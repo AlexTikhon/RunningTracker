@@ -1,0 +1,42 @@
+{
+  "name": "running-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.6.2",
+  "engines": {
+    "node": ">=24.11.0 <25",
+    "npm": ">=11.6.0 <12"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev": "concurrently --kill-others-on-fail --names api,web \"npm run dev --workspace=@running-tracker/api\" \"npm run dev --workspace=@running-tracker/web\"",
+    "lint": "eslint .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:integration": "npm run test:integration --workspace=@running-tracker/api",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build",
+    "db:up": "docker compose -f infra/compose/docker-compose.yml up -d --wait",
+    "db:down": "docker compose -f infra/compose/docker-compose.yml down",
+    "db:logs": "docker compose -f infra/compose/docker-compose.yml logs -f postgres",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:migrate:test": "node scripts/migrate.mjs --test"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.6",
+    "@types/pg": "8.23.1",
+    "concurrently": "9.2.4",
+    "eslint": "10.11.0",
+    "globals": "17.12.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0"
+  }
+}
