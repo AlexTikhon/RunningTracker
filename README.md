@@ -48,7 +48,7 @@ npm run db:migrate:test
 npm run test:integration
 ```
 
-`test:integration` loads and validates `TEST_DATABASE_URL` before creating the app or pool, rejects a non-test database URL, and executes security assertions through `running_tracker_runtime`. Fixtures use `TEST_MIGRATION_DATABASE_URL`, never broaden runtime privileges. CI deliberately points `DATABASE_URL` at a different, absent database while `TEST_DATABASE_URL` points at the service database.
+`test:integration` validates runtime, migration, and maintenance URLs before creating any pool: each URL must use PostgreSQL, authenticate as its exact role, target a database ending in `_test`, and resolve to the same host, normalized port, and database. Fixture setup then verifies `current_database()` and `current_user` on its dedicated owner client before any mutation. Security assertions execute through `running_tracker_runtime`; runtime privileges are never broadened. CI deliberately points `DATABASE_URL` at a different, absent database while the three test URLs point at the service database.
 
 `db:bootstrap` is the only privileged setup step. It creates PostGIS and three non-superuser roles, restricts database/schema creation, and transfers the existing migration metadata table to the migration owner. Normal API startup never invokes bootstrap or reads bootstrap/migration credentials.
 

@@ -4,7 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app.js';
 import { systemClock } from '../src/clock.js';
-import { loadTestEnvironment, type Environment } from '../src/config/environment.js';
+import {
+  loadIntegrationTestConfiguration,
+  type Environment,
+} from '../src/config/environment.js';
 import { createDatabasePool, DatabaseProbe } from '../src/database/database.js';
 
 describe('PostGIS integration', () => {
@@ -13,7 +16,7 @@ describe('PostGIS integration', () => {
   let pool: Pool | undefined;
 
   beforeAll(() => {
-    config = loadTestEnvironment();
+    config = loadIntegrationTestConfiguration().environment;
     pool = createDatabasePool({ ...config, DB_POOL_MAX: 2 });
     app = createApp({ clock: systemClock, config, pool });
   });

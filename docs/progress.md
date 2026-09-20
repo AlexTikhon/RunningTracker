@@ -7,6 +7,7 @@ Last updated: 2026-09-20.
 | P00 | DONE | Repository root, source documents, environment, ADR, and decision backlog established |
 | P01 | DONE | Reproducible Express 5/API/web workspace, persistent PostgreSQL/PostGIS, migrations, health, and CI commands verified after P01.1 review fixes |
 | P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
+| P02A.1 review fixes | IMPLEMENTED, NOT VERIFIED | Integration fixture target guard and confirmed-COMMIT handling added; checks intentionally not run in this iteration |
 | P02B | TODO | Runs, points, commands, summaries, shares, tombstones, and full D02 ACL/RLS matrix |
 | P03 | TODO | Session boundary, commands, and API contracts |
 | P04 | TODO | Ingestion, raw history, and GPS simulator |
@@ -109,3 +110,22 @@ Limits and P02B readiness:
 - P02B must add `runs`, `run_points`, `run_commands`, `run_summaries`, `run_shares`, and `run_tombstones`, their composite tenant constraints, and direct child-table ACL tests;
 - HTTP authentication remains P03; P02A context is supplied only by trusted application code or test fixtures;
 - GitHub Actions configuration was updated but was not run on a hosted runner.
+
+## P02A.1 — static-review corrections
+
+Implemented:
+
+- one integration-test configuration validator now checks runtime, migration, and maintenance URLs before pool construction: PostgreSQL protocol, exact role, decoded `_test` database suffix, and equal normalized host/port/database;
+- tenant fixture setup checks `current_database()` and `current_user` on its checked-out owner client before the first `DELETE`/`INSERT`, performs all fixture mutations through that client, and releases/destroys it on failure;
+- `withTenantTransaction` now returns the callback result only for `QueryResult.command === 'COMMIT'`; a confirmed `ROLLBACK` raises a distinct known-outcome error without another rollback, while COMMIT execution failures and unexpected commands retain conservative unknown-outcome connection destruction;
+- helper ownership of the outer transaction boundary and client release is explicit in code and ADR-0003;
+- unit regressions cover valid and unsafe integration configurations, actual fixture-connection identity mismatch with zero mutations, realistic PostgreSQL command mocks, confirmed rollback, unexpected COMMIT results, and preserved rollback-error behavior;
+- the real-PostgreSQL integration suite includes a callback that catches `SELECT 1 / 0` and verifies that its returned value is rejected after PostgreSQL reports the transaction rollback.
+
+Verification status:
+
+- no tests, lint, typecheck, build, dependency installation, Docker command, migration, or database connection was run for P02A.1, as required for this iteration;
+- the P02A verification evidence above is historical and was not repeated after these corrections;
+- P02A.1 remains unverified until the focused unit/static checks and real-PostgreSQL integration scenario are executed.
+
+Next stage remains P02B after P02A.1 verification; P02B was not started.

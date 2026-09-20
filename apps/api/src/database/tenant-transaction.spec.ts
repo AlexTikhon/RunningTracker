@@ -1,8 +1,9 @@
-import type { Pool, PoolClient } from 'pg';
+import type { Pool, PoolClient, QueryResult } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
   TenantTransactionCommitError,
+  TenantTransactionRolledBackError,
   withTenantTransaction,
 } from './tenant-transaction.js';
 
@@ -11,9 +12,24 @@ const context = {
   userId: '11111111-1111-4111-8111-111111111111',
 };
 
-function createHarness(queryImplementation?: (text: string) => Promise<unknown>) {
+function queryResult(command: string): QueryResult<Record<string, never>> {
+  return { command, fields: [], oid: 0, rowCount: 0, rows: [] };
+}
+
+function defaultQueryResult(text: string): QueryResult<Record<string, never>> {
+  if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') {
+    return queryResult(text);
+  }
+  return queryResult('SELECT');
+}
+
+function createHarness(
+  queryImplementation?: (text: string) => Promise<QueryResult<Record<string, never>>>,
+) {
   const release = vi.fn();
-  const query = vi.fn((text: string) => queryImplementation?.(text) ?? Promise.resolve({ rows: [] }));
+  const query = vi.fn((text: string) =>
+    queryImplementation?.(text) ?? Promise.resolve(defaultQueryResult(text)),
+  );
   const client = { query, release } as unknown as PoolClient;
   const connect = vi.fn(() => Promise.resolve(client));
   const pool = { connect } as Pick<Pool, 'connect'>;
@@ -51,7 +67,9 @@ describe('withTenantTransaction', () => {
   it('destroys the client when rollback fails without replacing the callback error', async () => {
     const rollbackError = new Error('rollback failed');
     const harness = createHarness((text) =>
-      text === 'ROLLBACK' ? Promise.reject(rollbackError) : Promise.resolve({ rows: [] }),
+      text === 'ROLLBACK'
+        ? Promise.reject(rollbackError)
+        : Promise.resolve(defaultQueryResult(text)),
     );
     const callbackError = new Error('callback failed');
 
@@ -66,7 +84,9 @@ describe('withTenantTransaction', () => {
   it('reports an unknown commit outcome and destroys the client', async () => {
     const commitError = new Error('connection lost');
     const harness = createHarness((text) =>
-      text === 'COMMIT' ? Promise.reject(commitError) : Promise.resolve({ rows: [] }),
+      text === 'COMMIT'
+        ? Promise.reject(commitError)
+        : Promise.resolve(defaultQueryResult(text)),
     );
 
     await expect(
@@ -77,6 +97,33 @@ describe('withTenantTransaction', () => {
     });
     expect(harness.query).not.toHaveBeenCalledWith('ROLLBACK');
     expect(harness.release).toHaveBeenCalledWith(commitError);
+  });
+
+  it('rejects a callback result when PostgreSQL confirms COMMIT as ROLLBACK', async () => {
+    const harness = createHarness((text) =>
+      Promise.resolve(queryResult(text === 'COMMIT' ? 'ROLLBACK' : defaultQueryResult(text).command)),
+    );
+
+    await expect(
+      withTenantTransaction(harness.pool, context, () => Promise.resolve('not committed')),
+    ).rejects.toBeInstanceOf(TenantTransactionRolledBackError);
+
+    expect(harness.query.mock.calls.at(-1)).toEqual(['COMMIT']);
+    expect(harness.query).not.toHaveBeenCalledWith('ROLLBACK');
+    expect(harness.release).toHaveBeenCalledWith(undefined);
+  });
+
+  it('treats an unexpected COMMIT command as an unknown outcome and destroys the client', async () => {
+    const harness = createHarness((text) =>
+      Promise.resolve(queryResult(text === 'COMMIT' ? 'UPDATE' : defaultQueryResult(text).command)),
+    );
+
+    await expect(
+      withTenantTransaction(harness.pool, context, () => Promise.resolve()),
+    ).rejects.toBeInstanceOf(TenantTransactionCommitError);
+
+    expect(harness.query).not.toHaveBeenCalledWith('ROLLBACK');
+    expect(harness.release).toHaveBeenCalledWith(expect.any(Error));
   });
 
   it('rejects invalid context before acquiring a connection', async () => {

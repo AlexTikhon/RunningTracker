@@ -14,6 +14,13 @@ export class TenantTransactionCommitError extends Error {
   }
 }
 
+export class TenantTransactionRolledBackError extends Error {
+  public constructor() {
+    super('Tenant transaction was rolled back by PostgreSQL; the callback result was not committed');
+    this.name = 'TenantTransactionRolledBackError';
+  }
+}
+
 function validatedUuid(name: keyof TenantContext, value: string): string {
   if (!uuidPattern.test(value)) {
     throw new TypeError(`${name} must be a canonical UUID`);
@@ -39,6 +46,11 @@ function recordRollbackFailure(originalError: unknown, rollbackError: unknown): 
   }
 }
 
+/**
+ * Owns client checkout/release and the outer BEGIN/COMMIT/ROLLBACK boundary.
+ * The callback may issue application SQL (including savepoints), but must not
+ * finish the outer transaction or release the provided client.
+ */
 export async function withTenantTransaction<Result>(
   pool: Pick<Pool, 'connect'>,
   context: TenantContext,
@@ -60,12 +72,27 @@ export async function withTenantTransaction<Result>(
 
     const result = await callback(client);
     phase = 'committing';
+    let commitCommand: string | undefined;
     try {
-      await client.query('COMMIT');
+      const commitResult = await client.query('COMMIT');
+      commitCommand = commitResult.command;
     } catch (error) {
       destroyReason = asError(error, 'Tenant transaction commit failed');
       throw new TenantTransactionCommitError(error);
     }
+
+    if (commitCommand === 'ROLLBACK') {
+      phase = 'complete';
+      throw new TenantTransactionRolledBackError();
+    }
+    if (commitCommand !== 'COMMIT') {
+      const error = new Error(
+        `Unexpected PostgreSQL COMMIT result: ${commitCommand ?? 'missing command'}`,
+      );
+      destroyReason = error;
+      throw new TenantTransactionCommitError(error);
+    }
+
     phase = 'complete';
     return result;
   } catch (error) {

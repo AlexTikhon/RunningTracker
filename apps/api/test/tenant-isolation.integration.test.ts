@@ -1,21 +1,16 @@
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import {
-  loadRequiredPostgresUrl,
-  loadTestEnvironment,
-} from '../src/config/environment.js';
+import { loadIntegrationTestConfiguration } from '../src/config/environment.js';
 import { createDatabasePool } from '../src/database/database.js';
-import { withTenantTransaction } from '../src/database/tenant-transaction.js';
-
-const ids = {
-  orgA: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-  orgB: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-  userDual: '11111111-1111-4111-8111-111111111111',
-  userInactive: '33333333-3333-4333-8333-333333333333',
-  userOrgA: '44444444-4444-4444-8444-444444444444',
-  userOrgB: '22222222-2222-4222-8222-222222222222',
-};
+import {
+  TenantTransactionRolledBackError,
+  withTenantTransaction,
+} from '../src/database/tenant-transaction.js';
+import {
+  prepareTenantIsolationFixtures,
+  tenantIsolationIds as ids,
+} from './tenant-isolation-fixtures.js';
 
 describe('P02A tenant isolation', () => {
   let maintenancePool: Pool;
@@ -23,45 +18,20 @@ describe('P02A tenant isolation', () => {
   let runtimePool: Pool;
 
   beforeAll(async () => {
-    const config = loadTestEnvironment();
-    runtimePool = createDatabasePool({ ...config, DB_POOL_MAX: 2 });
+    const config = loadIntegrationTestConfiguration();
+    runtimePool = createDatabasePool({ ...config.environment, DB_POOL_MAX: 2 });
     ownerPool = new Pool({
       application_name: 'running-tracker-test-fixtures',
-      connectionString: loadRequiredPostgresUrl('TEST_MIGRATION_DATABASE_URL'),
+      connectionString: config.migration.connectionString,
       max: 1,
     });
     maintenancePool = new Pool({
       application_name: 'running-tracker-test-maintenance',
-      connectionString: loadRequiredPostgresUrl('TEST_MAINTENANCE_DATABASE_URL'),
+      connectionString: config.maintenance.connectionString,
       max: 1,
     });
 
-    await ownerPool.query('DELETE FROM memberships');
-    await ownerPool.query('DELETE FROM organizations');
-    await ownerPool.query('DELETE FROM users');
-    await ownerPool.query(
-      `INSERT INTO users (id, external_identity)
-       VALUES
-         ($1, 'fixture-dual'),
-         ($2, 'fixture-org-b'),
-         ($3, 'fixture-inactive'),
-         ($4, 'fixture-org-a')`,
-      [ids.userDual, ids.userOrgB, ids.userInactive, ids.userOrgA],
-    );
-    await ownerPool.query(
-      'INSERT INTO organizations (id) VALUES ($1), ($2)',
-      [ids.orgA, ids.orgB],
-    );
-    await ownerPool.query(
-      `INSERT INTO memberships (org_id, user_id, role, active)
-       VALUES
-         ($1, $3, 'runner', true),
-         ($2, $3, 'coach', true),
-         ($2, $4, 'runner', true),
-         ($1, $5, 'runner', false),
-         ($1, $6, 'runner', true)`,
-      [ids.orgA, ids.orgB, ids.userDual, ids.userOrgB, ids.userInactive, ids.userOrgA],
-    );
+    await prepareTenantIsolationFixtures(ownerPool, config.migration);
   });
 
   afterAll(async () => {
@@ -217,6 +187,23 @@ describe('P02A tenant isolation', () => {
       ),
     ).rejects.toBe(callbackError);
     await expect(runtimePool.query('SELECT 1')).resolves.toBeDefined();
+  });
+
+  it('rejects a value returned after the callback catches an aborted-transaction error', async () => {
+    await expect(
+      withTenantTransaction(
+        runtimePool,
+        { orgId: ids.orgA, userId: ids.userOrgA },
+        async (client) => {
+          try {
+            await client.query('SELECT 1 / 0');
+          } catch {
+            // Simulates application code swallowing an SQL error without a savepoint recovery.
+          }
+          return 'must not be returned';
+        },
+      ),
+    ).rejects.toBeInstanceOf(TenantTransactionRolledBackError);
   });
 
   it('does not retain context when one physical connection is reused', async () => {
