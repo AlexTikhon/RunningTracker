@@ -24,8 +24,11 @@ jobs:
           --health-retries 20
     env:
       APP_ENV: test
-      DATABASE_URL: postgresql://running_tracker:running_tracker_local@127.0.0.1:5432/running_tracker_test
+      DATABASE_URL: postgresql://running_tracker:running_tracker_local@127.0.0.1:5432/running_tracker_main_must_not_be_used
       TEST_DATABASE_URL: postgresql://running_tracker:running_tracker_local@127.0.0.1:5432/running_tracker_test
+      DB_CONNECTION_TIMEOUT_MS: 2000
+      DB_QUERY_TIMEOUT_MS: 1000
+      SHUTDOWN_TIMEOUT_MS: 5000
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -39,4 +42,3 @@ jobs:
       - run: npm run build
       - run: npm run db:migrate:test
       - run: npm run test:integration
-

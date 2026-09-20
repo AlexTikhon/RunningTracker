@@ -2,7 +2,7 @@
 
 Версия: 1.0  
 Дата: 19 сентября 2026  
-Статус: план подготовлен; этапы реализации не начаты.  
+Статус: P00–P01.1 выполнены; P02 и последующие этапы не начаты.
 Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
 
 ## 1. Режим исполнения
@@ -43,7 +43,7 @@
 
 ~~~text
 apps/
-  api/                 NestJS: HTTP, ingestion, access, live, jobs, tiles
+  api/                 Express 5: HTTP, ingestion, access, live, jobs, tiles
   web/                 React + TypeScript
 packages/
   contracts/           Runtime-схемы запросов/ответов и публичные типы
@@ -66,9 +66,9 @@ docs/
 
 Если существует репозиторий, адаптироваться к его соглашениям.
 
-Базовый вариант: npm workspaces, React + Vite, NestJS, PostgreSQL/PostGIS, параметризованный SQL через pg и последовательные SQL-миграции. Выбор migration runner фиксируется в P01. Не добавлять ORM только ради CRUD, если критические запросы всё равно требуют SQL/PostGIS.
+Базовый вариант: npm workspaces, React + Vite, Express 5, PostgreSQL/PostGIS, параметризованный SQL через pg и последовательные SQL-миграции. Express выбран в ADR-0002 ради явного управления зависимостями, конфигурацией и lifecycle; это не заявление о выигрыше производительности. Выбор migration runner фиксируется в P01. Не добавлять ORM только ради CRUD, если критические запросы всё равно требуют SQL/PostGIS.
 
-packages/contracts не зависит от NestJS или драйвера БД. apps/web не импортирует серверные модели, secrets и infrastructure-код.
+packages/contracts не зависит от Express или драйвера БД. apps/web не импортирует серверные модели, secrets и infrastructure-код.
 
 Геодезические расчёты выполняет PostGIS. Клиент использует серверный connectFromPrevious; отдельного независимого алгоритма GPS-фильтрации на frontend нет.
 
@@ -122,7 +122,7 @@ packages/contracts не зависит от NestJS или драйвера БД.
 Ссылка на SDD: 3, 13.
 
 Задачи:
-- P01.1 Настроить workspace, TypeScript strict, API и web, lockfile, lint/typecheck/build.
+- P01.1 Настроить workspace, TypeScript strict, Express 5 API и web, lockfile, lint/typecheck/build; исправить изоляцию integration config, переносимость checksum и ограниченные DB/shutdown deadlines.
 - P01.2 Поднять PostgreSQL с PostGIS и persistent volume; подготовить migration runner и отдельную тестовую БД.
 - P01.3 Реализовать health/liveness и readiness с проверкой БД, graceful shutdown, validated env config, .env.example без secrets.
 - P01.4 Настроить same-origin доступ /api для frontend в development; минимальные страницы подключения и состояния.
@@ -132,6 +132,8 @@ packages/contracts не зависит от NestJS или драйвера БД.
 - запуск из чистого checkout по README;
 - SELECT PostGIS_Full_Version() успешно выполняется;
 - потеря БД меняет readiness, но не притворяется падением HTTP-процесса;
+- зависший health query завершается в заданный deadline и не удерживает pool slot;
+- одинаковый SQL после LF/Windows checkout имеет одинаковый checksum, а содержательное изменение отклоняется;
 - web и API доступны через документированные адреса.
 
 Границы: без auth-provider, RLS бизнес-таблиц, карты, Redis и streaming.
@@ -426,4 +428,3 @@ packages/contracts не зависит от NestJS или драйвера БД.
 Все этапы P00–P12 имеют статус TODO. Наличие этого плана и SDD не означает, что каркас или схема БД уже существуют.
 
 Первое поручение: P00–P01. После него пользователь получает запускаемый локальный проект и ясные prerequisites P02. Полная реализация продукта в первое поручение не входит.
-

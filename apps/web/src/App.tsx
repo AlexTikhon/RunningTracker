@@ -40,7 +40,7 @@ export function App() {
         <p className="eyebrow">Running Tracker · P01</p>
         <h1>Local foundation is connected.</h1>
         <p className="lede">
-          React reaches NestJS through the same-origin <code>/api</code> proxy. Readiness is
+          React reaches Express through the same-origin <code>/api</code> proxy. Readiness is
           backed by a real PostgreSQL check.
         </p>
       </section>
@@ -71,4 +71,3 @@ function StatusCard({ label, value }: { label: string; value: string }) {
     </article>
   );
 }
-

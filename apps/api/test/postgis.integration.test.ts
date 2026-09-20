@@ -1,45 +1,41 @@
-import type { INestApplication } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import type { Server } from 'node:http';
-import { Pool } from 'pg';
+import type { Pool } from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { AppModule } from '../src/app.module.js';
-
-const testDatabaseUrl =
-  process.env.TEST_DATABASE_URL ??
-  'postgresql://running_tracker:running_tracker_local@127.0.0.1:5433/running_tracker_test';
-
-function assertTestDatabase(url: string): void {
-  const databaseName = new URL(url).pathname.slice(1);
-  if (!databaseName.endsWith('_test')) {
-    throw new Error(`Integration tests require a database ending in _test, received ${databaseName}`);
-  }
-}
+import { createApp } from '../src/app.js';
+import { systemClock } from '../src/clock.js';
+import { loadTestEnvironment, type Environment } from '../src/config/environment.js';
+import { createDatabasePool, DatabaseProbe } from '../src/database/database.js';
 
 describe('PostGIS integration', () => {
-  let app: INestApplication;
-  let pool: Pool;
+  let app: ReturnType<typeof createApp> | undefined;
+  let config: Environment | undefined;
+  let pool: Pool | undefined;
 
-  beforeAll(async () => {
-    assertTestDatabase(testDatabaseUrl);
-    process.env.APP_ENV = 'test';
-    process.env.DATABASE_URL = testDatabaseUrl;
-
-    pool = new Pool({ connectionString: testDatabaseUrl, max: 2 });
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    await app.init();
+  beforeAll(() => {
+    config = loadTestEnvironment();
+    pool = createDatabasePool({ ...config, DB_POOL_MAX: 2 });
+    app = createApp({ clock: systemClock, config, pool });
   });
 
   afterAll(async () => {
-    await app.close();
-    await pool.end();
+    await pool?.end();
   });
 
   it('loads PostGIS in the isolated test database', async () => {
+    if (!pool || !config) {
+      throw new Error('Integration setup did not complete');
+    }
+
+    expect(pool.options.connectionString).toBe(config.DATABASE_URL);
+    expect(config.DATABASE_URL).toBe(process.env.TEST_DATABASE_URL ?? config.DATABASE_URL);
+    if (process.env.DATABASE_URL && process.env.TEST_DATABASE_URL !== process.env.DATABASE_URL) {
+      expect(config.DATABASE_URL).not.toBe(process.env.DATABASE_URL);
+    }
+
+    const database = await pool.query<{ name: string }>('SELECT current_database() AS name');
+    expect(database.rows[0]?.name.endsWith('_test')).toBe(true);
+
     const result = await pool.query<{ version: string }>(
       'SELECT PostGIS_Full_Version() AS version',
     );
@@ -48,10 +44,29 @@ describe('PostGIS integration', () => {
   });
 
   it('reports the real database as ready', async () => {
-    const server = app.getHttpServer() as Server;
-    await request(server)
+    if (!app) {
+      throw new Error('Integration setup did not complete');
+    }
+
+    await request(app)
       .get('/api/health/ready')
       .expect(200)
       .expect({ checks: { database: 'up' }, status: 'ok' });
+  });
+
+  it('destroys timed-out real connections instead of exhausting the pool', async () => {
+    if (!pool) {
+      throw new Error('Integration setup did not complete');
+    }
+
+    const probe = new DatabaseProbe(pool, systemClock, 25, 'SELECT pg_sleep(10)');
+
+    for (let index = 0; index < 3; index += 1) {
+      await expect(probe.ping()).rejects.toThrow('deadline');
+      expect(pool.waitingCount).toBe(0);
+    }
+
+    expect(pool.idleCount).toBe(0);
+    expect(pool.totalCount).toBe(0);
   });
 });

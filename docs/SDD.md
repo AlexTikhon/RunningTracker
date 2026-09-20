@@ -58,7 +58,7 @@ Mapbox предоставляет базовую карту. Наш Node.js back
 
 ~~~mermaid
 flowchart LR
-    R["React: бегун + локальный буфер"] -->|"HTTPS: команды, GPS"| API["NestJS API"]
+    R["React: бегун + локальный буфер"] -->|"HTTPS: команды, GPS"| API["Express 5 API"]
     C["React: тренер"] -->|"HTTP: snapshots / changes"| API
     API -->|"SSE: актуальные состояния"| C
     API --> DB[("PostgreSQL + PostGIS")]
@@ -70,6 +70,8 @@ flowchart LR
 ~~~
 
 Один модульный монолит: Identity/Access, Runs/Ingestion, TrackProcessing, Live, ArchiveTiles, Maintenance. Фоновые задачи — модули того же развёртывания; состояние задач восстанавливается из БД.
+
+HTTP-адаптер реализован на Express 5. Конфигурация валидируется до создания зависимостей; `pg.Pool`, clock и последующие сервисы передаются явно, без DI-контейнера. Импорт модулей не открывает порт, соединение с БД и таймеры. Выбор заменяет исходный NestJS-каркас согласно ADR-0002 и сделан ради явного lifecycle и учебной прозрачности, а не на основании неподтверждённого выигрыша производительности.
 
 Геометрия для MVT обрабатывается в PostGIS, а не переносится целиком в Node.js. LRU хранит готовые бинарные тайлы. Redis, Kafka, Kubernetes и отдельная time-series БД для MVP не нужны.
 
@@ -462,13 +464,13 @@ Conflict/error details не содержат чужие точки. Автори
 
 ## 13. Развёртывание и эксплуатация
 
-Локально: Docker Compose, PostgreSQL/PostGIS, NestJS, React, GPS-симулятор. Демо: один хост/регион, TLS reverse proxy, persistent DB volume, внешний backup. Backend и PostgreSQL имеют независимые resource limits.
+Локально: Docker Compose, PostgreSQL/PostGIS, Express 5, React, GPS-симулятор. Демо: один хост/регион, TLS reverse proxy, persistent DB volume, внешний backup. Backend и PostgreSQL имеют независимые resource limits.
 
 Начальные пределы: DB pool 10 соединений на backend, максимум 2 одновременных tile-query, максимум 2 summary jobs. Длительные SSE не занимают pool slots. Запросы и фоновые задачи имеют timeouts. Лимиты уточняются измерениями, а не числом пользователей само по себе.
 
 Продуктовая аутентификация подключается через проверенный identity provider; регистрация/восстановление пароля не реализуются собственным криптографическим протоколом. Для локальных интеграционных тестов — тестовые identity/session fixtures.
 
-Graceful shutdown останавливает новые задачи/запросы, завершает короткие транзакции, закрывает SSE; после старта jobs находят незавершённую работу в БД.
+Graceful shutdown прекращает приём новых HTTP-соединений, ограниченно ждёт активные запросы и закрытие pool; при превышении общего deadline принудительно закрывает HTTP-соединения и завершает процесс с ошибкой. После старта jobs находят незавершённую работу в БД.
 
 ## 14. Узкие места и развитие
 

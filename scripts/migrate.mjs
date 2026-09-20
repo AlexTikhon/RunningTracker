@@ -1,10 +1,14 @@
-import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import process from 'node:process';
 
 import pg from 'pg';
+
+import {
+  migrationAction,
+  normalizeMigrationSql,
+} from './migration-checksum.mjs';
 
 const { Client } = pg;
 const useTestDatabase = process.argv.includes('--test');
@@ -53,17 +57,13 @@ try {
   const checksums = new Map(applied.rows.map((row) => [row.id, row.checksum]));
 
   for (const file of migrationFiles) {
-    const sql = await readFile(join(migrationsDirectory, file), 'utf8');
-    const checksum = createHash('sha256').update(sql).digest('hex');
+    const sql = normalizeMigrationSql(await readFile(join(migrationsDirectory, file), 'utf8'));
     const previousChecksum = checksums.get(file);
+    const { action, checksum } = migrationAction(file, sql, previousChecksum);
 
-    if (previousChecksum === checksum) {
+    if (action === 'skip') {
       console.log(`skip ${file}`);
       continue;
-    }
-
-    if (previousChecksum) {
-      throw new Error(`Applied migration ${file} has changed`);
     }
 
     await client.query('BEGIN');
@@ -84,4 +84,3 @@ try {
   await client.query("SELECT pg_advisory_unlock(hashtext('running-tracker:migrations'))");
   await client.end();
 }
-
