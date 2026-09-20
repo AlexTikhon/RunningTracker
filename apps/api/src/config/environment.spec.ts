@@ -16,7 +16,7 @@ afterEach(() => {
 describe('validateEnvironment', () => {
   it('coerces bounded values and applies defaults', () => {
     const environment = validateEnvironment({
-      DATABASE_URL: 'postgresql://user:password@127.0.0.1:5433/database',
+      DATABASE_URL: 'postgresql://running_tracker_runtime:password@127.0.0.1:5433/database',
       PORT: '3100',
     });
 
@@ -35,14 +35,21 @@ describe('validateEnvironment', () => {
     expect(() => validateEnvironment({ DATABASE_URL: 'https://example.com' })).toThrow(
       'DATABASE_URL must use the postgres or postgresql protocol',
     );
+    expect(() =>
+      validateEnvironment({
+        DATABASE_URL: 'postgresql://running_tracker_owner:password@127.0.0.1:5433/database',
+      }),
+    ).toThrow('DATABASE_URL must authenticate as running_tracker_runtime');
   });
 
   it('uses TEST_DATABASE_URL instead of DATABASE_URL for integration configuration', () => {
     const environment = loadTestEnvironment({
       envFiles: [],
       environment: {
-        DATABASE_URL: 'postgresql://user:password@127.0.0.1:5433/running_tracker',
-        TEST_DATABASE_URL: 'postgresql://user:password@127.0.0.1:5433/running_tracker_test',
+        DATABASE_URL:
+          'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker',
+        TEST_DATABASE_URL:
+          'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker_test',
       },
     });
 
@@ -56,14 +63,14 @@ describe('validateEnvironment', () => {
     const envFile = join(directory, '.env');
     writeFileSync(
       envFile,
-      'TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5433/from_file_test\n',
+      'TEST_DATABASE_URL=postgresql://running_tracker_runtime:password@127.0.0.1:5433/from_file_test\n',
       'utf8',
     );
 
     const environment = loadTestEnvironment({
       envFiles: [envFile],
       environment: {
-        DATABASE_URL: 'postgresql://user:password@127.0.0.1:5433/main',
+        DATABASE_URL: 'postgresql://running_tracker_runtime:password@127.0.0.1:5433/main',
       },
     });
 
@@ -75,7 +82,8 @@ describe('validateEnvironment', () => {
       loadTestEnvironment({
         envFiles: [],
         environment: {
-          TEST_DATABASE_URL: 'postgresql://user:password@127.0.0.1:5433/production',
+          TEST_DATABASE_URL:
+            'postgresql://running_tracker_runtime:password@127.0.0.1:5433/production',
         },
       }),
     ).toThrow('Integration tests require a database ending in _test');

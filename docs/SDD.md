@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
-Дата: 19 сентября 2026  
-Статус: согласованный проект архитектуры; реализация и нагрузочные проверки ещё не выполнены.  
+Дата: 20 сентября 2026
+Статус: согласованный проект архитектуры; P00–P02A реализованы локально, продуктовые run/share таблицы и нагрузочные проверки ещё не выполнены.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -230,6 +230,10 @@ distance_m — сумма ST_Distance(a.geom::geography,b.geom::geography) до�
 RLS включается на всех tenant-owned таблицах. Runtime-role не владелец, не superuser, без BYPASSRLS. Tenant/user context задаётся сервером transaction-local после аутентификации. API остаётся доверенной границей; клиент не подключается к PostgreSQL.
 
 ACL применяется к точкам/сводкам также при прямом запросе, а не только при чтении runs. Политики проверяются интеграционно под реальной runtime-role. Maintenance использует отдельную ограниченную роль. [PostgreSQL RLS](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
+
+P02A фиксирует минимальную матрицу до появления run/share API: runtime читает только собственную строку `users`, текущую `organizations` и собственную активную `memberships`, причём все три требуют активного membership для пары transaction-local user/org. DML этих таблиц runtime-role не выдан; fixtures выполняются migration/object owner. Пустой или некорректный context возвращает ноль строк. `app_private.has_active_membership()` — узкий `SECURITY DEFINER`: он возвращает только boolean, принадлежит object owner, имеет фиксированный `search_path`, закрыт от PUBLIC и исполняется только runtime-role. Это устраняет рекурсивное обращение policy `memberships` к самой себе, но не заменяет RLS.
+
+Роли P02A: privileged bootstrap создаёт extension/roles и не используется API; `running_tracker_owner` выполняет миграции и владеет application objects; `running_tracker_runtime` подключается из API; `running_tracker_maintenance` пока имеет только CONNECT, без table/DDL прав. Возможность runtime-role вызвать `set_config` не защищает от произвольного SQL с украденными DB credentials: доверенная HTTP/session boundary должна контролировать context, а настоящая аутентификация остаётся P03.
 
 История: индексный проход по (org_id,run_id,seq), страницы до 1 000 точек. Для raw replay курсор содержит data_revision; изменение версии требует перезапуска чтения. Для live используется иной стабильный протокол из раздела 9.
 
@@ -536,17 +540,19 @@ EXPLAIN (ANALYZE,BUFFERS) оценивает SQL; отдельно измеря�
 
 ## 16. Порядок реализации
 
-1. Основа: Compose, migrations, runtime/maintenance roles, session fixtures, organizations/memberships и RLS.
-   Готово, когда cross-tenant integration tests проходят под runtime-role.
-2. Вертикальный сценарий: create run → batch → повтор → history → finish; IndexedDB и симулятор.
+1. P02A foundation: Compose, migration owner/runtime/maintenance roles, trusted fixtures, organizations/memberships, transaction helper и базовая RLS.
+   Выполнено, когда identity/tenant integration tests проходят под runtime-role.
+2. P02B schema/ACL: runs, points, commands, summaries, shares, tombstones, composite FK и полная D02 matrix.
+   Готово, когда direct child-table reads и cross-tenant links не обходят run/share ACL.
+3. Вертикальный сценарий: create run → batch → повтор → history → finish; IndexedDB и симулятор.
    Готово, когда данные сохраняются после потери ответа и переподключения.
-3. Track processing: edge rules, summary, revisions, late points, purge.
+4. Track processing: edge rules, summary, revisions, late points, purge.
    Готово, когда геометрические fixtures и конкурентный пересчёт проверены.
-4. Live: SSE state, snapshot/changes, reconnect, ACL revocation, React markers/track.
+5. Live: SSE state, snapshot/changes, reconnect, ACL revocation, React markers/track.
    Готово, когда соблюдается контракт восстановления и измерен live p95.
-5. Archive tiles: MVT, границы мира, ACL, LRU, revision refresh.
+6. Archive tiles: MVT, границы мира, ACL, LRU, revision refresh.
    Готово, когда соседние тайлы корректны и неподвижная карта обновляется.
-6. Эксплуатация: limits, метрики, нагрузка, restore drill и документация запуска.
+7. Эксплуатация: limits, метрики, нагрузка, restore drill и документация запуска.
    Готово, когда известны измеренные пределы и проверено восстановление.
 
 Не начинаем с микросервисов или Redis. Первый демонстрируемый результат — одна надёжно записанная и восстановленная пробежка; инфраструктура добавляется по проверяемым требованиям.

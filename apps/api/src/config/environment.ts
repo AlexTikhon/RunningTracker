@@ -11,6 +11,9 @@ const environmentSchema = z.object({
     .url()
     .refine((value) => value.startsWith('postgresql://') || value.startsWith('postgres://'), {
       message: 'DATABASE_URL must use the postgres or postgresql protocol',
+    })
+    .refine((value) => decodeURIComponent(new URL(value).username) === 'running_tracker_runtime', {
+      message: 'DATABASE_URL must authenticate as running_tracker_runtime',
     }),
   DB_POOL_MAX: z.coerce.number().int().positive().max(50).default(10),
   DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(2_000),
@@ -58,21 +61,35 @@ function readEnvFiles(paths: readonly string[]): Record<string, string> {
   return values;
 }
 
+function environmentSource(options: LoadEnvironmentOptions): Record<string, string | undefined> {
+  return {
+    ...readEnvFiles(options.envFiles ?? defaultEnvFiles()),
+    ...(options.environment ?? process.env),
+  };
+}
+
+export function loadRequiredPostgresUrl(
+  variableName: string,
+  options: LoadEnvironmentOptions = {},
+): string {
+  const value = z
+    .string({ error: `${variableName} is required` })
+    .url()
+    .refine((candidate) => candidate.startsWith('postgresql://') || candidate.startsWith('postgres://'), {
+      message: `${variableName} must use the postgres or postgresql protocol`,
+    })
+    .parse(environmentSource(options)[variableName]);
+
+  return value;
+}
+
 export function loadEnvironment(options: LoadEnvironmentOptions = {}): Environment {
-  const fromFiles = readEnvFiles(options.envFiles ?? defaultEnvFiles());
-  return validateEnvironment({ ...fromFiles, ...(options.environment ?? process.env) });
+  return validateEnvironment(environmentSource(options));
 }
 
 export function loadTestEnvironment(options: LoadEnvironmentOptions = {}): Environment {
-  const fromFiles = readEnvFiles(options.envFiles ?? defaultEnvFiles());
-  const source = { ...fromFiles, ...(options.environment ?? process.env) };
-  const testDatabaseUrl = z
-    .string({ error: 'TEST_DATABASE_URL is required' })
-    .url()
-    .refine((value) => value.startsWith('postgresql://') || value.startsWith('postgres://'), {
-      message: 'TEST_DATABASE_URL must use the postgres or postgresql protocol',
-    })
-    .parse(source.TEST_DATABASE_URL);
+  const source = environmentSource(options);
+  const testDatabaseUrl = loadRequiredPostgresUrl('TEST_DATABASE_URL', options);
   const databaseName = new URL(testDatabaseUrl).pathname.slice(1);
 
   if (!databaseName.endsWith('_test')) {

@@ -24,6 +24,8 @@
     "db:up": "docker compose -f infra/compose/docker-compose.yml up -d --wait",
     "db:down": "docker compose -f infra/compose/docker-compose.yml down",
     "db:logs": "docker compose -f infra/compose/docker-compose.yml logs -f postgres",
+    "db:bootstrap": "node scripts/bootstrap-database.mjs",
+    "db:bootstrap:test": "node scripts/bootstrap-database.mjs --test",
     "db:migrate": "node scripts/migrate.mjs",
     "db:migrate:test": "node scripts/migrate.mjs --test"
   },

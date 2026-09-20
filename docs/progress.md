@@ -1,12 +1,13 @@
 # Implementation progress
 
-Last updated: 2026-09-19.
+Last updated: 2026-09-20.
 
 | Stage | Status | Result |
 |---|---|---|
 | P00 | DONE | Repository root, source documents, environment, ADR, and decision backlog established |
 | P01 | DONE | Reproducible Express 5/API/web workspace, persistent PostgreSQL/PostGIS, migrations, health, and CI commands verified after P01.1 review fixes |
-| P02 | TODO | Product schema, roles, RLS, and access matrix |
+| P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
+| P02B | TODO | Runs, points, commands, summaries, shares, tombstones, and full D02 ACL/RLS matrix |
 | P03 | TODO | Session boundary, commands, and API contracts |
 | P04 | TODO | Ingestion, raw history, and GPS simulator |
 | P05 | TODO | Browser recording and local buffer |
@@ -44,6 +45,8 @@ Implemented:
 - separate connection and readiness-query deadlines plus bounded HTTP/pool shutdown with a forced fallback;
 - pinned PostgreSQL 17/PostGIS 3.5 Compose service with persistent named volume and isolated test database;
 - checksum/advisory-lock SQL migration runner, LF-canonical SQL hashing, and initial PostGIS extension migration;
+- whole-history migration preflight under the advisory lock; missing/changed/out-of-order files and backfilled names fail before pending files execute;
+- monotonic shutdown budgeting separated from UTC business-event time, with controlled-clock timeout tests;
 - unit and real-PostGIS integration suites plus portable CI workflow.
 
 Verification evidence:
@@ -77,6 +80,32 @@ Limitations:
 - the pinned image digest is Linux amd64-specific;
 - local fixture credentials are intentionally non-production, and no deployment/secrets/auth work is part of P01.
 
-## P02 prerequisites
+## P02A — database boundary and tenant foundation
 
-P02 may start only after P01 verification is complete. Its scope begins with business migrations and database roles. It must resolve D01 where schema representation is involved and D02 in full; integration tests must execute as the non-owner runtime role. No P02 schema or RLS is implemented in the current stage.
+Implemented:
+
+- explicit privileged bootstrap for PostGIS/role creation, separate owner/migration, runtime, and maintenance credentials, and no API fallback to migration credentials;
+- `users`, `organizations` (`archive_revision >= 0`), and `memberships` (`runner|coach`, active flag) with PK/FK/UNIQUE/CHECK constraints and active-membership index;
+- read-only P02A runtime matrix: current identity, current organization, and own active membership only; all require active membership for the exact user/org context;
+- fail-closed RLS for missing/malformed context, absent membership, and inactive membership;
+- narrow boolean `SECURITY DEFINER` membership predicate with fixed safe search path and restricted EXECUTE, avoiding recursive membership policies;
+- `withTenantTransaction` with canonical UUID validation, one checked-out client, transaction-local GUCs, commit/rollback, safe release/destruction, preserved callback errors, and explicit unknown-commit outcome;
+- owner-only integration fixtures; runtime and maintenance roles are non-owner, non-superuser, and without `BYPASSRLS` or DDL rights.
+
+Verification evidence:
+
+- `npm run lint` and `npm run typecheck` passed;
+- migration unit suite passed 8 tests, including deleted/changed applied files, backfilled migration names, and out-of-order history;
+- API unit suite passed 16 tests, including controlled-clock shutdown and tenant transaction failure semantics;
+- privileged bootstrap and migrations applied successfully to real local `running_tracker` and `running_tracker_test`; rerun skips both unchanged migrations;
+- clean scratch test database completed bootstrap, applied `0000`/`0001` from empty history, skipped both on rerun, and was then removed;
+- real PostgreSQL/PostGIS integration suite passed 13 tests under runtime/maintenance roles, covering two organizations, multi-membership context switching, missing/malformed/inactive/no-membership cases, schema constraints, denied DML/DDL/metadata, commit/rollback, sequential connection reuse, concurrent context independence, role attributes, and PostGIS/readiness/query deadlines;
+- `npm run verify`, production builds, Compose config, and `git diff --check` passed locally.
+
+Limits and P02B readiness:
+
+- D02 is PARTIAL: identity/organization isolation is complete, while run/share/child-table policies remain P02B;
+- D01 canonical PointInput representation also remains P02B/P04;
+- P02B must add `runs`, `run_points`, `run_commands`, `run_summaries`, `run_shares`, and `run_tombstones`, their composite tenant constraints, and direct child-table ACL tests;
+- HTTP authentication remains P03; P02A context is supplied only by trusted application code or test fixtures;
+- GitHub Actions configuration was updated but was not run on a hosted runner.

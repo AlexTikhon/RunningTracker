@@ -5,10 +5,8 @@ import process from 'node:process';
 
 import pg from 'pg';
 
-import {
-  migrationAction,
-  normalizeMigrationSql,
-} from './migration-checksum.mjs';
+import { normalizeMigrationSql } from './migration-checksum.mjs';
+import { prepareMigrations, validateMigrationHistory } from './migration-history.mjs';
 
 const { Client } = pg;
 const useTestDatabase = process.argv.includes('--test');
@@ -17,24 +15,26 @@ if (existsSync('.env')) {
   process.loadEnvFile('.env');
 }
 
-const variableName = useTestDatabase ? 'TEST_DATABASE_URL' : 'DATABASE_URL';
+const variableName = useTestDatabase ? 'TEST_MIGRATION_DATABASE_URL' : 'MIGRATION_DATABASE_URL';
 const databaseUrl = process.env[variableName];
 
 if (!databaseUrl) {
   throw new Error(`${variableName} is required. Copy .env.example to .env or set it explicitly.`);
 }
 
+const migrationUrl = new URL(databaseUrl);
+if (decodeURIComponent(migrationUrl.username) !== 'running_tracker_owner') {
+  throw new Error(`${variableName} must authenticate as running_tracker_owner`);
+}
+
 if (useTestDatabase) {
-  const databaseName = new URL(databaseUrl).pathname.slice(1);
+  const databaseName = migrationUrl.pathname.slice(1);
   if (!databaseName.endsWith('_test')) {
     throw new Error(`Refusing to run test migrations against non-test database ${databaseName}`);
   }
 }
 
 const migrationsDirectory = join(process.cwd(), 'db', 'migrations');
-const migrationFiles = (await readdir(migrationsDirectory))
-  .filter((file) => file.endsWith('.sql'))
-  .sort((left, right) => left.localeCompare(right));
 
 const client = new Client({
   application_name: 'running-tracker-migrations',
@@ -45,6 +45,17 @@ await client.connect();
 
 try {
   await client.query("SELECT pg_advisory_lock(hashtext('running-tracker:migrations'))");
+  const migrationFiles = (await readdir(migrationsDirectory))
+    .filter((file) => file.endsWith('.sql'))
+    .sort();
+  const migrations = prepareMigrations(
+    await Promise.all(
+      migrationFiles.map(async (file) => ({
+        file,
+        sql: normalizeMigrationSql(await readFile(join(migrationsDirectory, file), 'utf8')),
+      })),
+    ),
+  );
   await client.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id text PRIMARY KEY,
@@ -53,19 +64,16 @@ try {
     )
   `);
 
-  const applied = await client.query('SELECT id, checksum FROM schema_migrations');
-  const checksums = new Map(applied.rows.map((row) => [row.id, row.checksum]));
+  const applied = await client.query(
+    'SELECT id, checksum FROM schema_migrations ORDER BY applied_at ASC, id ASC',
+  );
+  const pending = validateMigrationHistory(migrations, applied.rows);
 
-  for (const file of migrationFiles) {
-    const sql = normalizeMigrationSql(await readFile(join(migrationsDirectory, file), 'utf8'));
-    const previousChecksum = checksums.get(file);
-    const { action, checksum } = migrationAction(file, sql, previousChecksum);
+  for (const { file } of migrations.slice(0, applied.rows.length)) {
+    console.log(`skip ${file}`);
+  }
 
-    if (action === 'skip') {
-      console.log(`skip ${file}`);
-      continue;
-    }
-
+  for (const { checksum, file, sql } of pending) {
     await client.query('BEGIN');
     try {
       await client.query(sql);

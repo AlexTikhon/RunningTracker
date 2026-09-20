@@ -37,6 +37,6 @@ Compose binds PostGIS to `127.0.0.1:5433`, avoiding the existing listener and pr
 
 - Docker Desktop was installed but its daemon was initially stopped. It became available after a normal background start; no system component was installed or reconfigured.
 - The pinned image digest is the verified Linux amd64 manifest. A future arm64 workstation must deliberately select and record its corresponding digest.
-- Fixed database credentials are local fixtures only. Deployment credentials and secret management are outside P00–P01.
+- Fixed database credentials in `.env.example` are local fixtures only. P02A separates the local privileged bootstrap login from `running_tracker_owner`, `running_tracker_runtime`, and `running_tracker_maintenance`; deployment credentials and secret management remain outside the current scope.
 
 These are workstation/runtime constraints. Product and architecture constraints remain in `SDD.md`.

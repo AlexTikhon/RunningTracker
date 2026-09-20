@@ -2,7 +2,7 @@
 
 Версия: 1.0  
 Дата: 19 сентября 2026  
-Статус: P00–P01.1 выполнены; P02 и последующие этапы не начаты.
+Статус: P00–P02A выполнены; P02B и последующие этапы не начаты.
 Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
 
 ## 1. Режим исполнения
@@ -78,8 +78,9 @@ packages/contracts не зависит от Express или драйвера БД
 |---|---|---|
 | P00 | Проверенные входные данные и локальный backlog решений | — |
 | P01 | Воспроизводимый каркас, API/web, PostgreSQL/PostGIS | P00 |
-| P02 | Миграции, runtime-role, RLS и матрица доступа | P01 |
-| P03 | Создание run, команды, HTTP/session-контракты | P02 |
+| P02A | Роли, identity/organization schema, tenant helper и базовая RLS | P01 |
+| P02B | Run/point/share schema, ограничения и полная ACL/RLS-матрица | P02A |
+| P03 | Создание run, команды, HTTP/session-контракты | P02B |
 | P04 | Надёжный ingestion, raw history и GPS-симулятор | P03 |
 | P05 | Запись из браузера с локальным буфером | P04 |
 | P06 | Геообработка и согласованная публикация сводок | P04 |
@@ -90,7 +91,7 @@ packages/contracts не зависит от Express или драйвера БД
 | P11 | Измерения, ограничения нагрузки и эксплуатационные метрики | P08–P10 |
 | P12 | Production auth, recovery и готовность к размещению | P11 |
 
-Рабочий порядок по умолчанию: P00 → P01 → … → P12. Возможность независимых ветвей не означает поручение запускать дополнительных агентов.
+Рабочий порядок по умолчанию: P00 → P01 → P02A → P02B → P03 → … → P12. Возможность независимых ветвей не означает поручение запускать дополнительных агентов.
 
 Вехи:
 - P04: backend умеет надёжно сохранить и прочитать одну пробежку.
@@ -138,26 +139,38 @@ packages/contracts не зависит от Express или драйвера БД
 
 Границы: без auth-provider, RLS бизнес-таблиц, карты, Redis и streaming.
 
-### P02 — Схема данных и безопасность
+### P02A — Identity/organization schema и базовая tenant-изоляция
 
 Ссылка на SDD: 5, 8.
 
 Задачи:
-- P02.1 Создать миграции для users, organizations, memberships, runs, points, commands, summaries, shares, tombstones и индексов SDD.
-- P02.2 Добавить CHECK/UNIQUE/FK, состояния, revisions, единицы измерения, ограничения диапазонов. SQL-поля для сравнения payload не должны незаметно терять точность.
-- P02.3 Разделить migration owner, runtime и maintenance roles; права выдавать явно.
-- P02.4 Реализовать transaction-local tenant/user context и RLS. Политики не должны рекурсивно ссылаться друг на друга через runs ↔ shares.
-- P02.5 Подготовить fixtures: две организации, владелец, тренер, участник без grant, деактивированный участник.
+- P02A.1 Создать users, organizations с archive_revision и memberships с role/active, PK/FK/UNIQUE/CHECK и индексами.
+- P02A.2 Разделить privileged bootstrap, migration/object owner, runtime и maintenance credentials; права выдавать явно.
+- P02A.3 Реализовать один-client transaction helper с transaction-local tenant/user context, явными rollback/commit semantics и безопасным release.
+- P02A.4 Зафиксировать минимальную матрицу identity/organization reads и реализовать fail-closed, нерекурсивную RLS.
+- P02A.5 Подготовить отдельные owner fixtures для двух организаций, multi-membership и inactive/no-membership случаев.
 
 Проверки:
 - реальные SQL-запросы под runtime-role, а не под владельцем;
-- SELECT/INSERT/UPDATE/DELETE для разрешённых и запрещённых комбинаций;
+- разрешённый SELECT и запрещённые SELECT/INSERT/UPDATE/DELETE по P02A-матрице;
 - connection reuse из pool не переносит контекст предыдущего запроса;
-- cross-tenant FK не связывает объекты разных организаций;
+- параллельные tenant-транзакции не смешивают контекст;
+- runtime не владеет таблицами, не имеет superuser/BYPASSRLS и не выполняет DDL;
 - privileged maintenance не доступен обычному HTTP-коду;
-- прямое чтение points/summaries не обходит ACL.
 
-Готово, когда существует исполняемая матрица доступа. Моки repository не являются доказательством RLS.
+Готово, когда существует исполняемая P02A-матрица доступа под реальной runtime-role. Моки repository не являются доказательством RLS.
+
+### P02B — Run schema и полная ACL/RLS-матрица
+
+Ссылка на SDD: 5, 8.
+
+Задачи:
+- P02B.1 Создать runs, run_points, run_commands, run_summaries, run_shares, run_tombstones и индексы SDD.
+- P02B.2 Добавить CHECK/UNIQUE/FK, состояния, revisions, единицы измерения и ограничения диапазонов. SQL-поля для сравнения payload не должны незаметно терять точность.
+- P02B.3 Завершить D02: нерекурсивные runs/shares policies и child-table ACL без обхода прямым чтением.
+- P02B.4 Проверить cross-tenant composite FK, owner/grantee access и denied mutations под runtime-role.
+
+Готово, когда исполняемая матрица покрывает run/share/child tables, а прямое чтение points/summaries не обходит ACL.
 
 ### P03 — Session boundary, команды и API-основа
 
@@ -370,8 +383,8 @@ packages/contracts не зависит от Express или драйвера БД
 
 | ID | Вопрос | Владелец | Ожидаемый результат |
 |---|---|---|---|
-| D01 | Точная канонизация PointInput для повторов: числа, -0, timestamps, seq | P02/P04 | Детерминированная спецификация и тесты без потери точности |
-| D02 | RLS runs/shares без рекурсии и обхода child-table ACL | P02 | Матрица policies и runtime-role тесты |
+| D01 | Точная канонизация PointInput для повторов: числа, -0, timestamps, seq | P02B/P04 | Детерминированная спецификация и тесты без потери точности |
+| D02 | RLS runs/shares без рекурсии и обхода child-table ACL | P02A/P02B | P02A identity baseline + P02B run/share matrix и runtime-role тесты |
 | D03 | Session endpoint, локальная identity и production guard | P03/P12 | Явный контракт и безопасное переключение окружений |
 | D04 | Одна записывающая вкладка/устройство, reload и конфликт writer | P05 | Конкретный lease/ownership механизм; не полагаться только на UI |
 | D05 | Очередь offline commands после server auto-finish | P05 | Терминальный reconciliation, сохранение оставшихся GPS в допустимом окне |
@@ -423,8 +436,8 @@ packages/contracts не зависит от Express или драйвера БД
 
 Техническое объяснение пользователю: кратко, на уровне senior frontend/fullstack. Объяснять новые backend/DB trade-offs на конкретном коде, а не повторять базовые JavaScript-концепции.
 
-## 10. Стартовый статус
+## 10. Текущий статус
 
-Все этапы P00–P12 имеют статус TODO. Наличие этого плана и SDD не означает, что каркас или схема БД уже существуют.
+P00–P02A выполнены с локальной воспроизводимой проверкой. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
 
-Первое поручение: P00–P01. После него пользователь получает запускаемый локальный проект и ясные prerequisites P02. Полная реализация продукта в первое поручение не входит.
+Следующий ограниченный этап — P02B. Он не запускается автоматически и не включает P03 authentication/API behavior.

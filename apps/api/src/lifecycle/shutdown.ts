@@ -14,7 +14,7 @@ async function waitWithinDeadline(
   deadline: number,
   clock: Clock,
 ): Promise<boolean> {
-  const remainingMs = Math.max(0, deadline - clock.now());
+  const remainingMs = Math.max(0, deadline - clock.monotonicNow());
 
   return new Promise((resolve) => {
     let settled = false;
@@ -68,7 +68,7 @@ export async function shutdownInfrastructure(options: {
   timeoutMs: number;
 }): Promise<ShutdownResult> {
   const { clock, pool, server, timeoutMs } = options;
-  const deadline = clock.now() + timeoutMs;
+  const deadline = clock.monotonicNow() + timeoutMs;
   let forced = false;
 
   if (!(await waitWithinDeadline(closeServer(server), deadline, clock))) {
