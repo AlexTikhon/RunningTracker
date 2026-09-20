@@ -127,11 +127,12 @@ describe('P02B runs and run_shares ACL', () => {
             'UPDATE runs SET data_revision = data_revision + 1 WHERE org_id = $1 AND id = $2',
             [ids.orgA, ids.runRecording],
           );
-          const inserted = await client.query(
+          const inserted = await client.query<{ id: string }>(
             `INSERT INTO runs (
                org_id, id, user_id, status, created_at, started_at, finished_at
              )
-             VALUES ($1, $2, $3, 'finished', $4, $4, $5)`,
+             VALUES ($1, $2, $3, 'finished', $4, $4, $5)
+             RETURNING id`,
             [
               ids.orgA,
               extraRunIds.insert,
@@ -140,10 +141,10 @@ describe('P02B runs and run_shares ACL', () => {
               '2026-09-20T11:00:00.000Z',
             ],
           );
-          return { inserted: inserted.rowCount, updated: updated.rowCount };
+          return { inserted: inserted.rows[0]?.id, updated: updated.rowCount };
         },
       ),
-    ).resolves.toEqual({ inserted: 1, updated: 1 });
+    ).resolves.toEqual({ inserted: extraRunIds.insert, updated: 1 });
 
     await expect(
       withTenantTransaction(

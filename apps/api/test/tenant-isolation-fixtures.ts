@@ -22,6 +22,17 @@ export const tenantIsolationIds = {
   runOrgBShared: 'b0000000-0000-4000-8000-000000000002',
 } as const;
 
+const tenantIsolationRunIds = [
+  tenantIsolationIds.runRecording,
+  tenantIsolationIds.runPaused,
+  tenantIsolationIds.runFinishedHistory,
+  tenantIsolationIds.runRecordingHistoryOnly,
+  tenantIsolationIds.runFinishedLiveOnly,
+  tenantIsolationIds.runFinishedBoth,
+  tenantIsolationIds.runOrgBCoachHidden,
+  tenantIsolationIds.runOrgBShared,
+] as const;
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error('Tenant fixture setup failed', { cause: error });
 }
@@ -48,6 +59,8 @@ export async function prepareTenantIsolationFixtures(
       );
     }
 
+    await client.query('DELETE FROM run_summaries');
+    await client.query('DELETE FROM run_points');
     await client.query('DELETE FROM run_shares');
     await client.query('DELETE FROM runs');
     await client.query('DELETE FROM memberships');
@@ -137,27 +150,104 @@ export async function prepareTenantIsolationFixtures(
          org_id, run_id, grantee_user_id, can_read_live, can_read_history
        )
        VALUES
-         ($1, $3, $11, true, false),
-         ($1, $4, $11, true, true),
-         ($1, $5, $11, false, true),
-         ($1, $6, $11, false, true),
-         ($1, $7, $11, true, false),
-         ($1, $8, $11, true, true),
-         ($1, $5, $12, false, true),
-         ($2, $10, $11, false, true)`,
+         ($1, $2, $3, true, false),
+         ($1, $4, $3, true, true),
+         ($1, $5, $3, false, true),
+         ($1, $6, $3, false, true),
+         ($1, $7, $3, true, false),
+         ($1, $8, $3, true, true),
+         ($1, $5, $9, false, true),
+         ($10, $11, $3, false, true)`,
       [
         tenantIsolationIds.orgA,
-        tenantIsolationIds.orgB,
         tenantIsolationIds.runRecording,
+        tenantIsolationIds.userDual,
         tenantIsolationIds.runPaused,
         tenantIsolationIds.runFinishedHistory,
         tenantIsolationIds.runRecordingHistoryOnly,
         tenantIsolationIds.runFinishedLiveOnly,
         tenantIsolationIds.runFinishedBoth,
-        tenantIsolationIds.runOrgBCoachHidden,
-        tenantIsolationIds.runOrgBShared,
-        tenantIsolationIds.userDual,
         tenantIsolationIds.userInactive,
+        tenantIsolationIds.orgB,
+        tenantIsolationIds.runOrgBShared,
+      ],
+    );
+    await client.query(
+      `INSERT INTO run_points (
+         org_id, run_id, seq, segment_id, recorded_at, received_at,
+         geom, accuracy_m, ingested_revision
+       )
+       SELECT target.org_id,
+              target.run_id,
+              1,
+              0,
+              $3::timestamptz,
+              $3::timestamptz,
+              ST_SetSRID(
+                ST_MakePoint(21.0 + target.ordinality / 1000.0, 52.0 + target.ordinality / 1000.0),
+                4326
+              ),
+              5.0,
+              1
+       FROM unnest($1::uuid[], $2::uuid[]) WITH ORDINALITY
+         AS target(org_id, run_id, ordinality)`,
+      [
+        [
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgB,
+          tenantIsolationIds.orgB,
+        ],
+        tenantIsolationRunIds,
+        '2026-09-20T08:15:00.000Z',
+      ],
+    );
+    await client.query(
+      `INSERT INTO run_summaries (
+         org_id, run_id, source_revision, algorithm_version, display_geom,
+         distance_m, observed_duration_s, quality_stats, computed_at
+       )
+       SELECT target.org_id,
+              target.run_id,
+              1,
+              'fixture-v1',
+              ST_GeomFromText(
+                'MULTILINESTRING((21.0 52.0, 21.001 52.001))',
+                4326
+              ),
+              130.5,
+              60.25,
+              jsonb_build_object(
+                'rawPointCount', 2,
+                'acceptedPointCount', 2,
+                'acceptedEdgeCount', 1,
+                'poorAccuracyPointCount', 0,
+                'seqGapCount', 0,
+                'segmentBreakCount', 0,
+                'nonpositiveTimeDeltaCount', 0,
+                'excessiveTimeGapCount', 0,
+                'excessiveSpeedCount', 0,
+                'insufficientData', false
+              ),
+              $3::timestamptz
+       FROM unnest($1::uuid[], $2::uuid[]) AS target(org_id, run_id)`,
+      [
+        [
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgA,
+          tenantIsolationIds.orgB,
+          tenantIsolationIds.orgB,
+        ],
+        tenantIsolationRunIds,
+        '2026-09-20T09:15:00.000Z',
       ],
     );
   } catch (error) {

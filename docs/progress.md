@@ -8,7 +8,7 @@ Last updated: 2026-09-20.
 | P01 | DONE | Reproducible Express 5/API/web workspace, persistent PostgreSQL/PostGIS, migrations, health, and CI commands verified after P01.1 review fixes |
 | P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
 | P02A.1 review fixes | IMPLEMENTED, NOT VERIFIED | Integration fixture target guard and confirmed-COMMIT handling added; checks intentionally not run in this iteration |
-| P02B | IN PROGRESS — PARTIAL, NOT VERIFIED | `runs`, `run_shares`, constraints, minimal grants, and non-recursive ACL/RLS implemented; child tables and full D02 matrix remain |
+| P02B | IN PROGRESS — PARTIAL, NOT VERIFIED | `runs`, `run_shares`, `run_points`, and `run_summaries` with constraints, indexes, narrow grants, and non-recursive ACL/RLS implemented; commands, tombstones, and final D02 verification remain |
 | P03 | TODO | Session boundary, commands, and API contracts |
 | P04 | TODO | Ingestion, raw history, and GPS simulator |
 | P05 | TODO | Browser recording and local buffer |
@@ -146,10 +146,36 @@ Verification status:
 - static review covered migration ordering, SQL policy direction, grants, fixture cleanup order, TypeScript imports/types, and scenario-to-requirement mapping;
 - the P02A evidence above remains historical and is not evidence for P02A.1 or this P02B fragment.
 
-Remaining P02B scope:
+Remaining P02B scope at this fragment boundary:
 
 - `run_points`, `run_commands`, `run_summaries`, and `run_tombstones` plus their constraints and indexes;
 - direct child-table ACL and cross-tenant tests completing D02;
 - D01 canonical PointInput representation and executable verification of the complete stage.
 
-Next work remains P02B after targeted verification of P02A.1 and this fragment. P03 was not started.
+## P02B — points/summaries fragment
+
+Implemented:
+
+- corrected the shared `run_shares` fixture query to use a contiguous parameter list without changing the fixture rows or ACL matrix;
+- forward-only `0003_run_points_summaries_rls.sql` adds `run_points` and `run_summaries` with composite parent FKs, cascading deletion, SDD keys, explicit numeric/timestamp representations, range/finiteness checks, geometry typmods, nonempty geometry checks, and the required point revision and summary GiST indexes;
+- raw points deliberately have no GiST index; runtime receives SELECT/INSERT only, with INSERT restricted to the active owner and no UPDATE/DELETE privilege;
+- summaries are runtime-read-only; owner access is retained, while a grantee requires a finished run and active history grant, so live-only access cannot expose a summary;
+- `app_private.can_read_run_history()` is a narrow boolean `STABLE SECURITY DEFINER` helper with fixed `pg_catalog` search path and no PUBLIC EXECUTE;
+- the run SELECT owner branch is explicit so owner `INSERT ... RETURNING` does not depend on a stable helper seeing the row inserted by the current statement;
+- ADR-0005 records the points/summaries access matrix, `quality_stats` shape, storage decisions, and the cross-row guarantees deferred to ingestion and summary publication;
+- integration scenarios cover direct and joined child reads, owner/live/history/both/no-grant access, all run states, inactive membership, multi-organization context, revocation, denied mutations, `INSERT ... RETURNING`, cross-tenant FKs, invalid numeric/geometry values, duplicate point PK immutability, representations, indexes, and maintenance denial.
+
+Verification status:
+
+- no tests, lint, typecheck, build, dependency installation, Docker command, migration, or database connection was run for this fragment, as required for this iteration;
+- static review covered migration ordering, grants/policies, fixture cleanup order, SQL placeholder/argument correspondence in changed queries, TypeScript structure, and scenario-to-requirement mapping;
+- all earlier P01/P02A results above are historical and were not repeated after this migration and test code were added;
+- the new integration scenarios are implemented but must not be described as passing until executed against the isolated real PostgreSQL/PostGIS test database.
+
+Remaining P02B scope:
+
+- `run_commands` and `run_tombstones`, their constraints, indexes, and child ACL;
+- D01 canonical `PointInput` input/payload comparison rules remain for P04; this fragment fixes only database representation;
+- targeted execution of P02A.1, runs/shares, points/summaries, and then the complete P02B ACL matrix.
+
+Next work remains P02B. P03 was not started.

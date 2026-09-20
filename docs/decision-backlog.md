@@ -4,8 +4,8 @@ This backlog preserves the mandatory clarifications from the implementation plan
 
 | ID | Owner | Required outcome | Status |
 |---|---|---|---|
-| D01 | P02B/P04 | Deterministic PointInput canonicalization for numbers, `-0`, timestamps, and seq without precision loss | TODO |
-| D02 | P02A/P02B | P02A baseline is verified; non-recursive runs/shares are implemented but unverified; child-table ACL remains | PARTIAL |
+| D01 | P02B/P04 | Storage is fixed as bigint seq/revision, integer segment, `timestamptz(3)`, PostGIS double-precision coordinates, and finite double-precision accuracy; input canonicalization for numbers, `-0`, timestamp spelling, and retries remains | TODO |
+| D02 | P02A/P02B | P02A baseline is verified; non-recursive runs/shares plus points/summaries direct-read ACL are implemented but unverified; commands/tombstones and final executable matrix remain | PARTIAL |
 | D03 | P03/P12 | Explicit session endpoint, safe local identity boundary, and production startup guard | TODO |
 | D04 | P05 | Concrete single-writer lease/ownership mechanism across tabs, devices, and reloads | TODO |
 | D05 | P05 | Terminal reconciliation for queued offline commands after server auto-finish | TODO |
