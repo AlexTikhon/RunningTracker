@@ -117,7 +117,7 @@ describe('P02A tenant isolation', () => {
     await expect(
       ownerPool.query(
         `INSERT INTO users (id, external_identity)
-         VALUES ('55555555-5555-4555-8555-555555555555', 'fixture-org-a')`,
+         VALUES ('88888888-8888-4888-8888-888888888888', 'fixture-org-a')`,
       ),
     ).rejects.toThrow(/users_external_identity_unique/u);
     await expect(

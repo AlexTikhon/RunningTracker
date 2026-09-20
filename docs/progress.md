@@ -8,7 +8,7 @@ Last updated: 2026-09-20.
 | P01 | DONE | Reproducible Express 5/API/web workspace, persistent PostgreSQL/PostGIS, migrations, health, and CI commands verified after P01.1 review fixes |
 | P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
 | P02A.1 review fixes | IMPLEMENTED, NOT VERIFIED | Integration fixture target guard and confirmed-COMMIT handling added; checks intentionally not run in this iteration |
-| P02B | TODO | Runs, points, commands, summaries, shares, tombstones, and full D02 ACL/RLS matrix |
+| P02B | IN PROGRESS — PARTIAL, NOT VERIFIED | `runs`, `run_shares`, constraints, minimal grants, and non-recursive ACL/RLS implemented; child tables and full D02 matrix remain |
 | P03 | TODO | Session boundary, commands, and API contracts |
 | P04 | TODO | Ingestion, raw history, and GPS simulator |
 | P05 | TODO | Browser recording and local buffer |
@@ -105,9 +105,9 @@ Verification evidence:
 
 Limits and P02B readiness:
 
-- D02 is PARTIAL: identity/organization isolation is complete, while run/share/child-table policies remain P02B;
+- D02 is PARTIAL: identity/organization isolation is verified and run/share policies are implemented but unverified, while child-table policies remain P02B;
 - D01 canonical PointInput representation also remains P02B/P04;
-- P02B must add `runs`, `run_points`, `run_commands`, `run_summaries`, `run_shares`, and `run_tombstones`, their composite tenant constraints, and direct child-table ACL tests;
+- P02B must still add `run_points`, `run_commands`, `run_summaries`, and `run_tombstones`, their composite tenant constraints, and direct child-table ACL tests;
 - HTTP authentication remains P03; P02A context is supplied only by trusted application code or test fixtures;
 - GitHub Actions configuration was updated but was not run on a hosted runner.
 
@@ -128,4 +128,28 @@ Verification status:
 - the P02A verification evidence above is historical and was not repeated after these corrections;
 - P02A.1 remains unverified until the focused unit/static checks and real-PostgreSQL integration scenario are executed.
 
-Next stage remains P02B after P02A.1 verification; P02B was not started.
+## P02B — first bounded runs/shares fragment
+
+Implemented:
+
+- forward-only `0002_runs_shares_rls.sql` creates only `runs` and `run_shares` with composite tenant keys, same-organization membership FKs, SDD state/revision/time checks, the global one-active-run partial unique index, and the required list/finished indexes;
+- runtime grants are explicit: `runs` has SELECT/INSERT and column-limited lifecycle UPDATE without DELETE; `run_shares` has SELECT/INSERT/UPDATE/DELETE; maintenance receives no additional access;
+- owner reads and writes its run, while an active grantee reads unfinished runs through `can_read_live` and finished runs through `can_read_history`; coach role alone grants nothing;
+- only a run owner mutates shares, while direct `run_shares` reads expose only owned-run grants or the current grantee's own rows;
+- two narrow owner-executed boolean predicates with fixed `pg_catalog` search paths and no PUBLIC EXECUTE remove the `runs` ↔ `run_shares` policy recursion described by D02;
+- integration fixtures and runtime-role scenarios cover owners, grantees, unrelated and inactive members, multi-organization membership, all grant/status combinations, revocation, prohibited grantee mutations, owner/org reassignment, cross-tenant FKs, direct share reads, and the global second-active-run rejection;
+- ADR-0004 records the bounded ACL semantics and why D02 remains partial.
+
+Verification status:
+
+- no test, lint, typecheck, build, Docker, migration, or database command was run for this fragment, as required for this iteration;
+- static review covered migration ordering, SQL policy direction, grants, fixture cleanup order, TypeScript imports/types, and scenario-to-requirement mapping;
+- the P02A evidence above remains historical and is not evidence for P02A.1 or this P02B fragment.
+
+Remaining P02B scope:
+
+- `run_points`, `run_commands`, `run_summaries`, and `run_tombstones` plus their constraints and indexes;
+- direct child-table ACL and cross-tenant tests completing D02;
+- D01 canonical PointInput representation and executable verification of the complete stage.
+
+Next work remains P02B after targeted verification of P02A.1 and this fragment. P03 was not started.

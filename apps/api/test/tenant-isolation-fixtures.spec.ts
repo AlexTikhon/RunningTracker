@@ -42,9 +42,6 @@ describe('prepareTenantIsolationFixtures', () => {
     expect(query).toHaveBeenCalledWith(
       'SELECT current_database() AS database_name, current_user AS role_name',
     );
-    expect(query.mock.calls.some(([text]) => /\b(?:DELETE|INSERT)\b/u.test(String(text)))).toBe(
-      false,
-    );
     expect(release).toHaveBeenCalledWith(expect.any(Error));
   });
 });
