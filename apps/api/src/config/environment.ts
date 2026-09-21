@@ -3,7 +3,57 @@ import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 
-const environmentSchema = z.object({
+const canonicalUuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+const environmentBoolean = z.union([
+  z.boolean(),
+  z.enum(['true', 'false']).transform((value) => value === 'true'),
+]);
+
+const uuidList = z
+  .string()
+  .default('')
+  .transform((value, context) => {
+    const entries = value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    for (const entry of entries) {
+      if (!canonicalUuidPattern.test(entry)) {
+        context.addIssue({ code: 'custom', message: `invalid canonical UUID: ${entry}` });
+      }
+    }
+
+    return [...new Set(entries)];
+  });
+
+const originList = z
+  .string()
+  .default('')
+  .transform((value, context) => {
+    const entries = value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    for (const entry of entries) {
+      try {
+        const parsed = new URL(entry);
+        if (parsed.origin !== entry || !['http:', 'https:'].includes(parsed.protocol)) {
+          throw new Error('not a canonical HTTP origin');
+        }
+      } catch {
+        context.addIssue({ code: 'custom', message: `invalid canonical HTTP origin: ${entry}` });
+      }
+    }
+
+    return [...new Set(entries)];
+  });
+
+const environmentSchema = z
+  .object({
   APP_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().max(65_535).default(3000),
   DATABASE_URL: z
@@ -18,8 +68,49 @@ const environmentSchema = z.object({
   DB_POOL_MAX: z.coerce.number().int().positive().max(50).default(10),
   DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(2_000),
   DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(1_000),
+  ALLOWED_ORIGINS: originList,
+  LOCAL_AUTH_ENABLED: environmentBoolean.default(false),
+  LOCAL_AUTH_USER_IDS: uuidList,
+  SESSION_COOKIE_SECURE: environmentBoolean.default(true),
+  SESSION_STORE_MAX_ENTRIES: z.coerce.number().int().positive().max(10_000).default(100),
+  SESSION_TTL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60 * 60 * 1_000)
+    .default(8 * 60 * 60 * 1_000),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
-});
+  })
+  .superRefine((environment, context) => {
+    if (environment.APP_ENV === 'production' && environment.LOCAL_AUTH_ENABLED) {
+      context.addIssue({
+        code: 'custom',
+        message: 'LOCAL_AUTH_ENABLED must be false in production',
+        path: ['LOCAL_AUTH_ENABLED'],
+      });
+    }
+    if (environment.APP_ENV === 'production' && !environment.SESSION_COOKIE_SECURE) {
+      context.addIssue({
+        code: 'custom',
+        message: 'SESSION_COOKIE_SECURE must be true in production',
+        path: ['SESSION_COOKIE_SECURE'],
+      });
+    }
+    if (environment.LOCAL_AUTH_ENABLED && environment.LOCAL_AUTH_USER_IDS.length === 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'LOCAL_AUTH_USER_IDS must contain at least one user when local auth is enabled',
+        path: ['LOCAL_AUTH_USER_IDS'],
+      });
+    }
+    if (environment.LOCAL_AUTH_ENABLED && environment.ALLOWED_ORIGINS.length === 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'ALLOWED_ORIGINS must contain at least one origin when local auth is enabled',
+        path: ['ALLOWED_ORIGINS'],
+      });
+    }
+  });
 
 export type Environment = z.infer<typeof environmentSchema>;
 

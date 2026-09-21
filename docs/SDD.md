@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P02A.1 и полная DB schema/ACL-подчасть P02B, включая `run_commands` и `run_tombstones`, проверены локально на реальном PostgreSQL/PostGIS под разделёнными ролями. D02 решён для доверенного tenant context; P02B остаётся частичным только из-за D01 canonical `PointInput`, отложенного до P04. P03 не начат.
+Статус: согласованный проект архитектуры; P00–P02A.1 и полная DB schema/ACL-подчасть P02B проверены локально под разделёнными ролями. P03.1 HTTP session boundary, Origin/CSRF, requestId, ApiError и session-to-tenant transaction реализованы и проверены; P03.2–P03.5 не начаты. D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration; P02B остаётся частичным только из-за D01 canonical `PointInput`, отложенного до P04.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -238,7 +238,7 @@ ACL применяется к точкам/сводкам также при пр
 
 P02A фиксирует минимальную матрицу до появления run/share API: runtime читает только собственную строку `users`, текущую `organizations` и собственную активную `memberships`, причём все три требуют активного membership для пары transaction-local user/org. DML этих таблиц runtime-role не выдан; fixtures выполняются migration/object owner. Пустой или некорректный context возвращает ноль строк. `app_private.has_active_membership()` — узкий `SECURITY DEFINER`: он возвращает только boolean, принадлежит object owner, имеет фиксированный `search_path`, закрыт от PUBLIC и исполняется только runtime-role. Это устраняет рекурсивное обращение policy `memberships` к самой себе, но не заменяет RLS.
 
-Роли P02A: privileged bootstrap создаёт extension/roles и не используется API; `running_tracker_owner` выполняет миграции и владеет application objects; `running_tracker_runtime` подключается из API; `running_tracker_maintenance` пока имеет только CONNECT, без table/DDL прав. Возможность runtime-role вызвать `set_config` не защищает от произвольного SQL с украденными DB credentials: доверенная HTTP/session boundary должна контролировать context, а настоящая аутентификация остаётся P03.
+Роли P02A: privileged bootstrap создаёт extension/roles и не используется API; `running_tracker_owner` выполняет миграции и владеет application objects; `running_tracker_runtime` подключается из API; `running_tracker_maintenance` пока имеет только CONNECT, без table/DDL прав. Возможность runtime-role вызвать `set_config` не защищает от произвольного SQL с украденными DB credentials. P03.1 теперь контролирует HTTP context: `userId` берётся только из проверенной server-side session, client-selected `orgId` валидируется, а active membership повторно проверяется внутри той же runtime-role транзакции до прикладного callback. Это локальная development/test boundary; production identity/provider остаётся P12.
 
 P02B storage/ACL описана ADR-0004/0005/0006. Live-grant действует только для `recording`/`paused`, history-grant — только для `finished`; роль coach сама доступа не добавляет. Взаимная рекурсия policies исключена узкими boolean `SECURITY DEFINER` predicates с фиксированным `search_path`; PUBLIC EXECUTE закрыт. `run_points` наследует текущий parent ACL и разрешает owner INSERT без UPDATE/DELETE; `run_summaries` доступна runtime только для чтения истории. `run_commands` допускает SELECT/INSERT только активному владельцу parent run и не даёт runtime UPDATE/DELETE; grants не раскрывают command payload/response. `run_tombstones` доступна runtime только для SELECT собственного marker при активном membership и не обращается к уже удалённому run. Direct SELECT и JOIN, grant/status combinations, revocation, invalid context и denied mutations проверены под реальной runtime-role. Forward-only миграция `0004` проверяет каждую вершину `display_geom`, а `0005` добавляет commands/tombstones. D02 решён в границах доверенного transaction-local context; HTTP authentication/session boundary остаётся P03.
 
@@ -327,7 +327,19 @@ HTTP тайлов: application/vnd.mapbox-vector-tile, Cache-Control: private, n
 
 ## 11. API-контракты
 
-Базовый prefix: /api/orgs/{orgId}. Все даты — ISO 8601 UTC, координаты — longitude/latitude. Идентификатор пользователя берётся из сессии, не из тела запроса.
+Базовый prefix прикладного API: /api/orgs/{orgId}; session API использует `/api/session`. Все даты — ISO 8601 UTC, координаты — longitude/latitude. Идентификатор пользователя берётся из проверенной server-side session, не из headers/body/query.
+
+### 11.0 Session boundary
+
+| Метод и путь | Требования | Успех |
+|---|---|---|
+| POST /api/session | Только явно включённый development/test local auth; exact configured Origin; application/json; `{ userId }` из server allowlist | 201 `{ identity: { userId }, expiresAt, csrf: { headerName, token } }` + session cookie |
+| GET /api/session | Валидная unexpired/unrevoked session cookie | 200 с тем же публичным session response |
+| DELETE /api/session | Session cookie + exact Origin + session-bound `x-csrf-token` | 204, server-side revoke и очищенная cookie |
+
+Opaque session token хранится у клиента только в `HttpOnly` cookie и индексирует серверную запись по digest. Cookie использует `SameSite=Strict`, `Path=/`, без `Domain`; `Secure` обязателен для HTTPS, а явное исключение разрешено только в development/test для локального HTTP. Все session responses используют `Cache-Control: no-store`. Expiry проверяется сервером через внедряемые часы.
+
+Локальный in-memory store ограничен, внедряем, не создаёт фоновых timers и теряет session state при перезапуске. Local auth по умолчанию выключен и запрещён в production до создания pool/listener. Bootstrap login защищён exact configured Origin и JSON-only запросом; allowed Origin не выводится из Host/X-Forwarded. Остальные state-changing session-authenticated routers переиспользуют session → Origin → CSRF middleware chain. Production provider/real login остаётся P12.
 
 ### 11.1 Общие типы
 
@@ -459,6 +471,8 @@ GET /tiles/runs/{z}/{x}/{y}.mvt?revision=...&from=...&to=... → 200 бинар�
 
 ### 11.6 Ошибки
 
+Application errors используют единый envelope `ApiError` из 11.1; server-generated UUID совпадает в `X-Request-Id` и `error.requestId`, входной request-id header не отражается. `details` допускает только безопасные validation metadata. Stack, SQL, credentials, cookies, session/CSRF tokens и внутренние error objects не возвращаются. Health endpoints остаются отдельным operational contract с прежними status/body semantics `{ status, checks? }`, но также получают `X-Request-Id`.
+
 | Status | Коды и поведение |
 |---|---|
 | 400 | INVALID_REQUEST, INVALID_CURSOR; исправление запроса |
@@ -492,7 +506,7 @@ Conflict/error details не содержат чужие точки. Автори
 
 Начальные пределы: DB pool 10 соединений на backend, максимум 2 одновременных tile-query, максимум 2 summary jobs. Длительные SSE не занимают pool slots. Запросы и фоновые задачи имеют timeouts. Лимиты уточняются измерениями, а не числом пользователей само по себе.
 
-Продуктовая аутентификация подключается через проверенный identity provider; регистрация/восстановление пароля не реализуются собственным криптографическим протоколом. Для локальных интеграционных тестов — тестовые identity/session fixtures.
+Продуктовая аутентификация подключается в P12 через проверенный identity provider; регистрация/восстановление пароля не реализуются собственным криптографическим протоколом. P03.1 предоставляет только явно включаемую development/test identity/session fixture с opaque token и bounded process-local store; production startup с ней запрещён, перезапуск теряет локальные сессии.
 
 Graceful shutdown прекращает приём новых HTTP-соединений, ограниченно ждёт активные запросы и закрытие pool; при превышении общего deadline принудительно закрывает HTTP-соединения и завершает процесс с ошибкой. После старта jobs находят незавершённую работу в БД.
 

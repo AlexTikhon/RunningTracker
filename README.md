@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02A establish a reproducible React/Express 5/PostGIS workspace plus the identity/organization schema, separated database roles, transaction-local tenant context, and baseline RLS. Run data, authentication, GPS ingestion, streaming, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03.1 adds a development/test-only HTTP session boundary, Origin/CSRF protection, request IDs, ApiError responses, and verified session-to-tenant transactions. Run/command APIs, production identity, GPS ingestion, streaming, and maps remain later stages.
 
 ## Prerequisites
 
@@ -31,6 +31,19 @@ On POSIX systems, replace the first command with `cp .env.example .env`.
 - API readiness: http://127.0.0.1:3000/api/health/ready
 
 The Vite server proxies `/api` to the API, so browser requests remain same-origin in development. Liveness describes the HTTP process only; readiness returns `503` when PostgreSQL cannot be reached.
+
+## Local session fixture
+
+Local login is opt-in. In `.env`, set `LOCAL_AUTH_ENABLED=true` and list only fixture identities in `LOCAL_AUTH_USER_IDS`. The example keeps it disabled. The API refuses local auth in `APP_ENV=production` before constructing the database pool or opening a listener.
+
+The bootstrap flow is:
+
+1. `POST /api/session` with exact configured `Origin`, `Content-Type: application/json`, and `{ "userId": "<allowlisted UUID>" }`.
+2. Retain the opaque `HttpOnly`, `SameSite=Strict`, `Path=/` cookie and the returned `csrf.token` in memory.
+3. Send the token in `x-csrf-token` plus the exact configured `Origin` on authenticated mutations.
+4. `GET /api/session` refreshes identity/expiry/CSRF data; `DELETE /api/session` revokes the server record and clears the cookie.
+
+`SESSION_COOKIE_SECURE=false` is an explicit local HTTP exception allowed only in development/test. Deployed HTTPS uses `Secure`. The local store is process-memory-only, bounded by `SESSION_STORE_MAX_ENTRIES`, and loses all sessions on restart; the production identity/provider integration remains P12.
 
 Stop the local database without deleting its named volume:
 
@@ -79,6 +92,8 @@ The P02A runtime matrix is intentionally narrow:
 
 Missing/malformed context, absent membership, and inactive membership expose no rows. Setting these GUCs is not a security boundary against arbitrary SQL run with runtime credentials; the trusted application/session boundary supplies them, while real HTTP authentication remains P03.
 
+P03.1 now resolves that HTTP boundary for local development/test: `userId` is accepted only from a verified server-side session. A route may select `orgId`, but `withAuthenticatedTenantTransaction` validates it, opens `withTenantTransaction` under `running_tracker_runtime`, rechecks active membership inside that same transaction, and runs subsequent SQL on the same client. External production authentication remains P12.
+
 ## Configuration
 
 Configuration is loaded and validated before the API app and pool are created. `.env.example` contains clearly labelled fixed local development/test credentials for bootstrap, migration owner, runtime, and maintenance roles. Use separate managed secrets outside local development.
@@ -86,5 +101,7 @@ Configuration is loaded and validated before the API app and pool are created. `
 `DB_CONNECTION_TIMEOUT_MS` bounds pool acquisition/connection. `DB_QUERY_TIMEOUT_MS` separately bounds the readiness query; timeout destroys that client so a hung query cannot occupy the pool. `SHUTDOWN_TIMEOUT_MS` bounds HTTP drain plus pool closure with monotonic elapsed time before the controlled fallback terminates the process. UTC business-event time remains a separate clock capability.
 
 `createApp({ config, pool, clock })` has no startup side effects. The executable entrypoint calls `main.ts`, which owns configuration loading, dependency construction, port binding, and signal handling.
+
+Application API failures use `{ "error": { "code", "message", "requestId", "details"? } }`; `X-Request-Id` is generated server-side and matches the body. Health remains a separate operational contract with its established `{ status, checks? }` body while still receiving the response request-ID header.
 
 Architecture and execution evidence are in `docs/`, especially `docs/SDD.md`, `docs/implementation-plan.md`, and `docs/progress.md`.

@@ -54,6 +54,50 @@ describe('validateEnvironment', () => {
     ).toThrow('DATABASE_URL must authenticate as running_tracker_runtime');
   });
 
+  it('fails production startup before infrastructure when local auth or insecure cookies are configured', () => {
+    const databaseUrl =
+      'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker';
+
+    expect(() =>
+      validateEnvironment({
+        ALLOWED_ORIGINS: 'https://tracker.example',
+        APP_ENV: 'production',
+        DATABASE_URL: databaseUrl,
+        LOCAL_AUTH_ENABLED: 'true',
+        LOCAL_AUTH_USER_IDS: '11111111-1111-4111-8111-111111111111',
+      }),
+    ).toThrow('LOCAL_AUTH_ENABLED must be false in production');
+    expect(() =>
+      validateEnvironment({
+        APP_ENV: 'production',
+        DATABASE_URL: databaseUrl,
+        SESSION_COOKIE_SECURE: 'false',
+      }),
+    ).toThrow('SESSION_COOKIE_SECURE must be true in production');
+  });
+
+  it('requires canonical explicit local identities and origins', () => {
+    const databaseUrl =
+      'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker';
+
+    expect(() =>
+      validateEnvironment({
+        APP_ENV: 'test',
+        DATABASE_URL: databaseUrl,
+        LOCAL_AUTH_ENABLED: 'true',
+      }),
+    ).toThrow('LOCAL_AUTH_USER_IDS must contain at least one user');
+    expect(() =>
+      validateEnvironment({
+        ALLOWED_ORIGINS: 'http://127.0.0.1:5173/',
+        APP_ENV: 'test',
+        DATABASE_URL: databaseUrl,
+        LOCAL_AUTH_ENABLED: 'true',
+        LOCAL_AUTH_USER_IDS: '11111111-1111-4111-8111-111111111111',
+      }),
+    ).toThrow('invalid canonical HTTP origin');
+  });
+
   it('uses TEST_DATABASE_URL instead of DATABASE_URL for integration configuration', () => {
     const config = loadIntegrationTestConfiguration({
       envFiles: [],

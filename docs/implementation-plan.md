@@ -2,7 +2,7 @@
 
 Версия: 1.0  
 Дата: 21 сентября 2026
-Статус: P00–P02A.1 и полная схема/ACL-матрица P02B, включая `run_commands` и `run_tombstones`, проверены локально на реальном PostgreSQL/PostGIS; D02 решён в границах доверенного tenant context. P02B не объявлен DONE: D01 `PointInput` canonicalization остаётся открытым для P04; последующие этапы не начаты.
+Статус: P00–P02A.1 и полная схема/ACL-матрица P02B проверены локально на реальном PostgreSQL/PostGIS; D02 решён. P03.1 session boundary и минимальные session/error runtime contracts из P03.2 реализованы и проверены, остальные P03.2–P03.5 не начаты. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12. P02B не объявлен DONE: D01 `PointInput` canonicalization остаётся открытым для P04.
 Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
 
 ## 1. Режим исполнения
@@ -179,7 +179,7 @@ packages/contracts не зависит от Express или драйвера БД
 Ссылка на SDD: 6.1, 8, 11.
 
 Задачи:
-- P03.1 Реализовать session boundary, CSRF/Origin-проверки, requestId и единый ApiError. Локальная identity fixture разрешена только в development/test; production startup с ней запрещён.
+- P03.1 Реализовать session boundary, CSRF/Origin-проверки, requestId и единый ApiError. Локальная identity fixture разрешена только в development/test; production startup с ней запрещён. **Выполнено и проверено 2026-09-21; ADR-0007.**
 - P03.2 Создать runtime-контракты, OpenAPI для обычного HTTP и описание SSE; bigint/seq сериализуются строками.
 - P03.3 Реализовать PUT run и POST commands: idempotency, expectedControlRevision, terminal finish, один активный run на пользователя.
 - P03.4 Реализовать GET run/list, управление shares и проверку активного membership.
@@ -387,7 +387,8 @@ packages/contracts не зависит от Express или драйвера БД
 |---|---|---|---|
 | D01 | Точная канонизация PointInput для повторов: числа, -0, timestamps, seq | P02B/P04 | Детерминированная спецификация и тесты без потери точности |
 | D02 | RLS runs/shares без рекурсии и обхода child-table ACL | P02A/P02B | P02A identity baseline + P02B run/share matrix и runtime-role тесты |
-| D03 | Session endpoint, локальная identity и production guard | P03/P12 | Явный контракт и безопасное переключение окружений |
+| D03a | Session endpoint, локальная identity, CSRF/Origin и production guard | P03 | Явный HTTP/session contract и fail-fast local-auth guard — RESOLVED в ADR-0007 |
+| D03b | Production identity/session provider integration | P12 | Стандартный provider/protocol без local/anonymous fallback; TODO |
 | D04 | Одна записывающая вкладка/устройство, reload и конфликт writer | P05 | Конкретный lease/ownership механизм; не полагаться только на UI |
 | D05 | Очередь offline commands после server auto-finish | P05 | Терминальный reconciliation, сохранение оставшихся GPS в допустимом окне |
 | D06 | Начальная пагинация и changes с фиксированной T | P07 | Эквивалентность snapshot + changes свежему snapshot |
@@ -442,4 +443,4 @@ packages/contracts не зависит от Express или драйвера БД
 
 P00–P02A.1 и полная DB schema/ACL-подчасть P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) проверены локально воспроизводимыми unit/build и real PostgreSQL/PostGIS integration-командами. D02 решён в границах доверенного tenant context. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
 
-P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. P03 authentication/API behavior, command service и P10 deletion/retention не начаты.
+P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. В P03 выполнен только P03.1 и минимальная session/error часть P03.2; run/command contracts, OpenAPI/SSE description, P03.3–P03.5 и P10 deletion/retention не начаты. Production identity/session provider остаётся P12.

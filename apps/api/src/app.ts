@@ -1,40 +1,52 @@
-import express, { type ErrorRequestHandler, type Express } from 'express';
+import express, { type Express, type Router } from 'express';
 
+import { SessionManager } from './auth/session-manager.js';
+import { createSessionRouter } from './auth/session-http.js';
+import { InMemorySessionStore } from './auth/session-store.js';
 import type { Clock } from './clock.js';
 import type { Environment } from './config/environment.js';
 import { DatabaseProbe, type DatabasePool } from './database/database.js';
 import { createHealthRouter } from './health/health.routes.js';
-import { HttpError } from './http/errors.js';
+import { apiErrorHandler, unknownApiRoute } from './http/errors.js';
+import { requestIdMiddleware } from './http/request-id.js';
 
 export interface AppDependencies {
   clock: Clock;
   config: Environment;
   pool: DatabasePool;
+  sessionManager?: SessionManager;
+  testOnlyRouter?: Router;
 }
 
-const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
-  if (response.headersSent) {
-    next(error);
-    return;
+export function createApp({ clock, config, pool, sessionManager, testOnlyRouter }: AppDependencies): Express {
+  if (testOnlyRouter && config.APP_ENV !== 'test') {
+    throw new Error('testOnlyRouter can only be mounted when APP_ENV=test');
   }
 
-  if (error instanceof HttpError) {
-    response.status(error.statusCode).json(error.body);
-    return;
-  }
-
-  const summary = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
-  console.error(`Unhandled HTTP error: ${summary}`);
-  response.status(500).json({ status: 'error' });
-};
-
-export function createApp({ clock, config, pool }: AppDependencies): Express {
   const app = express();
   const database = new DatabaseProbe(pool, clock, config.DB_QUERY_TIMEOUT_MS);
+  const sessions =
+    sessionManager ??
+    new SessionManager({
+      clock,
+      store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
+      ttlMs: config.SESSION_TTL_MS,
+    });
 
   app.disable('x-powered-by');
+  app.use(requestIdMiddleware);
   app.use('/api/health', createHealthRouter(database));
-  app.use(errorHandler);
+  app.use('/api/session', (_request, response, next) => {
+    response.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+  app.use(express.json({ limit: '64kb' }));
+  app.use('/api/session', createSessionRouter(config, sessions));
+  if (testOnlyRouter) {
+    app.use('/api', testOnlyRouter);
+  }
+  app.use('/api', unknownApiRoute);
+  app.use(apiErrorHandler);
 
   return app;
 }

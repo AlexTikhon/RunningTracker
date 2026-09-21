@@ -3,10 +3,17 @@ import process from 'node:process';
 import type { Pool } from 'pg';
 
 import { createApp } from './app.js';
+import { SessionManager } from './auth/session-manager.js';
+import { InMemorySessionStore } from './auth/session-store.js';
 import { systemClock } from './clock.js';
 import { loadEnvironment } from './config/environment.js';
 import { createDatabasePool } from './database/database.js';
 import { shutdownInfrastructure } from './lifecycle/shutdown.js';
+
+export interface MainDependencies {
+  createPool?: typeof createDatabasePool;
+  loadConfig?: typeof loadEnvironment;
+}
 
 function listen(server: Server, port: number): Promise<void> {
   return new Promise((resolveListen, reject) => {
@@ -55,10 +62,15 @@ function registerShutdown(server: Server, pool: Pool, timeoutMs: number): void {
   process.once('SIGTERM', handleSignal);
 }
 
-export async function main(): Promise<void> {
-  const config = loadEnvironment();
-  const pool = createDatabasePool(config);
-  const app = createApp({ clock: systemClock, config, pool });
+export async function main(dependencies: MainDependencies = {}): Promise<void> {
+  const config = (dependencies.loadConfig ?? loadEnvironment)();
+  const pool = (dependencies.createPool ?? createDatabasePool)(config);
+  const sessionManager = new SessionManager({
+    clock: systemClock,
+    store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
+    ttlMs: config.SESSION_TTL_MS,
+  });
+  const app = createApp({ clock: systemClock, config, pool, sessionManager });
   const server = createServer(app);
 
   try {

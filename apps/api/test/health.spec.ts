@@ -3,18 +3,19 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../src/app.js';
 import { systemClock } from '../src/clock.js';
-import type { Environment } from '../src/config/environment.js';
+import { validateEnvironment } from '../src/config/environment.js';
 import type { DatabaseClient, DatabasePool } from '../src/database/database.js';
 
-const config: Environment = {
+const config = validateEnvironment({
   APP_ENV: 'test',
-  DATABASE_URL: 'postgresql://user:password@127.0.0.1:5433/running_tracker_test',
+  DATABASE_URL:
+    'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker_test',
   DB_CONNECTION_TIMEOUT_MS: 100,
   DB_POOL_MAX: 2,
   DB_QUERY_TIMEOUT_MS: 25,
   PORT: 3_000,
   SHUTDOWN_TIMEOUT_MS: 100,
-};
+});
 
 function poolWithQuery(query: DatabaseClient['query']): {
   pool: DatabasePool;
@@ -31,7 +32,11 @@ describe('health endpoints', () => {
     const { pool, release } = poolWithQuery(query);
     const app = createApp({ clock: systemClock, config, pool });
 
-    await request(app).get('/api/health/live').expect(200).expect({ status: 'ok' });
+    await request(app)
+      .get('/api/health/live')
+      .expect(200)
+      .expect('X-Request-Id', /^[0-9a-f-]{36}$/u)
+      .expect({ status: 'ok' });
     await request(app)
       .get('/api/health/ready')
       .expect(200)

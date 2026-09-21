@@ -9,7 +9,7 @@ Last updated: 2026-09-21.
 | P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
 | P02A.1 review fixes | VERIFIED | Integration fixture target guard and confirmed-COMMIT handling passed unit and real-role integration checks |
 | P02B | IN PROGRESS — DB SCHEMA/ACL VERIFIED | All six run child/access tables, constraints/indexes and the full D02 matrix passed real PostgreSQL/PostGIS role integration; only D01 canonical `PointInput` remains deferred to P04 |
-| P03 | TODO | Session boundary, commands, and API contracts |
+| P03 | IN PROGRESS — P03.1 VERIFIED | HTTP session boundary, local identity guard, Origin/CSRF, requestId/ApiError, and session-to-tenant transaction verified; remaining contracts/commands/API behavior are TODO |
 | P04 | TODO | Ingestion, raw history, and GPS simulator |
 | P05 | TODO | Browser recording and local buffer |
 | P06 | TODO | Geometry and archive summaries |
@@ -238,3 +238,37 @@ Decision/status boundary:
 - D01 remains TODO for P04: JSONB object storage and `canonical_payload` naming do not define canonical numeric/timestamp forms, `-0`, or semantic retry comparison;
 - D08, the retention duration/default, cleanup, behavior after expiry, run-ID reuse prevention, and atomic tombstone + run deletion + `archive_revision` transaction remain P10;
 - P02B is intentionally not marked DONE while D01 remains open. P03 and later product behavior were not started; hosted CI was not run.
+
+## P03.1 — HTTP session boundary and API error foundation
+
+Implemented:
+
+- `POST /api/session` as an explicitly enabled development/test-only login fixture using exact configured Origin, JSON-only requests, and a server-side UUID allowlist; missing `userId` never selects a default identity;
+- `GET /api/session` for verified identity, server expiry, and session-bound CSRF data; `DELETE /api/session` revokes the server record and clears the cookie;
+- random opaque session/CSRF tokens, digest-indexed bounded in-memory storage, injected clock/store, server-side expiry, no background interval/global singleton, and explicit restart session loss;
+- `HttpOnly`, `SameSite=Strict`, `Path=/`, no-Domain cookies, with `Secure` by default and an explicit development/test-only local HTTP exception;
+- fail-fast configuration: local auth defaults off, production rejects local auth and insecure cookies before pool construction/listener binding, and protected API has no anonymous/default-user fallback;
+- reusable session → exact Origin → session-bound CSRF middleware for mutations; allowed origins are static configuration and never derived from Host/X-Forwarded headers;
+- server-generated UUID request IDs before parsers/routers, matching `X-Request-Id` and the unified application `ApiError` body; invalid JSON/validation, auth, Origin/CSRF, organization, unknown routes, and unexpected errors are normalized without stacks, SQL, credentials, cookies, tokens, or internal error objects;
+- the existing health body/status contract remains separate and unchanged, with only `X-Request-Id` added;
+- `withAuthenticatedTenantTransaction`: derives `userId` only from the resolved session, validates client-selected `orgId`, opens `withTenantTransaction` under runtime-role, verifies current active membership inside the same transaction, and runs the DB operation on the same client;
+- minimal Express/pg-independent runtime schemas for public session and ApiError responses in `packages/contracts`;
+- ADR-0007 and synchronized SDD/plan/backlog/README/local configuration. D03 is split into resolved P03 `D03a` and TODO P12 production provider `D03b`.
+
+Verification evidence:
+
+- Docker Desktop 29.7.2/Linux engine was started; only the existing `running_tracker_test` target was bootstrapped/mutated for fixtures;
+- `npm run db:bootstrap:test` succeeded; `npm run db:migrate:test` verified unchanged checksums and skipped migrations `0000`–`0005`;
+- focused real-role HTTP integration passed 1 file / 4 tests for two organizations, dual membership, inactive/no membership, deactivation between requests, callback denial, identity spoof attempts, and pooled connection reuse;
+- `npm run verify` passed lint, strict typecheck, 8 migration tests, 37 API unit/HTTP tests, 1 web test, and all production builds;
+- full `npm run test:integration` passed 6 files / 73 tests under the real owner/runtime/maintenance roles, including the new HTTP → session → tenant transaction path and the complete prior ACL matrix;
+- a real listener smoke returned session create/read/logout/reuse statuses `201/200/204/401`, with `HttpOnly`, `SameSite=Strict`, `Path=/`, `no-store`, and a response request ID observed without printing token values; SIGINT then completed controlled shutdown;
+- `git diff --check` passed; migrations `0000`–`0005` were not modified.
+
+Limitations and remaining boundary:
+
+- the local in-memory store is intentionally single-process, bounded, and loses all sessions on restart; it is not a production availability mechanism;
+- external login, provider callback/recovery, durable/distributed sessions, deployed TLS/proxy/secrets, and production identity lifecycle remain D03b/P12;
+- only the session/error runtime schemas from P03.2 were added. Remaining P03.2 OpenAPI/ordinary HTTP/SSE contracts and all P03.3–P03.5 run/command/share/auto-finish behavior remain TODO;
+- P02B is still IN PROGRESS because D01 canonical `PointInput` remains P04-owned; P03 as a whole is not marked DONE;
+- hosted CI was not run, and no commit, push, deploy, paid-provider call, main-database migration, or Docker volume deletion occurred.
