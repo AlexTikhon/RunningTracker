@@ -1,8 +1,8 @@
 # Running Tracker — план пошаговой реализации для coding-агента
 
 Версия: 1.0  
-Дата: 19 сентября 2026  
-Статус: P00–P02A выполнены; P02B начат частично — `runs`/`run_shares` и их ACL реализованы, но не проверены запуском; остальные таблицы P02B и последующие этапы не начаты.
+Дата: 21 сентября 2026
+Статус: P00–P02A.1 и полная схема/ACL-матрица P02B, включая `run_commands` и `run_tombstones`, проверены локально на реальном PostgreSQL/PostGIS; D02 решён в границах доверенного tenant context. P02B не объявлен DONE: D01 `PointInput` canonicalization остаётся открытым для P04; последующие этапы не начаты.
 Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
 
 ## 1. Режим исполнения
@@ -171,6 +171,8 @@ packages/contracts не зависит от Express или драйвера БД
 - P02B.4 Проверить cross-tenant composite FK, owner/grantee access и denied mutations под runtime-role.
 
 Готово, когда исполняемая матрица покрывает run/share/child tables, а прямое чтение points/summaries не обходит ACL.
+
+Состояние на 2026-09-21: P02B.1–P02B.4 и D02 выполнены и проверены на реальной БД. Этап намеренно не отмечен DONE, потому что D01 canonical `PointInput`/retry comparison остаётся задачей P04. Это не блокирует фиксацию завершённой DB schema/ACL-подчасти и не означает начало P03.
 
 ### P03 — Session boundary, команды и API-основа
 
@@ -438,6 +440,6 @@ packages/contracts не зависит от Express или драйвера БД
 
 ## 10. Текущий статус
 
-P00–P02A выполнены с локальной воспроизводимой проверкой. Авторитетные команды и evidence находятся в `README.md` и `progress.md`. Исправление P02A.1 и первый фрагмент P02B реализованы, но в назначенной итерации не проверялись запуском.
+P00–P02A.1 и полная DB schema/ACL-подчасть P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) проверены локально воспроизводимыми unit/build и real PostgreSQL/PostGIS integration-командами. D02 решён в границах доверенного tenant context. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
 
-Следующая работа — проверить текущие изменения и продолжить P02B дочерними таблицами и их direct-read ACL. P02B ещё не завершён и не включает P03 authentication/API behavior.
+P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. P03 authentication/API behavior, command service и P10 deletion/retention не начаты.

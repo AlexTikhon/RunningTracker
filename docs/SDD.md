@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
-Дата: 20 сентября 2026
-Статус: согласованный проект архитектуры; P00–P02A реализованы локально, первый фрагмент P02B (`runs`/`run_shares`) реализован статически, но ещё не проверен запуском; дочерние таблицы и нагрузочные проверки не выполнены.
+Дата: 21 сентября 2026
+Статус: согласованный проект архитектуры; P00–P02A.1 и полная DB schema/ACL-подчасть P02B, включая `run_commands` и `run_tombstones`, проверены локально на реальном PostgreSQL/PostGIS под разделёнными ролями. D02 решён для доверенного tenant context; P02B остаётся частичным только из-за D01 canonical `PointInput`, отложенного до P04. P03 не начат.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -92,7 +92,9 @@ MongoDB 2dsphere подходит для proximity и геообластей. П
 
 ## 5. Логическая схема
 
-UUID используются для идентификаторов, timestamptz — для времени, bigint — для seq/revisions. В JSON bigint передаётся десятичной строкой; сравнение на клиенте через BigInt, не лексикографически.
+UUID используются для идентификаторов, timestamptz — для времени, bigint — для seq/revisions. PostgreSQL `bigint` имеет знаковый 64-битный диапазон; schema CHECK дополнительно требует неотрицательные revisions и положительный seq. Стандартный parser `pg` возвращает `int8` десятичной строкой даже без `::text`; API сохраняет эту форму, а клиент сравнивает через `BigInt`, не лексикографически.
+
+`segment_id` хранится как PostgreSQL `integer`: физический диапазон от -2 147 483 648 до 2 147 483 647, прикладной CHECK сужает его до 0…2 147 483 647. Координаты PostGIS `geometry` представлены IEEE-754 binary64 (`double precision`): они не являются десятичными fixed-point значениями. Для `Point` и каждой вершины `MultiLineString` проверяются конечность и диапазоны longitude/latitude; nullable `display_geom` остаётся допустимым. `timestamptz(3)` хранит миллисекундную точность, нормализует timezone и округляет более точный вход до ближайшей миллисекунды. Эти storage-правила не объявляют решённой канонизацию `PointInput`: spelling timestamps, `-0`, допустимые числовые формы и retry-сравнение остаются D01/P04.
 
 ### 5.1 Таблицы
 
@@ -108,7 +110,9 @@ UUID используются для идентификаторов, timestamptz
 | run_shares | org_id, run_id, grantee_user_id, can_read_history, can_read_live |
 | run_tombstones | org_id, run_id, owner_user_id, deleted_at, expires_at; без координат |
 
-run_tombstones не имеет каскадного FK на удаляемый run. Запись tombstone и удаление run выполняются атомарно. Экспорт журнала удалений для disaster recovery — отдельная эксплуатационная обязанность, описанная в разделе 12.
+run_tombstones не имеет FK на удаляемый run. Его owner связан с membership той же организации через `ON DELETE RESTRICT`, поэтому деактивация membership сохраняет tombstone. Запись tombstone, проверка фактического владельца удаляемого run, удаление run и изменение archive_revision должны выполняться атомарно будущей P10-транзакцией. Схема сама по себе не запрещает повторный INSERT того же run ID. Экспорт журнала удалений для disaster recovery — отдельная эксплуатационная обязанность, описанная в разделе 12.
+
+`run_commands.canonical_payload` и `response` — non-null JSONB objects. Такое хранение не обеспечивает канонизацию, семантическое сравнение повторов, валидацию команды или атомарность с изменением `runs`; это обязанности P03-транзакции.
 
 raw_state: available → purging → purged. status: recording ↔ paused → finished. finished — терминальное состояние.
 
@@ -141,6 +145,7 @@ control_revision отделена от data_revision: GPS-записи не до
 - run_summaries: PK (org_id,run_id), GiST(display_geom).
 - run_shares: PK (org_id,run_id,grantee_user_id).
 - run_commands: PK (org_id,run_id,command_id).
+- run_tombstones: PK (org_id,run_id); (expires_at) для будущей очистки.
 
 На исходных точках нет GiST. История читается по run, не по произвольной области мира.
 
@@ -235,7 +240,7 @@ P02A фиксирует минимальную матрицу до появле�
 
 Роли P02A: privileged bootstrap создаёт extension/roles и не используется API; `running_tracker_owner` выполняет миграции и владеет application objects; `running_tracker_runtime` подключается из API; `running_tracker_maintenance` пока имеет только CONNECT, без table/DDL прав. Возможность runtime-role вызвать `set_config` не защищает от произвольного SQL с украденными DB credentials: доверенная HTTP/session boundary должна контролировать context, а настоящая аутентификация остаётся P03.
 
-Первый фрагмент P02B реализует `runs` и `run_shares` по ADR-0004. Live-grant действует только для `recording`/`paused`, history-grant — только для `finished`; роль coach сама доступа не добавляет. Взаимная рекурсия policies исключена двумя узкими boolean `SECURITY DEFINER` predicates с фиксированным `search_path`: проверка чтения run обращается к обеим таблицам с правами owner, а policy shares использует отдельную проверку владения run. PUBLIC EXECUTE закрыт. Реализация и integration-сценарии пока не запускались; ACL дочерних таблиц остаётся следующим фрагментом P02B.
+P02B storage/ACL описана ADR-0004/0005/0006. Live-grant действует только для `recording`/`paused`, history-grant — только для `finished`; роль coach сама доступа не добавляет. Взаимная рекурсия policies исключена узкими boolean `SECURITY DEFINER` predicates с фиксированным `search_path`; PUBLIC EXECUTE закрыт. `run_points` наследует текущий parent ACL и разрешает owner INSERT без UPDATE/DELETE; `run_summaries` доступна runtime только для чтения истории. `run_commands` допускает SELECT/INSERT только активному владельцу parent run и не даёт runtime UPDATE/DELETE; grants не раскрывают command payload/response. `run_tombstones` доступна runtime только для SELECT собственного marker при активном membership и не обращается к уже удалённому run. Direct SELECT и JOIN, grant/status combinations, revocation, invalid context и denied mutations проверены под реальной runtime-role. Forward-only миграция `0004` проверяет каждую вершину `display_geom`, а `0005` добавляет commands/tombstones. D02 решён в границах доверенного transaction-local context; HTTP authentication/session boundary остаётся P03.
 
 История: индексный проход по (org_id,run_id,seq), страницы до 1 000 точек. Для raw replay курсор содержит data_revision; изменение версии требует перезапуска чтения. Для live используется иной стабильный протокол из раздела 9.
 
@@ -341,8 +346,20 @@ interface RunView {
   summary: null | {
     sourceRevision: Revision; algorithmVersion: string;
     distanceM: number; observedDurationS: number;
-    qualityStats: Record<string, number>;
+    qualityStats: QualityStats;
   };
+}
+interface QualityStats {
+  rawPointCount: number;
+  acceptedPointCount: number;
+  acceptedEdgeCount: number;
+  poorAccuracyPointCount: number;
+  seqGapCount: number;
+  segmentBreakCount: number;
+  nonpositiveTimeDeltaCount: number;
+  excessiveTimeGapCount: number;
+  excessiveSpeedCount: number;
+  insufficientData: boolean;
 }
 interface PointInput {
   seq: Seq; segmentId: number; recordedAt: Time;
@@ -367,6 +384,7 @@ interface ApiError {
 ~~~
 
 TypeScript не заменяет runtime-валидацию на обеих границах.
+Счётчики `QualityStats` — неотрицательные целые, `insufficientData` — boolean. Текущий P02B CHECK гарантирует только JSON object; полная проверка ключей, типов и вычисление значений принадлежат P06 summary publication.
 
 ### 11.2 Запись и управление
 

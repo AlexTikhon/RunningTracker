@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { loadIntegrationTestConfiguration } from '../src/config/environment.js';
@@ -10,6 +10,48 @@ import {
 } from './tenant-isolation-fixtures.js';
 
 type ChildTable = 'run_points' | 'run_summaries';
+
+interface DatabaseErrorShape {
+  code: string;
+  column?: string;
+  constraint?: string;
+}
+
+interface AccessMatrixCase {
+  canReadHistory: boolean;
+  canReadLive: boolean;
+  grant: 'both' | 'history-only' | 'live-only' | 'no-grant';
+  status: 'finished' | 'paused' | 'recording';
+}
+
+const accessMatrix = (
+  ['recording', 'paused', 'finished'] as const
+).flatMap((status) =>
+  [
+    { canReadHistory: false, canReadLive: true, grant: 'live-only' as const, status },
+    { canReadHistory: true, canReadLive: false, grant: 'history-only' as const, status },
+    { canReadHistory: true, canReadLive: true, grant: 'both' as const, status },
+    { canReadHistory: false, canReadLive: false, grant: 'no-grant' as const, status },
+  ] satisfies AccessMatrixCase[],
+);
+
+const matrixOwnerId = '88888888-8888-4888-8888-888888888888';
+const matrixRunId = 'd0000000-0000-4000-8000-000000000001';
+const transactionRunId = 'e0000000-0000-4000-8000-000000000001';
+
+async function expectDatabaseError(
+  operation: Promise<unknown>,
+  expected: DatabaseErrorShape,
+): Promise<void> {
+  try {
+    await operation;
+  } catch (error) {
+    expect(error).toMatchObject(expected);
+    return;
+  }
+
+  throw new Error(`Expected PostgreSQL error ${expected.code}`);
+}
 
 const pointInsertSql = `INSERT INTO run_points (
   org_id, run_id, seq, segment_id, recorded_at, received_at,
@@ -95,6 +137,143 @@ describe('P02B run_points and run_summaries ACL', () => {
       return result.rows.map(({ run_id }) => run_id);
     });
 
+  const canReadChild = (
+    table: ChildTable,
+    orgId: string,
+    userId: string,
+    runId: string,
+    joinRuns: boolean,
+  ) =>
+    withTenantTransaction(runtimePool, { orgId, userId }, async (client) => {
+      const result = await client.query<{ visible: boolean }>(
+        joinRuns
+          ? `SELECT EXISTS (
+               SELECT 1
+               FROM ${table} AS child
+               JOIN runs AS parent
+                 ON parent.org_id = child.org_id AND parent.id = child.run_id
+               WHERE child.org_id = $1 AND child.run_id = $2
+             ) AS visible`
+          : `SELECT EXISTS (
+               SELECT 1 FROM ${table}
+               WHERE org_id = $1 AND run_id = $2
+             ) AS visible`,
+        [orgId, runId],
+      );
+      return result.rows[0]?.visible ?? false;
+    });
+
+  const withVerifiedOwnerTransaction = async (
+    mutation: (client: PoolClient) => Promise<void>,
+  ): Promise<void> => {
+    const client = await ownerPool.connect();
+    let releaseError: Error | undefined;
+
+    try {
+      const identity = await client.query<{ database_name: string; role_name: string }>(
+        'SELECT current_database() AS database_name, current_user AS role_name',
+      );
+      expect(identity.rows[0]).toEqual({
+        database_name: expectedOwner.database,
+        role_name: expectedOwner.user,
+      });
+
+      await client.query('BEGIN');
+      await mutation(client);
+      await client.query('COMMIT');
+    } catch (error) {
+      releaseError = error instanceof Error ? error : new Error('Owner fixture mutation failed');
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  };
+
+  const seedAccessMatrixCase = (matrixCase: AccessMatrixCase) =>
+    withVerifiedOwnerTransaction(async (client) => {
+      const finishedAt = matrixCase.status === 'finished' ? '2026-09-20T09:00:00.000Z' : null;
+
+      await client.query(
+        `INSERT INTO users (id, external_identity) VALUES ($1, 'fixture-matrix-owner')`,
+        [matrixOwnerId],
+      );
+      await client.query(
+        `INSERT INTO memberships (org_id, user_id, role, active)
+         VALUES ($1, $2, 'runner', true)`,
+        [ids.orgA, matrixOwnerId],
+      );
+      await client.query(
+        `INSERT INTO runs (
+           org_id, id, user_id, status, started_at, created_at, finished_at
+         ) VALUES ($1, $2, $3, $4, $5, $5, $6)`,
+        [
+          ids.orgA,
+          matrixRunId,
+          matrixOwnerId,
+          matrixCase.status,
+          '2026-09-20T08:00:00.000Z',
+          finishedAt,
+        ],
+      );
+      if (matrixCase.grant !== 'no-grant') {
+        await client.query(
+          `INSERT INTO run_shares (
+             org_id, run_id, grantee_user_id, can_read_live, can_read_history
+           ) VALUES ($1, $2, $3, $4, $5)`,
+          [
+            ids.orgA,
+            matrixRunId,
+            ids.userDual,
+            matrixCase.canReadLive,
+            matrixCase.canReadHistory,
+          ],
+        );
+      }
+      await client.query(pointInsertSql, pointValues(ids.orgA, matrixRunId, { seq: '1' }));
+      await client.query(
+        `INSERT INTO run_summaries (
+           org_id, run_id, source_revision, algorithm_version,
+           distance_m, observed_duration_s, quality_stats
+         ) VALUES ($1, $2, 1, 'matrix-v1', 1, 1, '{}'::jsonb)`,
+        [ids.orgA, matrixRunId],
+      );
+    });
+
+  it.each(accessMatrix)(
+    'enforces $grant access for $status points and summaries in direct reads and joins',
+    async (matrixCase) => {
+      await seedAccessMatrixCase(matrixCase);
+
+      const pointVisible =
+        matrixCase.status === 'finished'
+          ? matrixCase.canReadHistory
+          : matrixCase.canReadLive;
+      const summaryVisible = matrixCase.status === 'finished' && matrixCase.canReadHistory;
+
+      for (const joinRuns of [false, true]) {
+        await expect(
+          canReadChild(
+            'run_points',
+            ids.orgA,
+            ids.userDual,
+            matrixRunId,
+            joinRuns,
+          ),
+        ).resolves.toBe(pointVisible);
+        await expect(
+          canReadChild(
+            'run_summaries',
+            ids.orgA,
+            ids.userDual,
+            matrixRunId,
+            joinRuns,
+          ),
+        ).resolves.toBe(summaryVisible);
+      }
+    },
+  );
+
   it('applies the run ACL to direct point reads and to joins', async () => {
     const ownerExpected = [
       ids.runRecording,
@@ -175,28 +354,90 @@ describe('P02B run_points and run_summaries ACL', () => {
         summaries: '0',
       });
       await client.query('ROLLBACK');
+
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.user_id', '', true)");
+      await client.query("SELECT set_config('app.org_id', '', true)");
+      const empty = await client.query<{ points: string; summaries: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM run_points) AS points,
+           (SELECT count(*)::text FROM run_summaries) AS summaries`,
+      );
+      expect(empty.rows[0]).toEqual({ points: '0', summaries: '0' });
+      await client.query('ROLLBACK');
     } finally {
       client.release();
     }
+
+    for (const userId of [ids.userStranger, ids.userOrgB]) {
+      await expect(
+        canReadChild('run_points', ids.orgA, userId, ids.runRecording, false),
+      ).resolves.toBe(false);
+      await expect(
+        canReadChild('run_summaries', ids.orgA, userId, ids.runRecording, false),
+      ).resolves.toBe(false);
+    }
+
+    const switchedOrganization = await withTenantTransaction(
+      runtimePool,
+      { orgId: ids.orgB, userId: ids.userDual },
+      async (switchedClient) => {
+        const result = await switchedClient.query<{ points: string; summaries: string }>(
+          `SELECT
+             (SELECT count(*)::text FROM run_points
+              WHERE org_id = $1 AND run_id = $2) AS points,
+             (SELECT count(*)::text FROM run_summaries
+              WHERE org_id = $1 AND run_id = $2) AS summaries`,
+          [ids.orgA, ids.runRecording],
+        );
+        return result.rows[0];
+      },
+    );
+    expect(switchedOrganization).toEqual({ points: '0', summaries: '0' });
   });
 
-  it('applies grant revocation and membership deactivation on the next statement', async () => {
-    await withTenantTransaction(
-      runtimePool,
-      { orgId: ids.orgA, userId: ids.userOrgA },
-      (client) =>
-        client.query(
-          `DELETE FROM run_shares
-           WHERE org_id = $1 AND run_id = $2 AND grantee_user_id = $3`,
-          [ids.orgA, ids.runFinishedHistory, ids.userDual],
-        ),
-    );
-    await expect(readChildren('run_points', ids.orgA, ids.userDual)).resolves.not.toContain(
-      ids.runFinishedHistory,
-    );
-    await expect(readChildren('run_summaries', ids.orgA, ids.userDual)).resolves.not.toContain(
-      ids.runFinishedHistory,
-    );
+  it('observes committed grant revocation on the next READ COMMITTED statement', async () => {
+    const granteeClient = await runtimePool.connect();
+    const readTarget = () =>
+      granteeClient.query<{ points: string; summaries: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM run_points
+            WHERE org_id = $1 AND run_id = $2) AS points,
+           (SELECT count(*)::text FROM run_summaries
+            WHERE org_id = $1 AND run_id = $2) AS summaries`,
+        [ids.orgA, ids.runFinishedHistory],
+      );
+
+    try {
+      await granteeClient.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+      await granteeClient.query(
+        `SELECT set_config('app.user_id', $1, true), set_config('app.org_id', $2, true)`,
+        [ids.userDual, ids.orgA],
+      );
+
+      const beforeRevocation = await readTarget();
+      expect(beforeRevocation.rows[0]).toEqual({ points: '1', summaries: '1' });
+
+      await withTenantTransaction(
+        runtimePool,
+        { orgId: ids.orgA, userId: ids.userOrgA },
+        (client) =>
+          client.query(
+            `DELETE FROM run_shares
+             WHERE org_id = $1 AND run_id = $2 AND grantee_user_id = $3`,
+            [ids.orgA, ids.runFinishedHistory, ids.userDual],
+          ),
+      );
+
+      const afterRevocation = await readTarget();
+      expect(afterRevocation.rows[0]).toEqual({ points: '0', summaries: '0' });
+      await granteeClient.query('COMMIT');
+    } catch (error) {
+      await granteeClient.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      granteeClient.release();
+    }
 
     await ownerPool.query(
       'UPDATE memberships SET active = false WHERE org_id = $1 AND user_id = $2',
@@ -234,6 +475,101 @@ describe('P02B run_points and run_summaries ACL', () => {
         ),
       ).rejects.toThrow(/permission denied/u);
     }
+  });
+
+  it('allows owner child reads and inserts, then denies both after membership deactivation', async () => {
+    await expect(
+      canReadChild('run_points', ids.orgA, ids.userOrgA, ids.runRecording, false),
+    ).resolves.toBe(true);
+    await expect(
+      canReadChild('run_summaries', ids.orgA, ids.userOrgA, ids.runRecording, false),
+    ).resolves.toBe(true);
+
+    await withTenantTransaction(
+      runtimePool,
+      { orgId: ids.orgA, userId: ids.userOrgA },
+      (client) =>
+        client.query(pointInsertSql, pointValues(ids.orgA, ids.runRecording, { seq: '2' })),
+    );
+
+    await ownerPool.query(
+      'UPDATE memberships SET active = false WHERE org_id = $1 AND user_id = $2',
+      [ids.orgA, ids.userOrgA],
+    );
+
+    await expect(
+      canReadChild('run_points', ids.orgA, ids.userOrgA, ids.runRecording, false),
+    ).resolves.toBe(false);
+    await expect(
+      canReadChild('run_summaries', ids.orgA, ids.userOrgA, ids.runRecording, false),
+    ).resolves.toBe(false);
+    await expectDatabaseError(
+      withTenantTransaction(
+        runtimePool,
+        { orgId: ids.orgA, userId: ids.userOrgA },
+        (client) =>
+          client.query(pointInsertSql, pointValues(ids.orgA, ids.runRecording, { seq: '3' })),
+      ),
+      { code: '42501' },
+    );
+  });
+
+  it('supports run RETURNING followed by point RETURNING in the same tenant transaction', async () => {
+    await expect(
+      withTenantTransaction(
+        runtimePool,
+        { orgId: ids.orgA, userId: ids.userStranger },
+        async (client) => {
+          const run = await client.query<{ id: string }>(
+            `INSERT INTO runs (org_id, id, user_id, status)
+             VALUES ($1, $2, $3, 'recording')
+             RETURNING id`,
+            [ids.orgA, transactionRunId, ids.userStranger],
+          );
+          const point = await client.query<{ seq: string }>(
+            `${pointInsertSql} RETURNING seq`,
+            pointValues(ids.orgA, transactionRunId, { seq: '9007199254740993' }),
+          );
+          return { pointSeq: point.rows[0]?.seq, runId: run.rows[0]?.id };
+        },
+      ),
+    ).resolves.toEqual({
+      pointSeq: '9007199254740993',
+      runId: transactionRunId,
+    });
+  });
+
+  it('rejects runtime ON CONFLICT DO UPDATE and preserves the original point', async () => {
+    const before = await ownerPool.query<{ accuracy_m: number; ewkt: string }>(
+      `SELECT accuracy_m, ST_AsEWKT(geom) AS ewkt
+       FROM run_points
+       WHERE org_id = $1 AND run_id = $2 AND seq = 1`,
+      [ids.orgA, ids.runRecording],
+    );
+
+    await expectDatabaseError(
+      withTenantTransaction(
+        runtimePool,
+        { orgId: ids.orgA, userId: ids.userOrgA },
+        (client) =>
+          client.query(
+            `${pointInsertSql}
+             ON CONFLICT (org_id, run_id, seq)
+             DO UPDATE SET accuracy_m = EXCLUDED.accuracy_m
+             RETURNING accuracy_m`,
+            pointValues(ids.orgA, ids.runRecording, { accuracyM: 99, seq: '1' }),
+          ),
+      ),
+      { code: '42501' },
+    );
+
+    const after = await ownerPool.query<{ accuracy_m: number; ewkt: string }>(
+      `SELECT accuracy_m, ST_AsEWKT(geom) AS ewkt
+       FROM run_points
+       WHERE org_id = $1 AND run_id = $2 AND seq = 1`,
+      [ids.orgA, ids.runRecording],
+    );
+    expect(after.rows).toEqual(before.rows);
   });
 
   it('prevents a grantee from inserting or changing points', async () => {
@@ -282,48 +618,75 @@ describe('P02B run_points and run_summaries ACL', () => {
   });
 
   it('enforces point keys, tenant FK, ranges, finiteness, geometry, and immutability', async () => {
-    await expect(
-      ownerPool.query(pointInsertSql, pointValues(ids.orgB, ids.runRecording)),
-    ).rejects.toThrow(/run_points_run_fk/u);
+    await expectDatabaseError(
+      ownerPool.query(
+        pointInsertSql,
+        pointValues(ids.orgB, ids.runRecording, { seq: '1001' }),
+      ),
+      { code: '23503', constraint: 'run_points_run_fk' },
+    );
 
     const invalidPoints = [
       { constraint: 'run_points_seq_positive', overrides: { seq: '0' } },
-      { constraint: 'run_points_segment_id_nonnegative', overrides: { segmentId: -1 } },
-      { constraint: 'run_points_longitude_in_range', overrides: { longitude: 181 } },
-      { constraint: 'run_points_latitude_in_range', overrides: { latitude: -91 } },
+      {
+        constraint: 'run_points_segment_id_nonnegative',
+        overrides: { segmentId: -1, seq: '1002' },
+      },
+      {
+        constraint: 'run_points_longitude_in_range',
+        overrides: { longitude: 181, seq: '1003' },
+      },
+      {
+        constraint: 'run_points_latitude_in_range',
+        overrides: { latitude: -91, seq: '1004' },
+      },
       {
         constraint: 'run_points_accuracy_finite_nonnegative',
-        overrides: { accuracyM: -1 },
+        overrides: { accuracyM: -1, seq: '1005' },
       },
       {
         constraint: 'run_points_ingested_revision_nonnegative',
-        overrides: { ingestedRevision: '-1' },
+        overrides: { ingestedRevision: '-1', seq: '1006' },
       },
     ] as const;
 
     for (const { constraint, overrides } of invalidPoints) {
-      await expect(
+      await expectDatabaseError(
         ownerPool.query(pointInsertSql, pointValues(ids.orgA, ids.runRecording, overrides)),
-      ).rejects.toThrow(new RegExp(constraint, 'u'));
+        { code: '23514', constraint },
+      );
     }
 
-    for (const value of ['NaN', 'Infinity', '-Infinity']) {
-      await expect(
-        ownerPool.query(pointInsertSql, pointValues(ids.orgA, ids.runRecording, { accuracyM: value })),
-      ).rejects.toThrow(/run_points_accuracy_finite_nonnegative/u);
+    for (const [index, value] of ['NaN', 'Infinity', '-Infinity'].entries()) {
+      await expectDatabaseError(
+        ownerPool.query(
+          pointInsertSql,
+          pointValues(ids.orgA, ids.runRecording, {
+            accuracyM: value,
+            seq: `${1100 + index}`,
+          }),
+        ),
+        { code: '23514', constraint: 'run_points_accuracy_finite_nonnegative' },
+      );
     }
 
-    for (const [coordinate, constraint] of [
+    for (const [coordinateIndex, [coordinate, constraint]] of [
       ['longitude', 'run_points_longitude_in_range'],
       ['latitude', 'run_points_latitude_in_range'],
-    ] as const) {
-      for (const value of ['NaN', 'Infinity', '-Infinity']) {
-        await expect(
+    ].entries() as IterableIterator<
+      [number, readonly ['longitude' | 'latitude', string]]
+    >) {
+      for (const [valueIndex, value] of ['NaN', 'Infinity', '-Infinity'].entries()) {
+        await expectDatabaseError(
           ownerPool.query(
             pointInsertSql,
-            pointValues(ids.orgA, ids.runRecording, { [coordinate]: value }),
+            pointValues(ids.orgA, ids.runRecording, {
+              [coordinate]: value,
+              seq: `${1200 + coordinateIndex * 10 + valueIndex}`,
+            }),
           ),
-        ).rejects.toThrow(new RegExp(constraint, 'u'));
+          { code: '23514', constraint },
+        );
       }
     }
 
@@ -332,34 +695,45 @@ describe('P02B run_points and run_summaries ACL', () => {
       [5, 'run_points_received_at_finite'],
     ] as const) {
       const values = pointValues(ids.orgA, ids.runRecording);
+      values[2] = `${1300 + valueIndex}`;
       values[valueIndex] = 'infinity';
-      await expect(ownerPool.query(pointInsertSql, values)).rejects.toThrow(
-        new RegExp(constraint, 'u'),
-      );
+      await expectDatabaseError(ownerPool.query(pointInsertSql, values), {
+        code: '23514',
+        constraint,
+      });
     }
 
-    await expect(
+    await expectDatabaseError(
+      ownerPool.query(
+        pointInsertSql,
+        pointValues(ids.orgA, ids.runRecording, { segmentId: 2_147_483_648, seq: '1400' }),
+      ),
+      { code: '22003' },
+    );
+
+    await expectDatabaseError(
       ownerPool.query(
         pointInsertSql.replace(
           'ST_SetSRID(ST_MakePoint($7, $8), 4326)',
           'ST_GeomFromText($7, $8)',
         ),
         [
-          ...pointValues(ids.orgA, ids.runRecording).slice(0, 6),
+          ...pointValues(ids.orgA, ids.runRecording, { seq: '1401' }).slice(0, 6),
           'POINT EMPTY',
           4326,
           4.5,
           '2',
         ],
       ),
-    ).rejects.toThrow(/run_points_geom_not_empty/u);
+      { code: '23514', constraint: 'run_points_geom_not_empty' },
+    );
     await expect(
       ownerPool.query(
         pointInsertSql.replace(
           'ST_SetSRID(ST_MakePoint($7, $8), 4326)',
           'ST_SetSRID(ST_MakePoint($7, $8), 3857)',
         ),
-        pointValues(ids.orgA, ids.runRecording),
+        pointValues(ids.orgA, ids.runRecording, { seq: '1402' }),
       ),
     ).rejects.toThrow(/SRID/u);
     await expect(
@@ -369,7 +743,7 @@ describe('P02B run_points and run_summaries ACL', () => {
           'ST_GeomFromText($7, $8)',
         ),
         [
-          ...pointValues(ids.orgA, ids.runRecording).slice(0, 6),
+          ...pointValues(ids.orgA, ids.runRecording, { seq: '1403' }).slice(0, 6),
           'LINESTRING(21 52, 22 53)',
           4326,
           4.5,
@@ -384,12 +758,13 @@ describe('P02B run_points and run_summaries ACL', () => {
        WHERE org_id = $1 AND run_id = $2 AND seq = 1`,
       [ids.orgA, ids.runRecording],
     );
-    await expect(
+    await expectDatabaseError(
       ownerPool.query(
         pointInsertSql,
         pointValues(ids.orgA, ids.runRecording, { accuracyM: 99, seq: '1' }),
       ),
-    ).rejects.toThrow(/run_points_pkey/u);
+      { code: '23505', constraint: 'run_points_pkey' },
+    );
     const after = await ownerPool.query<{ accuracy_m: number; ewkt: string }>(
       `SELECT accuracy_m, ST_AsEWKT(geom) AS ewkt
        FROM run_points
@@ -399,116 +774,231 @@ describe('P02B run_points and run_summaries ACL', () => {
     expect(after.rows).toEqual(before.rows);
   });
 
-  it('enforces summary tenant, revision, version, metric, JSON, and geometry constraints', async () => {
-    const summaryInsertSql = `INSERT INTO run_summaries (
-      org_id, run_id, source_revision, algorithm_version, display_geom,
-      distance_m, observed_duration_s, quality_stats
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
-    const validValues = [
-      ids.orgA,
-      ids.runRecording,
-      '1',
-      'fixture-v2',
-      null,
-      1,
-      1,
-      {},
-    ];
+  it('enforces summary tenant, revision, version, metric, and timestamp constraints', async () => {
+    await expectDatabaseError(
+      ownerPool.query(
+        `UPDATE run_summaries SET org_id = $1
+         WHERE org_id = $2 AND run_id = $3`,
+        [ids.orgB, ids.orgA, ids.runRecording],
+      ),
+      { code: '23503', constraint: 'run_summaries_run_fk' },
+    );
 
-    await expect(
-      ownerPool.query(summaryInsertSql, [ids.orgB, ...validValues.slice(1)]),
-    ).rejects.toThrow(/run_summaries_run_fk/u);
-
-    const invalidSummaries = [
-      {
-        constraint: 'run_summaries_source_revision_nonnegative',
-        values: [ids.orgA, ids.runRecording, '-1', 'fixture-v2', null, 1, 1, {}],
-      },
-      {
-        constraint: 'run_summaries_algorithm_version_valid',
-        values: [ids.orgA, ids.runRecording, '1', ' ', null, 1, 1, {}],
-      },
-      {
-        constraint: 'run_summaries_algorithm_version_valid',
-        values: [ids.orgA, ids.runRecording, '1', 'é'.repeat(65), null, 1, 1, {}],
-      },
-      {
-        constraint: 'run_summaries_distance_finite_nonnegative',
-        values: [ids.orgA, ids.runRecording, '1', 'fixture-v2', null, -1, 1, {}],
-      },
-      {
-        constraint: 'run_summaries_duration_finite_nonnegative',
-        values: [ids.orgA, ids.runRecording, '1', 'fixture-v2', null, 1, -1, {}],
-      },
-      {
-        constraint: 'run_summaries_quality_stats_object',
-        values: [ids.orgA, ids.runRecording, '1', 'fixture-v2', null, 1, 1, []],
-      },
-    ];
-
-    for (const { constraint, values } of invalidSummaries) {
-      await expect(ownerPool.query(summaryInsertSql, values)).rejects.toThrow(
-        new RegExp(constraint, 'u'),
+    for (const [column, value, constraint] of [
+      ['source_revision', '-1', 'run_summaries_source_revision_nonnegative'],
+      ['algorithm_version', ' ', 'run_summaries_algorithm_version_valid'],
+      ['algorithm_version', 'é'.repeat(65), 'run_summaries_algorithm_version_valid'],
+      ['distance_m', -1, 'run_summaries_distance_finite_nonnegative'],
+      ['observed_duration_s', -1, 'run_summaries_duration_finite_nonnegative'],
+    ] as const) {
+      await expectDatabaseError(
+        ownerPool.query(
+          `UPDATE run_summaries SET ${column} = $1
+           WHERE org_id = $2 AND run_id = $3`,
+          [value, ids.orgA, ids.runRecording],
+        ),
+        { code: '23514', constraint },
       );
     }
 
-    for (const [column, value] of [
-      ['distance_m', 'NaN'],
-      ['distance_m', 'Infinity'],
-      ['observed_duration_s', 'NaN'],
-      ['observed_duration_s', 'Infinity'],
+    for (const [column, value, constraint] of [
+      ['distance_m', 'NaN', 'run_summaries_distance_finite_nonnegative'],
+      ['distance_m', 'Infinity', 'run_summaries_distance_finite_nonnegative'],
+      ['distance_m', '-Infinity', 'run_summaries_distance_finite_nonnegative'],
+      ['observed_duration_s', 'NaN', 'run_summaries_duration_finite_nonnegative'],
+      ['observed_duration_s', 'Infinity', 'run_summaries_duration_finite_nonnegative'],
+      ['observed_duration_s', '-Infinity', 'run_summaries_duration_finite_nonnegative'],
     ] as const) {
-      await expect(
+      await expectDatabaseError(
         ownerPool.query(
           `UPDATE run_summaries SET ${column} = $1::double precision
            WHERE org_id = $2 AND run_id = $3`,
           [value, ids.orgA, ids.runRecording],
         ),
-      ).rejects.toThrow(/finite_nonnegative/u);
+        { code: '23514', constraint },
+      );
     }
 
-    await expect(
-      ownerPool.query(
-        `UPDATE run_summaries
-         SET display_geom = ST_GeomFromText('MULTILINESTRING EMPTY', 4326)
-         WHERE org_id = $1 AND run_id = $2`,
-        [ids.orgA, ids.runRecording],
-      ),
-    ).rejects.toThrow(/run_summaries_display_geom_not_empty/u);
-    await expect(
-      ownerPool.query(
-        `UPDATE run_summaries
-         SET display_geom = ST_GeomFromText('MULTILINESTRING((21 52, 22 53))', 3857)
-         WHERE org_id = $1 AND run_id = $2`,
-        [ids.orgA, ids.runRecording],
-      ),
-    ).rejects.toThrow(/SRID/u);
-    await expect(
-      ownerPool.query(
-        `UPDATE run_summaries
-         SET display_geom = ST_GeomFromText('LINESTRING(21 52, 22 53)', 4326)
-         WHERE org_id = $1 AND run_id = $2`,
-        [ids.orgA, ids.runRecording],
-      ),
-    ).rejects.toThrow(/Geometry type|does not match column type/u);
-    await expect(
-      ownerPool.query(
-        `UPDATE run_summaries
-         SET display_geom = ST_GeomFromText('MULTILINESTRING((181 52, 182 53))', 4326)
-         WHERE org_id = $1 AND run_id = $2`,
-        [ids.orgA, ids.runRecording],
-      ),
-    ).rejects.toThrow(/run_summaries_display_geom_coordinates_valid/u);
-    await expect(
+    await expectDatabaseError(
       ownerPool.query(
         `UPDATE run_summaries SET computed_at = 'infinity'
          WHERE org_id = $1 AND run_id = $2`,
         [ids.orgA, ids.runRecording],
       ),
-    ).rejects.toThrow(/run_summaries_computed_at_finite/u);
+      { code: '23514', constraint: 'run_summaries_computed_at_finite' },
+    );
+  });
+
+  it('distinguishes SQL NULL from JSON null and rejects non-object quality_stats', async () => {
+    const validQualityStats = {
+      acceptedEdgeCount: 1,
+      acceptedPointCount: 2,
+      excessiveSpeedCount: 0,
+      excessiveTimeGapCount: 0,
+      insufficientData: false,
+      nonpositiveTimeDeltaCount: 0,
+      poorAccuracyPointCount: 0,
+      rawPointCount: 2,
+      segmentBreakCount: 0,
+      seqGapCount: 0,
+    };
+    await ownerPool.query(
+      `UPDATE run_summaries SET quality_stats = $1::jsonb
+       WHERE org_id = $2 AND run_id = $3`,
+      [JSON.stringify(validQualityStats), ids.orgA, ids.runRecording],
+    );
+    const stored = await ownerPool.query<{ quality_stats: unknown }>(
+      `SELECT quality_stats FROM run_summaries WHERE org_id = $1 AND run_id = $2`,
+      [ids.orgA, ids.runRecording],
+    );
+    expect(stored.rows[0]?.quality_stats).toEqual(validQualityStats);
+
+    for (const value of [[], 'scalar', 42, true, null]) {
+      await expectDatabaseError(
+        ownerPool.query(
+          `UPDATE run_summaries SET quality_stats = $1::jsonb
+           WHERE org_id = $2 AND run_id = $3`,
+          [JSON.stringify(value), ids.orgA, ids.runRecording],
+        ),
+        { code: '23514', constraint: 'run_summaries_quality_stats_object' },
+      );
+    }
+
+    await expectDatabaseError(
+      ownerPool.query(
+        `UPDATE run_summaries SET quality_stats = $1
+         WHERE org_id = $2 AND run_id = $3`,
+        [null, ids.orgA, ids.runRecording],
+      ),
+      { code: '23502', column: 'quality_stats' },
+    );
+  });
+
+  it('validates every display_geom coordinate and preserves valid global routes and NULL', async () => {
+    const updateGeometry = (expression: string) =>
+      ownerPool.query(
+        `UPDATE run_summaries SET display_geom = ${expression}
+         WHERE org_id = $1 AND run_id = $2`,
+        [ids.orgA, ids.runRecording],
+      );
+
+    for (const wkt of [
+      'MULTILINESTRING((NaN 52, 21 52, 22 53))',
+      'MULTILINESTRING((21 52, NaN 52, 22 53))',
+      'MULTILINESTRING((21 52, 22 53, NaN 52))',
+      'MULTILINESTRING((21 52, 22 53),(30 40, NaN 41, 31 42))',
+      'MULTILINESTRING((181 52, 22 53))',
+      'MULTILINESTRING((21 -91, 22 53))',
+    ]) {
+      await expectDatabaseError(
+        updateGeometry(`ST_GeomFromText('${wkt}', 4326)`),
+        { code: '23514', constraint: 'run_summaries_display_geom_coordinates_valid' },
+      );
+    }
+
+    for (const wkt of [
+      'MULTILINESTRING((21 52, Infinity 52))',
+      'MULTILINESTRING((21 52, -Infinity 52))',
+    ]) {
+      await expectDatabaseError(updateGeometry(`ST_GeomFromText('${wkt}', 4326)`), {
+        code: 'XX000',
+      });
+    }
+
+    await expectDatabaseError(
+      updateGeometry("ST_GeomFromText('MULTILINESTRING EMPTY', 4326)"),
+      { code: '23514', constraint: 'run_summaries_display_geom_coordinates_valid' },
+    );
+    await expectDatabaseError(
+      updateGeometry(
+        "ST_GeomFromText('MULTILINESTRING((21 52, 22 53))', 3857)",
+      ),
+      { code: '22023' },
+    );
+    await expectDatabaseError(
+      updateGeometry("ST_GeomFromText('POINT(21 52)', 4326)"),
+      { code: '22023' },
+    );
+
+    await expect(
+      updateGeometry(
+        "ST_GeomFromText('MULTILINESTRING((179.5 10, -179.5 10.5),(-75 -45, 75 45))', 4326)",
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 });
+    await expect(updateGeometry('NULL')).resolves.toMatchObject({ rowCount: 1 });
+    const nullable = await ownerPool.query<{ display_geom: unknown }>(
+      `SELECT display_geom FROM run_summaries WHERE org_id = $1 AND run_id = $2`,
+      [ids.orgA, ids.runRecording],
+    );
+    expect(nullable.rows[0]?.display_geom).toBeNull();
   });
 
   it('keeps bigint/timestamp representations and the intended indexes explicit', async () => {
+    const largeBigint = '9007199254740993';
+    const precisePointValues = pointValues(ids.orgA, ids.runRecording, {
+      ingestedRevision: largeBigint,
+      latitude: 52.9876543210987,
+      longitude: 21.1234567890123,
+      segmentId: 2_147_483_647,
+      seq: largeBigint,
+    });
+    precisePointValues[4] = '2026-09-20T08:15:02.1236Z';
+    precisePointValues[5] = '2026-09-20T08:15:03.4564Z';
+    await ownerPool.query(pointInsertSql, precisePointValues);
+    await ownerPool.query(
+      `UPDATE run_summaries
+       SET source_revision = $1, computed_at = $2
+       WHERE org_id = $3 AND run_id = $4`,
+      [largeBigint, '2026-09-20T09:15:00.7896Z', ids.orgA, ids.runRecording],
+    );
+
+    const pointRoundTrip = await ownerPool.query<{
+      coordinate_type: string;
+      ingested_revision: string;
+      latitude: number;
+      longitude: number;
+      received_at: Date;
+      recorded_at: Date;
+      segment_id: number;
+      seq: string;
+    }>(
+      `SELECT seq,
+              segment_id,
+              recorded_at,
+              received_at,
+              ST_X(geom) AS longitude,
+              ST_Y(geom) AS latitude,
+              pg_typeof(ST_X(geom))::text AS coordinate_type,
+              ingested_revision
+       FROM run_points
+       WHERE org_id = $1 AND run_id = $2 AND seq = $3`,
+      [ids.orgA, ids.runRecording, largeBigint],
+    );
+    expect(pointRoundTrip.rows[0]).toEqual({
+      coordinate_type: 'double precision',
+      ingested_revision: largeBigint,
+      latitude: 52.9876543210987,
+      longitude: 21.1234567890123,
+      received_at: new Date('2026-09-20T08:15:03.456Z'),
+      recorded_at: new Date('2026-09-20T08:15:02.124Z'),
+      segment_id: 2_147_483_647,
+      seq: largeBigint,
+    });
+
+    const summaryRoundTrip = await ownerPool.query<{
+      computed_at: Date;
+      source_revision: string;
+    }>(
+      `SELECT source_revision, computed_at
+       FROM run_summaries
+       WHERE org_id = $1 AND run_id = $2`,
+      [ids.orgA, ids.runRecording],
+    );
+    expect(summaryRoundTrip.rows[0]).toEqual({
+      computed_at: new Date('2026-09-20T09:15:00.790Z'),
+      source_revision: largeBigint,
+    });
+
     const columns = await ownerPool.query<{
       column_name: string;
       data_type: string;
@@ -588,6 +1078,46 @@ describe('P02B run_points and run_summaries ACL', () => {
     ).toBe(false);
   });
 
+  it('cascades point and summary deletion from an owner-created parent run', async () => {
+    const cascadeRunId = 'f0000000-0000-4000-8000-000000000001';
+    await withVerifiedOwnerTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO runs (
+           org_id, id, user_id, status, started_at, created_at, finished_at
+         ) VALUES ($1, $2, $3, 'finished', $4, $4, $5)`,
+        [
+          ids.orgA,
+          cascadeRunId,
+          ids.userStranger,
+          '2026-09-20T08:00:00.000Z',
+          '2026-09-20T09:00:00.000Z',
+        ],
+      );
+      await client.query(pointInsertSql, pointValues(ids.orgA, cascadeRunId, { seq: '1' }));
+      await client.query(
+        `INSERT INTO run_summaries (
+           org_id, run_id, source_revision, algorithm_version,
+           distance_m, observed_duration_s, quality_stats
+         ) VALUES ($1, $2, 1, 'cascade-v1', 1, 1, '{}'::jsonb)`,
+        [ids.orgA, cascadeRunId],
+      );
+    });
+
+    await ownerPool.query('DELETE FROM runs WHERE org_id = $1 AND id = $2', [
+      ids.orgA,
+      cascadeRunId,
+    ]);
+    const remaining = await ownerPool.query<{ points: string; summaries: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM run_points
+          WHERE org_id = $1 AND run_id = $2) AS points,
+         (SELECT count(*)::text FROM run_summaries
+          WHERE org_id = $1 AND run_id = $2) AS summaries`,
+      [ids.orgA, cascadeRunId],
+    );
+    expect(remaining.rows[0]).toEqual({ points: '0', summaries: '0' });
+  });
+
   it('keeps the history predicate stable, definer-owned, and narrowly executable', async () => {
     const result = await ownerPool.query<{
       maintenance_execute: boolean;
@@ -621,6 +1151,49 @@ describe('P02B run_points and run_summaries ACL', () => {
       prosecdef: true,
       provolatile: 's',
       runtime_execute: true,
+    });
+  });
+
+  it('keeps coordinate validation immutable, invoker-owned, and unexecutable by runtime roles', async () => {
+    const result = await ownerPool.query<{
+      maintenance_execute: boolean;
+      owner: string;
+      proconfig: string[];
+      proisstrict: boolean;
+      proparallel: string;
+      prosecdef: boolean;
+      provolatile: string;
+      runtime_execute: boolean;
+    }>(
+      `SELECT pg_get_userbyid(procedure.proowner) AS owner,
+              procedure.prosecdef,
+              procedure.provolatile,
+              procedure.proparallel,
+              procedure.proisstrict,
+              procedure.proconfig,
+              has_function_privilege(
+                'running_tracker_runtime',
+                'app_private.display_geom_coordinates_valid(geometry)',
+                'EXECUTE'
+              ) AS runtime_execute,
+              has_function_privilege(
+                'running_tracker_maintenance',
+                'app_private.display_geom_coordinates_valid(geometry)',
+                'EXECUTE'
+              ) AS maintenance_execute
+       FROM pg_proc AS procedure
+       WHERE procedure.oid =
+         'app_private.display_geom_coordinates_valid(geometry)'::regprocedure`,
+    );
+    expect(result.rows[0]).toEqual({
+      maintenance_execute: false,
+      owner: 'running_tracker_owner',
+      proconfig: ['search_path=pg_catalog'],
+      proisstrict: true,
+      proparallel: 's',
+      prosecdef: false,
+      provolatile: 'i',
+      runtime_execute: false,
     });
   });
 

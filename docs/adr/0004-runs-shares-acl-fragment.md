@@ -1,6 +1,6 @@
 # ADR-0004: non-recursive runs and run_shares ACL fragment
 
-- Status: accepted; implementation not yet executed against PostgreSQL
+- Status: accepted; implemented scope verified against PostgreSQL/PostGIS
 - Date: 2026-09-20
 - Scope: first bounded fragment of P02B and D02
 
@@ -47,7 +47,16 @@ services, and HTTP behavior.
 - Direct `run_shares` reads do not disclose other users' grants to a grantee or
   unrelated member.
 - The definer functions expose only authorization booleans, not rows or generic
-  SQL execution, but their behavior still requires real runtime-role integration
-  verification before this fragment can be called verified.
-- `run_points`, `run_commands`, `run_summaries`, and `run_tombstones` are absent;
-  therefore P02B.1 and D02 are not complete.
+  SQL execution. Their required real runtime-role verification is recorded below.
+- At this fragment boundary, child tables and D02 were incomplete. They are now
+  implemented and verified by ADR-0005/0006; this ADR's original scope remains
+  the runs/shares decision.
+
+## Verification
+
+On 2026-09-21, the runs/shares policies and constraints were executed in the
+isolated `running_tracker_test` database under the real owner, runtime, and
+maintenance roles. The integration suite covered the complete implemented
+grant/status matrix, direct reads, denied mutations, revocation, membership
+deactivation, cross-tenant FKs, and role privileges. This verifies only the
+implemented fragment; it does not close P02B or D02.

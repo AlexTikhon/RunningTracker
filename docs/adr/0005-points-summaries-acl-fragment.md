@@ -1,6 +1,6 @@
 # ADR-0005: run_points and run_summaries storage and ACL fragment
 
-- Status: accepted; implementation not yet executed against PostgreSQL
+- Status: accepted; implemented scope verified against PostgreSQL/PostGIS
 - Date: 2026-09-20
 - Scope: bounded second fragment of P02B and D02
 
@@ -50,6 +50,13 @@ database authorization, but does not implement ingestion or summary publication.
    newly inserted row without depending on a `STABLE` helper querying that row
    through the statement snapshot. Point `INSERT ... RETURNING` authorizes
    against its already existing parent run.
+7. Validate every `display_geom` vertex through the pure
+   `app_private.display_geom_coordinates_valid(geometry)` helper. It is
+   `IMMUTABLE`, `STRICT`, `PARALLEL SAFE`, security invoker, and has a fixed
+   `pg_catalog` search path with qualified PostGIS calls. PUBLIC, runtime, and
+   maintenance EXECUTE are revoked. The row CHECK still permits SQL NULL and
+   rejects empty, non-finite, and out-of-range geometry; valid routes crossing
+   the antimeridian remain valid.
 
 ## Database guarantees in this fragment
 
@@ -58,7 +65,7 @@ database authorization, but does not implement ingestion or summary publication.
 - Point keys, ranges, finite values, SRID/type, and nonempty geometry are
   enforced by SQL types, PostGIS typmods, and CHECK constraints.
 - Summary revision/version, finite metrics, JSON object shape, SRID/type, and
-  nonempty geometry when non-null are enforced similarly.
+  every coordinate of nonempty geometry when non-null are enforced similarly.
 - Raw points have the revision/sequence index required by change recovery and
   deliberately have no GiST index; summaries have the archive GiST index.
 - RLS plus narrow grants protects direct child-table access. Runtime cannot
@@ -76,7 +83,8 @@ database authorization, but does not implement ingestion or summary publication.
   cannot be expressed as row-local CHECK constraints and are not simulated by
   triggers in this schema fragment.
 - Commands, tombstones, deletion, retention, and executable verification of the
-  complete P02B matrix remain outside this fragment.
+  complete P02B matrix were outside this fragment. ADR-0006 now implements and
+  verifies commands/tombstones and D02; deletion/retention remain P10.
 
 ## Consequences
 
@@ -85,5 +93,17 @@ database authorization, but does not implement ingestion or summary publication.
   This is deliberate test setup, not a runtime publication path.
 - D01 remains open because storage representation alone does not define input
   canonicalization for numbers, negative zero, timestamp spelling, and retries.
-- D02 remains PARTIAL until commands/tombstones and the complete P02B executable
-  verification are finished.
+- At this fragment boundary D02 remained PARTIAL. ADR-0006 records its later
+  resolution under the real runtime role and its trusted-context boundary.
+
+## Verification
+
+On 2026-09-21, migrations `0002`–`0004` and 57 integration scenarios passed in
+the isolated `running_tracker_test` PostgreSQL/PostGIS database under the real
+owner, runtime, and maintenance roles. Coverage includes direct/JOIN ACL for all
+live/history/both/no-grant and run-status combinations; owner and denied
+mutations; statement-level revocation; duplicate and upsert immutability;
+bigint/timestamp/binary64 representation; JSON object/array/scalar/null
+semantics; composite FK/cascade; and per-vertex geometry validation. D01,
+summary-publication validation, commands, and tombstones remain outside this
+verified fragment.

@@ -1,14 +1,14 @@
 # Implementation progress
 
-Last updated: 2026-09-20.
+Last updated: 2026-09-21.
 
 | Stage | Status | Result |
 |---|---|---|
 | P00 | DONE | Repository root, source documents, environment, ADR, and decision backlog established |
 | P01 | DONE | Reproducible Express 5/API/web workspace, persistent PostgreSQL/PostGIS, migrations, health, and CI commands verified after P01.1 review fixes |
 | P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
-| P02A.1 review fixes | IMPLEMENTED, NOT VERIFIED | Integration fixture target guard and confirmed-COMMIT handling added; checks intentionally not run in this iteration |
-| P02B | IN PROGRESS — PARTIAL, NOT VERIFIED | `runs`, `run_shares`, `run_points`, and `run_summaries` with constraints, indexes, narrow grants, and non-recursive ACL/RLS implemented; commands, tombstones, and final D02 verification remain |
+| P02A.1 review fixes | VERIFIED | Integration fixture target guard and confirmed-COMMIT handling passed unit and real-role integration checks |
+| P02B | IN PROGRESS — DB SCHEMA/ACL VERIFIED | All six run child/access tables, constraints/indexes and the full D02 matrix passed real PostgreSQL/PostGIS role integration; only D01 canonical `PointInput` remains deferred to P04 |
 | P03 | TODO | Session boundary, commands, and API contracts |
 | P04 | TODO | Ingestion, raw history, and GPS simulator |
 | P05 | TODO | Browser recording and local buffer |
@@ -103,7 +103,7 @@ Verification evidence:
 - real PostgreSQL/PostGIS integration suite passed 13 tests under runtime/maintenance roles, covering two organizations, multi-membership context switching, missing/malformed/inactive/no-membership cases, schema constraints, denied DML/DDL/metadata, commit/rollback, sequential connection reuse, concurrent context independence, role attributes, and PostGIS/readiness/query deadlines;
 - `npm run verify`, production builds, Compose config, and `git diff --check` passed locally.
 
-Limits and P02B readiness:
+Limits and P02B readiness at the P02A completion boundary (historical):
 
 - D02 is PARTIAL: identity/organization isolation is verified and run/share policies are implemented but unverified, while child-table policies remain P02B;
 - D01 canonical PointInput representation also remains P02B/P04;
@@ -122,11 +122,11 @@ Implemented:
 - unit regressions cover valid and unsafe integration configurations, actual fixture-connection identity mismatch with zero mutations, realistic PostgreSQL command mocks, confirmed rollback, unexpected COMMIT results, and preserved rollback-error behavior;
 - the real-PostgreSQL integration suite includes a callback that catches `SELECT 1 / 0` and verifies that its returned value is rejected after PostgreSQL reports the transaction rollback.
 
-Verification status:
+Verification status in the original 2026-09-20 iteration:
 
 - no tests, lint, typecheck, build, dependency installation, Docker command, migration, or database connection was run for P02A.1, as required for this iteration;
 - the P02A verification evidence above is historical and was not repeated after these corrections;
-- P02A.1 remains unverified until the focused unit/static checks and real-PostgreSQL integration scenario are executed.
+- P02A.1 was unverified at that boundary; the 2026-09-21 corrective verification below supersedes this current-status claim without rewriting the historical result.
 
 ## P02B — first bounded runs/shares fragment
 
@@ -140,11 +140,11 @@ Implemented:
 - integration fixtures and runtime-role scenarios cover owners, grantees, unrelated and inactive members, multi-organization membership, all grant/status combinations, revocation, prohibited grantee mutations, owner/org reassignment, cross-tenant FKs, direct share reads, and the global second-active-run rejection;
 - ADR-0004 records the bounded ACL semantics and why D02 remains partial.
 
-Verification status:
+Verification status in the original 2026-09-20 iteration:
 
 - no test, lint, typecheck, build, Docker, migration, or database command was run for this fragment, as required for this iteration;
 - static review covered migration ordering, SQL policy direction, grants, fixture cleanup order, TypeScript imports/types, and scenario-to-requirement mapping;
-- the P02A evidence above remains historical and is not evidence for P02A.1 or this P02B fragment.
+- the P02A evidence above was historical and was not evidence for P02A.1 or this P02B fragment at that boundary.
 
 Remaining P02B scope at this fragment boundary:
 
@@ -165,17 +165,76 @@ Implemented:
 - ADR-0005 records the points/summaries access matrix, `quality_stats` shape, storage decisions, and the cross-row guarantees deferred to ingestion and summary publication;
 - integration scenarios cover direct and joined child reads, owner/live/history/both/no-grant access, all run states, inactive membership, multi-organization context, revocation, denied mutations, `INSERT ... RETURNING`, cross-tenant FKs, invalid numeric/geometry values, duplicate point PK immutability, representations, indexes, and maintenance denial.
 
-Verification status:
+Verification status in the original 2026-09-20 iteration:
 
 - no tests, lint, typecheck, build, dependency installation, Docker command, migration, or database connection was run for this fragment, as required for this iteration;
 - static review covered migration ordering, grants/policies, fixture cleanup order, SQL placeholder/argument correspondence in changed queries, TypeScript structure, and scenario-to-requirement mapping;
 - all earlier P01/P02A results above are historical and were not repeated after this migration and test code were added;
-- the new integration scenarios are implemented but must not be described as passing until executed against the isolated real PostgreSQL/PostGIS test database.
+- the new integration scenarios were implemented but unexecuted at that boundary; the 2026-09-21 corrective verification below supplies the runtime evidence.
 
-Remaining P02B scope:
+Remaining P02B scope at the original points/summaries fragment boundary:
 
 - `run_commands` and `run_tombstones`, their constraints, indexes, and child ACL;
 - D01 canonical `PointInput` input/payload comparison rules remain for P04; this fragment fixes only database representation;
 - targeted execution of P02A.1, runs/shares, points/summaries, and then the complete P02B ACL matrix.
 
-Next work remains P02B. P03 was not started.
+## P02B corrective verification — 2026-09-21
+
+Confirmed defects:
+
+- passing JavaScript `[]` directly to `pg` serialized it as PostgreSQL array literal `{}`, so `$1::jsonb` became JSON object `{}` and the negative `quality_stats` case could miss the intended CHECK;
+- the negative summary inserts reused an existing `(org_id, run_id)` and reached `run_summaries_pkey` before the target CHECK;
+- the `Box3D` extrema check was not a proof over every vertex: PostGIS 3.5.2 accepted `NaN` at the beginning/middle of a line and inside a later component, while rejection depended on vertex position.
+
+Corrections:
+
+- integration tests now pass JSON values via `JSON.stringify`, distinguish JSON null from SQL NULL, cover array/scalars/null/object, and assert SQLSTATE plus constraint/column where PostgreSQL exposes it;
+- negative CHECK/FK/PK cases use UPDATE or collision-free keys, including exact duplicate-point PK and unchanged-row assertions;
+- forward-only migration `0004_validate_display_geom_coordinates.sql` adds an immutable, strict, parallel-safe security-invoker helper over `ST_DumpPoints`, revokes runtime/maintenance/PUBLIC EXECUTE, and replaces only the summary coordinate CHECK;
+- display geometry regressions cover `NaN` at every line position and component, infinities, ranges, SRID/type, EMPTY, SQL NULL, valid global geometry, and antimeridian crossing;
+- runtime-role coverage now includes the parameterized live/history/both/no-grant × recording/paused/finished matrix for points and summaries through direct SELECT and JOIN, owner access/deactivation, coach/no-membership/empty/malformed/cross-org contexts, duplicate/upsert immutability, same-transaction run/point RETURNING, statement-level READ COMMITTED revocation, bigint and timestamp round-trips, composite FK, and cascade.
+
+Verification evidence:
+
+- pre-mutation connection proof: every configured test URL targeted `127.0.0.1:5433/running_tracker_test`; actual roles were `running_tracker`, `running_tracker_owner`, `running_tracker_runtime`, and `running_tracker_maintenance` as intended;
+- initial focused integration reproduction: 11/12 child tests passed and the JSON case failed on `run_summaries_pkey`, proving the test defect; direct SQL additionally showed JS `[]` → `{}` and accepted internal `NaN` vertices;
+- `npm run verify` passed: lint, strict typecheck, 8 migration tests, 28 API unit tests, 1 web test, and all production builds;
+- first `npm run db:migrate:test` skipped `0000`–`0003` and applied `0004`; the immediate rerun skipped `0000`–`0004`;
+- `npm run test:integration` passed 4 files / 57 tests against real PostgreSQL/PostGIS roles;
+- `git diff --check` passed.
+
+Limitations at the corrective verification boundary:
+
+- D01 remains TODO: storage representations are verified, but canonical `PointInput` comparison for numbers, `-0`, timestamp spelling, and retries belongs to P04;
+- D02 remains PARTIAL because `run_commands`, `run_tombstones`, their ACL/constraints, and the final complete-stage matrix are absent;
+- full `quality_stats` keys/types/calculation remain P06 summary-publication behavior; P02B enforces only a non-null JSON object;
+- hosted CI was not run. P03 and all later stages remain unstarted.
+
+Next bounded fragment remains P02B: `run_commands` and `run_tombstones`. P03 was not started.
+
+## P02B — commands/tombstones and complete ACL matrix
+
+Implemented:
+
+- forward-only `0005_run_commands_tombstones_rls.sql` adds `run_commands` with UUID composite identity/parent FK, cascading deletion, object-only JSONB payload/response checks, finite `timestamptz(3)`, owner-only SELECT/INSERT RLS, and no runtime UPDATE/DELETE;
+- live/history/both grants and coach role do not reveal command payload/response; direct SELECT and JOIN use the same owner-only result;
+- `run_tombstones` stores only tenant/run/owner identifiers and finite deletion/expiry timestamps, requires `expires_at > deleted_at`, has an expiry index and same-organization membership FK with `ON DELETE RESTRICT`, and deliberately has no run FK;
+- tombstone RLS directly compares `owner_user_id` and current organization/user context plus active membership, without querying `runs` or calling run/share helpers; runtime receives SELECT only;
+- ADR-0006 separates SQL guarantees from future P03 command atomicity/canonical replay and P10 deletion/retention guarantees;
+- shared owner fixtures now delete commands before runs and tombstones before memberships, retaining RLS/FK enforcement and sequential integration execution.
+
+Verification evidence:
+
+- pre-mutation proof confirmed every configured URL targeted `127.0.0.1:5433/running_tracker_test`; actual logins were bootstrap `running_tracker`, object owner `running_tracker_owner`, runtime `running_tracker_runtime`, and maintenance `running_tracker_maintenance`; owner/runtime/maintenance were non-superuser and non-BYPASSRLS;
+- first `npm run db:migrate:test` skipped `0000`–`0004` and applied `0005`; the required rerun skipped `0000`–`0005`;
+- focused command/tombstone regression passed 12/12 after correcting two test-only assumptions discovered by the first run;
+- `npm run verify` passed lint, strict typecheck, 8 migration tests, 28 API unit tests, 1 web test, and all builds;
+- `npm run test:integration` passed 5 files / 69 tests under the real PostgreSQL/PostGIS roles, re-executing the complete identity, runs/shares, points/summaries, commands/tombstones, direct/JOIN, constraints, grants, RLS, ownership, and maintenance matrix;
+- `git diff --check` passed after documentation updates.
+
+Decision/status boundary:
+
+- D02 is RESOLVED for database authorization with trusted transaction-local tenant/user context. This does not verify or implement HTTP authentication/session establishment, which remains P03;
+- D01 remains TODO for P04: JSONB object storage and `canonical_payload` naming do not define canonical numeric/timestamp forms, `-0`, or semantic retry comparison;
+- D08, the retention duration/default, cleanup, behavior after expiry, run-ID reuse prevention, and atomic tombstone + run deletion + `archive_revision` transaction remain P10;
+- P02B is intentionally not marked DONE while D01 remains open. P03 and later product behavior were not started; hosted CI was not run.
