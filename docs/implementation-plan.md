@@ -182,7 +182,7 @@ packages/contracts не зависит от Express или драйвера БД
 - P03.1 Реализовать session boundary, CSRF/Origin-проверки, requestId и единый ApiError. Локальная identity fixture разрешена только в development/test; production startup с ней запрещён. **Выполнено и проверено 2026-09-21; ADR-0007.**
 - P03.2 Создать runtime-контракты, OpenAPI для обычного HTTP и описание SSE; bigint/seq сериализуются строками. **Выполнено и проверено 2026-09-22; D01 canonicalization намеренно оставлена P04.**
 - P03.3 Реализовать PUT run и POST commands: idempotency, expectedControlRevision, terminal finish, один активный run на пользователя. **Выполнено и проверено 2026-09-22 на реальном PostgreSQL: row lock, concurrent create/commands/replay и rollback atomicity.**
-- P03.4 Реализовать GET run/list, управление shares и проверку активного membership.
+- P03.4 Реализовать GET run/list, управление shares и проверку активного membership. **Выполнено и проверено 2026-09-22 на реальном PostgreSQL: owner/shared ACL, keyset pagination, owner-only share upsert/revoke и active-membership boundary.**
 - P03.5 Выполнить автоfinish через внедряемые часы и повторяемую maintenance-задачу.
 
 Проверки:
@@ -443,4 +443,4 @@ packages/contracts не зависит от Express или драйвера БД
 
 P00–P02A.1 и полная DB schema/ACL-подчасть P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) проверены локально воспроизводимыми unit/build и real PostgreSQL/PostGIS integration-командами. D02 решён в границах доверенного tenant context. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
 
-P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. В P03 выполнены P03.1–P03.3: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract и атомарные `PUT run`/`POST commands` с idempotent replay и конкурентной сериализацией по строке run. P03.4 run/list/share handlers, P03.5 auto-finish и P10 deletion/retention не начаты. Production identity/session provider остаётся P12.
+P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. В P03 выполнены P03.1–P03.4: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read и owner-only share management. P03.5 auto-finish и P10 deletion/retention не начаты. Production identity/session provider остаётся P12.

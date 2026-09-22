@@ -1,7 +1,11 @@
 import {
   createRunRequestSchema,
+  organizationPathSchema,
   runCommandRequestSchema,
+  runListQuerySchema,
   runPathSchema,
+  runSharePathSchema,
+  upsertRunShareRequestSchema,
 } from '@running-tracker/contracts';
 import type { Request, RequestHandler, Router } from 'express';
 import { Router as createRouter } from 'express';
@@ -10,6 +14,7 @@ import type { ZodType } from 'zod';
 
 import {
   createAuthenticatedMutationProtection,
+  createSessionAuthentication,
   getAuthenticatedSession,
 } from '../auth/session-http.js';
 import type { SessionManager } from '../auth/session-manager.js';
@@ -17,7 +22,14 @@ import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
-import { applyRunCommand, createRun } from './run-service.js';
+import {
+  applyRunCommand,
+  createRun,
+  listRuns,
+  readRun,
+  revokeRunShare,
+  upsertRunShare,
+} from './run-service.js';
 
 interface RunRouterDependencies {
   clock: Clock;
@@ -49,6 +61,15 @@ function routeInput(request: Request): { orgId: string; runId: string } {
   return { orgId: path.orgId.toLowerCase(), runId: path.runId.toLowerCase() };
 }
 
+function shareRouteInput(request: Request): { orgId: string; runId: string; userId: string } {
+  const path = parseContract(runSharePathSchema, request.params, 'run share path');
+  return {
+    orgId: path.orgId.toLowerCase(),
+    runId: path.runId.toLowerCase(),
+    userId: path.userId.toLowerCase(),
+  };
+}
+
 export function createRunRouter({
   clock,
   config,
@@ -56,7 +77,38 @@ export function createRunRouter({
   sessionManager,
 }: RunRouterDependencies): Router {
   const router = createRouter({ mergeParams: true });
+  const authenticate = createSessionAuthentication(sessionManager);
   const mutationProtection = createAuthenticatedMutationProtection(config, sessionManager);
+
+  router.get('/', authenticate, async (request, response, next) => {
+    try {
+      const path = parseContract(organizationPathSchema, request.params, 'organization path');
+      const query = parseContract(runListQuerySchema, request.query, 'run-list query');
+      const session = getAuthenticatedSession(request);
+      const result = await withAuthenticatedTenantTransaction(
+        pool,
+        session,
+        path.orgId.toLowerCase(),
+        (client) => listRuns(client, path.orgId.toLowerCase(), query),
+      );
+      response.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/:runId', authenticate, async (request, response, next) => {
+    try {
+      const { orgId, runId } = routeInput(request);
+      const session = getAuthenticatedSession(request);
+      const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+        readRun(client, orgId, runId),
+      );
+      response.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
 
   router.put('/:runId', ...mutationProtection, requireJson, async (request, response, next) => {
     try {
@@ -85,6 +137,42 @@ export function createRunRouter({
           applyRunCommand(client, session, orgId, runId, body, clock),
         );
         response.status(200).json(result);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.put(
+    '/:runId/shares/:userId',
+    ...mutationProtection,
+    requireJson,
+    async (request, response, next) => {
+      try {
+        const { orgId, runId, userId } = shareRouteInput(request);
+        const body = parseContract(upsertRunShareRequestSchema, request.body, 'run share request');
+        const session = getAuthenticatedSession(request);
+        const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+          upsertRunShare(client, session, orgId, runId, userId, body),
+        );
+        response.status(200).json(result);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.delete(
+    '/:runId/shares/:userId',
+    ...mutationProtection,
+    async (request, response, next) => {
+      try {
+        const { orgId, runId, userId } = shareRouteInput(request);
+        const session = getAuthenticatedSession(request);
+        await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+          revokeRunShare(client, session, orgId, runId, userId),
+        );
+        response.status(204).end();
       } catch (error) {
         next(error);
       }
