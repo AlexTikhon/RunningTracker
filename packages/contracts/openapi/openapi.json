@@ -1,0 +1,2423 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Running Tracker HTTP API",
+    "version": "1.0.0",
+    "description": "Ordinary HTTP transport contract from SDD section 11. The /live SSE protocol is specified separately in packages/contracts/sse.md."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "sessionCookie": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Session"
+    },
+    {
+      "name": "Runs"
+    },
+    {
+      "name": "Shares"
+    },
+    {
+      "name": "Live reads"
+    },
+    {
+      "name": "Archive"
+    },
+    {
+      "name": "Health"
+    }
+  ],
+  "paths": {
+    "/api/session": {
+      "post": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Create a development/test local session",
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Session created. The opaque session is set in an HttpOnly cookie."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Read the current session",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Current session."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Revoke the current session",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The operation completed successfully."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/health/live": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Process liveness",
+        "security": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "The API process is live."
+          }
+        }
+      }
+    },
+    "/api/health/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Database readiness",
+        "security": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "The API and database are ready."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "The database is unavailable."
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs": {
+      "get": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "List visible runs by started-at half-open interval",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          },
+          {
+            "$ref": "#/components/parameters/Limit100"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunListResponse"
+                }
+              }
+            },
+            "description": "Visible runs."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}": {
+      "put": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Create an idempotent client-identified run",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            },
+            "description": "Existing run returned for an equivalent retry."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            },
+            "description": "Run created."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Read a visible run",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            },
+            "description": "Run details."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Delete an owned run",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The operation completed successfully."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}/commands": {
+      "post": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Apply or replay an idempotent lifecycle command",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunCommandResponse"
+                }
+              }
+            },
+            "description": "Stored command result."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}/points": {
+      "post": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Atomically ingest a point batch",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestPointsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestPointsResponse"
+                }
+              }
+            },
+            "description": "Point batch result."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Read raw point history",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/Limit1000"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PointsResponse"
+                }
+              }
+            },
+            "description": "Raw point page."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}/shares/{userId}": {
+      "put": {
+        "tags": [
+          "Shares"
+        ],
+        "summary": "Create or replace an owned run share",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/UserId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertRunShareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunShareResponse"
+                }
+              }
+            },
+            "description": "Persisted share permissions."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Shares"
+        ],
+        "summary": "Revoke an owned run share",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/UserId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The operation completed successfully."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}/live-track": {
+      "get": {
+        "tags": [
+          "Live reads"
+        ],
+        "summary": "Read a stable initial live-track page",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/Limit1000"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackPage"
+                }
+              }
+            },
+            "description": "Track snapshot page."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}/live-track/changes": {
+      "get": {
+        "tags": [
+          "Live reads"
+        ],
+        "summary": "Read a stable live-track change page",
+        "description": "Exactly one of afterRevision or cursor is required.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/AfterRevision"
+          },
+          {
+            "$ref": "#/components/parameters/Limit1000"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackPage"
+                }
+              }
+            },
+            "description": "Track change page."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}/track": {
+      "get": {
+        "tags": [
+          "Archive"
+        ],
+        "summary": "Read published archive geometry",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/ArchiveMode"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveTrackResponse"
+                }
+              }
+            },
+            "description": "GeoJSON Feature with published geometry metadata."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/archive/runs": {
+      "get": {
+        "tags": [
+          "Archive"
+        ],
+        "summary": "List visible archive runs intersecting a WGS84 bbox",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/Bbox"
+          },
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          },
+          {
+            "$ref": "#/components/parameters/Limit100"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunListResponse"
+                }
+              }
+            },
+            "description": "Visible archive runs."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/live/nearby": {
+      "get": {
+        "tags": [
+          "Live reads"
+        ],
+        "summary": "Read confirmed fresh nearby run positions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/Longitude"
+          },
+          {
+            "$ref": "#/components/parameters/Latitude"
+          },
+          {
+            "$ref": "#/components/parameters/RadiusM"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NearbyResponse"
+                }
+              }
+            },
+            "description": "Nearby live runs."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/archive/metadata": {
+      "get": {
+        "tags": [
+          "Archive"
+        ],
+        "summary": "Read revisioned archive tile metadata",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveMetadataResponse"
+                }
+              }
+            },
+            "description": "Archive tile metadata."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/tiles/runs/{z}/{x}/{y}.mvt": {
+      "get": {
+        "tags": [
+          "Archive"
+        ],
+        "summary": "Read a revision-bound Mapbox Vector Tile",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/TileZ"
+          },
+          {
+            "$ref": "#/components/parameters/TileX"
+          },
+          {
+            "$ref": "#/components/parameters/TileY"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          },
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A Mapbox Vector Tile; an empty result is a valid empty MVT.",
+            "content": {
+              "application/vnd.mapbox-vector-tile": {
+                "schema": {
+                  "type": "string",
+                  "contentEncoding": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "running_tracker_session"
+      }
+    },
+    "responses": {
+      "ApiError": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorResponse"
+            }
+          }
+        },
+        "description": "Application error envelope."
+      }
+    },
+    "parameters": {
+      "OrgId": {
+        "name": "orgId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/UUID"
+        }
+      },
+      "RunId": {
+        "name": "runId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/UUID"
+        }
+      },
+      "UserId": {
+        "name": "userId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/UUID"
+        }
+      },
+      "Origin": {
+        "name": "Origin",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "CsrfToken": {
+        "name": "x-csrf-token",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "From": {
+        "name": "from",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Timestamp"
+        }
+      },
+      "To": {
+        "name": "to",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Timestamp"
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "Limit100": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "Limit1000": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "AfterRevision": {
+        "name": "afterRevision",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/Revision"
+        }
+      },
+      "ArchiveMode": {
+        "name": "mode",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "const": "archive"
+        }
+      },
+      "Bbox": {
+        "name": "bbox",
+        "in": "query",
+        "required": true,
+        "description": "west,south,east,north in WGS84; west > east crosses the antimeridian.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Longitude": {
+        "name": "longitude",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        }
+      },
+      "Latitude": {
+        "name": "latitude",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        }
+      },
+      "RadiusM": {
+        "name": "radiusM",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5000
+        }
+      },
+      "Revision": {
+        "name": "revision",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Revision"
+        }
+      },
+      "TileZ": {
+        "name": "z",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "TileX": {
+        "name": "x",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "TileY": {
+        "name": "y",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "schemas": {
+      "UUID": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+      },
+      "Revision": {
+        "type": "string",
+        "pattern": "^\\d+$",
+        "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+      },
+      "Seq": {
+        "type": "string",
+        "pattern": "^\\d+$",
+        "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+      },
+      "Timestamp": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+      },
+      "RunStatus": {
+        "type": "string",
+        "enum": [
+          "recording",
+          "paused",
+          "finished"
+        ]
+      },
+      "RawState": {
+        "type": "string",
+        "enum": [
+          "available",
+          "purging",
+          "purged"
+        ]
+      },
+      "QualityStats": {
+        "type": "object",
+        "properties": {
+          "acceptedEdgeCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "acceptedPointCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "excessiveSpeedCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "excessiveTimeGapCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "insufficientData": {
+            "type": "boolean"
+          },
+          "nonpositiveTimeDeltaCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "poorAccuracyPointCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "rawPointCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "segmentBreakCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "seqGapCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "acceptedEdgeCount",
+          "acceptedPointCount",
+          "excessiveSpeedCount",
+          "excessiveTimeGapCount",
+          "insufficientData",
+          "nonpositiveTimeDeltaCount",
+          "poorAccuracyPointCount",
+          "rawPointCount",
+          "segmentBreakCount",
+          "seqGapCount"
+        ],
+        "additionalProperties": false
+      },
+      "RunSummary": {
+        "type": "object",
+        "properties": {
+          "algorithmVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "distanceM": {
+            "type": "number",
+            "minimum": 0
+          },
+          "observedDurationS": {
+            "type": "number",
+            "minimum": 0
+          },
+          "qualityStats": {
+            "type": "object",
+            "properties": {
+              "acceptedEdgeCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "acceptedPointCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "excessiveSpeedCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "excessiveTimeGapCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "insufficientData": {
+                "type": "boolean"
+              },
+              "nonpositiveTimeDeltaCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "poorAccuracyPointCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "rawPointCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "segmentBreakCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "seqGapCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "acceptedEdgeCount",
+              "acceptedPointCount",
+              "excessiveSpeedCount",
+              "excessiveTimeGapCount",
+              "insufficientData",
+              "nonpositiveTimeDeltaCount",
+              "poorAccuracyPointCount",
+              "rawPointCount",
+              "segmentBreakCount",
+              "seqGapCount"
+            ],
+            "additionalProperties": false
+          },
+          "sourceRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          }
+        },
+        "required": [
+          "algorithmVersion",
+          "distanceM",
+          "observedDurationS",
+          "qualityStats",
+          "sourceRevision"
+        ],
+        "additionalProperties": false
+      },
+      "RunView": {
+        "type": "object",
+        "properties": {
+          "controlRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "dataRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rawState": {
+            "type": "string",
+            "enum": [
+              "available",
+              "purging",
+              "purged"
+            ]
+          },
+          "runId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "recording",
+              "paused",
+              "finished"
+            ]
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "algorithmVersion": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "distanceM": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "observedDurationS": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "qualityStats": {
+                    "type": "object",
+                    "properties": {
+                      "acceptedEdgeCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "acceptedPointCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "excessiveSpeedCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "excessiveTimeGapCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "insufficientData": {
+                        "type": "boolean"
+                      },
+                      "nonpositiveTimeDeltaCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "poorAccuracyPointCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "rawPointCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "segmentBreakCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "seqGapCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "acceptedEdgeCount",
+                      "acceptedPointCount",
+                      "excessiveSpeedCount",
+                      "excessiveTimeGapCount",
+                      "insufficientData",
+                      "nonpositiveTimeDeltaCount",
+                      "poorAccuracyPointCount",
+                      "rawPointCount",
+                      "segmentBreakCount",
+                      "seqGapCount"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "sourceRevision": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                  }
+                },
+                "required": [
+                  "algorithmVersion",
+                  "distanceM",
+                  "observedDurationS",
+                  "qualityStats",
+                  "sourceRevision"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "controlRevision",
+          "dataRevision",
+          "finishedAt",
+          "rawState",
+          "runId",
+          "startedAt",
+          "status",
+          "summary"
+        ],
+        "additionalProperties": false
+      },
+      "PointInput": {
+        "type": "object",
+        "properties": {
+          "accuracyM": {
+            "type": "number",
+            "minimum": 0
+          },
+          "latitude": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "longitude": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "segmentId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "seq": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+          }
+        },
+        "required": [
+          "accuracyM",
+          "latitude",
+          "longitude",
+          "recordedAt",
+          "segmentId",
+          "seq"
+        ],
+        "additionalProperties": false
+      },
+      "TrackPoint": {
+        "type": "object",
+        "properties": {
+          "accuracyM": {
+            "type": "number",
+            "minimum": 0
+          },
+          "connectFromPrevious": {
+            "type": "boolean"
+          },
+          "coordinates": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              },
+              {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90
+              }
+            ],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "predecessorSeq": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^\\d+$",
+                "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "segmentId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "seq": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+          }
+        },
+        "required": [
+          "accuracyM",
+          "connectFromPrevious",
+          "coordinates",
+          "predecessorSeq",
+          "recordedAt",
+          "segmentId",
+          "seq"
+        ],
+        "additionalProperties": false
+      },
+      "TrackPage": {
+        "type": "object",
+        "properties": {
+          "algorithmVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "fromRevision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^\\d+$",
+                "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "toRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "upserts": {
+            "maxItems": 1000,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "accuracyM": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "connectFromPrevious": {
+                  "type": "boolean"
+                },
+                "coordinates": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "number",
+                      "minimum": -180,
+                      "maximum": 180
+                    },
+                    {
+                      "type": "number",
+                      "minimum": -90,
+                      "maximum": 90
+                    }
+                  ],
+                  "items": false,
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "predecessorSeq": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^\\d+$",
+                      "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recordedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "segmentId": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "seq": {
+                  "type": "string",
+                  "pattern": "^\\d+$",
+                  "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+                }
+              },
+              "required": [
+                "accuracyM",
+                "connectFromPrevious",
+                "coordinates",
+                "predecessorSeq",
+                "recordedAt",
+                "segmentId",
+                "seq"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "algorithmVersion",
+          "fromRevision",
+          "nextCursor",
+          "toRevision",
+          "upserts"
+        ],
+        "additionalProperties": false
+      },
+      "SessionCreateRequest": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "userId"
+        ],
+        "additionalProperties": false
+      },
+      "SessionResponse": {
+        "type": "object",
+        "properties": {
+          "csrf": {
+            "type": "object",
+            "properties": {
+              "headerName": {
+                "type": "string",
+                "const": "x-csrf-token"
+              },
+              "token": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{43}$"
+              }
+            },
+            "required": [
+              "headerName",
+              "token"
+            ],
+            "additionalProperties": false
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "identity": {
+            "type": "object",
+            "properties": {
+              "userId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              }
+            },
+            "required": [
+              "userId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "csrf",
+          "expiresAt",
+          "identity"
+        ],
+        "additionalProperties": false
+      },
+      "ApiErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "details": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "requestId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "requestId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "checks": {
+            "type": "object",
+            "properties": {
+              "database": {
+                "type": "string",
+                "enum": [
+                  "up",
+                  "down"
+                ]
+              }
+            },
+            "required": [
+              "database"
+            ],
+            "additionalProperties": false
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "not-ready"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "CreateRunRequest": {
+        "type": "object",
+        "properties": {
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "startedAt"
+        ],
+        "additionalProperties": false
+      },
+      "RunCommandRequest": {
+        "type": "object",
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "expectedControlRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "pause",
+              "resume",
+              "finish"
+            ]
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedControlRevision",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "RunCommandResponse": {
+        "type": "object",
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "controlRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "dataRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "recording",
+              "paused",
+              "finished"
+            ]
+          }
+        },
+        "required": [
+          "commandId",
+          "controlRevision",
+          "dataRevision",
+          "finishedAt",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "IngestPointsRequest": {
+        "type": "object",
+        "properties": {
+          "points": {
+            "minItems": 1,
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "accuracyM": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "latitude": {
+                  "type": "number",
+                  "minimum": -90,
+                  "maximum": 90
+                },
+                "longitude": {
+                  "type": "number",
+                  "minimum": -180,
+                  "maximum": 180
+                },
+                "recordedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "segmentId": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "seq": {
+                  "type": "string",
+                  "pattern": "^\\d+$",
+                  "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+                }
+              },
+              "required": [
+                "accuracyM",
+                "latitude",
+                "longitude",
+                "recordedAt",
+                "segmentId",
+                "seq"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "points"
+        ],
+        "additionalProperties": false
+      },
+      "IngestPointsResponse": {
+        "type": "object",
+        "properties": {
+          "dataRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "duplicateCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "insertedCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "dataRevision",
+          "duplicateCount",
+          "insertedCount"
+        ],
+        "additionalProperties": false
+      },
+      "UpsertRunShareRequest": {
+        "type": "object",
+        "properties": {
+          "canReadHistory": {
+            "type": "boolean"
+          },
+          "canReadLive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canReadHistory",
+          "canReadLive"
+        ],
+        "additionalProperties": false
+      },
+      "RunShareResponse": {
+        "type": "object",
+        "properties": {
+          "canReadHistory": {
+            "type": "boolean"
+          },
+          "canReadLive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canReadHistory",
+          "canReadLive"
+        ],
+        "additionalProperties": false
+      },
+      "RunListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "controlRevision": {
+                  "type": "string",
+                  "pattern": "^\\d+$",
+                  "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                },
+                "dataRevision": {
+                  "type": "string",
+                  "pattern": "^\\d+$",
+                  "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                },
+                "finishedAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "rawState": {
+                  "type": "string",
+                  "enum": [
+                    "available",
+                    "purging",
+                    "purged"
+                  ]
+                },
+                "runId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "startedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "recording",
+                    "paused",
+                    "finished"
+                  ]
+                },
+                "summary": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "algorithmVersion": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "distanceM": {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        "observedDurationS": {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        "qualityStats": {
+                          "type": "object",
+                          "properties": {
+                            "acceptedEdgeCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "acceptedPointCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "excessiveSpeedCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "excessiveTimeGapCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "insufficientData": {
+                              "type": "boolean"
+                            },
+                            "nonpositiveTimeDeltaCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "poorAccuracyPointCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "rawPointCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "segmentBreakCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "seqGapCount": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "acceptedEdgeCount",
+                            "acceptedPointCount",
+                            "excessiveSpeedCount",
+                            "excessiveTimeGapCount",
+                            "insufficientData",
+                            "nonpositiveTimeDeltaCount",
+                            "poorAccuracyPointCount",
+                            "rawPointCount",
+                            "segmentBreakCount",
+                            "seqGapCount"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "sourceRevision": {
+                          "type": "string",
+                          "pattern": "^\\d+$",
+                          "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                        }
+                      },
+                      "required": [
+                        "algorithmVersion",
+                        "distanceM",
+                        "observedDurationS",
+                        "qualityStats",
+                        "sourceRevision"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "controlRevision",
+                "dataRevision",
+                "finishedAt",
+                "rawState",
+                "runId",
+                "startedAt",
+                "status",
+                "summary"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "PointsResponse": {
+        "type": "object",
+        "properties": {
+          "dataRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "points": {
+            "maxItems": 1000,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "accuracyM": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "latitude": {
+                  "type": "number",
+                  "minimum": -90,
+                  "maximum": 90
+                },
+                "longitude": {
+                  "type": "number",
+                  "minimum": -180,
+                  "maximum": 180
+                },
+                "recordedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "segmentId": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "seq": {
+                  "type": "string",
+                  "pattern": "^\\d+$",
+                  "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 1..9223372036854775807."
+                }
+              },
+              "required": [
+                "accuracyM",
+                "latitude",
+                "longitude",
+                "recordedAt",
+                "segmentId",
+                "seq"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "dataRevision",
+          "nextCursor",
+          "points"
+        ],
+        "additionalProperties": false
+      },
+      "ArchiveTrackResponse": {
+        "type": "object",
+        "properties": {
+          "geometry": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "coordinates": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "minItems": 2,
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "prefixItems": [
+                          {
+                            "type": "number",
+                            "minimum": -180,
+                            "maximum": 180
+                          },
+                          {
+                            "type": "number",
+                            "minimum": -90,
+                            "maximum": 90
+                          }
+                        ],
+                        "items": false,
+                        "minItems": 2,
+                        "maxItems": 2
+                      }
+                    }
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "MultiLineString"
+                  }
+                },
+                "required": [
+                  "coordinates",
+                  "type"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "algorithmVersion": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "sourceRevision": {
+                "type": "string",
+                "pattern": "^\\d+$",
+                "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+              }
+            },
+            "required": [
+              "algorithmVersion",
+              "sourceRevision"
+            ],
+            "additionalProperties": false
+          },
+          "type": {
+            "type": "string",
+            "const": "Feature"
+          }
+        },
+        "required": [
+          "geometry",
+          "properties",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "NearbyResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "coordinates": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "number",
+                      "minimum": -180,
+                      "maximum": 180
+                    },
+                    {
+                      "type": "number",
+                      "minimum": -90,
+                      "maximum": 90
+                    }
+                  ],
+                  "items": false,
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "distanceM": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "recordedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "runId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              },
+              "required": [
+                "coordinates",
+                "distanceM",
+                "recordedAt",
+                "runId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "serverTime": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "items",
+          "serverTime"
+        ],
+        "additionalProperties": false
+      },
+      "ArchiveMetadataResponse": {
+        "type": "object",
+        "properties": {
+          "archiveRevision": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+          },
+          "filter": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "to": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ],
+            "additionalProperties": false
+          },
+          "maxzoom": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 24
+          },
+          "minzoom": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 24
+          },
+          "sourceLayer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tiles": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "archiveRevision",
+          "filter",
+          "maxzoom",
+          "minzoom",
+          "sourceLayer",
+          "tiles"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

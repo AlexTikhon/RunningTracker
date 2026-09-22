@@ -7,17 +7,21 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./openapi.json": "./openapi/openapi.json"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/generate-openapi.mjs",
     "lint": "eslint src",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@types/node": "24.13.6",
+    "vitest": "5.0.1",
     "typescript": "6.0.3"
   }
 }

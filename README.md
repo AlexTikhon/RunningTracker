@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03.1 adds a development/test-only HTTP session boundary, Origin/CSRF protection, request IDs, ApiError responses, and verified session-to-tenant transactions. Run/command APIs, production identity, GPS ingestion, streaming, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03.1 adds a development/test-only HTTP session boundary, Origin/CSRF protection, request IDs, ApiError responses, and verified session-to-tenant transactions. P03.2 adds strict shared runtime contracts, an OpenAPI 3.1 ordinary-HTTP specification, and an explicit SSE protocol contract. Run/command handlers, production identity, GPS ingestion, streaming implementation, and maps remain later stages.
 
 ## Prerequisites
 
@@ -44,6 +44,14 @@ The bootstrap flow is:
 4. `GET /api/session` refreshes identity/expiry/CSRF data; `DELETE /api/session` revokes the server record and clears the cookie.
 
 `SESSION_COOKIE_SECURE=false` is an explicit local HTTP exception allowed only in development/test. Deployed HTTPS uses `Secure`. The local store is process-memory-only, bounded by `SESSION_STORE_MAX_ENTRIES`, and loses all sessions on restart; the production identity/provider integration remains P12.
+
+## Shared API contracts
+
+`packages/contracts` is transport-only and has no Express or PostgreSQL dependency. It exports strict Zod schemas and inferred types for session/error responses, runs, commands, shares, points, track pages, archive/nearby reads, and the `live.state` SSE payload. PostgreSQL `bigint` revisions and point sequences cross HTTP as bounded decimal strings; URL numeric query inputs are parsed and range-checked by their query schemas.
+
+The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. OpenAPI/SSE artifacts specify contracts only; P03.3+ implements the handlers.
+
+P03.2 validates the `PointInput` transport domain but deliberately does not normalize `-0`, timestamp spelling, numeric spelling, or retry equivalence. That canonicalization remains D01/P04.
 
 Stop the local database without deleting its named volume:
 
