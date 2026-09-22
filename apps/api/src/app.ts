@@ -1,4 +1,5 @@
 import express, { type Express, type Router } from 'express';
+import type { Pool } from 'pg';
 
 import { SessionManager } from './auth/session-manager.js';
 import { createSessionRouter } from './auth/session-http.js';
@@ -9,6 +10,7 @@ import { DatabaseProbe, type DatabasePool } from './database/database.js';
 import { createHealthRouter } from './health/health.routes.js';
 import { apiErrorHandler, unknownApiRoute } from './http/errors.js';
 import { requestIdMiddleware } from './http/request-id.js';
+import { createRunRouter } from './runs/run.routes.js';
 
 export interface AppDependencies {
   clock: Clock;
@@ -42,6 +44,15 @@ export function createApp({ clock, config, pool, sessionManager, testOnlyRouter 
   });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
+  app.use(
+    '/api/orgs/:orgId/runs',
+    createRunRouter({
+      clock,
+      config,
+      pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+    }),
+  );
   if (testOnlyRouter) {
     app.use('/api', testOnlyRouter);
   }

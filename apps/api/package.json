@@ -4,15 +4,20 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prebuild": "npm run build --workspace=@running-tracker/contracts",
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --watch --import tsx src/entrypoint.ts",
     "lint": "eslint src test *.ts",
     "start": "node dist/entrypoint.js",
+    "pretest": "npm run build --workspace=@running-tracker/contracts",
     "test": "vitest run --config vitest.config.ts",
+    "pretest:integration": "npm run build --workspace=@running-tracker/contracts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "pretypecheck": "npm run build --workspace=@running-tracker/contracts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@running-tracker/contracts": "0.1.0",
     "express": "5.2.1",
     "pg": "8.23.0",
     "zod": "4.6.5"

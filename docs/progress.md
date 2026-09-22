@@ -9,7 +9,7 @@ Last updated: 2026-09-22.
 | P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
 | P02A.1 review fixes | VERIFIED | Integration fixture target guard and confirmed-COMMIT handling passed unit and real-role integration checks |
 | P02B | IN PROGRESS — DB SCHEMA/ACL VERIFIED | All six run child/access tables, constraints/indexes and the full D02 matrix passed real PostgreSQL/PostGIS role integration; only D01 canonical `PointInput` remains deferred to P04 |
-| P03 | IN PROGRESS — P03.1–P03.2 VERIFIED | Session/security boundary plus strict shared runtime contracts, OpenAPI 3.1 ordinary-HTTP specification, and explicit SSE contract verified; P03.3–P03.5 behavior remains TODO |
+| P03 | IN PROGRESS — P03.1–P03.3 VERIFIED | Session/security boundary, shared runtime/OpenAPI/SSE contracts, and atomic run creation/lifecycle commands verified; P03.4–P03.5 remain TODO |
 | P04 | TODO | Ingestion, raw history, and GPS simulator |
 | P05 | TODO | Browser recording and local buffer |
 | P06 | TODO | Geometry and archive summaries |
@@ -269,7 +269,7 @@ Limitations and remaining boundary:
 
 - the local in-memory store is intentionally single-process, bounded, and loses all sessions on restart; it is not a production availability mechanism;
 - external login, provider callback/recovery, durable/distributed sessions, deployed TLS/proxy/secrets, and production identity lifecycle remain D03b/P12;
-- P03.2 was subsequently completed as recorded below; P03.3–P03.5 run/command/share/auto-finish behavior remains TODO;
+- P03.2 and P03.3 were subsequently completed as recorded below; P03.4–P03.5 run-read/share/auto-finish behavior remains TODO;
 - P02B is still IN PROGRESS because D01 canonical `PointInput` remains P04-owned; P03 as a whole is not marked DONE;
 - hosted CI was not run, and no commit, push, deploy, paid-provider call, main-database migration, or Docker volume deletion occurred.
 
@@ -295,6 +295,32 @@ Verification evidence on 2026-09-22:
 
 Remaining P03 boundary:
 
-- P03.3: implement `PUT /runs/{runId}` and `POST /runs/{runId}/commands` against the established session/tenant transaction and shared contracts, including create/command idempotency, canonical command replay comparison, duplicate lookup before expected revision checks, terminal finish, and the one-active-run constraint;
 - P03.4 run/list/share handlers and P03.5 clock-driven auto-finish remain separate later fragments;
 - P04 still owns D01 `PointInput` canonicalization/retry equivalence and point ingestion behavior.
+
+## P03.3 — atomic run creation and lifecycle commands
+
+Implemented:
+
+- `PUT /api/orgs/:orgId/runs/:runId` and `POST /api/orgs/:orgId/runs/:runId/commands` use the P03.1 authenticated mutation middleware and `withAuthenticatedTenantTransaction`, and validate paths, requests, successful responses, and persisted replay responses with the shared P03.2 Zod contracts;
+- run creation checks an owner-visible tombstone, creates the run and its server `created_at` in one tenant transaction, returns `201` for the insert and `200` for an equivalent retry, rejects changed creation payload with `409 ACTIVE_RUN_EXISTS`, returns `410 RUN_DELETED` for the deleted owner run ID, and maps the named partial unique-index violation to `409 ACTIVE_RUN_EXISTS`;
+- lifecycle commands lock the owned run row with `FOR UPDATE`, then query `run_commands` before any expected-revision check; a canonical payload normalizes the decimal revision string and stores only `{ expectedControlRevision, type }` beside the command UUID;
+- an identical command retry returns the validated stored JSON response, while command-ID reuse with a different payload, a stale control revision, and an invalid transition return `409 CONTROL_REVISION_CONFLICT`, the existing SDD 409 code for lifecycle concurrency conflicts;
+- accepted transitions are exactly `recording -> paused`, `paused -> recording`, `recording -> finished`, and `paused -> finished`; each increments `control_revision` and `data_revision` once, while finish sets the injected server timestamp once and `finished` remains terminal;
+- the run update and immutable command/result insert share the outer PostgreSQL transaction, so an insert failure rolls the state/revision update back; all bigint revisions remain decimal strings at the HTTP and JSONB boundaries;
+- the API now declares its workspace dependency on `@running-tracker/contracts`; API typecheck/test/build lifecycle hooks build that dependency first so a clean checkout does not depend on an ignored pre-existing contracts `dist` directory.
+
+Verification evidence on 2026-09-22:
+
+- focused lifecycle unit coverage passed and the complete API unit suite passed 9 files / 38 tests;
+- focused real-PostgreSQL HTTP integration passed 1 file / 10 tests, covering equivalent and changed create retries, concurrent equivalent creation, two competing active-run creations, tombstone rejection, two different concurrent commands at one revision, the same command concurrently and after commit, command-ID payload mismatch, stale revisions, the complete transition path and terminal finish, and rollback after a forced command-insert failure;
+- `npm run verify` passed root lint, strict typecheck, 8 migration tests, 38 API unit tests, 1 web test, 13 contract tests, and all production builds;
+- Docker Compose was healthy, `npm run db:bootstrap:test` succeeded, and `npm run db:migrate:test` skipped unchanged migrations `0000`–`0005` after checksum verification;
+- full `npm run test:integration` passed 7 files / 83 tests under the real owner/runtime/maintenance roles;
+- `git diff --check` passed; no migration, RLS policy, P03.1/P03.2 contract, commit, push, main-database migration, hosted CI run, or P03.4+ behavior was added.
+
+Remaining P03 boundary:
+
+- P03.3 has no known implementation gap within its assigned scope;
+- P03.4 still owns run list/read and share endpoints, and P03.5 owns maintenance auto-finish;
+- point ingestion/canonicalisation, history, SSE delivery, archive behavior, and tombstone creation/retention remain in their later assigned stages.
