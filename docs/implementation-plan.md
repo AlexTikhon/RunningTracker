@@ -1,8 +1,8 @@
 # Running Tracker — план пошаговой реализации для coding-агента
 
 Версия: 1.0  
-Дата: 22 сентября 2026
-Статус: P00–P02A.1 и полная схема/ACL-матрица P02B проверены локально на реальном PostgreSQL/PostGIS; D02 решён. P03.1–P03.5 реализованы и проверены, включая atomic run lifecycle, read/share API и clock-driven maintenance auto-finish; P03 завершён. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12. P02B не объявлен DONE: D01 `PointInput` canonicalization остаётся открытым для P04.
+Дата: 23 сентября 2026
+Статус: P00–P03 и P04.1 проверены локально на реальном PostgreSQL/PostGIS; D01 и D02 решены. P04 остаётся IN PROGRESS: bounded atomic ingestion выполнен, raw history, simulator/fault injection и другие последующие подэтапы не начаты. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12.
 Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
 
 ## 1. Режим исполнения
@@ -172,7 +172,7 @@ packages/contracts не зависит от Express или драйвера БД
 
 Готово, когда исполняемая матрица покрывает run/share/child tables, а прямое чтение points/summaries не обходит ACL.
 
-Состояние на 2026-09-21: P02B.1–P02B.4 и D02 выполнены и проверены на реальной БД. Этап намеренно не отмечен DONE, потому что D01 canonical `PointInput`/retry comparison остаётся задачей P04. Это не блокирует фиксацию завершённой DB schema/ACL-подчасти и не означает начало P03.
+Состояние на 2026-09-23: P02B.1–P02B.4 и D02 проверены на реальной БД; D01 canonical `PointInput`/retry comparison resolved в P04.1. Тем самым оставшаяся причина держать P02B открытым устранена, P02B считается DONE.
 
 ### P03 — Session boundary, команды и API-основа
 
@@ -200,8 +200,8 @@ packages/contracts не зависит от Express или драйвера БД
 Ссылка на SDD: 6.2–6.3, 8, 11.2–11.3.
 
 Задачи:
-- P04.1 Реализовать bounded atomic batch, canonical payload comparison, FOR UPDATE и ACK после commit.
-- P04.2 Записывать ingested_revision только новым точкам; повторы не увеличивают data_revision.
+- P04.1 Реализовать bounded atomic batch, canonical payload comparison, FOR UPDATE и ACK после commit. **Выполнено и проверено 2026-09-23, включая `ingested_revision` только для новых точек и отсутствие revision bump для повторов.**
+- P04.2 Ранее выделенный revision-инвариант поглощён P04.1, поскольку является частью атомарного ingestion-контракта; отдельной реализации не осталось.
 - P04.3 Добавить raw history с limit, курсором, revision mismatch и проверками доступа.
 - P04.4 Создать симулятор с seed/virtual clock: normal, duplicates, reordered, delayed batch, dropped response, clock jump, GPS spike.
 - P04.5 Добавить безопасное fault injection в тестовой среде для случая commit выполнен, ответ потерян.
@@ -385,7 +385,7 @@ packages/contracts не зависит от Express или драйвера БД
 
 | ID | Вопрос | Владелец | Ожидаемый результат |
 |---|---|---|---|
-| D01 | Точная канонизация PointInput для повторов: числа, -0, timestamps, seq | P02B/P04 | Детерминированная спецификация и тесты без потери точности |
+| D01 | Точная канонизация PointInput для повторов: числа, -0, timestamps, seq | P02B/P04 | RESOLVED в P04.1: strict shape, bigint decimal seq, `-0` → `0`, UTC nearest-ms timestamp, canonical retry equality |
 | D02 | RLS runs/shares без рекурсии и обхода child-table ACL | P02A/P02B | P02A identity baseline + P02B run/share matrix и runtime-role тесты |
 | D03a | Session endpoint, локальная identity, CSRF/Origin и production guard | P03 | Явный HTTP/session contract и fail-fast local-auth guard — RESOLVED в ADR-0007 |
 | D03b | Production identity/session provider integration | P12 | Стандартный provider/protocol без local/anonymous fallback; TODO |
@@ -443,4 +443,4 @@ packages/contracts не зависит от Express или драйвера БД
 
 P00–P02A.1 и полная DB schema/ACL-подчасть P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) проверены локально воспроизводимыми unit/build и real PostgreSQL/PostGIS integration-командами. D02 решён в границах доверенного tenant context. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
 
-P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. P03.1–P03.5 выполнены: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read, owner-only share management и clock-driven maintenance auto-finish. P10 deletion/retention не начаты. Production identity/session provider остаётся P12.
+P02B DONE после разрешения D01 в P04.1. P03.1–P03.5 выполнены: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read, owner-only share management и clock-driven maintenance auto-finish. P04.1 bounded atomic point ingestion выполнен; P04 целиком не завершён, raw history и simulator/fault injection остаются. P10 deletion/retention не начаты. Production identity/session provider остаётся P12.

@@ -51,7 +51,13 @@ The bootstrap flow is:
 
 The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. The implemented P03 routes use the shared ordinary-HTTP contracts; SSE remains a protocol contract for P08.
 
-P03.2 validates the `PointInput` transport domain but deliberately does not normalize `-0`, timestamp spelling, numeric spelling, or retry equivalence. That canonicalization remains D01/P04.
+P04.1 resolves D01 with one strict `PointInput`: required `seq`, `segmentId`, `recordedAt`, `longitude`, `latitude`, and `accuracyM`, with no nullable/extra fields. Parsing canonicalizes `seq` through PostgreSQL-bigint decimal form, every `-0` to `0`, and UTC `recordedAt` to millisecond precision using the same nearest-millisecond rounding as `timestamptz(3)`. The canonical values are used for validation, retry comparison, persistence, and the shared public type.
+
+## Point ingestion
+
+`POST /api/orgs/:orgId/runs/:runId/points` accepts `{ "points": PointInput[] }` under the existing session, Origin/CSRF, membership, tenant transaction, and RLS boundary. A request contains 1–100 entries and remains subject to the 64 KiB JSON limit; a run may contain at most 50,000 unique points. `seq` defines deterministic track order, so request order, equal timestamps, late lower sequences, and device timestamps outside the live-freshness window are accepted as raw history.
+
+The service locks the owned run, compares every repeated `seq` with its canonical stored payload, increments `data_revision` once only when at least one unique point is new, and inserts all new rows set-wise with that `ingested_revision`. Exact retries return `200` without a revision change; conflicting payloads return `409 POINT_CONFLICT`. Recording and paused runs accept points. Finished runs accept new points through `finished_at + 24 hours`; after that, only exact retries are acknowledged (`409 UPLOAD_WINDOW_CLOSED` for new points). `purging`/`purged` raw state returns `410 RAW_HISTORY_UNAVAILABLE`. The response is `{ dataRevision, insertedCount, duplicateCount }`, and HTTP acknowledgement occurs only after the surrounding PostgreSQL transaction commits.
 
 Stop the local database without deleting its named volume:
 

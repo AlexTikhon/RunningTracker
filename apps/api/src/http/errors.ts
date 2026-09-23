@@ -25,6 +25,14 @@ function isInvalidJson(error: unknown): boolean {
   );
 }
 
+function isPayloadTooLarge(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'type' in error &&
+    (error as { type?: unknown }).type === 'entity.too.large'
+  );
+}
+
 export const unknownApiRoute: RequestHandler = (_request, _response, next) => {
   next(new ApiError(404, 'ROUTE_NOT_FOUND', 'The requested API route does not exist'));
 };
@@ -38,11 +46,13 @@ export const apiErrorHandler: ErrorRequestHandler = (error, request, response, n
   const requestId = getRequestId(request);
   const normalized = isInvalidJson(error)
     ? new ApiError(400, 'INVALID_REQUEST', 'The request body is not valid JSON')
-    : error instanceof ApiError
-      ? error
-      : new ApiError(500, 'INTERNAL_ERROR', 'An unexpected server error occurred');
+    : isPayloadTooLarge(error)
+      ? new ApiError(413, 'BATCH_TOO_LARGE', 'The request body exceeds 64 KiB')
+      : error instanceof ApiError
+        ? error
+        : new ApiError(500, 'INTERNAL_ERROR', 'An unexpected server error occurred');
 
-  if (!(error instanceof ApiError) && !isInvalidJson(error)) {
+  if (!(error instanceof ApiError) && !isInvalidJson(error) && !isPayloadTooLarge(error)) {
     const errorName = error instanceof Error ? error.name : 'UnknownError';
     console.error(`Unhandled HTTP error [${requestId}] (${errorName})`);
   }

@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P02A.1 и полная DB schema/ACL-подчасть P02B проверены локально под разделёнными ролями. P03.1 HTTP session boundary, Origin/CSRF, requestId, ApiError и session-to-tenant transaction реализованы и проверены; P03.2–P03.5 не начаты. D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration; P02B остаётся частичным только из-за D01 canonical `PointInput`, отложенного до P04.
+Статус: согласованный проект архитектуры; P00–P03 и P04.1 проверены локально под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration. P04 raw history, simulator/fault injection и последующие этапы не начаты.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -94,7 +94,9 @@ MongoDB 2dsphere подходит для proximity и геообластей. П
 
 UUID используются для идентификаторов, timestamptz — для времени, bigint — для seq/revisions. PostgreSQL `bigint` имеет знаковый 64-битный диапазон; schema CHECK дополнительно требует неотрицательные revisions и положительный seq. Стандартный parser `pg` возвращает `int8` десятичной строкой даже без `::text`; API сохраняет эту форму, а клиент сравнивает через `BigInt`, не лексикографически.
 
-`segment_id` хранится как PostgreSQL `integer`: физический диапазон от -2 147 483 648 до 2 147 483 647, прикладной CHECK сужает его до 0…2 147 483 647. Координаты PostGIS `geometry` представлены IEEE-754 binary64 (`double precision`): они не являются десятичными fixed-point значениями. Для `Point` и каждой вершины `MultiLineString` проверяются конечность и диапазоны longitude/latitude; nullable `display_geom` остаётся допустимым. `timestamptz(3)` хранит миллисекундную точность, нормализует timezone и округляет более точный вход до ближайшей миллисекунды. Эти storage-правила не объявляют решённой канонизацию `PointInput`: spelling timestamps, `-0`, допустимые числовые формы и retry-сравнение остаются D01/P04.
+`segment_id` хранится как PostgreSQL `integer`: физический диапазон от -2 147 483 648 до 2 147 483 647, прикладной CHECK сужает его до 0…2 147 483 647. Координаты PostGIS `geometry` представлены IEEE-754 binary64 (`double precision`): они не являются десятичными fixed-point значениями. Для `Point` и каждой вершины `MultiLineString` проверяются конечность и диапазоны longitude/latitude; nullable `display_geom` остаётся допустимым. `timestamptz(3)` хранит миллисекундную точность, нормализует timezone и округляет более точный вход до ближайшей миллисекунды.
+
+D01 canonical `PointInput` resolved в P04.1. Объект strict и содержит ровно шесть обязательных non-null полей из §11.1. `seq` принимается как положительная decimal bigint-строка и канонизируется через `BigInt(...).toString()`; `segmentId` — integer 0…2 147 483 647; longitude/latitude — конечные binary64 в диапазонах −180…180/−90…90; `accuracyM` — конечное неотрицательное binary64. JSON numeric spelling исчезает при parsing, `-0` нормализуется в `0`. `recordedAt` принимает только ISO UTC `Z`, округляется до ближайшей миллисекунды с переносом секунды и сериализуется ровно тремя дробными цифрами. Retry equality сравнивает только эти шесть канонических полей; `received_at` и `ingested_revision` не участвуют.
 
 ### 5.1 Таблицы
 

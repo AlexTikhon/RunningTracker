@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import {
   accuracyMetersSchema,
+  canonicalFiniteNumber,
   coordinatesSchema,
   nonnegativeFiniteSchema,
   nonnegativeIntegerSchema,
@@ -15,6 +16,20 @@ import {
 export const runStatusSchema = z.enum(['recording', 'paused', 'finished']);
 export const activeRunStatusSchema = z.enum(['recording', 'paused']);
 export const rawStateSchema = z.enum(['available', 'purging', 'purged']);
+
+function canonicalPointTimestamp(value: string): string {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/u.exec(value);
+  if (!match) {
+    return value;
+  }
+  const fraction = match[2] ?? '';
+  const milliseconds = Date.parse(`${match[1]}.${fraction.padEnd(3, '0').slice(0, 3)}Z`);
+  if (!Number.isFinite(milliseconds)) {
+    return value;
+  }
+  const rounded = milliseconds + (fraction.length > 3 && Number(fraction[3]) >= 5 ? 1 : 0);
+  return new Date(rounded).toISOString();
+}
 
 export const qualityStatsSchema = z.strictObject({
   acceptedEdgeCount: nonnegativeIntegerSchema,
@@ -80,15 +95,15 @@ export const runViewSchema = z
     }
   });
 
-// D01 deliberately remains open: this validates the transport value domain but does not
-// canonicalize numeric spelling, -0, timestamp spelling, or retry equivalence.
 export const pointInputSchema = z.strictObject({
-  accuracyM: accuracyMetersSchema,
-  latitude: z.number().finite().min(-90).max(90),
-  longitude: z.number().finite().min(-180).max(180),
-  recordedAt: timestampSchema,
+  accuracyM: accuracyMetersSchema.overwrite(canonicalFiniteNumber),
+  latitude: z.number().finite().min(-90).max(90).overwrite(canonicalFiniteNumber),
+  longitude: z.number().finite().min(-180).max(180).overwrite(canonicalFiniteNumber),
+  recordedAt: timestampSchema
+    .overwrite(canonicalPointTimestamp)
+    .refine((value) => timestampSchema.safeParse(value).success, 'Timestamp rounding is out of range'),
   segmentId: segmentIdSchema,
-  seq: seqSchema,
+  seq: seqSchema.overwrite((value) => BigInt(value).toString()),
 });
 
 export const trackPointSchema = z.strictObject({

@@ -8,9 +8,9 @@ Last updated: 2026-09-23.
 | P01 | DONE | Reproducible Express 5/API/web workspace, persistent PostgreSQL/PostGIS, migrations, health, and CI commands verified after P01.1 review fixes |
 | P02A | DONE | DB roles, identity/organization schema, tenant transaction helper, and baseline RLS verified under runtime-role |
 | P02A.1 review fixes | VERIFIED | Integration fixture target guard and confirmed-COMMIT handling passed unit and real-role integration checks |
-| P02B | IN PROGRESS — DB SCHEMA/ACL VERIFIED | All six run child/access tables, constraints/indexes and the full D02 matrix passed real PostgreSQL/PostGIS role integration; only D01 canonical `PointInput` remains deferred to P04 |
+| P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
-| P04 | TODO | Ingestion, raw history, and GPS simulator |
+| P04 | IN PROGRESS — P04.1 DONE | Bounded atomic ingestion is verified; raw history, simulator/fault injection, and later P04 work remain |
 | P05 | TODO | Browser recording and local buffer |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
@@ -381,6 +381,29 @@ Verification evidence on 2026-09-23:
 Status and remaining boundary:
 
 - P03 is DONE: P03.1–P03.5 have executable unit and real-role integration evidence;
-- P02B remains IN PROGRESS only because D01 canonical `PointInput`/retry comparison belongs to P04; P03.5 does not mark it complete;
+- P02B is now DONE because P04.1 resolved its only remaining item, D01 canonical `PointInput`/retry comparison;
 - each API process currently owns one safe, idempotent scheduler, so multiple instances may perform redundant function calls. Durable job ownership, backoff/metrics, and hosted CI remain operational follow-up rather than P03 correctness requirements;
-- the exact next task is P04.1: implement bounded atomic point-batch ingestion with D01 canonical payload comparison, run-row `FOR UPDATE`, and acknowledgement only after commit. Do not start raw history, simulator, browser buffering, SSE, geometry, or retention in that fragment.
+- P04.1 is documented below; its completion does not start raw history, simulator, browser buffering, SSE, geometry, or retention.
+
+## P04.1 — bounded atomic point-batch ingestion
+
+Implemented:
+
+- canonical strict `PointInput` across shared contracts, HTTP, service, persistence comparison, and tests: required non-null `seq`, `segmentId`, `recordedAt`, `longitude`, `latitude`, `accuracyM`; unknown keys rejected; bigint decimal `seq`, negative zero, and UTC millisecond timestamp spelling normalized deterministically;
+- authenticated `POST /api/orgs/:orgId/runs/:runId/points` with the existing error envelope, 1–100 entry limit, 64 KiB JSON limit, owner-only access under runtime-role RLS, and 50,000 unique points per run;
+- one outer tenant transaction and owned-run `FOR UPDATE`; set-based existing-point lookup and `unnest` insert; one `data_revision` increment per batch containing new points, the same `ingested_revision` for those rows, and no `control_revision` change;
+- exact retries and identical in-batch duplicate sequences are acknowledged without reinsertion; any canonical payload mismatch rejects the full batch with `POINT_CONFLICT`;
+- recording and paused runs accept uploads; finished runs accept new points through `finished_at + 24h`, exact retries remain acknowledged after closure, and unavailable raw state fails before replay disclosure;
+- `seq`, not arrival or timestamp, defines ordering. Unsorted/lower late sequences, equal timestamps, and device future/old timestamps are valid raw history; live freshness filtering remains later work;
+- no migration was added: existing P02B PK/FK/CHECK/RLS/grants and revision columns already enforce the storage boundary.
+
+Verification evidence on 2026-09-23:
+
+- focused shared-contract tests passed 1 file / 13 tests; focused P04.1 real-PostgreSQL integration passed 1 file / 10 tests;
+- combined P04.1 plus P03.3/P03.5 regression passed 3 files / 32 tests;
+- complete `npm run test:integration` passed 10 files / 114 tests under real owner/runtime/maintenance roles;
+- a stale checksum state in the disposable `running_tracker_test` database was detected before migration execution. Only that `_test` database was rebuilt from the documented bootstrap URL; migrations `0000`–`0007` then applied cleanly and the required rerun skipped all eight with matching checksums. The main database was not connected to or migrated;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 46 API unit tests, 1 web test, 13 contract tests, and all production builds;
+- `git diff --check` passed. No migration, dependency, commit, push, main/production database write, paid-provider call, or hosted CI run occurred.
+
+P04.1 is DONE; P04 remains IN PROGRESS. Raw history, simulator/fault injection, browser buffering, SSE, geometry, and retention were not implemented. The smallest next task is P04.3 raw history (the former standalone P04.2 revision invariant was completed as a required part of P04.1).

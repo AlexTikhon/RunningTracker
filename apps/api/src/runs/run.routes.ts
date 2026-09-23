@@ -1,5 +1,7 @@
 import {
   createRunRequestSchema,
+  ingestPointsRequestSchema,
+  POINT_BATCH_MAX_SIZE,
   organizationPathSchema,
   runCommandRequestSchema,
   runListQuerySchema,
@@ -25,6 +27,7 @@ import { ApiError } from '../http/errors.js';
 import {
   applyRunCommand,
   createRun,
+  ingestRunPoints,
   listRuns,
   readRun,
   revokeRunShare,
@@ -123,6 +126,33 @@ export function createRunRouter({
       next(error);
     }
   });
+
+  router.post(
+    '/:runId/points',
+    ...mutationProtection,
+    requireJson,
+    async (request, response, next) => {
+      try {
+        const { orgId, runId } = routeInput(request);
+        const input = request.body as { points?: unknown } | undefined;
+        if (Array.isArray(input?.points) && input.points.length > POINT_BATCH_MAX_SIZE) {
+          throw new ApiError(
+            413,
+            'BATCH_TOO_LARGE',
+            `A point batch cannot exceed ${POINT_BATCH_MAX_SIZE} entries`,
+          );
+        }
+        const body = parseContract(ingestPointsRequestSchema, request.body, 'point batch request');
+        const session = getAuthenticatedSession(request);
+        const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+          ingestRunPoints(client, session, orgId, runId, body, clock),
+        );
+        response.status(200).json(result);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   router.post(
     '/:runId/commands',

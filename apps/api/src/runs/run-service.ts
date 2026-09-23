@@ -1,4 +1,5 @@
 import {
+  ingestPointsResponseSchema,
   runListResponseSchema,
   runCommandResponseSchema,
   runShareResponseSchema,
@@ -6,6 +7,9 @@ import {
   timestampSchema,
   uuidSchema,
   type CreateRunRequest,
+  type IngestPointsRequest,
+  type IngestPointsResponse,
+  type PointInput,
   type RunListQuery,
   type RunListResponse,
   type RunCommandRequest,
@@ -49,6 +53,21 @@ interface LockedRunRow {
   status: RunStatus;
 }
 
+interface LockedIngestionRunRow {
+  data_revision: string;
+  finished_at: Date | null;
+  raw_state: 'available' | 'purging' | 'purged';
+}
+
+interface StoredPointRow {
+  accuracy_m: number;
+  latitude: number;
+  longitude: number;
+  recorded_at: string;
+  segment_id: number;
+  seq: string;
+}
+
 interface StoredCommandRow {
   payload_matches: boolean;
   response: unknown;
@@ -63,6 +82,9 @@ const runListCursorSchema = z.strictObject({
   runId: uuidSchema,
   startedAt: timestampSchema,
 });
+
+export const POINTS_PER_RUN_MAX = 50_000;
+const UPLOAD_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 type RunListCursor = z.infer<typeof runListCursorSchema>;
 
@@ -354,6 +376,166 @@ export async function revokeRunShare(
      WHERE org_id = $1 AND run_id = $2 AND grantee_user_id = $3`,
     [orgId, runId, granteeUserId],
   );
+}
+
+function sameCanonicalPoint(stored: StoredPointRow, point: PointInput): boolean {
+  return (
+    stored.seq === point.seq &&
+    stored.segment_id === point.segmentId &&
+    stored.recorded_at === point.recordedAt &&
+    stored.longitude === point.longitude &&
+    stored.latitude === point.latitude &&
+    stored.accuracy_m === point.accuracyM
+  );
+}
+
+function uniqueCanonicalPoints(points: PointInput[]): {
+  duplicateCount: number;
+  points: PointInput[];
+} {
+  const unique = new Map<string, PointInput>();
+  let duplicateCount = 0;
+  for (const point of points) {
+    const existing = unique.get(point.seq);
+    if (!existing) {
+      unique.set(point.seq, point);
+      continue;
+    }
+    if (
+      existing.segmentId !== point.segmentId ||
+      existing.recordedAt !== point.recordedAt ||
+      existing.longitude !== point.longitude ||
+      existing.latitude !== point.latitude ||
+      existing.accuracyM !== point.accuracyM
+    ) {
+      throw new ApiError(409, 'POINT_CONFLICT', 'One point sequence is bound to different payloads');
+    }
+    duplicateCount += 1;
+  }
+  return { duplicateCount, points: [...unique.values()] };
+}
+
+export async function ingestRunPoints(
+  client: PoolClient,
+  session: Pick<StoredSession, 'userId'>,
+  orgId: string,
+  runId: string,
+  request: IngestPointsRequest,
+  clock: Clock,
+): Promise<IngestPointsResponse> {
+  const locked = await client.query<LockedIngestionRunRow>(
+    `SELECT data_revision, finished_at, raw_state
+     FROM runs
+     WHERE org_id = $1 AND id = $2 AND user_id = $3
+     FOR UPDATE`,
+    [orgId, runId, session.userId],
+  );
+  const run = locked.rows[0];
+  if (!run) {
+    return throwMissingRun(client, orgId, runId);
+  }
+  if (run.raw_state !== 'available') {
+    throw new ApiError(410, 'RAW_HISTORY_UNAVAILABLE', 'Raw point history is unavailable');
+  }
+
+  const batch = uniqueCanonicalPoints(request.points);
+  const sequences = batch.points.map(({ seq }) => seq);
+  const existingResult = await client.query<StoredPointRow>(
+    `SELECT seq,
+            segment_id,
+            to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS recorded_at,
+            ST_X(geom) AS longitude,
+            ST_Y(geom) AS latitude,
+            accuracy_m
+     FROM run_points
+     WHERE org_id = $1 AND run_id = $2 AND seq = ANY($3::bigint[])`,
+    [orgId, runId, sequences],
+  );
+  const requestedBySequence = new Map(batch.points.map((point) => [point.seq, point]));
+  const existingSequences = new Set<string>();
+  for (const stored of existingResult.rows) {
+    const requested = requestedBySequence.get(stored.seq);
+    if (!requested || !sameCanonicalPoint(stored, requested)) {
+      throw new ApiError(409, 'POINT_CONFLICT', 'A point sequence is already bound to a different payload');
+    }
+    existingSequences.add(stored.seq);
+  }
+
+  const newPoints = batch.points.filter(({ seq }) => !existingSequences.has(seq));
+  const duplicateCount = batch.duplicateCount + existingSequences.size;
+  if (newPoints.length === 0) {
+    return ingestPointsResponseSchema.parse({
+      dataRevision: run.data_revision,
+      duplicateCount,
+      insertedCount: 0,
+    });
+  }
+
+  const receivedAt = clock.utcNow();
+  if (
+    run.finished_at !== null &&
+    receivedAt.getTime() > run.finished_at.getTime() + UPLOAD_WINDOW_MS
+  ) {
+    throw new ApiError(409, 'UPLOAD_WINDOW_CLOSED', 'The finished run upload window is closed');
+  }
+
+  const pointCount = await client.query<{ count: string }>(
+    'SELECT count(*) FROM run_points WHERE org_id = $1 AND run_id = $2',
+    [orgId, runId],
+  );
+  if (BigInt(pointCount.rows[0]?.count ?? '0') + BigInt(newPoints.length) > POINTS_PER_RUN_MAX) {
+    throw new ApiError(422, 'RUN_POINT_LIMIT', 'The run cannot exceed 50000 points');
+  }
+
+  const revisionResult = await client.query<{ data_revision: string }>(
+    `UPDATE runs
+     SET data_revision = data_revision + 1
+     WHERE org_id = $1 AND id = $2 AND user_id = $3
+     RETURNING data_revision`,
+    [orgId, runId, session.userId],
+  );
+  const dataRevision = revisionResult.rows[0]?.data_revision;
+  if (!dataRevision) {
+    throw new Error('The locked run disappeared before its point revision update');
+  }
+
+  await client.query(
+    `INSERT INTO run_points (
+       org_id, run_id, seq, segment_id, recorded_at, received_at,
+       geom, accuracy_m, ingested_revision
+     )
+     SELECT $1,
+            $2,
+            input.seq,
+            input.segment_id,
+            input.recorded_at,
+            $9::timestamptz,
+            ST_SetSRID(ST_MakePoint(input.longitude, input.latitude), 4326),
+            input.accuracy_m,
+            $10::bigint
+     FROM unnest(
+       $3::bigint[], $4::integer[], $5::timestamptz[],
+       $6::double precision[], $7::double precision[], $8::double precision[]
+     ) AS input(seq, segment_id, recorded_at, longitude, latitude, accuracy_m)`,
+    [
+      orgId,
+      runId,
+      newPoints.map(({ seq }) => seq),
+      newPoints.map(({ segmentId }) => segmentId),
+      newPoints.map(({ recordedAt }) => recordedAt),
+      newPoints.map(({ longitude }) => longitude),
+      newPoints.map(({ latitude }) => latitude),
+      newPoints.map(({ accuracyM }) => accuracyM),
+      receivedAt.toISOString(),
+      dataRevision,
+    ],
+  );
+
+  return ingestPointsResponseSchema.parse({
+    dataRevision,
+    duplicateCount,
+    insertedCount: newPoints.length,
+  });
 }
 
 export function nextRunStatus(current: RunStatus, command: RunCommandType): RunStatus | undefined {

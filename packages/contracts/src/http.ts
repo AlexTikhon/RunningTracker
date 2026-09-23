@@ -14,6 +14,7 @@ import {
 } from './primitives.js';
 
 const opaqueTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
+export const POINT_BATCH_MAX_SIZE = 100;
 const queryLimit = (maximum: number) =>
   z
     .string()
@@ -94,17 +95,21 @@ export const runCommandResponseSchema = z
   });
 
 export const ingestPointsRequestSchema = z.strictObject({
-  points: z.array(pointInputSchema).min(1).max(100),
+  points: z.array(pointInputSchema).min(1).max(POINT_BATCH_MAX_SIZE),
 });
 export const ingestPointsResponseSchema = z
   .strictObject({
     dataRevision: revisionSchema,
-    duplicateCount: nonnegativeIntegerSchema.max(100),
-    insertedCount: nonnegativeIntegerSchema.max(100),
+    duplicateCount: nonnegativeIntegerSchema.max(POINT_BATCH_MAX_SIZE),
+    insertedCount: nonnegativeIntegerSchema.max(POINT_BATCH_MAX_SIZE),
   })
-  .refine((response) => response.duplicateCount + response.insertedCount <= 100, {
+  .refine(
+    (response) =>
+      response.duplicateCount + response.insertedCount <= POINT_BATCH_MAX_SIZE,
+    {
     message: 'point result counts must not exceed the maximum batch size',
-  });
+    },
+  );
 
 export const upsertRunShareRequestSchema = z.strictObject({
   canReadHistory: z.boolean(),

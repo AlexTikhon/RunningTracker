@@ -148,9 +148,13 @@ describe('shared model contracts', () => {
     expect(seqSchema.safeParse('-1').success).toBe(false);
   });
 
-  it('rejects non-finite and out-of-range point values', () => {
+  it('enforces the complete canonical PointInput value domain', () => {
     expect(pointInputSchema.safeParse(point).success).toBe(true);
     for (const invalid of [
+      { ...point, seq: '0' },
+      { ...point, segmentId: -1 },
+      { ...point, segmentId: 2_147_483_648 },
+      { ...point, recordedAt: 'not-a-timestamp' },
       { ...point, longitude: Number.NaN },
       { ...point, longitude: Number.POSITIVE_INFINITY },
       { ...point, longitude: 180.000_001 },
@@ -160,6 +164,14 @@ describe('shared model contracts', () => {
     ]) {
       expect(pointInputSchema.safeParse(invalid).success).toBe(false);
     }
+    for (const missing of ['accuracyM', 'latitude', 'longitude', 'recordedAt', 'segmentId', 'seq']) {
+      const candidate: Record<string, unknown> = { ...point };
+      delete candidate[missing];
+      expect(pointInputSchema.safeParse(candidate).success).toBe(false);
+      expect(pointInputSchema.safeParse({ ...point, [missing]: null }).success).toBe(false);
+    }
+    expect(pointInputSchema.safeParse({ ...point, latitude: -90, longitude: 180 }).success).toBe(true);
+    expect(pointInputSchema.safeParse({ ...point, latitude: 90, longitude: -180 }).success).toBe(true);
   });
 });
 
@@ -176,16 +188,45 @@ describe('ordinary HTTP contracts', () => {
     ).toBe(false);
   });
 
-  it('bounds point batches and preserves D01 as a later concern', () => {
+  it('bounds point batches and canonicalizes D01-equivalent spellings', () => {
     expect(ingestPointsRequestSchema.safeParse({ points: [point] }).success).toBe(true);
     expect(ingestPointsRequestSchema.safeParse({ points: [] }).success).toBe(false);
+    expect(
+      ingestPointsRequestSchema.safeParse({ points: Array.from({ length: 100 }, () => point) })
+        .success,
+    ).toBe(true);
     expect(
       ingestPointsRequestSchema.safeParse({ points: Array.from({ length: 101 }, () => point) })
         .success,
     ).toBe(false);
-    // P03.2 validates the value domain but intentionally does not normalize equivalent spellings.
-    expect(pointInputSchema.safeParse({ ...point, seq: '0001' }).success).toBe(true);
-    expect(pointInputSchema.parse({ ...point, longitude: -0 }).longitude).toBe(-0);
+    const canonical = pointInputSchema.parse({
+      ...point,
+      accuracyM: -0,
+      latitude: -0,
+      longitude: -0,
+      recordedAt: '2026-09-22T10:00:00Z',
+      seq: '0001',
+    });
+    expect(canonical).toEqual({
+      ...point,
+      accuracyM: 0,
+      latitude: 0,
+      longitude: 0,
+      recordedAt: '2026-09-22T10:00:00.000Z',
+    });
+    expect(Object.is(canonical.longitude, -0)).toBe(false);
+    expect(
+      pointInputSchema.parse({ ...point, recordedAt: '2026-09-22T10:00:00.123499Z' })
+        .recordedAt,
+    ).toBe('2026-09-22T10:00:00.123Z');
+    expect(
+      pointInputSchema.parse({ ...point, recordedAt: '2026-09-22T10:00:00.123500Z' })
+        .recordedAt,
+    ).toBe('2026-09-22T10:00:00.124Z');
+    expect(
+      pointInputSchema.parse({ ...point, recordedAt: '2026-09-22T10:00:00.999500Z' })
+        .recordedAt,
+    ).toBe('2026-09-22T10:00:01.000Z');
   });
 
   it('validates pagination, mutually exclusive change cursors, ranges, bbox, and nearby inputs', () => {

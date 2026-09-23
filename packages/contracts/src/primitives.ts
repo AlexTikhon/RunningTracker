@@ -28,6 +28,9 @@ export const nonnegativeIntegerSchema = z.int().nonnegative().max(Number.MAX_SAF
 export const segmentIdSchema = z.int().min(0).max(2_147_483_647);
 export const coordinatesSchema = z.tuple([longitudeSchema, latitudeSchema]);
 
+export const canonicalFiniteNumber = (value: number): number =>
+  Object.is(value, -0) ? 0 : value;
+
 export type UUID = z.infer<typeof uuidSchema>;
 export type Revision = z.infer<typeof revisionSchema>;
 export type Seq = z.infer<typeof seqSchema>;

@@ -4,7 +4,7 @@ This backlog preserves the mandatory clarifications from the implementation plan
 
 | ID | Owner | Required outcome | Status |
 |---|---|---|---|
-| D01 | P02B/P04 | Verified storage: bigint seq/revision round-trip as strings, nonnegative integer segment, millisecond `timestamptz(3)` rounding, binary64 PostGIS coordinates, and finite double-precision accuracy; input canonicalization for numbers, `-0`, timestamp spelling, and retries remains | TODO |
+| D01 | P02B/P04 | Strict six-field `PointInput`; seq normalized to bigint decimal, `-0` to `0`, UTC timestamps to nearest millisecond, canonical field equality for retries; verified through contracts and real PostgreSQL ingestion | RESOLVED — P04.1 |
 | D02 | P02A/P02B | Complete identity/run/share/child direct/JOIN ACL matrix, including commands/tombstones, verified under the real runtime role; guarantee assumes trusted transaction-local tenant/user context and does not prove the P03 HTTP session boundary | RESOLVED |
 | D03a | P03 | Explicit session endpoint, safe local identity allowlist, CSRF/Origin boundary, request identity, and production startup guard | RESOLVED — ADR-0007 |
 | D03b | P12 | Production identity/session provider integration with no local or anonymous fallback | TODO |
