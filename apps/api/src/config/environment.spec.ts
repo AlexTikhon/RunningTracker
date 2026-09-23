@@ -19,6 +19,13 @@ const validIntegrationEnvironment = {
     'postgresql://running_tracker_owner:owner-secret@localhost/running_tracker_test',
 };
 
+const validApplicationEnvironment = {
+  DATABASE_URL:
+    'postgresql://running_tracker_runtime:runtime-secret@127.0.0.1:5433/running_tracker',
+  MAINTENANCE_DATABASE_URL:
+    'postgresql://running_tracker_maintenance:maintenance-secret@127.0.0.1:5433/running_tracker',
+};
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
@@ -28,7 +35,7 @@ afterEach(() => {
 describe('validateEnvironment', () => {
   it('coerces bounded values and applies defaults', () => {
     const environment = validateEnvironment({
-      DATABASE_URL: 'postgresql://running_tracker_runtime:password@127.0.0.1:5433/database',
+      ...validApplicationEnvironment,
       PORT: '3100',
     });
 
@@ -38,64 +45,82 @@ describe('validateEnvironment', () => {
       DB_POOL_MAX: 10,
       DB_QUERY_TIMEOUT_MS: 1_000,
       PORT: 3_100,
+      RUN_AUTO_FINISH_INTERVAL_MS: 60_000,
       SHUTDOWN_TIMEOUT_MS: 5_000,
     });
   });
 
   it('rejects startup without a PostgreSQL URL', () => {
     expect(() => validateEnvironment({})).toThrow('Invalid environment configuration');
-    expect(() => validateEnvironment({ DATABASE_URL: 'https://example.com' })).toThrow(
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        DATABASE_URL: 'https://example.com',
+      }),
+    ).toThrow(
       'DATABASE_URL must use the postgres or postgresql protocol',
     );
     expect(() =>
       validateEnvironment({
+        ...validApplicationEnvironment,
         DATABASE_URL: 'postgresql://running_tracker_owner:password@127.0.0.1:5433/database',
       }),
     ).toThrow('DATABASE_URL must authenticate as running_tracker_runtime');
   });
 
   it('fails production startup before infrastructure when local auth or insecure cookies are configured', () => {
-    const databaseUrl =
-      'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker';
-
     expect(() =>
       validateEnvironment({
+        ...validApplicationEnvironment,
         ALLOWED_ORIGINS: 'https://tracker.example',
         APP_ENV: 'production',
-        DATABASE_URL: databaseUrl,
         LOCAL_AUTH_ENABLED: 'true',
         LOCAL_AUTH_USER_IDS: '11111111-1111-4111-8111-111111111111',
       }),
     ).toThrow('LOCAL_AUTH_ENABLED must be false in production');
     expect(() =>
       validateEnvironment({
+        ...validApplicationEnvironment,
         APP_ENV: 'production',
-        DATABASE_URL: databaseUrl,
         SESSION_COOKIE_SECURE: 'false',
       }),
     ).toThrow('SESSION_COOKIE_SECURE must be true in production');
   });
 
   it('requires canonical explicit local identities and origins', () => {
-    const databaseUrl =
-      'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker';
-
     expect(() =>
       validateEnvironment({
+        ...validApplicationEnvironment,
         APP_ENV: 'test',
-        DATABASE_URL: databaseUrl,
         LOCAL_AUTH_ENABLED: 'true',
       }),
     ).toThrow('LOCAL_AUTH_USER_IDS must contain at least one user');
     expect(() =>
       validateEnvironment({
+        ...validApplicationEnvironment,
         ALLOWED_ORIGINS: 'http://127.0.0.1:5173/',
         APP_ENV: 'test',
-        DATABASE_URL: databaseUrl,
         LOCAL_AUTH_ENABLED: 'true',
         LOCAL_AUTH_USER_IDS: '11111111-1111-4111-8111-111111111111',
       }),
     ).toThrow('invalid canonical HTTP origin');
+  });
+
+  it('requires the maintenance role on the same database target', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        MAINTENANCE_DATABASE_URL:
+          'postgresql://running_tracker_runtime:secret@127.0.0.1:5433/running_tracker',
+      }),
+    ).toThrow('MAINTENANCE_DATABASE_URL must authenticate as running_tracker_maintenance');
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        MAINTENANCE_DATABASE_URL:
+          'postgresql://running_tracker_maintenance:secret@127.0.0.1:5433/other_database',
+      }),
+    ).toThrow('must target the same host, port, and database as DATABASE_URL');
   });
 
   it('uses TEST_DATABASE_URL instead of DATABASE_URL for integration configuration', () => {

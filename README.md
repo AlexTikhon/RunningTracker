@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03.1 adds a development/test-only HTTP session boundary, Origin/CSRF protection, request IDs, ApiError responses, and verified session-to-tenant transactions. P03.2 adds strict shared runtime contracts, an OpenAPI 3.1 ordinary-HTTP specification, and an explicit SSE protocol contract. Run/command handlers, production identity, GPS ingestion, streaming implementation, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. Production identity, GPS ingestion, streaming implementation, and maps remain later stages.
 
 ## Prerequisites
 
@@ -49,7 +49,7 @@ The bootstrap flow is:
 
 `packages/contracts` is transport-only and has no Express or PostgreSQL dependency. It exports strict Zod schemas and inferred types for session/error responses, runs, commands, shares, points, track pages, archive/nearby reads, and the `live.state` SSE payload. PostgreSQL `bigint` revisions and point sequences cross HTTP as bounded decimal strings; URL numeric query inputs are parsed and range-checked by their query schemas.
 
-The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. OpenAPI/SSE artifacts specify contracts only; P03.3+ implements the handlers.
+The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. The implemented P03 routes use the shared ordinary-HTTP contracts; SSE remains a protocol contract for P08.
 
 P03.2 validates the `PointInput` transport domain but deliberately does not normalize `-0`, timestamp spelling, numeric spelling, or retry equivalence. That canonicalization remains D01/P04.
 
@@ -71,7 +71,7 @@ npm run test:integration
 
 `test:integration` validates runtime, migration, and maintenance URLs before creating any pool: each URL must use PostgreSQL, authenticate as its exact role, target a database ending in `_test`, and resolve to the same host, normalized port, and database. Fixture setup then verifies `current_database()` and `current_user` on its dedicated owner client before any mutation. Security assertions execute through `running_tracker_runtime`; runtime privileges are never broadened. CI deliberately points `DATABASE_URL` at a different, absent database while the three test URLs point at the service database.
 
-`db:bootstrap` is the only privileged setup step. It creates PostGIS and three non-superuser roles, restricts database/schema creation, and transfers the existing migration metadata table to the migration owner. Normal API startup never invokes bootstrap or reads bootstrap/migration credentials.
+`db:bootstrap` is the only privileged setup step. It creates PostGIS and three non-superuser roles, restricts database/schema creation, and transfers the existing migration metadata table to the migration owner. Normal API startup never invokes bootstrap or reads bootstrap/migration credentials. The maintenance login has no direct table DML or DDL: it has schema usage plus EXECUTE only on the owner-defined `app_private.auto_finish_runs(timestamptz)` capability.
 
 ## Database migrations
 
@@ -104,7 +104,9 @@ P03.1 now resolves that HTTP boundary for local development/test: `userId` is ac
 
 ## Configuration
 
-Configuration is loaded and validated before the API app and pool are created. `.env.example` contains clearly labelled fixed local development/test credentials for bootstrap, migration owner, runtime, and maintenance roles. Use separate managed secrets outside local development.
+Configuration is loaded and validated before the API app and pools are created. `.env.example` contains clearly labelled fixed local development/test credentials for bootstrap, migration owner, runtime, and maintenance roles. `DATABASE_URL` must authenticate as `running_tracker_runtime`; `MAINTENANCE_DATABASE_URL` must authenticate as `running_tracker_maintenance` and target the same host, normalized port, and database. Use separate managed secrets outside local development.
+
+`RUN_AUTO_FINISH_INTERVAL_MS` is the interval between settled maintenance cycles and defaults to 60 seconds. It is an implementation parameter, not a tighter product guarantee than “the first maintenance cycle after `created_at + 24 hours`.” Each cycle passes one injected UTC timestamp to the database function. The function atomically changes only eligible `recording`/`paused` runs to `finished`, sets `finished_at` to that timestamp, and increments `data_revision`; it does not change `control_revision`, `raw_state`, or `run_commands`. Conditional PostgreSQL updates make concurrent commands and repeated workers idempotent. Startup and signal handling remain in `main.ts`; shutdown stops future maintenance timers before closing HTTP and both pools within the shared deadline.
 
 `DB_CONNECTION_TIMEOUT_MS` bounds pool acquisition/connection. `DB_QUERY_TIMEOUT_MS` separately bounds the readiness query; timeout destroys that client so a hung query cannot occupy the pool. `SHUTDOWN_TIMEOUT_MS` bounds HTTP drain plus pool closure with monotonic elapsed time before the controlled fallback terminates the process. UTC business-event time remains a separate clock capability.
 

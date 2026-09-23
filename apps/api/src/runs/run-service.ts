@@ -117,6 +117,14 @@ function isForeignKeyViolation(error: unknown, constraint: string): boolean {
   return candidate.code === '23503' && candidate.constraint === constraint;
 }
 
+function isCheckViolation(error: unknown, constraint: string): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+  const candidate = error as PostgresErrorLike;
+  return candidate.code === '23514' && candidate.constraint === constraint;
+}
+
 function transportTimestamp(value: string): string {
   const matched = /^(.*\.)(\d{6})Z$/u.exec(value);
   if (!matched) {
@@ -370,6 +378,12 @@ export async function createRun(
   clock: Clock,
 ): Promise<CreateRunResult> {
   const startedAt = request.startedAt;
+  await client.query(
+    `SELECT pg_advisory_xact_lock(
+       hashtextextended($1::text || ':' || $2::text, 0)
+     )`,
+    [orgId, runId],
+  );
   const existing = await readOwnedRun(client, orgId, runId, session.userId, startedAt);
   if (existing) {
     if (!existing.creationPayloadMatches) {
@@ -382,6 +396,15 @@ export async function createRun(
     throw new ApiError(410, 'RUN_DELETED', 'The run has been deleted');
   }
 
+  const createdAt = clock.utcNow();
+  if (Date.parse(startedAt) > createdAt.getTime() + 24 * 60 * 60 * 1_000) {
+    throw new ApiError(
+      400,
+      'INVALID_REQUEST',
+      'The run start time cannot be more than 24 hours after server creation time',
+    );
+  }
+
   let inserted: boolean;
   try {
     const result = await client.query(
@@ -389,12 +412,19 @@ export async function createRun(
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (org_id, id) DO NOTHING
        RETURNING id`,
-      [orgId, runId, session.userId, startedAt, clock.utcNow().toISOString()],
+      [orgId, runId, session.userId, startedAt, createdAt.toISOString()],
     );
     inserted = result.rowCount === 1;
   } catch (error) {
     if (isUniqueViolation(error, 'runs_one_active_per_user_idx')) {
       throw new ApiError(409, 'ACTIVE_RUN_EXISTS', 'The current identity already has an active run');
+    }
+    if (isCheckViolation(error, 'runs_start_within_auto_finish_window')) {
+      throw new ApiError(
+        400,
+        'INVALID_REQUEST',
+        'The run start time cannot be more than 24 hours after server creation time',
+      );
     }
     throw error;
   }

@@ -47,6 +47,8 @@ function localAuthConfig(overrides: Record<string, unknown> = {}): Environment {
     ALLOWED_ORIGINS: allowedOrigin,
     APP_ENV: 'test',
     DATABASE_URL: 'postgresql://running_tracker_runtime:password@127.0.0.1:5433/test',
+    MAINTENANCE_DATABASE_URL:
+      'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/test',
     LOCAL_AUTH_ENABLED: 'true',
     LOCAL_AUTH_USER_IDS: `${allowedUser},${otherUser}`,
     SESSION_COOKIE_SECURE: 'false',
@@ -341,6 +343,8 @@ describe('HTTP session boundary', () => {
     const disabled = validateEnvironment({
       APP_ENV: 'test',
       DATABASE_URL: 'postgresql://running_tracker_runtime:password@127.0.0.1:5433/test',
+      MAINTENANCE_DATABASE_URL:
+        'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/test',
     });
     const disabledApp = createApp({ clock, config: disabled, pool });
     await request(disabledApp)

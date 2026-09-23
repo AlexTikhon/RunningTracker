@@ -52,36 +52,152 @@ const originList = z
     return [...new Set(entries)];
   });
 
+interface ParsedDatabaseConnection {
+  connectionString: string;
+  database: string;
+  host: string;
+  port: string;
+  user: string;
+}
+
+function parseDatabaseConnection(
+  connectionString: string,
+  variableName: string,
+  expectedUser: string,
+  requireTestDatabase: boolean,
+  createError: (message: string) => Error,
+): ParsedDatabaseConnection {
+  let url: URL;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    throw createError(`${variableName} must be a valid PostgreSQL URL`);
+  }
+
+  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+    throw createError(`${variableName} must use the postgres or postgresql protocol`);
+  }
+
+  const identityOverrides = ['database', 'dbname', 'host', 'port', 'user'].filter((name) =>
+    url.searchParams.has(name),
+  );
+  if (identityOverrides.length > 0) {
+    throw createError(`${variableName} must not override connection identity in query parameters`);
+  }
+
+  let database: string;
+  let user: string;
+  try {
+    database = decodeURIComponent(url.pathname.slice(1));
+    user = decodeURIComponent(url.username);
+  } catch {
+    throw createError(`${variableName} contains invalid percent-encoding`);
+  }
+
+  if (user !== expectedUser) {
+    throw createError(`${variableName} must authenticate as ${expectedUser}`);
+  }
+  if (!database) {
+    throw createError(`${variableName} must include a database name`);
+  }
+  if (requireTestDatabase && !database.endsWith('_test')) {
+    throw createError(`${variableName} database name must end in _test`);
+  }
+
+  const port = url.port || '5432';
+  const numericPort = Number(port);
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65_535) {
+    throw createError(`${variableName} must use a valid PostgreSQL port`);
+  }
+
+  return {
+    connectionString,
+    database,
+    host: url.hostname.toLowerCase(),
+    port: numericPort.toString(),
+    user,
+  };
+}
+
+function sameDatabaseTarget(
+  first: ParsedDatabaseConnection,
+  second: ParsedDatabaseConnection,
+): boolean {
+  return (
+    first.host === second.host &&
+    first.port === second.port &&
+    first.database === second.database
+  );
+}
+
 const environmentSchema = z
   .object({
-  APP_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().max(65_535).default(3000),
-  DATABASE_URL: z
-    .string()
-    .url()
-    .refine((value) => value.startsWith('postgresql://') || value.startsWith('postgres://'), {
-      message: 'DATABASE_URL must use the postgres or postgresql protocol',
-    })
-    .refine((value) => decodeURIComponent(new URL(value).username) === 'running_tracker_runtime', {
-      message: 'DATABASE_URL must authenticate as running_tracker_runtime',
-    }),
-  DB_POOL_MAX: z.coerce.number().int().positive().max(50).default(10),
-  DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(2_000),
-  DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(1_000),
-  ALLOWED_ORIGINS: originList,
-  LOCAL_AUTH_ENABLED: environmentBoolean.default(false),
-  LOCAL_AUTH_USER_IDS: uuidList,
-  SESSION_COOKIE_SECURE: environmentBoolean.default(true),
-  SESSION_STORE_MAX_ENTRIES: z.coerce.number().int().positive().max(10_000).default(100),
-  SESSION_TTL_MS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(24 * 60 * 60 * 1_000)
-    .default(8 * 60 * 60 * 1_000),
-  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
+    APP_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    PORT: z.coerce.number().int().positive().max(65_535).default(3000),
+    DATABASE_URL: z.string(),
+    MAINTENANCE_DATABASE_URL: z.string(),
+    RUN_AUTO_FINISH_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60 * 1_000)
+      .default(60_000),
+    DB_POOL_MAX: z.coerce.number().int().positive().max(50).default(10),
+    DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(2_000),
+    DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(1_000),
+    ALLOWED_ORIGINS: originList,
+    LOCAL_AUTH_ENABLED: environmentBoolean.default(false),
+    LOCAL_AUTH_USER_IDS: uuidList,
+    SESSION_COOKIE_SECURE: environmentBoolean.default(true),
+    SESSION_STORE_MAX_ENTRIES: z.coerce.number().int().positive().max(10_000).default(100),
+    SESSION_TTL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60 * 1_000)
+      .default(8 * 60 * 60 * 1_000),
+    SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
   })
   .superRefine((environment, context) => {
+    let runtime: ParsedDatabaseConnection | undefined;
+    let maintenance: ParsedDatabaseConnection | undefined;
+    try {
+      runtime = parseDatabaseConnection(
+        environment.DATABASE_URL,
+        'DATABASE_URL',
+        'running_tracker_runtime',
+        false,
+        (message) => new Error(message),
+      );
+    } catch (error) {
+      context.addIssue({
+        code: 'custom',
+        message: error instanceof Error ? error.message : 'DATABASE_URL is invalid',
+        path: ['DATABASE_URL'],
+      });
+    }
+    try {
+      maintenance = parseDatabaseConnection(
+        environment.MAINTENANCE_DATABASE_URL,
+        'MAINTENANCE_DATABASE_URL',
+        'running_tracker_maintenance',
+        false,
+        (message) => new Error(message),
+      );
+    } catch (error) {
+      context.addIssue({
+        code: 'custom',
+        message: error instanceof Error ? error.message : 'MAINTENANCE_DATABASE_URL is invalid',
+        path: ['MAINTENANCE_DATABASE_URL'],
+      });
+    }
+    if (runtime && maintenance && !sameDatabaseTarget(runtime, maintenance)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'MAINTENANCE_DATABASE_URL must target the same host, port, and database as DATABASE_URL',
+        path: ['MAINTENANCE_DATABASE_URL'],
+      });
+    }
     if (environment.APP_ENV === 'production' && environment.LOCAL_AUTH_ENABLED) {
       context.addIssue({
         code: 'custom',
@@ -172,10 +288,7 @@ function environmentSource(options: LoadEnvironmentOptions): Record<string, stri
   };
 }
 
-interface ParsedIntegrationDatabaseConnection extends VerifiedIntegrationDatabaseConnection {
-  host: string;
-  port: string;
-}
+type ParsedIntegrationDatabaseConnection = ParsedDatabaseConnection;
 
 function integrationConfigurationError(message: string): Error {
   return new Error(`Invalid integration database configuration: ${message}`);
@@ -192,55 +305,13 @@ function parseIntegrationDatabaseConnection(
     throw integrationConfigurationError(`${variableName} is required`);
   }
 
-  let url: URL;
-  try {
-    url = new URL(connectionString);
-  } catch {
-    throw integrationConfigurationError(`${variableName} must be a valid PostgreSQL URL`);
-  }
-
-  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
-    throw integrationConfigurationError(`${variableName} must use the postgres or postgresql protocol`);
-  }
-
-  const identityOverrides = ['database', 'dbname', 'host', 'port', 'user'].filter((name) =>
-    url.searchParams.has(name),
-  );
-  if (identityOverrides.length > 0) {
-    throw integrationConfigurationError(
-      `${variableName} must not override connection identity in query parameters`,
-    );
-  }
-
-  let database: string;
-  let user: string;
-  try {
-    database = decodeURIComponent(url.pathname.slice(1));
-    user = decodeURIComponent(url.username);
-  } catch {
-    throw integrationConfigurationError(`${variableName} contains invalid percent-encoding`);
-  }
-
-  if (user !== expectedUser) {
-    throw integrationConfigurationError(`${variableName} must authenticate as ${expectedUser}`);
-  }
-  if (!database.endsWith('_test')) {
-    throw integrationConfigurationError(`${variableName} database name must end in _test`);
-  }
-
-  const port = url.port || '5432';
-  const numericPort = Number(port);
-  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65_535) {
-    throw integrationConfigurationError(`${variableName} must use a valid PostgreSQL port`);
-  }
-
-  return {
+  return parseDatabaseConnection(
     connectionString,
-    database,
-    host: url.hostname.toLowerCase(),
-    port: numericPort.toString(),
-    user,
-  };
+    variableName,
+    expectedUser,
+    true,
+    integrationConfigurationError,
+  );
 }
 
 function assertSameIntegrationDatabase(
@@ -251,9 +322,7 @@ function assertSameIntegrationDatabase(
     !first ||
     rest.some(
       (connection) =>
-        connection.host !== first.host ||
-        connection.port !== first.port ||
-        connection.database !== first.database,
+        !sameDatabaseTarget(connection, first),
     )
   ) {
     throw integrationConfigurationError(
@@ -293,6 +362,7 @@ export function loadIntegrationTestConfiguration(
       ...source,
       APP_ENV: 'test',
       DATABASE_URL: runtime.connectionString,
+      MAINTENANCE_DATABASE_URL: maintenance.connectionString,
     }),
     maintenance,
     migration,

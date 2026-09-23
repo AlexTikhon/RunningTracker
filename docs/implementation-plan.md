@@ -2,7 +2,7 @@
 
 Версия: 1.0  
 Дата: 22 сентября 2026
-Статус: P00–P02A.1 и полная схема/ACL-матрица P02B проверены локально на реальном PostgreSQL/PostGIS; D02 решён. P03.1 session boundary, P03.2 runtime/OpenAPI/SSE contracts и P03.3 atomic run/lifecycle commands реализованы и проверены; P03.4–P03.5 не начаты. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12. P02B не объявлен DONE: D01 `PointInput` canonicalization остаётся открытым для P04.
+Статус: P00–P02A.1 и полная схема/ACL-матрица P02B проверены локально на реальном PostgreSQL/PostGIS; D02 решён. P03.1–P03.5 реализованы и проверены, включая atomic run lifecycle, read/share API и clock-driven maintenance auto-finish; P03 завершён. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12. P02B не объявлен DONE: D01 `PointInput` canonicalization остаётся открытым для P04.
 Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
 
 ## 1. Режим исполнения
@@ -183,7 +183,7 @@ packages/contracts не зависит от Express или драйвера БД
 - P03.2 Создать runtime-контракты, OpenAPI для обычного HTTP и описание SSE; bigint/seq сериализуются строками. **Выполнено и проверено 2026-09-22; D01 canonicalization намеренно оставлена P04.**
 - P03.3 Реализовать PUT run и POST commands: idempotency, expectedControlRevision, terminal finish, один активный run на пользователя. **Выполнено и проверено 2026-09-22 на реальном PostgreSQL: row lock, concurrent create/commands/replay и rollback atomicity.**
 - P03.4 Реализовать GET run/list, управление shares и проверку активного membership. **Выполнено и проверено 2026-09-22 на реальном PostgreSQL: owner/shared ACL, keyset pagination, owner-only share upsert/revoke и active-membership boundary.**
-- P03.5 Выполнить автоfinish через внедряемые часы и повторяемую maintenance-задачу.
+- P03.5 Выполнить автоfinish через внедряемые часы и повторяемую maintenance-задачу. **Выполнено и проверено 2026-09-23: узкая SECURITY DEFINER capability, injected UTC clock, non-overlapping scheduler, bounded shutdown и конкурентные real-PostgreSQL проверки.**
 
 Проверки:
 - retry создания и команды возвращает согласованный результат;
@@ -443,4 +443,4 @@ packages/contracts не зависит от Express или драйвера БД
 
 P00–P02A.1 и полная DB schema/ACL-подчасть P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) проверены локально воспроизводимыми unit/build и real PostgreSQL/PostGIS integration-командами. D02 решён в границах доверенного tenant context. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
 
-P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. В P03 выполнены P03.1–P03.4: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read и owner-only share management. P03.5 auto-finish и P10 deletion/retention не начаты. Production identity/session provider остаётся P12.
+P02B намеренно не объявлен DONE: D01 canonical `PointInput`/retry comparison остаётся открытым для P04. P03.1–P03.5 выполнены: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read, owner-only share management и clock-driven maintenance auto-finish. P10 deletion/retention не начаты. Production identity/session provider остаётся P12.

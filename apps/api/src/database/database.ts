@@ -34,6 +34,21 @@ export function createDatabasePool(config: Environment): Pool {
   return pool;
 }
 
+export function createMaintenanceDatabasePool(config: Environment): Pool {
+  const pool = new Pool({
+    application_name: 'running-tracker-maintenance',
+    connectionString: config.MAINTENANCE_DATABASE_URL,
+    connectionTimeoutMillis: config.DB_CONNECTION_TIMEOUT_MS,
+    max: 1,
+  });
+
+  pool.on('error', (error) => {
+    console.error(`Unexpected idle maintenance PostgreSQL client error: ${error.message}`);
+  });
+
+  return pool;
+}
+
 export class DatabaseProbe {
   public constructor(
     private readonly pool: DatabasePool,

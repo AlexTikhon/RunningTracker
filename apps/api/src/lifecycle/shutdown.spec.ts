@@ -63,10 +63,12 @@ describe('shutdownInfrastructure', () => {
     servers.add(server);
     await listen(server);
     const end = vi.fn(() => Promise.resolve());
+    const stop = vi.fn();
 
     const result = await shutdownInfrastructure({
       clock: systemClock,
-      pool: { end },
+      pools: [{ end }],
+      runner: { stop },
       server,
       timeoutMs: 100,
     });
@@ -74,6 +76,7 @@ describe('shutdownInfrastructure', () => {
     expect(result).toEqual({ forced: false });
     expect(server.listening).toBe(false);
     expect(end).toHaveBeenCalledOnce();
+    expect(stop).toHaveBeenCalledOnce();
   });
 
   it('returns a forced result when pool shutdown exceeds the shared deadline', async () => {
@@ -81,10 +84,12 @@ describe('shutdownInfrastructure', () => {
     servers.add(server);
     const clock = createControlledClock();
     const end = vi.fn(() => new Promise<void>(() => undefined));
+    const stop = vi.fn();
 
     const resultPromise = shutdownInfrastructure({
       clock,
-      pool: { end },
+      pools: [{ end }],
+      runner: { stop },
       server,
       timeoutMs: 10,
     });
@@ -96,5 +101,33 @@ describe('shutdownInfrastructure', () => {
     const result = await resultPromise;
 
     expect(result).toEqual({ forced: true });
+  });
+
+  it('stops maintenance scheduling before closing both pools', async () => {
+    const server = createServer();
+    servers.add(server);
+    const events: string[] = [];
+    const runner = { stop: vi.fn(() => events.push('stop')) };
+    const runtimeEnd = vi.fn(() => {
+      events.push('runtime-end');
+      return Promise.resolve();
+    });
+    const maintenanceEnd = vi.fn(() => {
+      events.push('maintenance-end');
+      return Promise.resolve();
+    });
+
+    const result = await shutdownInfrastructure({
+      clock: systemClock,
+      pools: [{ end: runtimeEnd }, { end: maintenanceEnd }],
+      runner,
+      server,
+      timeoutMs: 100,
+    });
+
+    expect(result).toEqual({ forced: false });
+    expect(events[0]).toBe('stop');
+    expect(runtimeEnd).toHaveBeenCalledOnce();
+    expect(maintenanceEnd).toHaveBeenCalledOnce();
   });
 });

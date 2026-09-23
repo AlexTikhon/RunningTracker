@@ -38,6 +38,8 @@ describe('DatabaseProbe', () => {
       APP_ENV: 'test',
       DATABASE_URL:
         'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker_test',
+      MAINTENANCE_DATABASE_URL:
+        'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker_test',
       DB_CONNECTION_TIMEOUT_MS: 321,
       DB_POOL_MAX: 4,
       DB_QUERY_TIMEOUT_MS: 654,

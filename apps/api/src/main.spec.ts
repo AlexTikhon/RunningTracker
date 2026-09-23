@@ -16,6 +16,8 @@ describe('main startup ordering', () => {
             APP_ENV: 'production',
             DATABASE_URL:
               'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker',
+            MAINTENANCE_DATABASE_URL:
+              'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker',
             LOCAL_AUTH_ENABLED: 'true',
             LOCAL_AUTH_USER_IDS: '11111111-1111-4111-8111-111111111111',
           }),

@@ -9,6 +9,10 @@ export interface CloseablePool {
   end(): Promise<void>;
 }
 
+export interface StoppableRunner {
+  stop(): void;
+}
+
 async function waitWithinDeadline(
   operation: Promise<void>,
   deadline: number,
@@ -63,11 +67,13 @@ function closeServer(server: Server): Promise<void> {
 
 export async function shutdownInfrastructure(options: {
   clock: Clock;
-  pool: CloseablePool;
+  pools: readonly CloseablePool[];
+  runner: StoppableRunner;
   server: Server;
   timeoutMs: number;
 }): Promise<ShutdownResult> {
-  const { clock, pool, server, timeoutMs } = options;
+  const { clock, pools, runner, server, timeoutMs } = options;
+  runner.stop();
   const deadline = clock.monotonicNow() + timeoutMs;
   let forced = false;
 
@@ -76,7 +82,7 @@ export async function shutdownInfrastructure(options: {
     server.closeAllConnections();
   }
 
-  if (!(await waitWithinDeadline(pool.end(), deadline, clock))) {
+  if (!(await waitWithinDeadline(Promise.all(pools.map((pool) => pool.end())).then(() => undefined), deadline, clock))) {
     forced = true;
   }
 

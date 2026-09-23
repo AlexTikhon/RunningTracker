@@ -65,6 +65,7 @@ describe('HTTP session to runtime-role tenant boundary', () => {
       ALLOWED_ORIGINS: allowedOrigin,
       APP_ENV: 'test',
       DATABASE_URL: integration.runtime.connectionString,
+      MAINTENANCE_DATABASE_URL: integration.maintenance.connectionString,
       LOCAL_AUTH_ENABLED: 'true',
       LOCAL_AUTH_USER_IDS: [ids.userDual, ids.userOrgB, ids.userInactive].join(','),
       SESSION_COOKIE_SECURE: 'false',
