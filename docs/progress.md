@@ -12,7 +12,7 @@ Last updated: 2026-09-26.
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
-| P06 | TODO | Geometry and archive summaries |
+| P06 | IN PROGRESS | P06.1 edge evaluation, P06.2 revision-bound metrics/quality/chains, and P06.3 global metric simplification verified; publication remains |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
 | P09 | TODO | MVT, cache, and archive map |
@@ -575,3 +575,59 @@ Verification evidence on 2026-09-26:
 - no migration, public HTTP contract, server/database behavior, paid-provider call, Mapbox integration, commit, push, hosted CI, or real-browser/device GPS interaction occurred. Browser APIs and IndexedDB concurrency are covered with injected ports and `fake-indexeddb`, not claimed as physical-device QA.
 
 P05 is DONE. The next planned fragment is P06.1: one versioned edge-validity rule shared by summary processing and the future live-track path. SSE, archive maps, retention, and production identity remain unstarted.
+
+## P06.1 — versioned PostGIS track-edge evaluation
+
+Implemented:
+
+- `app_private.current_track_algorithm_version()` establishes `v1` as the single current version for future summary and live-track SQL;
+- `app_private.evaluate_track_edge(...)` applies the SDD thresholds to consecutive raw points using spheroidal PostGIS distance and `recorded_at`, returning accepted/rejected, one stable primary rejection reason, distance, and duration;
+- rejection precedence is seq gap, segment break, poor accuracy, nonpositive time delta, excessive time gap, then excessive speed. Unknown versions fail closed with SQLSTATE `22023`;
+- the pure evaluator is immutable, strict, parallel-safe, security-invoker, and available only to the runtime and maintenance roles. ADR-0012 records the shared-database-algorithm boundary.
+
+Verification evidence on 2026-09-26:
+
+- focused real-PostGIS integration passed accepted threshold boundaries, all six rejection paths and precedence (including zero/negative time), speed-spike filtering, antimeridian/high-latitude distance, unsupported versions, and runtime/maintenance/PUBLIC privilege checks;
+- full `npm run verify`, full real-role integration, migration preflight/application, and `git diff --check` passed;
+- no summary aggregation/publication, geometry construction/simplification, public HTTP contract, SSE/live-track implementation, frontend behavior, retention, commit, or push occurred.
+
+P06.1 is complete. P06.2 continues the same database boundary below; P06.3 simplification, P06.4 publication, and P06.5 job concurrency remain unstarted at this checkpoint.
+
+## P06.2 — revision-bound summary metrics and accepted chains
+
+Implemented:
+
+- `app_private.calculate_run_summary(...)` reads the exact `ingested_revision <= source_revision` point set and reuses the P06.1 edge evaluator for every neighboring seq-ordered pair;
+- distance and observed duration sum accepted edges only; quality output has the exact public `QualityStats` keys, with per-point poor-accuracy counting and stable primary-reason edge counters;
+- accepted-point count is the unique set of endpoints participating in accepted edges. Rejections split ordered chains, isolated points produce no fake line, and zero accepted edges return zero metrics plus `insufficientData=true`;
+- unsimplified accepted chains are returned as a nullable WGS84 `MultiLineString` for P06.3. The function is `STABLE SECURITY DEFINER`, executable only by maintenance, and does not broaden that role's direct table access. ADR-0013 records these semantics.
+
+Verification evidence on 2026-09-26:
+
+- focused P06.1/P06.2 real-PostGIS integration passed 2 files / 17 tests, including empty/isolated input, independently bounded equatorial distance, all quality categories, multiple chains, late lower-seq revision rebinding, delivery-time independence, invalid version/revision, and role privileges;
+- the disposable `running_tracker_test` database was rebuilt after the new migration changed during verification; migrations `0000`–`0009` then applied from empty history and a second migration run skipped every unchanged file;
+- full real-role/PostGIS integration passed 13 files / 140 tests;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 48 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- no `run_summaries` write/publication, geometry simplification or antimeridian normalization, organization/run locking, scheduler/concurrency, public HTTP contract, frontend behavior, commit, push, or hosted CI occurred.
+
+P06 remains IN PROGRESS. P06.3 continues the geometry pipeline below; P06.4 publication and P06.5 job concurrency remain unstarted at this checkpoint.
+
+## P06.3 — global metric display-geometry simplification
+
+Implemented:
+
+- `app_private.simplify_display_geometry(...)` is a pure version-bound capability executable only by the maintenance role; it accepts P06.2 accepted chains and returns only display geometry, leaving pre-simplification metrics and quality counters unchanged;
+- every chain receives a cumulative spheroidal-distance M measure and is partitioned into at-most-20-km pieces with the exact same boundary point in adjacent pieces;
+- each piece is simplified with a 5 metre Douglas–Peucker tolerance in its own WGS84 azimuthal-equidistant projection, preserving endpoints and material turns without using Web Mercator or degree-based tolerance;
+- longitudes are unwrapped continuously, split at every crossed `180 + 360k` boundary, and translated back into `[-180, 180]`. Greenwich remains continuous, while ordinary and polar antimeridian crossings become local components with coincident `180`/`-180` endpoints;
+- zero-length display pieces are omitted and an entirely display-degenerate result is `NULL`. Separate accepted chains and metric partition boundaries are not merged. ADR-0014 records these semantics.
+
+Verification evidence on 2026-09-26:
+
+- focused P06.3 real-PostGIS integration passed 1 file / 6 tests; combined P06.1–P06.3 integration passed 3 files / 23 tests;
+- migration `0010_simplify_display_geometry.sql` applied to the disposable test database after a clean preflight, and the second migration run skipped the unchanged full history;
+- full real-role/PostGIS integration passed 14 files / 146 tests;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 48 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- no `run_summaries` write/publication, summary-quality constraint change, organization/run locking, scheduler/concurrency, public HTTP contract, frontend behavior, commit, push, or hosted CI occurred.
+
+P06 remains IN PROGRESS. The next planned fragment is P06.4: revision-checked atomic summary publication with the organization archive revision. P06.5 job concurrency remains unstarted.

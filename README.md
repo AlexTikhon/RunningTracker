@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is complete: the API-backed runner screen, durable IndexedDB point/request buffer, retrying upload worker, fenced cross-tab writer lease, and shared Geolocation/simulator foreground capture path are implemented. Streaming, production identity, geometry processing, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is complete: the API-backed runner screen, durable IndexedDB point/request buffer, retrying upload worker, fenced cross-tab writer lease, and shared Geolocation/simulator foreground capture path are implemented. P06.1–P06.3 add the shared versioned PostGIS edge evaluator, revision-bound summary calculation, and globally normalized metric display simplification; atomic summary publication, streaming, production identity, and maps remain later stages.
 
 ## Prerequisites
 
@@ -91,6 +91,12 @@ npm run simulate:gps -- --list
 ```
 
 `dropped-response` marks an upload attempt as `drop-after-commit` and emits an exact retry. The P04.5 API hook is a separately injected test-only dependency: `createApp` rejects it unless `APP_ENV=test`, there is no environment/header/endpoint activation path, and the points route evaluates it only after PostgreSQL confirms `COMMIT` and before sending the HTTP result. The integration proof observes a transport-level `ECONNRESET`, verifies the committed rows and revision through SQL, retries the exact batch, reads raw history, and finishes the run.
+
+## Summary calculation
+
+`app_private.evaluate_track_edge(...)` is the single versioned PostGIS rule used by summary processing and future live-track reads. P06.2 builds on it with the maintenance-only `app_private.calculate_run_summary(...)` capability: points are fixed by `ingested_revision <= sourceRevision`, ordered by bigint `seq`, and reduced to accepted-edge distance/duration, exact `QualityStats`, and unsimplified accepted `MultiLineString` chains. Rejected edges terminate a chain, isolated points never become synthetic lines, and `received_at` does not affect continuity.
+
+P06.3 adds the separate pure `app_private.simplify_display_geometry(...)` capability. It partitions each accepted chain by cumulative geodesic length into at-most-20-km pieces with shared boundaries, simplifies each piece at 5 metres in a local azimuthal-equidistant projection, then unwraps and splits crossings at every antimeridian world boundary before returning WGS84. Endpoints and separate chains are preserved; display-degenerate zero-length pieces are omitted. Summary distance remains the pre-simplification accepted-edge total. Neither calculation function writes `run_summaries` or advances `archive_revision`; atomic publication remains P06.4.
 
 Stop the local database without deleting its named volume:
 

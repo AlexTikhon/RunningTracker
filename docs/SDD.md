@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P05 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P05 завершён; P06.1 versioned edge validation остаётся следующим фрагментом.
+Статус: согласованный проект архитектуры; P00–P05 и P06.1–P06.3 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06.1 зафиксировал единый versioned PostGIS edge evaluator, P06.2 — revision-bound metrics, quality counters и accepted chains, P06.3 — глобально нормализованное метрическое упрощение; P06.4 atomic publication остаётся следующим фрагментом.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -202,11 +202,13 @@ ACK означает commit PostgreSQL при fsync=on и synchronous_commit=on.
 - 0 < разница времени ≤ 10 с;
 - геодезической скорости ≤ 12 м/с.
 
-Пороги — параметры algorithm_version, не обещание точности GPS. Недопустимая точка/ребро не создаёт автоматического соединения через пропуск.
+Пороги — параметры algorithm_version, не обещание точности GPS. Недопустимая точка/ребро не создаёт автоматического соединения через пропуск. В P06.1 `app_private.current_track_algorithm_version()` возвращает `v1`, а единый `app_private.evaluate_track_edge(...)` выполняет PostGIS/geography-проверку для будущих summary и live-track запросов. Неизвестная версия отклоняется; primary rejection reason выбирается в порядке seq gap → segment break → poor accuracy → nonpositive recorded-time delta → excessive time gap → excessive speed (ADR-0012).
 
 distance_m — сумма ST_Distance(a.geom::geography,b.geom::geography) допустимых рёбер, до упрощения. observed_duration_s — сумма их временных интервалов; не называем её moving time. Высоту не учитываем. [ST_Distance](https://postgis.net/docs/ST_Distance.html)
 
-Сохраняем counts исходных точек, плохой точности и разрывов по причинам. При отсутствии допустимых рёбер дистанция 0 сопровождается insufficient_data.
+Сохраняем counts исходных точек, плохой точности и разрывов по причинам. `acceptedPointCount` считает уникальные концы хотя бы одного допустимого ребра; изолированные точки не становятся accepted. При отсутствии допустимых рёбер distance и observed duration равны 0, а `insufficientData=true`.
+
+В P06.2 `app_private.calculate_run_summary(org, run, sourceRevision, algorithmVersion)` читает только точки с `ingested_revision <= sourceRevision`, применяет единый evaluator к соседям в порядке seq и возвращает metrics, полный `QualityStats` и несжатые допустимые цепочки как nullable `MultiLineString`. Функция доступна maintenance-роли без прямого SELECT на таблицы; она не публикует summary и не меняет archive revision (ADR-0013).
 
 Из допустимых цепочек строим MultiLineString. Одиночные точки не становятся фиктивными линиями. Для архива — Douglas–Peucker с начальным допуском около 5 м в локальной метрической проекции:
 
@@ -216,6 +218,8 @@ distance_m — сумма ST_Distance(a.geom::geography,b.geom::geography) до�
 - нормализация/разделение при пересечении антимеридиана.
 
 Это инженерное приближение для отображения, не строгая глобальная метрическая гарантия. Web Mercator не используется для точной дистанции. ST_Simplify измеряет tolerance в единицах входной SRS. [ST_Simplify](https://postgis.net/docs/ST_Simplify.html), [ST_Transform](https://postgis.net/docs/ST_Transform.html)
+
+В P06.3 `app_private.simplify_display_geometry(acceptedChains, algorithmVersion)` реализует этот pipeline как отдельную pure maintenance capability. Cumulative geodesic M-measure делит каждую цепочку на части не длиннее 20 км с общей граничной точкой; каждая часть упрощается с tolerance 5 м в локальной azimuthal-equidistant проекции. После обратного преобразования долготы разворачиваются в непрерывный ряд, пересечения каждой границы `180 + 360k` разделяются, а компоненты переводятся обратно в диапазон `[-180, 180]`. Нулевые display-компоненты отбрасываются; metrics из P06.2 не пересчитываются по упрощённой геометрии (ADR-0014).
 
 Полный пересчёт завершённых run запускается раз в минуту:
 
