@@ -2,7 +2,15 @@ import { uuidSchema, type RunCommandType, type SessionResponse } from '@running-
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
-import { createRun, loadSession, RunnerApiError, sendRunCommand } from './runner-api.js';
+import { PointUploadWorker } from './point-upload-worker.js';
+import {
+  createRun,
+  loadSession,
+  readRun,
+  RunnerApiError,
+  sendRunCommand,
+  uploadPointBatch,
+} from './runner-api.js';
 import { getBrowserRunnerStorage } from './runner-storage.js';
 import {
   availableCommands,
@@ -57,11 +65,13 @@ export function App() {
   const [now, setNow] = useState(() => Date.now());
   const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
   const restoredUserId = useRef<string | null>(null);
+  const uploadWorker = useRef<PointUploadWorker | null>(null);
   const [runner, dispatch] = useReducer(
     runnerReducer,
     typeof navigator === 'undefined' || navigator.onLine !== false ? 'online' : 'offline',
     createInitialRunnerState,
   );
+  const normalizedOrgId = orgId.trim().toLowerCase();
 
   const refreshHealth = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -142,6 +152,49 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (
+      session.status !== 'ready'
+      || storage.status !== 'ready'
+      || runner.run === null
+      || !uuidSchema.safeParse(normalizedOrgId).success
+    ) {
+      return undefined;
+    }
+    const runnerStorage = getBrowserRunnerStorage();
+    const scope = {
+      orgId: normalizedOrgId,
+      runId: runner.run.runId,
+      userId: session.session.identity.userId,
+    };
+    const worker = new PointUploadWorker({
+      onAcknowledged: (dataRevision) => {
+        dispatch({ dataRevision, runId: scope.runId, type: 'point-batch-acknowledged' });
+      },
+      onPermanentError: async () => {
+        const authoritativeRun = await readRun(scope.orgId, scope.runId);
+        await runnerStorage.saveRunSnapshot(scope.userId, scope.orgId, authoritativeRun);
+        dispatch({ run: authoritativeRun, type: 'run-reconciled' });
+      },
+      onState: (nextUpload) => dispatch({ type: 'upload-changed', upload: nextUpload }),
+      scope,
+      send: (points) => uploadPointBatch({ orgId: scope.orgId, points, runId: scope.runId }, session.session.csrf),
+      storage: runnerStorage,
+    });
+    uploadWorker.current = worker;
+    worker.start(runner.connectivity === 'online');
+    return () => {
+      worker.stop();
+      if (uploadWorker.current === worker) {
+        uploadWorker.current = null;
+      }
+    };
+  }, [normalizedOrgId, runner.run?.runId, session, storage.status]);
+
+  useEffect(() => {
+    uploadWorker.current?.setOnline(runner.connectivity === 'online');
+  }, [runner.connectivity]);
+
+  useEffect(() => {
     if (runner.run === null || runner.run.status === 'finished') {
       return undefined;
     }
@@ -184,13 +237,30 @@ export function App() {
         );
         dispatch({ request, result, type: 'command-succeeded' });
       } catch (error) {
+        if (
+          request.kind === 'command'
+          && error instanceof RunnerApiError
+          && error.code === 'CONTROL_REVISION_CONFLICT'
+        ) {
+          try {
+            const authoritativeRun = await readRun(request.orgId, request.runId);
+            await getBrowserRunnerStorage().acknowledgeReconciledRequest(
+              session.session.identity.userId,
+              request,
+              authoritativeRun,
+            );
+            dispatch({ request, run: authoritativeRun, type: 'request-reconciled' });
+            return;
+          } catch {
+            // Preserve the original command failure when reconciliation is unavailable.
+          }
+        }
         dispatch({ message: errorMessage(error), request, type: 'request-failed' });
       }
     },
     [runner.connectivity, runner.run, session, storage.status],
   );
 
-  const normalizedOrgId = orgId.trim().toLowerCase();
   const validOrgId = uuidSchema.safeParse(normalizedOrgId).success;
   const phase = runnerPhase(runner);
   const busy = runner.pendingRequest !== null;
@@ -256,11 +326,11 @@ export function App() {
 
       <section className="runner-shell" aria-labelledby="runner-title">
         <div className="runner-copy">
-          <p className="eyebrow">Runner console · P05.2</p>
+          <p className="eyebrow">Runner console · P05.3</p>
           <h1 id="runner-title">Your run,<br />under control.</h1>
           <p className="lede">
-            Lifecycle requests survive reloads in IndexedDB and remain queued until the server confirms
-            them. GPS capture and automatic point upload join this screen in the next P05 slices.
+            Lifecycle requests and points survive reloads in IndexedDB. Buffered points upload in bounded,
+            acknowledged batches with retry backoff; GPS capture joins this screen in P05.5.
           </p>
         </div>
 
@@ -308,7 +378,12 @@ export function App() {
                 </button>
               )}
               {runner.run.status === 'finished' && (
-                <button className="primary-action" onClick={() => void clearFinishedRun()} type="button">
+                <button
+                  className="primary-action"
+                  disabled={runner.upload.pendingCount > 0}
+                  onClick={() => void clearFinishedRun()}
+                  type="button"
+                >
                   New run
                 </button>
               )}
@@ -351,7 +426,7 @@ export function App() {
           value={runner.connectivity}
         />
         <StateCard
-          detail={runner.upload.pendingCount === 0 ? 'No buffered points' : `${runner.upload.pendingCount} pending`}
+          detail={runner.upload.message ?? (runner.upload.pendingCount === 0 ? 'No buffered points' : `${runner.upload.pendingCount} pending`)}
           label="Upload"
           value={runner.upload.status}
         />

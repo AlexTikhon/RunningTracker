@@ -1,8 +1,11 @@
 import {
   apiErrorResponseSchema,
+  ingestPointsResponseSchema,
   runCommandResponseSchema,
   runViewSchema,
   sessionResponseSchema,
+  type IngestPointsResponse,
+  type PointInput,
   type RunCommandResponse,
   type RunCommandType,
   type RunView,
@@ -28,16 +31,36 @@ export interface RunCommandInput {
   type: RunCommandType;
 }
 
+export interface PointBatchInput {
+  orgId: string;
+  points: PointInput[];
+  runId: string;
+}
+
 export class RunnerApiError extends Error {
   public constructor(
     message: string,
     public readonly status: number,
     public readonly code: string,
     public readonly requestId: string | null,
+    public readonly retryAfterMs: number | null = null,
   ) {
     super(message);
     this.name = 'RunnerApiError';
   }
+}
+
+function retryAfterMs(response: Response): number | null {
+  const value = response.headers.get('retry-after');
+  if (value === null) {
+    return null;
+  }
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds * 1_000);
+  }
+  const deadline = Date.parse(value);
+  return Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : null;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -61,6 +84,7 @@ async function requireSuccess(response: Response): Promise<unknown> {
       response.status,
       parsed.data.error.code,
       parsed.data.error.requestId,
+      retryAfterMs(response),
     );
   }
 
@@ -69,6 +93,7 @@ async function requireSuccess(response: Response): Promise<unknown> {
     response.status,
     'HTTP_ERROR',
     null,
+    retryAfterMs(response),
   );
 }
 
@@ -102,6 +127,30 @@ export async function createRun(
     },
   );
   return runViewSchema.parse(await requireSuccess(response));
+}
+
+export async function readRun(orgId: string, runId: string): Promise<RunView> {
+  const response = await fetch(
+    `/api/orgs/${encodeURIComponent(orgId)}/runs/${encodeURIComponent(runId)}`,
+    { credentials: 'same-origin' },
+  );
+  return runViewSchema.parse(await requireSuccess(response));
+}
+
+export async function uploadPointBatch(
+  input: PointBatchInput,
+  csrf: CsrfCredentials,
+): Promise<IngestPointsResponse> {
+  const response = await fetch(
+    `/api/orgs/${encodeURIComponent(input.orgId)}/runs/${encodeURIComponent(input.runId)}/points`,
+    {
+      body: JSON.stringify({ points: input.points }),
+      credentials: 'same-origin',
+      headers: mutationHeaders(csrf),
+      method: 'POST',
+    },
+  );
+  return ingestPointsResponseSchema.parse(await requireSuccess(response));
 }
 
 export async function sendRunCommand(

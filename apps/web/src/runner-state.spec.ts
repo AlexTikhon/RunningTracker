@@ -97,6 +97,28 @@ describe('runnerReducer', () => {
     expect(runnerPhase(offline)).toBe('recording');
   });
 
+  it('advances acknowledged data revisions monotonically', () => {
+    const state = startRecording();
+    const advanced = runnerReducer(state, {
+      dataRevision: '3',
+      runId: recordingRun.runId,
+      type: 'point-batch-acknowledged',
+    });
+    const late = runnerReducer(advanced, {
+      dataRevision: '2',
+      runId: recordingRun.runId,
+      type: 'point-batch-acknowledged',
+    });
+    const staleReconciliation = runnerReducer(late, {
+      run: recordingRun,
+      type: 'run-reconciled',
+    });
+
+    expect(advanced.run?.dataRevision).toBe('3');
+    expect(late.run?.dataRevision).toBe('3');
+    expect(staleReconciliation.run?.dataRevision).toBe('3');
+  });
+
   it('restores a confirmed run, pending point count, and exact unacknowledged request', () => {
     const command: CommandRequest = {
       commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
@@ -129,6 +151,34 @@ describe('runnerReducer', () => {
     });
 
     expect(stale).toBe(state);
+  });
+
+  it('settles a stale command with an authoritative reconciled run', () => {
+    const command: CommandRequest = {
+      commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      expectedControlRevision: '0',
+      kind: 'command',
+      orgId: startRequest.orgId,
+      runId: startRequest.runId,
+      type: 'finish',
+    };
+    const pending = runnerReducer(startRecording(), { request: command, type: 'request-started' });
+    const authoritative = {
+      ...recordingRun,
+      dataRevision: '1',
+      finishedAt: '2026-09-26T09:00:00.000Z',
+      status: 'finished' as const,
+    };
+
+    const reconciled = runnerReducer(pending, {
+      request: command,
+      run: authoritative,
+      type: 'request-reconciled',
+    });
+
+    expect(reconciled.pendingRequest).toBeNull();
+    expect(reconciled.run).toEqual(authoritative);
+    expect(runnerPhase(reconciled)).toBe('finished');
   });
 
   it('exposes only valid lifecycle commands', () => {

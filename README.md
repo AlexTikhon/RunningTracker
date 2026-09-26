@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is in progress: the API-backed runner control screen, explicit state model, and durable IndexedDB point/request buffer are implemented. GPS capture, automatic upload, cross-tab ownership, streaming, production identity, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is in progress: the API-backed runner control screen, explicit state model, durable IndexedDB point/request buffer, and bounded retrying upload worker are implemented. GPS capture, cross-tab ownership, streaming, production identity, and maps remain later stages.
 
 ## Prerequisites
 
@@ -51,7 +51,9 @@ After a local session exists, the web app discovers it through same-origin `GET 
 
 The screen exposes recording, network, upload, and server/error state separately. Before a start or lifecycle mutation reaches the network, P05.2 stores its exact idempotency identity and payload in IndexedDB under the authenticated user. It removes that request only in the local transaction that records the server-confirmed run snapshot. Offline requests and unknown transport outcomes therefore survive reload and can use “Retry same request” after reconnection.
 
-The same user/organization/run-scoped database atomically allocates a positive bigint `seq` and stores the canonical point. IndexedDB uses a zero-padded sequence index so bounded reads retain numeric bigint order without converting `seq` to JavaScript `number`; deletion accepts only the explicit sequences acknowledged for a sent batch. Point capture, the automatic bounded upload/backoff worker, and cross-tab writer ownership remain P05.3–P05.5.
+The same user/organization/run-scoped database atomically allocates a positive bigint `seq` and stores the canonical point. IndexedDB uses a zero-padded sequence index so bounded reads retain numeric bigint order without converting `seq` to JavaScript `number`.
+
+P05.3 uploads at most 100 ordered points at a time and deletes only the exact sequence set after a validated acknowledgement accounts for every sent point. Network/5xx/408/425/429 outcomes retain the batch and use capped exponential full-jitter backoff; `Retry-After` is honoured for rate limiting. Other 4xx responses and incomplete success acknowledgements stop that run's worker, preserve its points, and trigger a best-effort authoritative run read. A stale lifecycle command is cleared only when a `CONTROL_REVISION_CONFLICT` can be reconciled to a successfully read and durably stored server run. Cross-tab writer ownership and point capture remain P05.4–P05.5.
 
 ## Shared API contracts
 

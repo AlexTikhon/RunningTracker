@@ -1,6 +1,7 @@
 import {
   createRunRequestSchema,
   pointInputSchema,
+  revisionSchema,
   runCommandRequestSchema,
   runViewSchema,
   uuidSchema,
@@ -188,6 +189,17 @@ function compareRequests(left: RequestRecord, right: RequestRecord): number {
   return left.enqueuedAt.localeCompare(right.enqueuedAt) || left.requestKey.localeCompare(right.requestKey);
 }
 
+function latestRunSnapshot(current: RunView | null | undefined, incoming: RunView): RunView {
+  if (current === null || current === undefined) {
+    return incoming;
+  }
+  const dataOrder = BigInt(incoming.dataRevision) - BigInt(current.dataRevision);
+  if (dataOrder !== 0n) {
+    return dataOrder > 0n ? incoming : current;
+  }
+  return BigInt(incoming.controlRevision) >= BigInt(current.controlRevision) ? incoming : current;
+}
+
 export class IndexedDbRunnerStorage {
   readonly #databaseName: string;
   readonly #factory: IDBFactory;
@@ -268,18 +280,52 @@ export class IndexedDbRunnerStorage {
     return records.map((record) => pointInputSchema.parse(record.point));
   }
 
-  public async acknowledgePointBatch(scopeInput: RunScope, sequences: readonly string[]): Promise<void> {
+  public async acknowledgePointBatch(
+    scopeInput: RunScope,
+    sequences: readonly string[],
+    dataRevisionInput?: string,
+  ): Promise<void> {
     const scope = validateScope(scopeInput);
     const canonical = sequences.map((seq) => pointInputSchema.shape.seq.parse(seq));
+    const dataRevision = dataRevisionInput === undefined
+      ? undefined
+      : revisionSchema.parse(dataRevisionInput);
     const database = await this.#open();
-    const transaction = database.transaction(STORES.points, 'readwrite');
+    const transaction = database.transaction([STORES.points, STORES.runs], 'readwrite');
     const done = transactionDone(transaction);
     const store = transaction.objectStore(STORES.points);
     const prefix = runStorageKey(scope);
     for (const seq of new Set(canonical)) {
       store.delete(`${prefix}:${seqKey(seq)}`);
     }
+    if (dataRevision !== undefined) {
+      const runStore = transaction.objectStore(STORES.runs);
+      const record = (await requestResult(runStore.get(prefix))) as RunRecord | undefined;
+      if (
+        record?.run !== null
+        && record?.run !== undefined
+        && BigInt(dataRevision) > BigInt(record.run.dataRevision)
+      ) {
+        runStore.put({ ...record, run: { ...record.run, dataRevision } });
+      }
+    }
     await done;
+  }
+
+  public async countPoints(scopeInput: RunScope): Promise<number> {
+    const scope = validateScope(scopeInput);
+    const database = await this.#open();
+    const transaction = database.transaction(STORES.points, 'readonly');
+    const done = transactionDone(transaction);
+    const range = this.#keyRange.bound(
+      [scope.userId, scope.orgId, scope.runId, ''],
+      [scope.userId, scope.orgId, scope.runId, '\uffff'],
+    );
+    const count = await requestResult(
+      transaction.objectStore(STORES.points).index('by-run-seq').count(range),
+    );
+    await done;
+    return count;
   }
 
   public async queueRequest(
@@ -376,6 +422,43 @@ export class IndexedDbRunnerStorage {
     await done;
   }
 
+  public async acknowledgeReconciledRequest(
+    userIdInput: string,
+    requestInput: CommandRequest,
+    runInput: RunView,
+  ): Promise<void> {
+    const userId = uuidSchema.parse(userIdInput);
+    const parsedRequest = parseRunnerRequest(requestInput);
+    if (parsedRequest.kind !== 'command') {
+      throw new Error('Request reconciliation requires a command request');
+    }
+    const run = runViewSchema.parse(runInput);
+    if (run.runId !== parsedRequest.runId) {
+      throw new Error('The reconciled run does not match the queued request');
+    }
+
+    const database = await this.#open();
+    const transaction = database.transaction(
+      [STORES.profiles, STORES.requests, STORES.runs],
+      'readwrite',
+    );
+    const done = transactionDone(transaction);
+    transaction.objectStore(STORES.requests).delete(requestStorageKey(userId, parsedRequest));
+    await this.#putRunSnapshot(transaction, userId, parsedRequest.orgId, run);
+    await done;
+  }
+
+  public async saveRunSnapshot(userIdInput: string, orgIdInput: string, runInput: RunView): Promise<void> {
+    const userId = uuidSchema.parse(userIdInput);
+    const orgId = uuidSchema.parse(orgIdInput);
+    const run = runViewSchema.parse(runInput);
+    const database = await this.#open();
+    const transaction = database.transaction([STORES.profiles, STORES.runs], 'readwrite');
+    const done = transactionDone(transaction);
+    await this.#putRunSnapshot(transaction, userId, orgId, run);
+    await done;
+  }
+
   public async loadRecovery(userIdInput: string): Promise<RunnerRecovery> {
     const userId = uuidSchema.parse(userIdInput);
     const database = await this.#open();
@@ -462,7 +545,7 @@ export class IndexedDbRunnerStorage {
     const record: RunRecord = {
       nextSeq: existing?.nextSeq ?? '1',
       orgId: scope.orgId,
-      run,
+      run: latestRunSnapshot(existing?.run, run),
       runId: scope.runId,
       storageKey,
       userId: scope.userId,

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createRun, loadSession, sendRunCommand } from './runner-api.js';
+import { createRun, loadSession, readRun, sendRunCommand, uploadPointBatch } from './runner-api.js';
 import type { RunnerApiError } from './runner-api.js';
 
 const csrf = { headerName: 'x-csrf-token' as const, token: 'a'.repeat(43) };
@@ -73,6 +73,70 @@ describe('runner API', () => {
         csrf,
       ),
     ).resolves.toEqual(result);
+  });
+
+  it('reads the authoritative run and uploads the exact bounded point payload', async () => {
+    const run = {
+      controlRevision: '1',
+      dataRevision: '2',
+      finishedAt: null,
+      rawState: 'available',
+      runId,
+      startedAt: '2026-09-26T08:00:00.000Z',
+      status: 'paused',
+      summary: null,
+    };
+    const point = {
+      accuracyM: 4.5,
+      latitude: 52.2297,
+      longitude: 21.0122,
+      recordedAt: run.startedAt,
+      segmentId: 0,
+      seq: '1',
+    };
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(run)))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        dataRevision: '3',
+        duplicateCount: 0,
+        insertedCount: 1,
+      })));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(readRun(orgId, runId)).resolves.toEqual(run);
+    await expect(uploadPointBatch({ orgId, points: [point], runId }, csrf)).resolves.toEqual({
+      dataRevision: '3',
+      duplicateCount: 0,
+      insertedCount: 1,
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(1, `/api/orgs/${orgId}/runs/${runId}`, {
+      credentials: 'same-origin',
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, `/api/orgs/${orgId}/runs/${runId}/points`, {
+      body: JSON.stringify({ points: [point] }),
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token },
+      method: 'POST',
+    });
+  });
+
+  it('exposes Retry-After for rate-limit backoff', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Slow down',
+          requestId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        },
+      }), { headers: { 'retry-after': '4' }, status: 429 })),
+    );
+
+    await expect(readRun(orgId, runId)).rejects.toEqual(expect.objectContaining({
+      code: 'RATE_LIMITED',
+      retryAfterMs: 4_000,
+      status: 429,
+    }));
   });
 
   it('preserves structured API failures for actionable UI errors', async () => {

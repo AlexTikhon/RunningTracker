@@ -11,7 +11,7 @@ Last updated: 2026-09-26.
 | P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
-| P05 | IN PROGRESS | P05.1 controls/state and P05.2 durable IndexedDB buffer complete; upload worker, writer ownership, and capture remain |
+| P05 | IN PROGRESS | P05.1 controls/state, P05.2 durable IndexedDB buffer, and P05.3 upload/reconciliation complete; writer ownership and capture remain |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
@@ -513,3 +513,23 @@ Verification evidence on 2026-09-26:
 - no migration, public HTTP contract, database write, upload worker, geolocation source, cross-tab writer lease, commit, push, paid-provider call, hosted CI, or real-browser interaction test occurred. IndexedDB behavior is verified through the standards-compatible test implementation, not claimed as browser/device QA.
 
 P05.2 is DONE. The next planned fragment is P05.3: bounded point upload batches, retry backoff/jitter, deletion of only server-acknowledged batches, and stop/reconciliation behavior for permanent errors. P05.4–P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.
+
+## P05.3 — bounded point upload and reconciliation
+
+Implemented:
+
+- one foreground worker per restored/active run reads ordered IndexedDB points in sequential batches of at most 100 and never mutates the in-flight payload;
+- a response deletes only the explicit sent sequences after the shared success contract is valid and inserted plus duplicate counts account for the complete batch. The returned `dataRevision` is stored atomically with deletion and cannot regress when a late concurrent-tab acknowledgement arrives;
+- transport/storage failures and HTTP 5xx/408/425/429 retain the batch and retry with capped exponential full jitter. `Retry-After` is parsed and honoured within a bounded five-minute scheduling ceiling; going offline cancels scheduled dispatch and reconnect wakes the durable buffer;
+- other HTTP 4xx results and incomplete success acknowledgements stop automatic upload for that run, retain every unacknowledged point, expose the permanent error, and attempt an authenticated run read to refresh the durable/UI snapshot;
+- `CONTROL_REVISION_CONFLICT` on a queued lifecycle command now performs terminal reconciliation: the command is removed only in the same IndexedDB transaction that stores a successfully read authoritative run. This covers an offline finish losing to server auto-finish without dropping still-uploadable points;
+- a finished run cannot be cleared while it still has buffered points. The P05.3 decisions and deferred ownership/background boundaries are recorded in ADR-0009.
+
+Verification evidence on 2026-09-26:
+
+- focused web tests passed 6 files / 32 tests, including deterministic 100/100/5 batching, exact ACK deletion, response-loss retry of an unchanged batch, jitter and `Retry-After`, offline/reconnect, permanent stop, malformed acknowledgement rejection, monotonic local revisions, and atomic command reconciliation;
+- focused web lint, strict typecheck, and production Vite build passed;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 48 API unit tests, 32 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- no migration, public HTTP contract, runtime dependency, database write, geolocation source, cross-tab writer lease, commit, push, paid-provider call, hosted CI, or real-browser interaction test occurred. Browser lifecycle/IndexedDB behavior is covered with reducer/API tests and `fake-indexeddb`, not claimed as device QA.
+
+P05.3 is DONE. The next planned fragment is P05.4: a single writer owner across tabs with an explicit lease/lock and conflict UX. P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.

@@ -86,6 +86,24 @@ describe('IndexedDbRunnerStorage', () => {
     ]);
   });
 
+  it('records the acknowledged data revision without allowing a late tab to regress it', async () => {
+    const storage = createStorage(new IDBFactory(), crypto.randomUUID());
+    await storage.queueRequest(userId, startRequest, null);
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    await storage.appendPoint(scope, measurement);
+    await storage.appendPoint(scope, { ...measurement, recordedAt: '2026-09-26T08:00:02.000Z' });
+
+    await storage.acknowledgePointBatch(scope, ['1'], '4');
+    await storage.acknowledgePointBatch(scope, ['1'], '3');
+    await storage.saveRunSnapshot(userId, orgId, recordingRun);
+
+    await expect(storage.countPoints(scope)).resolves.toBe(1);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
+      pendingPointCount: 1,
+      run: { dataRevision: '4' },
+    });
+  });
+
   it('keeps a start request through reload until its server acknowledgement is recorded', async () => {
     const factory = new IDBFactory();
     const databaseName = crypto.randomUUID();
@@ -135,6 +153,34 @@ describe('IndexedDbRunnerStorage', () => {
     await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
       request: null,
       run: { controlRevision: '1', dataRevision: '1', status: 'paused' },
+    });
+  });
+
+  it('atomically clears a permanently stale command after authoritative run reconciliation', async () => {
+    const storage = createStorage(new IDBFactory(), crypto.randomUUID());
+    await storage.queueRequest(userId, startRequest, null);
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    const command: CommandRequest = {
+      commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      expectedControlRevision: '0',
+      kind: 'command',
+      orgId,
+      runId,
+      type: 'finish',
+    };
+    await storage.queueRequest(userId, command, recordingRun);
+    const automaticallyFinished = {
+      ...recordingRun,
+      dataRevision: '1',
+      finishedAt: '2026-09-26T09:00:00.000Z',
+      status: 'finished' as const,
+    };
+
+    await storage.acknowledgeReconciledRequest(userId, command, automaticallyFinished);
+
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
+      request: null,
+      run: automaticallyFinished,
     });
   });
 
