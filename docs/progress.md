@@ -11,7 +11,7 @@ Last updated: 2026-09-26.
 | P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
-| P05 | TODO | Browser recording and local buffer |
+| P05 | IN PROGRESS | P05.1 API-backed runner controls/state complete; durable local buffer and capture remain |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
@@ -469,4 +469,25 @@ Verification evidence on 2026-09-26:
 - `npm run db:bootstrap:test` succeeded, `npm run db:migrate:test` checksum-verified and skipped unchanged migrations `0000`–`0007`, and full integration passed 11 files / 123 tests under the real owner/runtime/maintenance roles;
 - no migration, third-party dependency, public API contract, externally activatable fault switch, commit, push, main/production database write, paid-provider call, or hosted CI run occurred. The Compose service was stopped afterward with its named database volume preserved; `git diff --check` is part of the final handoff check.
 
-P04 is DONE. The smallest next planned fragment is P05.1 runner recording UI/state; P05.2–P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.
+P04 is DONE. At that delivery boundary the smallest next planned fragment was P05.1 runner recording UI/state; P05.2–P05.5, SSE, geometry, archive maps, retention, and production identity remained unstarted.
+
+## P05.1 — runner recording UI and state
+
+Implemented:
+
+- the web application now discovers the same-origin server session and exposes organization-scoped start, pause, resume, and finish controls backed by the existing strict shared contracts;
+- the reducer keeps server-confirmed run state separate from pending control requests, browser connectivity, upload status, and actionable errors. Invalid lifecycle transitions and concurrent control requests are rejected by the state model;
+- lifecycle commands use the current `controlRevision`; an unconfirmed mutation retains the exact run ID or command ID/payload so user-triggered retry preserves backend idempotency after an unknown transport outcome;
+- online/offline events update independently of the confirmed run status. Server mutations are disabled offline and the UI states explicitly that durable offline command queueing starts in P05.2;
+- the responsive runner dashboard shows elapsed foreground session time, run/revision identity, recording/network/upload/server status, structured API error references, session expiry, and API/database health;
+- the web workspace now consumes `@running-tracker/contracts` directly and builds it before web test/typecheck/build, preventing the UI from drifting from server response schemas.
+
+Verification evidence on 2026-09-26:
+
+- focused web tests passed 4 files / 13 tests, covering initial UI rendering, API request/CSRF shapes, structured failures, lifecycle transitions, stale completions, connectivity independence, retry identity, and finished-run reset;
+- focused web lint, strict typecheck, and production Vite build passed;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 48 API unit tests, 13 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- browser screenshot verification was unavailable because the computer-use environment exposed no browser surface; no visual/browser-interaction result is claimed;
+- no migration, external dependency, public API change, IndexedDB storage, upload worker, geolocation, writer lease, push, paid-provider call, or hosted CI run occurred.
+
+P05.1 is DONE. The next planned fragment is P05.2 atomic IndexedDB persistence for `seq` plus each point and durable storage of commands until acknowledgement. P05.3–P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.

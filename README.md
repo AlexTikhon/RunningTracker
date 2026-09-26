@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. Browser capture, streaming, production identity, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is in progress: the API-backed runner control screen and its explicit recording/network/upload/error state model are implemented. Durable browser buffering, GPS capture, streaming, production identity, and maps remain later stages.
 
 ## Prerequisites
 
@@ -44,6 +44,12 @@ The bootstrap flow is:
 4. `GET /api/session` refreshes identity/expiry/CSRF data; `DELETE /api/session` revokes the server record and clears the cookie.
 
 `SESSION_COOKIE_SECURE=false` is an explicit local HTTP exception allowed only in development/test. Deployed HTTPS uses `Secure`. The local store is process-memory-only, bounded by `SESSION_STORE_MAX_ENTRIES`, and loses all sessions on restart; the production identity/provider integration remains P12.
+
+## Runner control screen
+
+After a local session exists, the web app discovers it through same-origin `GET /api/session`. Enter an organization UUID to create a run, then use the revision-aware pause, resume, and finish controls. Each mutation carries the session CSRF token, validates the shared response contract, and disables concurrent controls until the server confirms the result.
+
+The screen exposes recording, network, upload, and server/error state separately. A failed mutation retains its exact run/command ID and expected revision, so “Retry same request” preserves backend idempotency after an unknown transport outcome. P05.1 intentionally keeps controls unavailable while offline: IndexedDB persistence, offline command queueing, point capture/upload, reload recovery, and cross-tab ownership are P05.2–P05.5.
 
 ## Shared API contracts
 
