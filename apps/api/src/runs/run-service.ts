@@ -1,15 +1,20 @@
 import {
   ingestPointsResponseSchema,
+  pointsResponseSchema,
+  revisionSchema,
   runListResponseSchema,
   runCommandResponseSchema,
   runShareResponseSchema,
   runViewSchema,
   timestampSchema,
   uuidSchema,
+  seqSchema,
   type CreateRunRequest,
   type IngestPointsRequest,
   type IngestPointsResponse,
   type PointInput,
+  type PointsQuery,
+  type PointsResponse,
   type RunListQuery,
   type RunListResponse,
   type RunCommandRequest,
@@ -68,6 +73,24 @@ interface StoredPointRow {
   seq: string;
 }
 
+interface RawPointCursor {
+  dataRevision: string;
+  lastSeq: string;
+  orgId: string;
+  runId: string;
+}
+
+interface RawPointPageRow {
+  accuracy_m: number | null;
+  data_revision: string;
+  latitude: number | null;
+  longitude: number | null;
+  raw_state: 'available' | 'purging' | 'purged';
+  recorded_at: string | null;
+  segment_id: number | null;
+  seq: string | null;
+}
+
 interface StoredCommandRow {
   payload_matches: boolean;
   response: unknown;
@@ -81,6 +104,13 @@ interface PostgresErrorLike {
 const runListCursorSchema = z.strictObject({
   runId: uuidSchema,
   startedAt: timestampSchema,
+});
+
+const rawPointCursorSchema = z.strictObject({
+  dataRevision: revisionSchema,
+  lastSeq: seqSchema,
+  orgId: uuidSchema,
+  runId: uuidSchema,
 });
 
 export const POINTS_PER_RUN_MAX = 50_000;
@@ -214,6 +244,34 @@ function decodeRunListCursor(cursor: string): RunListCursor {
   }
 }
 
+function encodeRawPointCursor(cursor: RawPointCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeRawPointCursor(cursor: string, orgId: string, runId: string): RawPointCursor {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/u.test(cursor)) {
+      throw new Error('The cursor is not base64url encoded');
+    }
+    const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    const parsed = rawPointCursorSchema.safeParse(decoded);
+    if (!parsed.success) {
+      throw new Error('The cursor payload is invalid');
+    }
+    const canonical = {
+      ...parsed.data,
+      orgId: parsed.data.orgId.toLowerCase(),
+      runId: parsed.data.runId.toLowerCase(),
+    };
+    if (canonical.orgId !== orgId || canonical.runId !== runId) {
+      throw new Error('The cursor belongs to a different raw-point history');
+    }
+    return canonical;
+  } catch {
+    throw new ApiError(400, 'INVALID_CURSOR', 'The point-history cursor is invalid');
+  }
+}
+
 async function isTombstoned(
   client: PoolClient,
   orgId: string,
@@ -318,6 +376,98 @@ export async function readRun(
     return throwMissingRun(client, orgId, runId);
   }
   return mapRunView(row);
+}
+
+export async function readRunPoints(
+  client: PoolClient,
+  orgId: string,
+  runId: string,
+  query: PointsQuery,
+): Promise<PointsResponse> {
+  const cursor = query.cursor ? decodeRawPointCursor(query.cursor, orgId, runId) : undefined;
+  const limit = query.limit ?? 1_000;
+  const result = await client.query<RawPointPageRow>(
+    `SELECT run.data_revision,
+            run.raw_state,
+            point.seq,
+            point.segment_id,
+            point.recorded_at,
+            point.longitude,
+            point.latitude,
+            point.accuracy_m
+     FROM runs AS run
+     LEFT JOIN LATERAL (
+       SELECT seq,
+              segment_id,
+              to_char(
+                recorded_at AT TIME ZONE 'UTC',
+                'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+              ) AS recorded_at,
+              ST_X(geom) AS longitude,
+              ST_Y(geom) AS latitude,
+              accuracy_m
+       FROM run_points
+       WHERE org_id = run.org_id
+         AND run_id = run.id
+         AND run.raw_state = 'available'
+         AND ($3::bigint IS NULL OR run.data_revision = $3::bigint)
+         AND ($4::bigint IS NULL OR seq > $4::bigint)
+       ORDER BY seq
+       LIMIT $5
+     ) AS point ON true
+     WHERE run.org_id = $1
+       AND run.id = $2
+       AND app_private.can_read_run_history(run.org_id, run.id)
+     ORDER BY point.seq NULLS LAST`,
+    [orgId, runId, cursor?.dataRevision ?? null, cursor?.lastSeq ?? null, limit + 1],
+  );
+  const run = result.rows[0];
+  if (!run) {
+    return throwMissingRun(client, orgId, runId);
+  }
+  if (run.raw_state !== 'available') {
+    throw new ApiError(410, 'RAW_HISTORY_UNAVAILABLE', 'Raw point history is unavailable');
+  }
+  if (cursor && cursor.dataRevision !== run.data_revision) {
+    throw new ApiError(
+      409,
+      'HISTORY_REVISION_CHANGED',
+      'The run changed while its raw point history was being read',
+    );
+  }
+
+  const pointRows = result.rows.filter(
+    (row): row is RawPointPageRow & {
+      accuracy_m: number;
+      latitude: number;
+      longitude: number;
+      recorded_at: string;
+      segment_id: number;
+      seq: string;
+    } => row.seq !== null,
+  );
+  const pageRows = pointRows.slice(0, limit);
+  const last = pageRows.at(-1);
+  return pointsResponseSchema.parse({
+    dataRevision: run.data_revision,
+    nextCursor:
+      pointRows.length > limit && last
+        ? encodeRawPointCursor({
+            dataRevision: run.data_revision,
+            lastSeq: last.seq,
+            orgId,
+            runId,
+          })
+        : null,
+    points: pageRows.map((point) => ({
+      accuracyM: point.accuracy_m,
+      latitude: point.latitude,
+      longitude: point.longitude,
+      recordedAt: point.recorded_at,
+      segmentId: point.segment_id,
+      seq: point.seq,
+    })),
+  });
 }
 
 export async function upsertRunShare(

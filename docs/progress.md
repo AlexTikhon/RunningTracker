@@ -10,7 +10,7 @@ Last updated: 2026-09-23.
 | P02A.1 review fixes | VERIFIED | Integration fixture target guard and confirmed-COMMIT handling passed unit and real-role integration checks |
 | P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
-| P04 | IN PROGRESS — P04.1 DONE | Bounded atomic ingestion is verified; raw history, simulator/fault injection, and later P04 work remain |
+| P04 | IN PROGRESS — P04.1, P04.3 DONE | Bounded atomic ingestion and revision-bound raw history are verified; simulator/fault injection and later P04 work remain |
 | P05 | TODO | Browser recording and local buffer |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
@@ -406,4 +406,25 @@ Verification evidence on 2026-09-23:
 - `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 46 API unit tests, 1 web test, 13 contract tests, and all production builds;
 - `git diff --check` passed. No migration, dependency, commit, push, main/production database write, paid-provider call, or hosted CI run occurred.
 
-P04.1 is DONE; P04 remains IN PROGRESS. Raw history, simulator/fault injection, browser buffering, SSE, geometry, and retention were not implemented. The smallest next task is P04.3 raw history (the former standalone P04.2 revision invariant was completed as a required part of P04.1).
+P04.1 is DONE. At that delivery boundary, raw history and later P04 work were intentionally still open; P04.3 below completes raw history without changing the P04.1 evidence (the former standalone P04.2 revision invariant was completed as a required part of P04.1).
+
+## P04.3 — revision-bound raw point history
+
+Implemented:
+
+- authenticated `GET /api/orgs/:orgId/runs/:runId/points` uses the existing strict query/response contracts, defaults to 1,000 points, rejects limits outside 1–1,000, and returns canonical `PointInput` values ordered by bigint `seq`;
+- an opaque operation-bound cursor carries `orgId`, `runId`, `dataRevision`, and the last `seq`. Reusing it for another run is `400 INVALID_CURSOR`; a changed run revision is `409 HISTORY_REVISION_CHANGED`, requiring replay from the first page;
+- each page is read through one PostgreSQL statement snapshot that returns the authorized run revision/raw state and a `limit + 1` lateral keyset page together. This prevents a page from mixing a pre-ingestion revision with post-ingestion points without requiring a row-mutation lock from history-only readers;
+- owners may read raw points for active or finished runs. A non-owner requires `can_read_history` on a finished run; `can_read_live` alone does not expose the raw-history endpoint. Existing session, active-membership, tenant transaction, child-table RLS, and error-envelope boundaries remain in force;
+- authorization is resolved before object retention/revision information. Authorized `purging`/`purged` history returns `410 RAW_HISTORY_UNAVAILABLE`; inaccessible and missing runs remain indistinguishable as `404 RUN_NOT_FOUND`;
+- no migration, RLS/grant change, dependency, or public contract change was required: the P03.2 `PointsResponse`/OpenAPI shape and P02B primary-key/index/ACL foundation were sufficient.
+
+Verification evidence on 2026-09-25:
+
+- focused P04.3 real-PostgreSQL integration passed 1 file / 8 tests; combined P04.3/P04.1/P03.4 regression passed 3 files / 27 tests;
+- complete `npm run test:integration` passed 11 files / 122 tests under the real owner/runtime/maintenance roles;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 46 API unit tests, 1 web test, 13 contract tests, and all production builds;
+- `npm run db:bootstrap:test` succeeded and `npm run db:migrate:test` verified and skipped unchanged migrations `0000`–`0007` with matching checksums;
+- `git diff --check` passed. No migration, dependency, commit, push, main/production database write, paid-provider call, or hosted CI run occurred.
+
+P04.3 is DONE; P04 remains IN PROGRESS. The smallest next task is P04.4 deterministic GPS simulation with seeded scenarios and a virtual clock. P04.5 fault injection, browser buffering, SSE, geometry, and retention remain unstarted.

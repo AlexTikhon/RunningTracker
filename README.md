@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. Production identity, GPS ingestion, streaming implementation, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04.1 point ingestion and P04.3 raw history are complete; deterministic simulation, fault injection, browser capture, streaming, production identity, and maps remain later stages.
 
 ## Prerequisites
 
@@ -58,6 +58,12 @@ P04.1 resolves D01 with one strict `PointInput`: required `seq`, `segmentId`, `r
 `POST /api/orgs/:orgId/runs/:runId/points` accepts `{ "points": PointInput[] }` under the existing session, Origin/CSRF, membership, tenant transaction, and RLS boundary. A request contains 1–100 entries and remains subject to the 64 KiB JSON limit; a run may contain at most 50,000 unique points. `seq` defines deterministic track order, so request order, equal timestamps, late lower sequences, and device timestamps outside the live-freshness window are accepted as raw history.
 
 The service locks the owned run, compares every repeated `seq` with its canonical stored payload, increments `data_revision` once only when at least one unique point is new, and inserts all new rows set-wise with that `ingested_revision`. Exact retries return `200` without a revision change; conflicting payloads return `409 POINT_CONFLICT`. Recording and paused runs accept points. Finished runs accept new points through `finished_at + 24 hours`; after that, only exact retries are acknowledged (`409 UPLOAD_WINDOW_CLOSED` for new points). `purging`/`purged` raw state returns `410 RAW_HISTORY_UNAVAILABLE`. The response is `{ dataRevision, insertedCount, duplicateCount }`, and HTTP acknowledgement occurs only after the surrounding PostgreSQL transaction commits.
+
+## Raw point history
+
+`GET /api/orgs/:orgId/runs/:runId/points?limit=1000&cursor=...` returns canonical raw points in ascending bigint `seq` order. The default and maximum page size is 1,000. The opaque cursor is bound to the organization, run, last sequence, and `data_revision`; if that revision changes between pages, the API returns `409 HISTORY_REVISION_CHANGED` and the client restarts from the first page.
+
+The run revision/raw state and `limit + 1` keyset page are read in one PostgreSQL statement snapshot, so a page cannot combine different committed revisions. Owners can read active or finished raw history; a non-owner needs `can_read_history` on a finished run. `can_read_live` alone is intentionally insufficient. Authorized `purging`/`purged` history returns `410 RAW_HISTORY_UNAVAILABLE`; inaccessible and missing runs return the same `404 RUN_NOT_FOUND`.
 
 Stop the local database without deleting its named volume:
 

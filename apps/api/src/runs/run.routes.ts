@@ -3,6 +3,7 @@ import {
   ingestPointsRequestSchema,
   POINT_BATCH_MAX_SIZE,
   organizationPathSchema,
+  pointsQuerySchema,
   runCommandRequestSchema,
   runListQuerySchema,
   runPathSchema,
@@ -29,6 +30,7 @@ import {
   createRun,
   ingestRunPoints,
   listRuns,
+  readRunPoints,
   readRun,
   revokeRunShare,
   upsertRunShare,
@@ -106,6 +108,20 @@ export function createRunRouter({
       const session = getAuthenticatedSession(request);
       const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
         readRun(client, orgId, runId),
+      );
+      response.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/:runId/points', authenticate, async (request, response, next) => {
+    try {
+      const { orgId, runId } = routeInput(request);
+      const query = parseContract(pointsQuerySchema, request.query, 'point-history query');
+      const session = getAuthenticatedSession(request);
+      const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+        readRunPoints(client, orgId, runId, query),
       );
       response.status(200).json(result);
     } catch (error) {
