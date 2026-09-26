@@ -97,6 +97,29 @@ describe('runnerReducer', () => {
     expect(runnerPhase(offline)).toBe('recording');
   });
 
+  it('restores a confirmed run, pending point count, and exact unacknowledged request', () => {
+    const command: CommandRequest = {
+      commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      expectedControlRevision: '0',
+      kind: 'command',
+      orgId: startRequest.orgId,
+      runId: startRequest.runId,
+      type: 'finish',
+    };
+
+    const restored = runnerReducer(createInitialRunnerState('offline'), {
+      pendingPointCount: 7,
+      request: command,
+      run: recordingRun,
+      type: 'storage-restored',
+    });
+
+    expect(restored.run).toEqual(recordingRun);
+    expect(restored.upload.pendingCount).toBe(7);
+    expect(restored.error?.request).toEqual(command);
+    expect(runnerPhase(restored)).toBe('error');
+  });
+
   it('ignores stale completions from superseded requests', () => {
     const state = startRecording();
     const stale = runnerReducer(state, {

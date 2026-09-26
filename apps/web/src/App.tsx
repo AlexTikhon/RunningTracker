@@ -1,8 +1,9 @@
 import { uuidSchema, type RunCommandType, type SessionResponse } from '@running-tracker/contracts';
-import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
 import { createRun, loadSession, RunnerApiError, sendRunCommand } from './runner-api.js';
+import { getBrowserRunnerStorage } from './runner-storage.js';
 import {
   availableCommands,
   createInitialRunnerState,
@@ -18,6 +19,10 @@ type SessionState =
   | { status: 'loading' }
   | { message: string; status: 'required' }
   | { session: SessionResponse; status: 'ready' };
+type StorageState =
+  | { status: 'loading' }
+  | { status: 'ready' }
+  | { message: string; status: 'error' };
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 
@@ -50,6 +55,8 @@ export function App() {
   const [session, setSession] = useState<SessionState>({ status: 'loading' });
   const [orgId, setOrgId] = useState('');
   const [now, setNow] = useState(() => Date.now());
+  const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
+  const restoredUserId = useRef<string | null>(null);
   const [runner, dispatch] = useReducer(
     runnerReducer,
     typeof navigator === 'undefined' || navigator.onLine !== false ? 'online' : 'offline',
@@ -88,6 +95,41 @@ export function App() {
   }, [refreshHealth, refreshSession]);
 
   useEffect(() => {
+    if (session.status !== 'ready' || restoredUserId.current === session.session.identity.userId) {
+      return;
+    }
+    let active = true;
+    const userId = session.session.identity.userId;
+    setStorage({ status: 'loading' });
+    void (async () => {
+      try {
+        const recovery = await getBrowserRunnerStorage().loadRecovery(userId);
+        if (!active) {
+          return;
+        }
+        restoredUserId.current = userId;
+        if (recovery.orgId !== null) {
+          setOrgId(recovery.orgId);
+        }
+        dispatch({
+          pendingPointCount: recovery.pendingPointCount,
+          request: recovery.request,
+          run: recovery.run,
+          type: 'storage-restored',
+        });
+        setStorage({ status: 'ready' });
+      } catch (error) {
+        if (active) {
+          setStorage({ message: errorMessage(error), status: 'error' });
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [session]);
+
+  useEffect(() => {
     const updateConnectivity = () => {
       dispatch({ connectivity: navigator.onLine ? 'online' : 'offline', type: 'connectivity-changed' });
     };
@@ -109,30 +151,50 @@ export function App() {
 
   const executeRequest = useCallback(
     async (request: RunnerRequest) => {
-      if (session.status !== 'ready') {
+      if (session.status !== 'ready' || storage.status !== 'ready') {
         return;
       }
       dispatch({ request, type: 'request-started' });
       try {
+        const runnerStorage = getBrowserRunnerStorage();
+        await runnerStorage.queueRequest(session.session.identity.userId, request, runner.run);
+        if (runner.connectivity === 'offline') {
+          dispatch({
+            message: 'Saved locally. Retry the same request when the connection returns.',
+            request,
+            type: 'request-failed',
+          });
+          return;
+        }
         if (request.kind === 'start') {
           const run = await createRun(request, session.session.csrf);
+          await runnerStorage.acknowledgeStart(session.session.identity.userId, request, run);
           dispatch({ request, run, type: 'start-succeeded' });
           return;
         }
+        if (runner.run === null) {
+          throw new Error('The durable command has no confirmed run state');
+        }
         const result = await sendRunCommand(request, session.session.csrf);
+        await runnerStorage.acknowledgeCommand(
+          session.session.identity.userId,
+          request,
+          runner.run,
+          result,
+        );
         dispatch({ request, result, type: 'command-succeeded' });
       } catch (error) {
         dispatch({ message: errorMessage(error), request, type: 'request-failed' });
       }
     },
-    [session],
+    [runner.connectivity, runner.run, session, storage.status],
   );
 
   const normalizedOrgId = orgId.trim().toLowerCase();
   const validOrgId = uuidSchema.safeParse(normalizedOrgId).success;
   const phase = runnerPhase(runner);
   const busy = runner.pendingRequest !== null;
-  const controlsDisabled = busy || runner.connectivity === 'offline' || session.status !== 'ready';
+  const controlsDisabled = busy || runner.error !== null || session.status !== 'ready' || storage.status !== 'ready';
   const commands = runner.run === null ? [] : availableCommands(runner.run.status);
   const elapsed = useMemo(
     () => durationLabel(runner.run?.startedAt, runner.run?.finishedAt, now),
@@ -167,6 +229,18 @@ export function App() {
     void executeRequest(request);
   };
 
+  const clearFinishedRun = async () => {
+    if (session.status !== 'ready') {
+      return;
+    }
+    try {
+      await getBrowserRunnerStorage().clearActiveRun(session.session.identity.userId);
+      dispatch({ type: 'finished-run-cleared' });
+    } catch (error) {
+      setStorage({ message: errorMessage(error), status: 'error' });
+    }
+  };
+
   return (
     <main>
       <header className="topbar">
@@ -182,11 +256,11 @@ export function App() {
 
       <section className="runner-shell" aria-labelledby="runner-title">
         <div className="runner-copy">
-          <p className="eyebrow">Runner console · P05.1</p>
+          <p className="eyebrow">Runner console · P05.2</p>
           <h1 id="runner-title">Your run,<br />under control.</h1>
           <p className="lede">
-            Lifecycle changes are confirmed by the server and tied to a control revision. GPS capture
-            and the durable local queue join this screen in the next P05 slices.
+            Lifecycle requests survive reloads in IndexedDB and remain queued until the server confirms
+            them. GPS capture and automatic point upload join this screen in the next P05 slices.
           </p>
         </div>
 
@@ -234,7 +308,7 @@ export function App() {
                 </button>
               )}
               {runner.run.status === 'finished' && (
-                <button className="primary-action" onClick={() => dispatch({ type: 'finished-run-cleared' })} type="button">
+                <button className="primary-action" onClick={() => void clearFinishedRun()} type="button">
                   New run
                 </button>
               )}
@@ -246,7 +320,13 @@ export function App() {
       {runner.connectivity === 'offline' && (
         <section className="notice notice--offline" role="status">
           <strong>Offline</strong>
-          <span>Server controls are paused. Durable command queueing begins in P05.2.</span>
+          <span>Lifecycle requests can be saved locally and retried after reconnection.</span>
+        </section>
+      )}
+
+      {storage.status === 'error' && (
+        <section className="notice notice--error" role="alert">
+          <div><strong>Local storage unavailable</strong><span>{storage.message}</span></div>
         </section>
       )}
 

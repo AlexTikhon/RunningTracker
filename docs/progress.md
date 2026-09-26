@@ -11,7 +11,7 @@ Last updated: 2026-09-26.
 | P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
-| P05 | IN PROGRESS | P05.1 API-backed runner controls/state complete; durable local buffer and capture remain |
+| P05 | IN PROGRESS | P05.1 controls/state and P05.2 durable IndexedDB buffer complete; upload worker, writer ownership, and capture remain |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
@@ -491,3 +491,25 @@ Verification evidence on 2026-09-26:
 - no migration, external dependency, public API change, IndexedDB storage, upload worker, geolocation, writer lease, push, paid-provider call, or hosted CI run occurred.
 
 P05.1 is DONE. The next planned fragment is P05.2 atomic IndexedDB persistence for `seq` plus each point and durable storage of commands until acknowledgement. P05.3–P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.
+
+## P05.2 — durable IndexedDB runner buffer
+
+Implemented:
+
+- a versioned IndexedDB database separates authenticated-user profiles, run snapshots/sequence state, canonical points, and unacknowledged requests; organization and run identifiers remain part of every run-scoped key;
+- point capture storage reads the next positive-bigint decimal `seq`, validates the complete shared `PointInput`, inserts the point, and advances `seq` in one `runs` + `points` read-write transaction. Failed validation/storage cannot consume a sequence independently of a point;
+- an internal zero-padded 19-character sequence key preserves positive-bigint ordering for IndexedDB batch reads without converting API `seq` values to lossy JavaScript numbers;
+- point reads are bounded to the server maximum of 100. Local acknowledgement deletes only the explicit sequence set passed for the sent batch, and repeating the same acknowledgement does not remove later buffered points;
+- exact start/lifecycle requests are persisted before HTTP dispatch and retained on offline or failed/unknown outcomes. A server success deletes that one request only in the local transaction that also stores the new confirmed run snapshot;
+- after session identity is known, reload recovery restores the active organization/run, buffered point count, and exact unacknowledged request. Offline controls can queue locally, while retry remains explicit until connectivity returns;
+- clearing a finished run removes only its active UI pointer; buffered points remain available for the future P05.3 uploader. The storage schema/invariants and deferred boundaries are recorded in ADR-0008;
+- `fake-indexeddb` is a web-workspace test-only dependency used to exercise IndexedDB transaction/index behavior without adding runtime bundle code.
+
+Verification evidence on 2026-09-26:
+
+- focused web tests passed 5 files / 20 tests, including 6 IndexedDB cases for concurrent allocation, close/reopen sequence continuity, invalid-point rollback, ordered explicit ACK behavior, exact request recovery, atomic command acknowledgement, and point retention after UI clearing;
+- focused web lint, strict typecheck, and production Vite build passed;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 48 API unit tests, 20 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- no migration, public HTTP contract, database write, upload worker, geolocation source, cross-tab writer lease, commit, push, paid-provider call, hosted CI, or real-browser interaction test occurred. IndexedDB behavior is verified through the standards-compatible test implementation, not claimed as browser/device QA.
+
+P05.2 is DONE. The next planned fragment is P05.3: bounded point upload batches, retry backoff/jitter, deletion of only server-acknowledged batches, and stop/reconciliation behavior for permanent errors. P05.4–P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.

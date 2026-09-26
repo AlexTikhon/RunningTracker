@@ -53,6 +53,12 @@ export type RunnerPhase =
 
 export type RunnerEvent =
   | { connectivity: Connectivity; type: 'connectivity-changed' }
+  | {
+      pendingPointCount: number;
+      request: RunnerRequest | null;
+      run: RunView | null;
+      type: 'storage-restored';
+    }
   | { request: RunnerRequest; type: 'request-started' }
   | { request: StartRequest; run: RunView; type: 'start-succeeded' }
   | { request: CommandRequest; result: RunCommandResponse; type: 'command-succeeded' }
@@ -100,6 +106,25 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
   switch (event.type) {
     case 'connectivity-changed':
       return { ...state, connectivity: event.connectivity };
+    case 'storage-restored':
+      if (state.pendingRequest !== null || state.run !== null) {
+        throw new Error('Durable state can only be restored before runner activity');
+      }
+      return {
+        ...state,
+        error: event.request === null
+          ? null
+          : {
+              message: 'Recovered an unacknowledged request from this browser.',
+              request: event.request,
+            },
+        run: event.run,
+        upload: {
+          message: null,
+          pendingCount: event.pendingPointCount,
+          status: 'idle',
+        },
+      };
     case 'request-started':
       if (state.pendingRequest !== null) {
         throw new Error('Only one runner request may be active');
@@ -140,7 +165,12 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       if (state.run?.status !== 'finished' || state.pendingRequest !== null) {
         throw new Error('Only a settled finished run can be cleared');
       }
-      return { ...state, error: null, run: null };
+      return {
+        ...state,
+        error: null,
+        run: null,
+        upload: { message: null, pendingCount: 0, status: 'idle' },
+      };
     case 'upload-changed':
       return { ...state, upload: event.upload };
   }

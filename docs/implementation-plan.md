@@ -2,7 +2,7 @@
 
 Версия: 1.0  
 Дата: 25 сентября 2026
-Статус: P00–P04 завершены и проверены локально; D01 и D02 решены. P05 IN PROGRESS: P05.1 runner control UI/state выполнен, P05.2–P05.5 не начаты. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12.
+Статус: P00–P04 завершены и проверены локально; D01 и D02 решены. P05 IN PROGRESS: P05.1 runner control UI/state и P05.2 durable IndexedDB buffer выполнены, P05.3–P05.5 не начаты. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12.
 Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
 
 ## 1. Режим исполнения
@@ -223,7 +223,7 @@ packages/contracts не зависит от Express или драйвера БД
 
 Задачи:
 - P05.1 Реализовать экран бегуна: start/pause/resume/finish, recording/upload/offline/error состояния. **Выполнено и проверено 2026-09-26: same-origin session discovery, shared-contract validation, revision-aware API controls, exact-request retry и responsive state dashboard.**
-- P05.2 Сохранять seq и точку в одной IndexedDB-транзакции; команды также сохранять до подтверждения.
+- P05.2 Сохранять seq и точку в одной IndexedDB-транзакции; команды также сохранять до подтверждения. **Выполнено и проверено 2026-09-26: user/run-scoped bigint seq allocation, canonical point buffer, explicit batch ACK deletion, durable exact-request queue и reload recovery.**
 - P05.3 Upload worker: bounded batches, backoff/jitter, удаление только подтверждённой пачки, остановка на постоянной ошибке.
 - P05.4 Один владелец записи среди вкладок; зафиксировать механизм lease/lock и обнаружение конфликтующего writer.
 - P05.5 Подключить Geolocation и симулятор через одинаковый интерфейс источника. Добавить Mapbox при наличии токена, сохранив возможность тестирования записи без внешней карты.
@@ -443,4 +443,4 @@ packages/contracts не зависит от Express или драйвера БД
 
 P00–P02A.1 и полная DB schema/ACL-подчасть P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) проверены локально воспроизводимыми unit/build и real PostgreSQL/PostGIS integration-командами. D02 решён в границах доверенного tenant context. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
 
-P02B DONE после разрешения D01 в P04.1. P03.1–P03.5 выполнены: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read, owner-only share management и clock-driven maintenance auto-finish. P04.1 bounded atomic point ingestion, P04.3 revision-bound raw history, P04.4 deterministic GPS simulator и P04.5 safe test-only response-loss injection выполнены; P04 DONE. P05.1 runner control UI/state выполнен; следующий фрагмент — P05.2 atomic IndexedDB persistence for points, seq, and unacknowledged commands. P10 deletion/retention не начаты. Production identity/session provider остаётся P12.
+P02B DONE после разрешения D01 в P04.1. P03.1–P03.5 выполнены: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read, owner-only share management и clock-driven maintenance auto-finish. P04.1 bounded atomic point ingestion, P04.3 revision-bound raw history, P04.4 deterministic GPS simulator и P04.5 safe test-only response-loss injection выполнены; P04 DONE. P05.1 runner control UI/state и P05.2 durable IndexedDB persistence выполнены; следующий фрагмент — P05.3 bounded point upload worker with backoff/jitter and explicit ACK deletion. P10 deletion/retention не начаты. Production identity/session provider остаётся P12.
