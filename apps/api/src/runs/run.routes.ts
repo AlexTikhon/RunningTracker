@@ -25,6 +25,7 @@ import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
+import type { TestOnlyFaultInjector } from '../testing/fault-injection.js';
 import {
   applyRunCommand,
   createRun,
@@ -41,6 +42,7 @@ interface RunRouterDependencies {
   config: Environment;
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
+  testOnlyFaultInjector?: TestOnlyFaultInjector;
 }
 
 function parseContract<Output>(schema: ZodType<Output>, input: unknown, label: string): Output {
@@ -80,6 +82,7 @@ export function createRunRouter({
   config,
   pool,
   sessionManager,
+  testOnlyFaultInjector,
 }: RunRouterDependencies): Router {
   const router = createRouter({ mergeParams: true });
   const authenticate = createSessionAuthentication(sessionManager);
@@ -163,6 +166,16 @@ export function createRunRouter({
         const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
           ingestRunPoints(client, session, orgId, runId, body, clock),
         );
+        if (
+          testOnlyFaultInjector?.shouldDropPointIngestionResponseAfterCommit({
+            orgId,
+            result,
+            runId,
+          }) === true
+        ) {
+          response.destroy();
+          return;
+        }
         response.status(200).json(result);
       } catch (error) {
         next(error);

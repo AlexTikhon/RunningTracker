@@ -1,6 +1,8 @@
 import {
   apiErrorResponseSchema,
   ingestPointsResponseSchema,
+  pointsResponseSchema,
+  runCommandResponseSchema,
   type PointInput,
 } from '@running-tracker/contracts';
 import { Pool } from 'pg';
@@ -19,6 +21,10 @@ import {
 } from '../src/config/environment.js';
 import { createDatabasePool } from '../src/database/database.js';
 import { runAutoFinishOnce } from '../src/maintenance/run-auto-finish.js';
+import type {
+  PointIngestionCommitContext,
+  TestOnlyFaultInjector,
+} from '../src/testing/fault-injection.js';
 import {
   prepareTenantIsolationFixtures,
   tenantIsolationIds as ids,
@@ -38,6 +44,7 @@ const runIds = {
   finishRace: 'a4100000-0000-4000-8000-000000000005',
   lifecycle: 'a4100000-0000-4000-8000-000000000006',
   limit: 'a4100000-0000-4000-8000-000000000007',
+  lostResponse: 'a4100000-0000-4000-8000-000000000011',
   otherOwner: 'a4100000-0000-4000-8000-000000000008',
   rawUnavailable: 'a4100000-0000-4000-8000-000000000009',
   validation: 'a4100000-0000-4000-8000-000000000010',
@@ -109,6 +116,8 @@ describe('P04.1 bounded atomic point ingestion', () => {
   let ownerAuthentication: Authentication;
   let otherAuthentication: Authentication;
   let expectedOwner: ReturnType<typeof loadIntegrationTestConfiguration>['migration'];
+  let dropResponseForRunId: string | undefined;
+  let droppedCommit: PointIngestionCommitContext | undefined;
 
   beforeAll(async () => {
     const integration = loadIntegrationTestConfiguration();
@@ -139,12 +148,28 @@ describe('P04.1 bounded atomic point ingestion', () => {
       store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
       ttlMs: config.SESSION_TTL_MS,
     });
-    app = createApp({ clock: new FixedClock(), config, pool: runtimePool, sessionManager });
+    const testOnlyFaultInjector: TestOnlyFaultInjector = {
+      shouldDropPointIngestionResponseAfterCommit: (context) => {
+        if (context.runId !== dropResponseForRunId) return false;
+        dropResponseForRunId = undefined;
+        droppedCommit = context;
+        return true;
+      },
+    };
+    app = createApp({
+      clock: new FixedClock(),
+      config,
+      pool: runtimePool,
+      sessionManager,
+      testOnlyFaultInjector,
+    });
     ownerAuthentication = await login(ids.userDual);
     otherAuthentication = await login(ids.userOrgA);
   });
 
   beforeEach(async () => {
+    dropResponseForRunId = undefined;
+    droppedCommit = undefined;
     await ownerPool.query('DROP TRIGGER IF EXISTS p041_reject_point ON run_points');
     await ownerPool.query('DROP FUNCTION IF EXISTS public.p041_reject_point()');
     await prepareTenantIsolationFixtures(ownerPool, expectedOwner);
@@ -289,6 +314,67 @@ describe('P04.1 bounded atomic point ingestion', () => {
     expect(stored.rows.map(({ seq }) => seq)).toEqual(['40', '41', '42', '43']);
     expect(stored.rows.map(({ ingested_revision }) => ingested_revision)).toEqual(['2', '1', '1', '1']);
     expect(stored.rows[1]).toMatchObject({ accuracy_m: 0, latitude: 0, longitude: 0 });
+  });
+
+  it('commits a batch before losing the response and safely acknowledges the exact retry', async () => {
+    const creation = await request(app)
+      .put(`/api/orgs/${ids.orgA}/runs/${runIds.lostResponse}`)
+      .set('Cookie', ownerAuthentication.cookie)
+      .set('Origin', allowedOrigin)
+      .set(csrfHeaderName, ownerAuthentication.csrfToken)
+      .type('application/json')
+      .send({ startedAt })
+      .expect(201);
+    expect(objectBody(creation)).toMatchObject({
+      dataRevision: '0',
+      runId: runIds.lostResponse,
+      status: 'recording',
+    });
+
+    const batch = [point('1'), point('2', { longitude: 21.0123 })];
+    dropResponseForRunId = runIds.lostResponse;
+    await expect(ingest(runIds.lostResponse, batch)).rejects.toMatchObject({ code: 'ECONNRESET' });
+
+    expect(droppedCommit).toMatchObject({
+      orgId: ids.orgA,
+      result: { dataRevision: '1', duplicateCount: 0, insertedCount: 2 },
+      runId: runIds.lostResponse,
+    });
+    expect(await pointCount(runIds.lostResponse)).toBe('2');
+    expect(await readRun(runIds.lostResponse)).toMatchObject({ data_revision: '1' });
+
+    const retry = await ingest(runIds.lostResponse, batch).expect(200);
+    expect(ingestPointsResponseSchema.parse(objectBody(retry))).toEqual({
+      dataRevision: '1',
+      duplicateCount: 2,
+      insertedCount: 0,
+    });
+
+    const history = await request(app)
+      .get(`/api/orgs/${ids.orgA}/runs/${runIds.lostResponse}/points`)
+      .set('Cookie', ownerAuthentication.cookie)
+      .expect(200);
+    expect(pointsResponseSchema.parse(objectBody(history))).toMatchObject({
+      dataRevision: '1',
+      nextCursor: null,
+      points: batch,
+    });
+
+    const finish = await mutation(
+      `/api/orgs/${ids.orgA}/runs/${runIds.lostResponse}/commands`,
+    )
+      .send({
+        commandId: finishCommandId,
+        expectedControlRevision: '0',
+        type: 'finish',
+      })
+      .expect(200);
+    expect(runCommandResponseSchema.parse(objectBody(finish))).toMatchObject({
+      controlRevision: '1',
+      dataRevision: '2',
+      status: 'finished',
+    });
+    expect(await pointCount(runIds.lostResponse)).toBe('2');
   });
 
   it('enforces validation, the 100-point batch boundary, and the 64 KiB body limit', async () => {

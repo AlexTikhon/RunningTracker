@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-09-23.
+Last updated: 2026-09-26.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -10,7 +10,7 @@ Last updated: 2026-09-23.
 | P02A.1 review fixes | VERIFIED | Integration fixture target guard and confirmed-COMMIT handling passed unit and real-role integration checks |
 | P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
-| P04 | IN PROGRESS — P04.1, P04.3 DONE | Bounded atomic ingestion and revision-bound raw history are verified; simulator/fault injection and later P04 work remain |
+| P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | TODO | Browser recording and local buffer |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
@@ -427,4 +427,46 @@ Verification evidence on 2026-09-25:
 - `npm run db:bootstrap:test` succeeded and `npm run db:migrate:test` verified and skipped unchanged migrations `0000`–`0007` with matching checksums;
 - `git diff --check` passed. No migration, dependency, commit, push, main/production database write, paid-provider call, or hosted CI run occurred.
 
-P04.3 is DONE; P04 remains IN PROGRESS. The smallest next task is P04.4 deterministic GPS simulation with seeded scenarios and a virtual clock. P04.5 fault injection, browser buffering, SSE, geometry, and retention remain unstarted.
+P04.3 is DONE; P04 remains IN PROGRESS. P04.4 below completes deterministic GPS simulation. P04.5 fault injection, browser buffering, SSE, geometry, and retention remain unstarted.
+
+## P04.4 — deterministic GPS simulator
+
+Implemented:
+
+- `@running-tracker/fixtures` generates six canonical `PointInput` captures from an explicit uint32 seed and normalized UTC start instant; identical inputs produce byte-stable JSON data while different seeds vary route noise and accuracy;
+- `VirtualClock` exposes UTC and monotonic time, deterministic due-time/FIFO callback ordering, explicit `advanceBy`/`advanceTo`/`runAll`, cancellation, and invalid/backwards-time guards without wall-clock sleeps;
+- scenario replay emits immutable capture and upload-attempt events for `normal`, `duplicates`, `reordered`, `delayed-batch`, `dropped-response`, `clock-jump`, and `gps-spike`;
+- the reordered scenario uploads `41 → 43 → 42`; delayed transmission keeps regular measurement timestamps; clock rollback changes device `recordedAt` while monotonic capture order continues; the spike exceeds 5 km between adjacent samples;
+- dropped-response describes `drop-after-commit` followed by an exact retry without adding an API hook or performing network I/O, preserving the P04.5 boundary;
+- `@running-tracker/gps-simulator` provides a JSON Lines CLI with strict scenario/seed argument handling and stable metadata/event output through `npm run simulate:gps`.
+
+Verification evidence on 2026-09-26:
+
+- focused fixtures coverage passed 3 files / 14 tests and CLI coverage passed 1 file / 3 tests; focused lint and strict typechecks passed;
+- a CLI smoke replay for seed `42` emitted the required `41 → 43 → 42` upload sequence on the expected virtual timeline;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 46 API unit tests, 1 web test, 13 contract tests, 14 fixture tests, 3 CLI tests, and all production builds;
+- PostgreSQL was started only for verification; process-local values from `.env.example` were used because no `.env` exists. `npm run db:bootstrap:test` succeeded, `npm run db:migrate:test` checksum-verified and skipped unchanged migrations `0000`–`0007`, and full integration passed 11 files / 122 tests under the real owner/runtime/maintenance roles;
+- the Compose service was stopped afterward with its named database volume preserved; `git diff --check` is part of the final handoff check.
+
+P04.4 is DONE. At that delivery boundary P04 remained in progress; P04.5 below closes the stage. Browser buffering, SSE, geometry, and retention remain later stages.
+
+## P04.5 — safe post-commit response-loss injection
+
+Implemented:
+
+- `createApp` accepts an optional `testOnlyFaultInjector` dependency and rejects all test-only app dependencies unless validated configuration has `APP_ENV=test`, before any pool access or listener construction;
+- the capability has no environment variable, request header, route, or other remotely triggerable control surface, and production `main` never supplies it;
+- point ingestion evaluates the injected decision only after `withAuthenticatedTenantTransaction` returns, which occurs only after PostgreSQL reports `COMMIT`; a selected request then destroys the HTTP response before headers/body are sent;
+- the deterministic integration scenario creates a run through HTTP, arms a one-shot run-specific drop, observes client `ECONNRESET`, and proves through the owner connection that two points and `data_revision=1` were already committed;
+- an exact HTTP retry returns `insertedCount=0`, `duplicateCount=2`, and the same `dataRevision=1`; raw history returns exactly those two canonical points; the subsequent finish command succeeds with `controlRevision=1` and `dataRevision=2`;
+- normal errors still use the existing error envelope, while the injected case deliberately produces no misleading 5xx response because the simulated failure is transport loss after commit.
+
+Verification evidence on 2026-09-26:
+
+- focused non-test safety coverage passed 1 file / 4 tests, proving both development and production reject the injected capability before database access;
+- focused real-PostgreSQL ingestion/fault coverage passed 1 file / 11 tests, including the complete create → committed response loss → exact retry → raw history → finish demonstration;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 48 API unit tests, 1 web test, 13 contract tests, 14 fixture tests, 3 CLI tests, and all production builds;
+- `npm run db:bootstrap:test` succeeded, `npm run db:migrate:test` checksum-verified and skipped unchanged migrations `0000`–`0007`, and full integration passed 11 files / 123 tests under the real owner/runtime/maintenance roles;
+- no migration, third-party dependency, public API contract, externally activatable fault switch, commit, push, main/production database write, paid-provider call, or hosted CI run occurred. The Compose service was stopped afterward with its named database volume preserved; `git diff --check` is part of the final handoff check.
+
+P04 is DONE. The smallest next planned fragment is P05.1 runner recording UI/state; P05.2–P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.

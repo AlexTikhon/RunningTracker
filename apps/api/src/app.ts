@@ -11,18 +11,27 @@ import { createHealthRouter } from './health/health.routes.js';
 import { apiErrorHandler, unknownApiRoute } from './http/errors.js';
 import { requestIdMiddleware } from './http/request-id.js';
 import { createRunRouter } from './runs/run.routes.js';
+import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 
 export interface AppDependencies {
   clock: Clock;
   config: Environment;
   pool: DatabasePool;
   sessionManager?: SessionManager;
+  testOnlyFaultInjector?: TestOnlyFaultInjector;
   testOnlyRouter?: Router;
 }
 
-export function createApp({ clock, config, pool, sessionManager, testOnlyRouter }: AppDependencies): Express {
-  if (testOnlyRouter && config.APP_ENV !== 'test') {
-    throw new Error('testOnlyRouter can only be mounted when APP_ENV=test');
+export function createApp({
+  clock,
+  config,
+  pool,
+  sessionManager,
+  testOnlyFaultInjector,
+  testOnlyRouter,
+}: AppDependencies): Express {
+  if ((testOnlyFaultInjector || testOnlyRouter) && config.APP_ENV !== 'test') {
+    throw new Error('test-only app dependencies require APP_ENV=test');
   }
 
   const app = express();
@@ -51,6 +60,7 @@ export function createApp({ clock, config, pool, sessionManager, testOnlyRouter 
       config,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
+      ...(testOnlyFaultInjector ? { testOnlyFaultInjector } : {}),
     }),
   );
   if (testOnlyRouter) {

@@ -1,0 +1,28 @@
+{
+  "name": "@running-tracker/gps-simulator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "running-tracker-gps-simulator": "./dist/entrypoint.js"
+  },
+  "scripts": {
+    "prebuild": "npm run build --workspace=@running-tracker/fixtures",
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint src",
+    "pretest": "npm run build --workspace=@running-tracker/fixtures",
+    "test": "vitest run",
+    "pretypecheck": "npm run build --workspace=@running-tracker/fixtures",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "presimulate": "npm run build",
+    "simulate": "node dist/entrypoint.js"
+  },
+  "dependencies": {
+    "@running-tracker/fixtures": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6",
+    "typescript": "6.0.3",
+    "vitest": "5.0.1"
+  }
+}

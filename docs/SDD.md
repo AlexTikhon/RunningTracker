@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P03, P04.1 и P04.3 проверены локально под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration. P04 raw history выполнен; simulator/fault injection и последующие этапы не начаты.
+Статус: согласованный проект архитектуры; P00–P04 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration. P04 завершён: ingestion, raw history, deterministic simulator и test-only post-commit response-loss proof выполнены; P05+ не начаты.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.

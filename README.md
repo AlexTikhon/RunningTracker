@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04.1 point ingestion and P04.3 raw history are complete; deterministic simulation, fault injection, browser capture, streaming, production identity, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. Browser capture, streaming, production identity, and maps remain later stages.
 
 ## Prerequisites
 
@@ -64,6 +64,19 @@ The service locks the owned run, compares every repeated `seq` with its canonica
 `GET /api/orgs/:orgId/runs/:runId/points?limit=1000&cursor=...` returns canonical raw points in ascending bigint `seq` order. The default and maximum page size is 1,000. The opaque cursor is bound to the organization, run, last sequence, and `data_revision`; if that revision changes between pages, the API returns `409 HISTORY_REVISION_CHANGED` and the client restarts from the first page.
 
 The run revision/raw state and `limit + 1` keyset page are read in one PostgreSQL statement snapshot, so a page cannot combine different committed revisions. Owners can read active or finished raw history; a non-owner needs `can_read_history` on a finished run. `can_read_live` alone is intentionally insufficient. Authorized `purging`/`purged` history returns `410 RAW_HISTORY_UNAVAILABLE`; inaccessible and missing runs return the same `404 RUN_NOT_FOUND`.
+
+## Deterministic GPS simulator
+
+`@running-tracker/fixtures` generates canonical `PointInput` captures and upload attempts from a uint32 seed and UTC start instant. Its explicitly advanced virtual clock provides stable FIFO timer ordering without wall-clock sleeps. The named scenarios are `normal`, `duplicates`, `reordered`, `delayed-batch`, `dropped-response`, `clock-jump`, and `gps-spike`.
+
+The CLI replays the resulting virtual timeline as JSON Lines without network or database I/O:
+
+```powershell
+npm run simulate:gps -- --scenario reordered --seed 42
+npm run simulate:gps -- --list
+```
+
+`dropped-response` marks an upload attempt as `drop-after-commit` and emits an exact retry. The P04.5 API hook is a separately injected test-only dependency: `createApp` rejects it unless `APP_ENV=test`, there is no environment/header/endpoint activation path, and the points route evaluates it only after PostgreSQL confirms `COMMIT` and before sending the HTTP result. The integration proof observes a transport-level `ECONNRESET`, verifies the committed rows and revision through SQL, retries the exact batch, reads raw history, and finishes the run.
 
 Stop the local database without deleting its named volume:
 

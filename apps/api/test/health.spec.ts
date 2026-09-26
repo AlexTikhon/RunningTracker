@@ -20,15 +20,43 @@ const config = validateEnvironment({
 });
 
 function poolWithQuery(query: DatabaseClient['query']): {
+  connect: ReturnType<typeof vi.fn>;
   pool: DatabasePool;
   release: ReturnType<typeof vi.fn>;
 } {
   const release = vi.fn();
   const client: DatabaseClient = { query, release };
-  return { pool: { connect: vi.fn().mockResolvedValue(client) }, release };
+  const connect = vi.fn().mockResolvedValue(client);
+  return { connect, pool: { connect }, release };
 }
 
 describe('health endpoints', () => {
+  it.each(['development', 'production'] as const)(
+    'rejects test-only fault injection in %s before infrastructure access',
+    (appEnvironment) => {
+      const guardedConfig = validateEnvironment({
+        APP_ENV: appEnvironment,
+        DATABASE_URL:
+          'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker',
+        MAINTENANCE_DATABASE_URL:
+          'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker',
+      });
+      const { connect, pool } = poolWithQuery(vi.fn());
+
+      expect(() =>
+        createApp({
+          clock: systemClock,
+          config: guardedConfig,
+          pool,
+          testOnlyFaultInjector: {
+            shouldDropPointIngestionResponseAfterCommit: () => true,
+          },
+        }),
+      ).toThrow('test-only app dependencies require APP_ENV=test');
+      expect(connect).not.toHaveBeenCalled();
+    },
+  );
+
   it('reports liveness and readiness when PostgreSQL responds', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] });
     const { pool, release } = poolWithQuery(query);

@@ -10,7 +10,8 @@
   },
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "tools/*"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
@@ -20,6 +21,7 @@
     "test": "npm run test:migrations && npm run test --workspaces --if-present",
     "test:migrations": "node --test scripts/*.test.mjs",
     "test:integration": "npm run test:integration --workspace=@running-tracker/api",
+    "simulate:gps": "npm run simulate --workspace=@running-tracker/gps-simulator --",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
     "db:up": "docker compose -f infra/compose/docker-compose.yml up -d --wait",
     "db:down": "docker compose -f infra/compose/docker-compose.yml down",
