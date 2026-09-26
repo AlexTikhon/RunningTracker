@@ -142,6 +142,29 @@ describe('runnerReducer', () => {
     expect(runnerPhase(restored)).toBe('error');
   });
 
+  it('synchronizes a durable request when a new tab takes ownership of an existing run', () => {
+    const staleTab = startRecording();
+    const command: CommandRequest = {
+      commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      expectedControlRevision: '0',
+      kind: 'command',
+      orgId: startRequest.orgId,
+      runId: startRequest.runId,
+      type: 'pause',
+    };
+
+    const synchronized = runnerReducer(staleTab, {
+      pendingPointCount: 4,
+      request: command,
+      run: recordingRun,
+      type: 'storage-restored',
+    });
+
+    expect(synchronized.error?.request).toEqual(command);
+    expect(synchronized.upload.pendingCount).toBe(4);
+    expect(runnerPhase(synchronized)).toBe('error');
+  });
+
   it('ignores stale completions from superseded requests', () => {
     const state = startRecording();
     const stale = runnerReducer(state, {

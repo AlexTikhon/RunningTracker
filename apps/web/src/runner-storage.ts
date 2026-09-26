@@ -12,17 +12,22 @@ import {
 
 import type { CommandRequest, RunnerRequest, StartRequest } from './runner-state.js';
 
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const DEFAULT_DATABASE_NAME = 'running-tracker-runner';
 const MAX_SEQ = 9_223_372_036_854_775_807n;
 const SEQ_KEY_WIDTH = MAX_SEQ.toString().length;
 
 const STORES = {
+  leases: 'leases',
   points: 'points',
   profiles: 'profiles',
   requests: 'requests',
   runs: 'runs',
 } as const;
+
+interface WriterLeaseRecord extends WriterLease {
+  storageKey: string;
+}
 
 interface ProfileRecord {
   activeOrgId: string | null;
@@ -69,6 +74,17 @@ export interface PointMeasurement {
   recordedAt: string;
   segmentId: number;
 }
+
+export interface WriterLease {
+  expiresAt: string;
+  fencingToken: string;
+  ownerId: string;
+  userId: string;
+}
+
+export type WriterLeaseAcquisition =
+  | { acquired: true; lease: WriterLease }
+  | { acquired: false; lease: WriterLease };
 
 export interface RunnerRecovery {
   orgId: string | null;
@@ -135,6 +151,26 @@ function requestStorageKey(userId: string, request: RunnerRequest): string {
 
 function seqKey(seq: string): string {
   return seq.padStart(SEQ_KEY_WIDTH, '0');
+}
+
+function validateLeaseDuration(leaseDurationMs: number): number {
+  if (!Number.isInteger(leaseDurationMs) || leaseDurationMs < 1 || leaseDurationMs > 300_000) {
+    throw new Error('Writer lease duration must be an integer from 1 to 300000 milliseconds');
+  }
+  return leaseDurationMs;
+}
+
+function parseWriterLease(value: WriterLeaseRecord): WriterLease {
+  const expiresAt = new Date(value.expiresAt);
+  if (Number.isNaN(expiresAt.getTime())) {
+    throw new Error('Stored writer lease expiry is invalid');
+  }
+  return {
+    expiresAt: expiresAt.toISOString(),
+    fencingToken: revisionSchema.parse(value.fencingToken),
+    ownerId: uuidSchema.parse(value.ownerId),
+    userId: uuidSchema.parse(value.userId),
+  };
 }
 
 function validateScope(scope: RunScope): RunScope {
@@ -217,6 +253,110 @@ export class IndexedDbRunnerStorage {
     this.#factory = factory;
     this.#keyRange = keyRange;
     this.#now = options.now ?? (() => new Date());
+  }
+
+  public async acquireWriterLease(
+    userIdInput: string,
+    ownerIdInput: string,
+    leaseDurationMsInput: number,
+  ): Promise<WriterLeaseAcquisition> {
+    const userId = uuidSchema.parse(userIdInput);
+    const ownerId = uuidSchema.parse(ownerIdInput);
+    const leaseDurationMs = validateLeaseDuration(leaseDurationMsInput);
+    const now = this.#now();
+    const database = await this.#open();
+    const transaction = database.transaction(STORES.leases, 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      const store = transaction.objectStore(STORES.leases);
+      const existing = (await requestResult(store.get(userId))) as WriterLeaseRecord | undefined;
+      if (
+        existing !== undefined
+        && existing.ownerId !== ownerId
+        && Date.parse(existing.expiresAt) > now.getTime()
+      ) {
+        await done;
+        return { acquired: false, lease: parseWriterLease(existing) };
+      }
+
+      const sameLiveOwner = existing?.ownerId === ownerId
+        && Date.parse(existing.expiresAt) > now.getTime();
+      const fencingToken = sameLiveOwner
+        ? revisionSchema.parse(existing.fencingToken)
+        : revisionSchema.parse((BigInt(existing?.fencingToken ?? '0') + 1n).toString());
+      const lease: WriterLeaseRecord = {
+        expiresAt: new Date(now.getTime() + leaseDurationMs).toISOString(),
+        fencingToken,
+        ownerId,
+        storageKey: userId,
+        userId,
+      };
+      store.put(lease);
+      await done;
+      return { acquired: true, lease: parseWriterLease(lease) };
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async renewWriterLease(
+    leaseInput: WriterLease,
+    leaseDurationMsInput: number,
+  ): Promise<WriterLease | null> {
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    const leaseDurationMs = validateLeaseDuration(leaseDurationMsInput);
+    const now = this.#now();
+    const database = await this.#open();
+    const transaction = database.transaction(STORES.leases, 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      const store = transaction.objectStore(STORES.leases);
+      const existing = (await requestResult(store.get(lease.userId))) as WriterLeaseRecord | undefined;
+      if (
+        existing === undefined
+        || existing.ownerId !== lease.ownerId
+        || existing.fencingToken !== lease.fencingToken
+        || Date.parse(existing.expiresAt) <= now.getTime()
+      ) {
+        await done;
+        return null;
+      }
+      const renewed: WriterLeaseRecord = {
+        ...existing,
+        expiresAt: new Date(now.getTime() + leaseDurationMs).toISOString(),
+      };
+      store.put(renewed);
+      await done;
+      return parseWriterLease(renewed);
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async releaseWriterLease(leaseInput: WriterLease): Promise<boolean> {
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    const database = await this.#open();
+    const transaction = database.transaction(STORES.leases, 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      const store = transaction.objectStore(STORES.leases);
+      const existing = (await requestResult(store.get(lease.userId))) as WriterLeaseRecord | undefined;
+      const matches = existing?.ownerId === lease.ownerId
+        && existing.fencingToken === lease.fencingToken;
+      if (matches) {
+        store.delete(lease.userId);
+      }
+      await done;
+      return matches;
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   public async appendPoint(scopeInput: RunScope, measurement: PointMeasurement): Promise<PointInput> {
@@ -566,6 +706,9 @@ export class IndexedDbRunnerStorage {
         'upgradeneeded',
         () => {
           const database = request.result;
+          if (!database.objectStoreNames.contains(STORES.leases)) {
+            database.createObjectStore(STORES.leases, { keyPath: 'storageKey' });
+          }
           if (!database.objectStoreNames.contains(STORES.profiles)) {
             database.createObjectStore(STORES.profiles, { keyPath: 'userId' });
           }

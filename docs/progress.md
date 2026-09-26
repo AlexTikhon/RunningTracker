@@ -11,7 +11,7 @@ Last updated: 2026-09-26.
 | P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
-| P05 | IN PROGRESS | P05.1 controls/state, P05.2 durable IndexedDB buffer, and P05.3 upload/reconciliation complete; writer ownership and capture remain |
+| P05 | IN PROGRESS | P05.1 controls/state, P05.2 durable IndexedDB buffer, P05.3 upload/reconciliation, and P05.4 writer ownership complete; capture remains |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
@@ -533,3 +533,23 @@ Verification evidence on 2026-09-26:
 - no migration, public HTTP contract, runtime dependency, database write, geolocation source, cross-tab writer lease, commit, push, paid-provider call, hosted CI, or real-browser interaction test occurred. Browser lifecycle/IndexedDB behavior is covered with reducer/API tests and `fake-indexeddb`, not claimed as device QA.
 
 P05.3 is DONE. The next planned fragment is P05.4: a single writer owner across tabs with an explicit lease/lock and conflict UX. P05.5, SSE, geometry, archive maps, retention, and production identity remain unstarted.
+
+## P05.4 — fenced cross-tab writer ownership
+
+Implemented:
+
+- IndexedDB schema version 2 adds one authenticated-user-scoped writer lease, matching the server's global one-active-run-per-user invariant. Each tab has an in-memory UUID owner identity;
+- lease acquisition is one atomic read-write transaction. A live competing owner is returned as a conflict, while an expired lease can be taken over with a monotonically increasing decimal bigint fencing token;
+- renewal requires the same owner/token and a still-live lease; release also requires the same owner/token. A stale tab therefore cannot renew or delete a successor's lease;
+- the coordinator uses a 15-second lease and 5-second heartbeat, fails closed when renewal/storage fails, and releases best-effort on clear/unmount. Restored activity claims automatically; idle tabs claim lazily before start and reread durable recovery state after acquisition;
+- lifecycle requests and point-upload dispatch require confirmed ownership. Non-owner tabs do not run the uploader, lifecycle controls are read-only, and conflict/loss UX shows lease expiry plus an explicit ownership retry;
+- ADR-0010 records the offline/distributed trade-off: the lease coordinates same-origin tabs. It does not falsely claim global exclusivity between disconnected devices; server active-run uniqueness, control revisions, idempotent request identities, and canonical point conflict handling remain that boundary.
+
+Verification evidence on 2026-09-26:
+
+- focused web tests passed 7 files / 37 tests, including lossless IndexedDB v1→v2 upgrade, simultaneous acquisition by two storage instances, expiry takeover, fencing-token advancement, stale renew/release rejection, coordinator renewal, fail-closed ownership loss, and durable request recovery by a successor tab;
+- focused web lint, strict typecheck, and production Vite build passed;
+- `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 48 API unit tests, 37 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- no migration, public HTTP contract, runtime dependency, database write, geolocation source, commit, push, paid-provider call, hosted CI, or real-browser interaction test occurred. Cross-tab correctness is covered through two clients sharing `fake-indexeddb`, not claimed as browser/device QA.
+
+P05.4 is DONE. The next planned fragment is P05.5: connect Geolocation and the deterministic simulator through one source interface, with stale-callback rejection and recording tests that do not depend on an external map. SSE, geometry, archive maps, retention, and production identity remain unstarted.

@@ -118,8 +118,8 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
     case 'connectivity-changed':
       return { ...state, connectivity: event.connectivity };
     case 'storage-restored':
-      if (state.pendingRequest !== null || state.run !== null) {
-        throw new Error('Durable state can only be restored before runner activity');
+      if (state.pendingRequest !== null) {
+        throw new Error('Durable state cannot be synchronized during an active request');
       }
       return {
         ...state,

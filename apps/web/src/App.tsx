@@ -21,6 +21,10 @@ import {
   type RunnerRequest,
   type StartRequest,
 } from './runner-state.js';
+import {
+  WriterLeaseCoordinator,
+  type WriterOwnershipState,
+} from './writer-lease.js';
 
 type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
 type SessionState =
@@ -64,8 +68,10 @@ export function App() {
   const [orgId, setOrgId] = useState('');
   const [now, setNow] = useState(() => Date.now());
   const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
+  const [writer, setWriter] = useState<WriterOwnershipState>({ status: 'unclaimed' });
   const restoredUserId = useRef<string | null>(null);
   const uploadWorker = useRef<PointUploadWorker | null>(null);
+  const writerCoordinator = useRef<WriterLeaseCoordinator | null>(null);
   const [runner, dispatch] = useReducer(
     runnerReducer,
     typeof navigator === 'undefined' || navigator.onLine !== false ? 'online' : 'offline',
@@ -140,6 +146,31 @@ export function App() {
   }, [session]);
 
   useEffect(() => {
+    if (session.status !== 'ready') {
+      return undefined;
+    }
+    const coordinator = new WriterLeaseCoordinator({
+      onState: setWriter,
+      storage: getBrowserRunnerStorage(),
+      userId: session.session.identity.userId,
+    });
+    writerCoordinator.current = coordinator;
+    setWriter({ status: 'unclaimed' });
+    return () => {
+      if (writerCoordinator.current === coordinator) {
+        writerCoordinator.current = null;
+      }
+      void coordinator.dispose();
+    };
+  }, [session]);
+
+  useEffect(() => {
+    if (storage.status === 'ready' && (runner.run !== null || runner.error !== null)) {
+      void writerCoordinator.current?.claim();
+    }
+  }, [runner.error, runner.run, storage.status]);
+
+  useEffect(() => {
     const updateConnectivity = () => {
       dispatch({ connectivity: navigator.onLine ? 'online' : 'offline', type: 'connectivity-changed' });
     };
@@ -155,6 +186,7 @@ export function App() {
     if (
       session.status !== 'ready'
       || storage.status !== 'ready'
+      || writer.status !== 'owned'
       || runner.run === null
       || !uuidSchema.safeParse(normalizedOrgId).success
     ) {
@@ -177,7 +209,15 @@ export function App() {
       },
       onState: (nextUpload) => dispatch({ type: 'upload-changed', upload: nextUpload }),
       scope,
-      send: (points) => uploadPointBatch({ orgId: scope.orgId, points, runId: scope.runId }, session.session.csrf),
+      send: async (points) => {
+        if (!await writerCoordinator.current?.assertOwned()) {
+          throw new Error('Point upload stopped because this tab no longer owns the writer lease');
+        }
+        return uploadPointBatch(
+          { orgId: scope.orgId, points, runId: scope.runId },
+          session.session.csrf,
+        );
+      },
       storage: runnerStorage,
     });
     uploadWorker.current = worker;
@@ -188,7 +228,7 @@ export function App() {
         uploadWorker.current = null;
       }
     };
-  }, [normalizedOrgId, runner.run?.runId, session, storage.status]);
+  }, [normalizedOrgId, runner.run?.runId, session, storage.status, writer.status]);
 
   useEffect(() => {
     uploadWorker.current?.setOnline(runner.connectivity === 'online');
@@ -207,6 +247,9 @@ export function App() {
       if (session.status !== 'ready' || storage.status !== 'ready') {
         return;
       }
+      if (!await writerCoordinator.current?.assertOwned()) {
+        return;
+      }
       dispatch({ request, type: 'request-started' });
       try {
         const runnerStorage = getBrowserRunnerStorage();
@@ -221,6 +264,11 @@ export function App() {
         }
         if (request.kind === 'start') {
           const run = await createRun(request, session.session.csrf);
+          if (!await writerCoordinator.current?.assertOwned()) {
+            throw new Error(
+              'Writer ownership changed after the server response; the exact start request remains queued.',
+            );
+          }
           await runnerStorage.acknowledgeStart(session.session.identity.userId, request, run);
           dispatch({ request, run, type: 'start-succeeded' });
           return;
@@ -229,6 +277,11 @@ export function App() {
           throw new Error('The durable command has no confirmed run state');
         }
         const result = await sendRunCommand(request, session.session.csrf);
+        if (!await writerCoordinator.current?.assertOwned()) {
+          throw new Error(
+            'Writer ownership changed after the server response; the exact command remains queued.',
+          );
+        }
         await runnerStorage.acknowledgeCommand(
           session.session.identity.userId,
           request,
@@ -261,18 +314,62 @@ export function App() {
     [runner.connectivity, runner.run, session, storage.status],
   );
 
+  const synchronizeAfterClaim = useCallback(async () => {
+    if (session.status !== 'ready' || storage.status !== 'ready') {
+      return false;
+    }
+    const recovery = await getBrowserRunnerStorage().loadRecovery(session.session.identity.userId);
+    if (recovery.orgId !== null) {
+      setOrgId(recovery.orgId);
+    }
+    if (
+      runner.pendingRequest === null
+      && (recovery.run !== null || recovery.request !== null)
+    ) {
+      dispatch({
+        pendingPointCount: recovery.pendingPointCount,
+        request: recovery.request,
+        run: recovery.run,
+        type: 'storage-restored',
+      });
+      return true;
+    }
+    return false;
+  }, [runner.pendingRequest, runner.run, session, storage.status]);
+
+  const claimWriter = useCallback(async () => {
+    const acquired = await writerCoordinator.current?.claim() ?? false;
+    if (!acquired) {
+      return false;
+    }
+    try {
+      return !await synchronizeAfterClaim();
+    } catch (error) {
+      setStorage({ message: errorMessage(error), status: 'error' });
+      return false;
+    }
+  }, [synchronizeAfterClaim]);
+
   const validOrgId = uuidSchema.safeParse(normalizedOrgId).success;
   const phase = runnerPhase(runner);
   const busy = runner.pendingRequest !== null;
-  const controlsDisabled = busy || runner.error !== null || session.status !== 'ready' || storage.status !== 'ready';
+  const controlsDisabled = busy
+    || runner.error !== null
+    || session.status !== 'ready'
+    || storage.status !== 'ready'
+    || writer.status === 'acquiring'
+    || (runner.run !== null && writer.status !== 'owned');
   const commands = runner.run === null ? [] : availableCommands(runner.run.status);
   const elapsed = useMemo(
     () => durationLabel(runner.run?.startedAt, runner.run?.finishedAt, now),
     [now, runner.run?.finishedAt, runner.run?.startedAt],
   );
 
-  const start = () => {
+  const start = async () => {
     if (!validOrgId || controlsDisabled || runner.run !== null) {
+      return;
+    }
+    if (!await claimWriter()) {
       return;
     }
     const request: StartRequest = {
@@ -306,6 +403,7 @@ export function App() {
     try {
       await getBrowserRunnerStorage().clearActiveRun(session.session.identity.userId);
       dispatch({ type: 'finished-run-cleared' });
+      await writerCoordinator.current?.release();
     } catch (error) {
       setStorage({ message: errorMessage(error), status: 'error' });
     }
@@ -326,11 +424,11 @@ export function App() {
 
       <section className="runner-shell" aria-labelledby="runner-title">
         <div className="runner-copy">
-          <p className="eyebrow">Runner console · P05.3</p>
+          <p className="eyebrow">Runner console · P05.4</p>
           <h1 id="runner-title">Your run,<br />under control.</h1>
           <p className="lede">
-            Lifecycle requests and points survive reloads in IndexedDB. Buffered points upload in bounded,
-            acknowledged batches with retry backoff; GPS capture joins this screen in P05.5.
+            Lifecycle requests and points survive reloads in IndexedDB. A fenced browser lease keeps one
+            tab in control while buffered uploads continue; GPS capture joins this screen in P05.5.
           </p>
         </div>
 
@@ -356,7 +454,7 @@ export function App() {
                 value={orgId}
               />
               <p id="organization-help">The server rechecks active membership inside the run transaction.</p>
-              <button className="primary-action" disabled={!validOrgId || controlsDisabled} onClick={start} type="button">
+              <button className="primary-action" disabled={!validOrgId || controlsDisabled} onClick={() => void start()} type="button">
                 {phase === 'starting' ? 'Starting…' : 'Start run'}
               </button>
             </div>
@@ -380,7 +478,7 @@ export function App() {
               {runner.run.status === 'finished' && (
                 <button
                   className="primary-action"
-                  disabled={runner.upload.pendingCount > 0}
+                  disabled={runner.upload.pendingCount > 0 || writer.status !== 'owned'}
                   onClick={() => void clearFinishedRun()}
                   type="button"
                 >
@@ -405,11 +503,27 @@ export function App() {
         </section>
       )}
 
+      {(writer.status === 'conflict' || writer.status === 'lost' || writer.status === 'error') && (
+        <section className="notice notice--writer" role="alert">
+          <div>
+            <strong>
+              {writer.status === 'error' ? 'Writer ownership unavailable' : 'Another tab may own recording'}
+            </strong>
+            <span>
+              {writer.status === 'conflict'
+                ? `This tab is read-only while the current lease is live (through ${new Date(writer.expiresAt).toLocaleTimeString()}).`
+                : writer.message}
+            </span>
+          </div>
+          <button onClick={() => void claimWriter()} type="button">Retry ownership</button>
+        </section>
+      )}
+
       {runner.error !== null && (
         <section className="notice notice--error" role="alert">
           <div><strong>Request not confirmed</strong><span>{runner.error.message}</span></div>
           <button
-            disabled={runner.connectivity === 'offline' || session.status !== 'ready'}
+            disabled={runner.connectivity === 'offline' || session.status !== 'ready' || writer.status !== 'owned'}
             onClick={() => void executeRequest(runner.error!.request)}
             type="button"
           >
@@ -434,6 +548,11 @@ export function App() {
           detail={runner.run ? `control rev ${runner.run.controlRevision}` : 'No server revision yet'}
           label="Server state"
           value={runner.error === null ? 'confirmed' : 'error'}
+        />
+        <StateCard
+          detail={writer.status === 'owned' ? `fence ${writer.fencingToken}` : 'Controls require the browser lease'}
+          label="Writer"
+          value={writer.status}
         />
       </section>
 
