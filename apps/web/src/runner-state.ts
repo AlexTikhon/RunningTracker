@@ -64,6 +64,7 @@ export type RunnerEvent =
   | { request: CommandRequest; result: RunCommandResponse; type: 'command-succeeded' }
   | { request: CommandRequest; run: RunView; type: 'request-reconciled' }
   | { message: string; request: RunnerRequest; type: 'request-failed' }
+  | { runId: string; type: 'point-buffered' }
   | { dataRevision: string; runId: string; type: 'point-batch-acknowledged' }
   | { run: RunView; type: 'run-reconciled' }
   | { type: 'finished-run-cleared' }
@@ -181,6 +182,17 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         ...state,
         error: { message: event.message, request: event.request },
         pendingRequest: null,
+      };
+    case 'point-buffered':
+      if (state.run?.runId !== event.runId) {
+        return state;
+      }
+      return {
+        ...state,
+        upload: {
+          ...state.upload,
+          pendingCount: state.upload.pendingCount + 1,
+        },
       };
     case 'finished-run-cleared':
       if (state.run?.status !== 'finished' || state.pendingRequest !== null) {

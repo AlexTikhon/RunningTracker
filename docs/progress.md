@@ -11,7 +11,7 @@ Last updated: 2026-09-26.
 | P02B | DONE | All six run child/access tables, D02 ACL matrix, and D01 canonical `PointInput`/retry semantics passed real PostgreSQL/PostGIS role integration |
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
-| P05 | IN PROGRESS | P05.1 controls/state, P05.2 durable IndexedDB buffer, P05.3 upload/reconciliation, and P05.4 writer ownership complete; capture remains |
+| P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
 | P06 | TODO | Geometry and archive summaries |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
@@ -553,3 +553,25 @@ Verification evidence on 2026-09-26:
 - no migration, public HTTP contract, runtime dependency, database write, geolocation source, commit, push, paid-provider call, hosted CI, or real-browser interaction test occurred. Cross-tab correctness is covered through two clients sharing `fake-indexeddb`, not claimed as browser/device QA.
 
 P05.4 is DONE. The next planned fragment is P05.5: connect Geolocation and the deterministic simulator through one source interface, with stale-callback rejection and recording tests that do not depend on an external map. SSE, geometry, archive maps, retention, and production identity remain unstarted.
+
+## P05.5 — fenced foreground Geolocation and simulator capture
+
+Implemented:
+
+- device Geolocation and the existing seeded fixture simulator implement one `CaptureSource` interface and emit the same source-neutral measurement shape. The simulator's fixture `seq`/`segmentId` are deliberately discarded because browser storage owns those identities;
+- `CaptureController` serializes callbacks, starts only for a confirmed recording run, and invalidates its generation before pause/finish/unmount/loss cleanup. A callback stopped while ownership renewal is in flight cannot be accepted as a new measurement; a 100-measurement ceiling stops capture visibly rather than allowing an unbounded callback queue;
+- IndexedDB atomically allocates a new bounded `segmentId` for each start/resume/recovered foreground session. The counter survives point upload deletion and page reload;
+- every measurement renews the writer lease, then IndexedDB verifies the same owner/fencing token and live expiry inside the point write transaction. Lease takeover therefore fences both segment allocation and capture persistence, not only UI/network dispatch;
+- a durable point updates visible pending state and wakes the existing uploader. Capture remains active offline and is explicitly foreground-only;
+- the runner UI exposes device GPS versus deterministic simulator selection and independent capture state. ADR-0011 records the stale-callback, segment, lease, and no-background guarantees;
+- no Mapbox token contract exists in tracked configuration and no token was supplied, so no paid/external map runtime was added. Core capture and verification remain tokenless; map presentation remains P08/P09 scope.
+
+Verification evidence on 2026-09-26:
+
+- focused web tests passed 9 files / 45 tests, including Geolocation adaptation, seeded simulator replay, bounded serialized persistence, durable segment assignment, ownership loss, stale async callback rejection, and transactional fencing across IndexedDB lease takeover;
+- focused web lint, strict typecheck, and production Vite build passed;
+- full `npm run verify` passed root lint, strict workspace typecheck, 8 migration-history tests, 48 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- `git diff --check` passed;
+- no migration, public HTTP contract, server/database behavior, paid-provider call, Mapbox integration, commit, push, hosted CI, or real-browser/device GPS interaction occurred. Browser APIs and IndexedDB concurrency are covered with injected ports and `fake-indexeddb`, not claimed as physical-device QA.
+
+P05 is DONE. The next planned fragment is P06.1: one versioned edge-validity rule shared by summary processing and the future live-track path. SSE, archive maps, retention, and production identity remain unstarted.

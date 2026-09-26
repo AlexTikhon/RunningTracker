@@ -15,6 +15,7 @@ import type { CommandRequest, RunnerRequest, StartRequest } from './runner-state
 const DATABASE_VERSION = 2;
 const DEFAULT_DATABASE_NAME = 'running-tracker-runner';
 const MAX_SEQ = 9_223_372_036_854_775_807n;
+const MAX_SEGMENT_ID = 2_147_483_647;
 const SEQ_KEY_WIDTH = MAX_SEQ.toString().length;
 
 const STORES = {
@@ -37,6 +38,7 @@ interface ProfileRecord {
 
 interface RunRecord {
   nextSeq: string;
+  nextSegmentId?: number;
   orgId: string;
   run: RunView | null;
   runId: string;
@@ -360,11 +362,70 @@ export class IndexedDbRunnerStorage {
   }
 
   public async appendPoint(scopeInput: RunScope, measurement: PointMeasurement): Promise<PointInput> {
+    return this.#appendPoint(scopeInput, measurement, null);
+  }
+
+  public async allocateCaptureSegment(
+    scopeInput: RunScope,
+    leaseInput: WriterLease,
+  ): Promise<number> {
     const scope = validateScope(scopeInput);
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    if (lease.userId !== scope.userId) {
+      throw new Error('Writer lease does not match the capture scope');
+    }
     const database = await this.#open();
-    const transaction = database.transaction([STORES.points, STORES.runs], 'readwrite');
+    const transaction = database.transaction([STORES.leases, STORES.runs], 'readwrite');
     const done = transactionDone(transaction);
     try {
+      await this.#assertCurrentLease(transaction, lease);
+      const runStore = transaction.objectStore(STORES.runs);
+      const key = runStorageKey(scope);
+      const existing = (await requestResult(runStore.get(key))) as RunRecord | undefined;
+      if (existing?.run === null || existing?.run === undefined) {
+        throw new Error('Capture requires a confirmed run snapshot');
+      }
+      const segmentId = existing.nextSegmentId ?? 0;
+      if (!Number.isInteger(segmentId) || segmentId < 0 || segmentId > MAX_SEGMENT_ID) {
+        throw new Error('The local capture segment is exhausted');
+      }
+      runStore.put({ ...existing, nextSegmentId: segmentId + 1 });
+      await done;
+      return segmentId;
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async appendPointForWriter(
+    scopeInput: RunScope,
+    measurement: PointMeasurement,
+    leaseInput: WriterLease,
+  ): Promise<PointInput> {
+    const scope = validateScope(scopeInput);
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    if (lease.userId !== scope.userId) {
+      throw new Error('Writer lease does not match the capture scope');
+    }
+    return this.#appendPoint(scope, measurement, lease);
+  }
+
+  async #appendPoint(
+    scopeInput: RunScope,
+    measurement: PointMeasurement,
+    lease: WriterLease | null,
+  ): Promise<PointInput> {
+    const scope = validateScope(scopeInput);
+    const database = await this.#open();
+    const stores = lease === null
+      ? [STORES.points, STORES.runs]
+      : [STORES.leases, STORES.points, STORES.runs];
+    const transaction = database.transaction(stores, 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      if (lease !== null) await this.#assertCurrentLease(transaction, lease);
       const runStore = transaction.objectStore(STORES.runs);
       const key = runStorageKey(scope);
       const existing = (await requestResult(runStore.get(key))) as RunRecord | undefined;
@@ -384,6 +445,7 @@ export class IndexedDbRunnerStorage {
       };
       const runRecord: RunRecord = {
         nextSeq: (nextSeq + 1n).toString(),
+        ...(existing?.nextSegmentId === undefined ? {} : { nextSegmentId: existing.nextSegmentId }),
         orgId: scope.orgId,
         run: existing?.run ?? null,
         runId: scope.runId,
@@ -399,6 +461,20 @@ export class IndexedDbRunnerStorage {
       abortTransaction(transaction);
       await done.catch(() => undefined);
       throw error;
+    }
+  }
+
+  async #assertCurrentLease(transaction: IDBTransaction, lease: WriterLease): Promise<void> {
+    const existing = (await requestResult(
+      transaction.objectStore(STORES.leases).get(lease.userId),
+    )) as WriterLeaseRecord | undefined;
+    if (
+      existing === undefined
+      || existing.ownerId !== lease.ownerId
+      || existing.fencingToken !== lease.fencingToken
+      || Date.parse(existing.expiresAt) <= this.#now().getTime()
+    ) {
+      throw new Error('This tab no longer owns the writer lease');
     }
   }
 
@@ -684,6 +760,7 @@ export class IndexedDbRunnerStorage {
     const existing = (await requestResult(store.get(storageKey))) as RunRecord | undefined;
     const record: RunRecord = {
       nextSeq: existing?.nextSeq ?? '1',
+      ...(existing?.nextSegmentId === undefined ? {} : { nextSegmentId: existing.nextSegmentId }),
       orgId: scope.orgId,
       run: latestRunSnapshot(existing?.run, run),
       runId: scope.runId,

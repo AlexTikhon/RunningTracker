@@ -71,14 +71,18 @@ export class WriterLeaseCoordinator {
   }
 
   public async assertOwned(): Promise<boolean> {
+    return await this.assertOwnedLease() !== null;
+  }
+
+  public async assertOwnedLease(): Promise<WriterLease | null> {
     const lease = this.#lease;
     if (lease === null || this.#disposed) {
-      return false;
+      return null;
     }
     try {
       const renewed = await this.#storage.renewWriterLease(lease, this.#leaseDurationMs);
       if (this.#disposed) {
-        return false;
+        return null;
       }
       if (renewed === null) {
         if (this.#lease === lease) {
@@ -89,7 +93,7 @@ export class WriterLeaseCoordinator {
             status: 'lost',
           });
         }
-        return false;
+        return null;
       }
       if (this.#lease === lease) {
         this.#lease = renewed;
@@ -100,14 +104,14 @@ export class WriterLeaseCoordinator {
         });
         this.#scheduleRenewal();
       }
-      return true;
+      return renewed;
     } catch (error) {
       if (!this.#disposed && this.#lease === lease) {
         this.#lease = null;
         this.#clearTimer();
         this.#onState({ message: message(error), status: 'error' });
       }
-      return false;
+      return null;
     }
   }
 

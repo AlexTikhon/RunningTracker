@@ -158,4 +158,64 @@ describe('writer lease', () => {
     expect(states.at(-1)).toMatchObject({ status: 'lost' });
     await coordinator.dispose();
   });
+
+  it('fences segment allocation and point persistence in the same IndexedDB transactions', async () => {
+    const factory = new IDBFactory();
+    const databaseName = crypto.randomUUID();
+    const clock = createClock();
+    const first = createStorage(factory, databaseName, clock.now);
+    const second = createStorage(factory, databaseName, clock.now);
+    const initial = await first.acquireWriterLease(userId, firstOwner, 100);
+    if (!initial.acquired) throw new Error('Expected the first owner to acquire the lease');
+    await first.saveRunSnapshot(userId, orgId, {
+      controlRevision: '0',
+      dataRevision: '0',
+      finishedAt: null,
+      rawState: 'available',
+      runId,
+      startedAt: '2026-09-26T08:00:00.000Z',
+      status: 'recording',
+      summary: null,
+    });
+
+    await expect(first.allocateCaptureSegment({ orgId, runId, userId }, initial.lease)).resolves.toBe(0);
+    await expect(first.appendPointForWriter(
+      { orgId, runId, userId },
+      {
+        accuracyM: 4.5,
+        latitude: 52.2297,
+        longitude: 21.0122,
+        recordedAt: '2026-09-26T08:00:00.000Z',
+        segmentId: 0,
+      },
+      initial.lease,
+    )).resolves.toMatchObject({ segmentId: 0, seq: '1' });
+
+    clock.advance(101);
+    const takeover = await second.acquireWriterLease(userId, secondOwner, 100);
+    if (!takeover.acquired) throw new Error('Expected the second owner to take over');
+    await expect(first.appendPointForWriter(
+      { orgId, runId, userId },
+      {
+        accuracyM: 4.5,
+        latitude: 52.2298,
+        longitude: 21.0123,
+        recordedAt: '2026-09-26T08:00:02.000Z',
+        segmentId: 0,
+      },
+      initial.lease,
+    )).rejects.toThrow('no longer owns');
+    await expect(second.allocateCaptureSegment({ orgId, runId, userId }, takeover.lease)).resolves.toBe(1);
+    await expect(second.appendPointForWriter(
+      { orgId, runId, userId },
+      {
+        accuracyM: 4.5,
+        latitude: 52.2298,
+        longitude: 21.0123,
+        recordedAt: '2026-09-26T08:00:02.000Z',
+        segmentId: 1,
+      },
+      takeover.lease,
+    )).resolves.toMatchObject({ segmentId: 1, seq: '2' });
+  });
 });

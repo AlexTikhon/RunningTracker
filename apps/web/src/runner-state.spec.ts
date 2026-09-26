@@ -119,6 +119,15 @@ describe('runnerReducer', () => {
     expect(staleReconciliation.run?.dataRevision).toBe('3');
   });
 
+  it('reflects each durably buffered capture before the uploader wakes', () => {
+    const buffered = runnerReducer(startRecording(), {
+      runId: recordingRun.runId,
+      type: 'point-buffered',
+    });
+
+    expect(buffered.upload.pendingCount).toBe(1);
+  });
+
   it('restores a confirmed run, pending point count, and exact unacknowledged request', () => {
     const command: CommandRequest = {
       commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',

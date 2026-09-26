@@ -2,6 +2,8 @@ import { uuidSchema, type RunCommandType, type SessionResponse } from '@running-
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
+import { CaptureController, type CaptureState } from './capture-controller.js';
+import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
 import { PointUploadWorker } from './point-upload-worker.js';
 import {
   createRun,
@@ -35,6 +37,7 @@ type StorageState =
   | { status: 'loading' }
   | { status: 'ready' }
   | { message: string; status: 'error' };
+type CaptureSourceKind = 'geolocation' | 'simulator';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 
@@ -69,6 +72,9 @@ export function App() {
   const [now, setNow] = useState(() => Date.now());
   const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
   const [writer, setWriter] = useState<WriterOwnershipState>({ status: 'unclaimed' });
+  const [capture, setCapture] = useState<CaptureState>({ status: 'idle' });
+  const [captureSourceKind, setCaptureSourceKind] = useState<CaptureSourceKind>('geolocation');
+  const captureController = useRef<CaptureController | null>(null);
   const restoredUserId = useRef<string | null>(null);
   const uploadWorker = useRef<PointUploadWorker | null>(null);
   const writerCoordinator = useRef<WriterLeaseCoordinator | null>(null);
@@ -235,6 +241,44 @@ export function App() {
   }, [runner.connectivity]);
 
   useEffect(() => {
+    if (
+      session.status !== 'ready'
+      || storage.status !== 'ready'
+      || writer.status !== 'owned'
+      || runner.run?.status !== 'recording'
+      || !uuidSchema.safeParse(normalizedOrgId).success
+    ) {
+      setCapture({ status: 'idle' });
+      return undefined;
+    }
+    const scope = {
+      orgId: normalizedOrgId,
+      runId: runner.run.runId,
+      userId: session.session.identity.userId,
+    };
+    const source = captureSourceKind === 'geolocation'
+      ? new GeolocationCaptureSource()
+      : new SimulatorCaptureSource({ name: 'normal', seed: 1 });
+    const controller = new CaptureController({
+      assertOwnedLease: async () => await writerCoordinator.current?.assertOwnedLease() ?? null,
+      onPoint: () => {
+        dispatch({ runId: scope.runId, type: 'point-buffered' });
+        uploadWorker.current?.wake();
+      },
+      onState: setCapture,
+      scope,
+      source,
+      storage: getBrowserRunnerStorage(),
+    });
+    captureController.current = controller;
+    void controller.start();
+    return () => {
+      controller.stop();
+      if (captureController.current === controller) captureController.current = null;
+    };
+  }, [captureSourceKind, normalizedOrgId, runner.run?.runId, runner.run?.status, session, storage.status, writer.status]);
+
+  useEffect(() => {
     if (runner.run === null || runner.run.status === 'finished') {
       return undefined;
     }
@@ -360,6 +404,13 @@ export function App() {
     || writer.status === 'acquiring'
     || (runner.run !== null && writer.status !== 'owned');
   const commands = runner.run === null ? [] : availableCommands(runner.run.status);
+  const captureDetail = capture.status === 'capturing' || capture.status === 'complete'
+    ? `segment ${capture.segmentId} · ${capture.capturedCount} buffered`
+    : capture.status === 'starting'
+      ? capture.source
+      : capture.status === 'error' || capture.status === 'lost'
+        ? capture.message
+        : 'Starts while the run is recording';
   const elapsed = useMemo(
     () => durationLabel(runner.run?.startedAt, runner.run?.finishedAt, now),
     [now, runner.run?.finishedAt, runner.run?.startedAt],
@@ -424,11 +475,11 @@ export function App() {
 
       <section className="runner-shell" aria-labelledby="runner-title">
         <div className="runner-copy">
-          <p className="eyebrow">Runner console · P05.4</p>
+          <p className="eyebrow">Runner console · P05.5</p>
           <h1 id="runner-title">Your run,<br />under control.</h1>
           <p className="lede">
-            Lifecycle requests and points survive reloads in IndexedDB. A fenced browser lease keeps one
-            tab in control while buffered uploads continue; GPS capture joins this screen in P05.5.
+            Device GPS and the seeded simulator share one fenced foreground capture path. Measurements
+            are durably sequenced in IndexedDB before the uploader can send them.
           </p>
         </div>
 
@@ -440,6 +491,20 @@ export function App() {
 
           <p className="timer" aria-label={`Elapsed time ${elapsed}`}>{elapsed}</p>
           <p className="timer-label">elapsed foreground session</p>
+
+          <div className="capture-source">
+            <label htmlFor="capture-source">Capture source</label>
+            <select
+              disabled={runner.run?.status === 'recording' || busy}
+              id="capture-source"
+              onChange={(event) => setCaptureSourceKind(event.target.value as CaptureSourceKind)}
+              value={captureSourceKind}
+            >
+              <option value="geolocation">Device GPS</option>
+              <option value="simulator">Simulator · normal · seed 1</option>
+            </select>
+            <span>Foreground only. Pausing or losing the writer lease stops capture.</span>
+          </div>
 
           {runner.run === null ? (
             <div className="start-panel">
@@ -503,6 +568,12 @@ export function App() {
         </section>
       )}
 
+      {(capture.status === 'error' || capture.status === 'lost') && (
+        <section className="notice notice--error" role="alert">
+          <div><strong>Capture stopped</strong><span>{capture.message}</span></div>
+        </section>
+      )}
+
       {(writer.status === 'conflict' || writer.status === 'lost' || writer.status === 'error') && (
         <section className="notice notice--writer" role="alert">
           <div>
@@ -554,6 +625,7 @@ export function App() {
           label="Writer"
           value={writer.status}
         />
+        <StateCard detail={captureDetail} label="Capture" value={capture.status} />
       </section>
 
       <section className={`session-bar session-bar--${session.status}`} aria-live="polite">

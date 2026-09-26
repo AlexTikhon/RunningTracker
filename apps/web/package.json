@@ -4,17 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prebuild": "npm run build --workspace=@running-tracker/contracts",
+    "prebuild": "npm run build --workspace=@running-tracker/contracts && npm run build --workspace=@running-tracker/fixtures",
     "build": "tsc -b && vite build",
     "dev": "vite",
     "lint": "eslint src *.ts",
-    "pretest": "npm run build --workspace=@running-tracker/contracts",
+    "pretest": "npm run build --workspace=@running-tracker/contracts && npm run build --workspace=@running-tracker/fixtures",
     "test": "vitest run",
-    "pretypecheck": "npm run build --workspace=@running-tracker/contracts",
+    "pretypecheck": "npm run build --workspace=@running-tracker/contracts && npm run build --workspace=@running-tracker/fixtures",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@running-tracker/contracts": "0.1.0",
+    "@running-tracker/fixtures": "0.1.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
