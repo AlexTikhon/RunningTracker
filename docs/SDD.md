@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P05 и P06.1–P06.3 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06.1 зафиксировал единый versioned PostGIS edge evaluator, P06.2 — revision-bound metrics, quality counters и accepted chains, P06.3 — глобально нормализованное метрическое упрощение; P06.4 atomic publication остаётся следующим фрагментом.
+Статус: согласованный проект архитектуры; P00–P05 и P06.1–P06.4 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06.1 зафиксировал единый versioned PostGIS edge evaluator, P06.2 — revision-bound metrics, quality counters и accepted chains, P06.3 — глобально нормализованное метрическое упрощение, P06.4 — revision-checked atomic publication; P06.5 job concurrency остаётся следующим фрагментом.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -223,11 +223,13 @@ distance_m — сумма ST_Distance(a.geom::geography,b.geom::geography) до�
 
 Полный пересчёт завершённых run запускается раз в минуту:
 
-1. Прочитать точки и source revision в коротком REPEATABLE READ snapshot.
+1. Зафиксировать source revision, затем прочитать revision-bound точки и выполнить calculation/simplification в одном коротком statement snapshot.
 2. Рассчитать результат без удержания блокировки run.
 3. При публикации заблокировать organization, затем run; сверить revision, состояние и отсутствие удаления.
 4. Записать summary и увеличить archive_revision в одной транзакции.
 5. При расхождении версии отбросить результат и повторить позже.
+
+P06.4 реализует этот protocol через maintenance-only `find_stale_run_summaries` и `publish_run_summary`. Один цикл выбирает не более одного finished/raw-available candidate; расчёт и упрощение выполняются одним materialized statement, поэтому используют один MVCC snapshot без run lock. Публикация блокирует organization, затем run, и под блокировками повторно проверяет status/raw state, точный `data_revision`, отсутствие tombstone и уже актуальной summary. Успешный upsert и увеличение `archive_revision` выполняются атомарно; stale/deleted/duplicate результат не меняет ни summary, ни revision. Точная v1-форма `QualityStats` проверяется publication capability, а table CHECK остаётся version-agnostic object guard (ADR-0015). Distributed claiming и настраиваемая конкурентность остаются P06.5.
 
 Все операции, которым нужны обе блокировки, соблюдают порядок organization → run. Ingestion блокирует только run и никогда затем не запрашивает organization lock.
 

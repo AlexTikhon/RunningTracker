@@ -46,6 +46,7 @@ describe('validateEnvironment', () => {
       DB_QUERY_TIMEOUT_MS: 1_000,
       PORT: 3_100,
       RUN_AUTO_FINISH_INTERVAL_MS: 60_000,
+      RUN_SUMMARY_INTERVAL_MS: 60_000,
       SHUTDOWN_TIMEOUT_MS: 5_000,
     });
   });

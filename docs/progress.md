@@ -12,7 +12,7 @@ Last updated: 2026-09-26.
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
-| P06 | IN PROGRESS | P06.1 edge evaluation, P06.2 revision-bound metrics/quality/chains, and P06.3 global metric simplification verified; publication remains |
+| P06 | IN PROGRESS | P06.1–P06.4 edge evaluation, revision-bound calculation, global simplification, and atomic publication verified; multi-worker concurrency remains |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
 | P09 | TODO | MVT, cache, and archive map |
@@ -630,4 +630,26 @@ Verification evidence on 2026-09-26:
 - full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 48 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
 - no `run_summaries` write/publication, summary-quality constraint change, organization/run locking, scheduler/concurrency, public HTTP contract, frontend behavior, commit, push, or hosted CI occurred.
 
-P06 remains IN PROGRESS. The next planned fragment is P06.4: revision-checked atomic summary publication with the organization archive revision. P06.5 job concurrency remains unstarted.
+P06.3 completed the calculation pipeline; the P06.4 continuation below adds revision-checked atomic publication. P06.5 job concurrency remains separate.
+
+## P06.4 — revision-checked atomic summary publication
+
+Implemented:
+
+- `app_private.find_stale_run_summaries(limit)` exposes only finished, raw-available runs with a missing, revision-stale, algorithm-stale, or invalid-current summary to the maintenance role;
+- the periodic worker processes one candidate per configurable cycle and calculates plus simplifies it in one materialized statement snapshot without holding a run mutation lock;
+- `app_private.publish_run_summary(...)` locks organization before run, then rechecks existence, finished/raw state, exact `data_revision`, tombstone absence, and whether another worker already published the same revision/version;
+- successful publication upserts `run_summaries` and increments `organizations.archive_revision` atomically. Stale, deleted, or duplicate results make neither change;
+- the publication capability enforces the exact v1 `QualityStats` key/type/count contract while the table retains its version-agnostic object check. Maintenance has no direct table DML; ADR-0015 records the transaction and privilege boundary;
+- `RUN_SUMMARY_INTERVAL_MS` defaults to 60 seconds. Both periodic tasks stop before maintenance-pool shutdown.
+
+Verification evidence on 2026-09-26:
+
+- focused API unit tests passed 2 files / 10 tests, including non-overlapping periodic execution and publication result validation;
+- focused P06.4 real-PostGIS integration passed 1 file / 6 tests, including candidate filters, role grants, quality rejection, end-to-end geometry publication, revision race while waiting on the run lock, deletion, and concurrent duplicate publication;
+- the disposable `running_tracker_test` database alone was rebuilt after the draft migration checksum changed; migrations `0000`–`0011` applied from empty history and the immediate rerun skipped all unchanged files;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 52 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- full real-role/PostGIS integration passed 15 files / 152 tests;
+- no public HTTP/OpenAPI/frontend change, multi-process work claiming, configurable concurrency, commit, push, hosted CI, or main-database migration occurred.
+
+P06 remains IN PROGRESS. The next planned fragment is P06.5: bounded multi-worker summary-job concurrency while preserving organization → run lock order. P07 remains unopened.

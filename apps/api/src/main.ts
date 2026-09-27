@@ -11,8 +11,13 @@ import {
   createDatabasePool,
   createMaintenanceDatabasePool,
 } from './database/database.js';
-import { shutdownInfrastructure } from './lifecycle/shutdown.js';
+import {
+  shutdownInfrastructure,
+  type StoppableRunner,
+} from './lifecycle/shutdown.js';
+import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
+import { runSummaryPublicationOnce } from './maintenance/run-summary-publication.js';
 
 export interface MainDependencies {
   clock?: Clock;
@@ -42,7 +47,7 @@ function registerShutdown(options: {
   clock: Clock;
   maintenancePool: Pool;
   pool: Pool;
-  runner: RunAutoFinishRunner;
+  runner: StoppableRunner;
   server: Server;
   timeoutMs: number;
 }): void {
@@ -100,11 +105,23 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   });
   const app = createApp({ clock, config, pool, sessionManager });
   const server = createServer(app);
-  const runner = new RunAutoFinishRunner({
+  const autoFinishRunner = new RunAutoFinishRunner({
     clock,
     intervalMs: config.RUN_AUTO_FINISH_INTERVAL_MS,
     runOnce: () => runAutoFinishOnce(maintenancePool, clock),
   });
+  const summaryRunner = new PeriodicRunner({
+    clock,
+    intervalMs: config.RUN_SUMMARY_INTERVAL_MS,
+    runOnce: () => runSummaryPublicationOnce(maintenancePool, clock),
+    taskName: 'Run summary publication',
+  });
+  const runner: StoppableRunner = {
+    stop: () => {
+      autoFinishRunner.stop();
+      summaryRunner.stop();
+    },
+  };
 
   try {
     await listen(server, config.PORT);
@@ -113,7 +130,8 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     throw error;
   }
 
-  runner.start();
+  autoFinishRunner.start();
+  summaryRunner.start();
   registerShutdown({
     clock,
     maintenancePool,

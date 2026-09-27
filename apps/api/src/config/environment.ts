@@ -142,6 +142,12 @@ const environmentSchema = z
       .positive()
       .max(24 * 60 * 60 * 1_000)
       .default(60_000),
+    RUN_SUMMARY_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60 * 1_000)
+      .default(60_000),
     DB_POOL_MAX: z.coerce.number().int().positive().max(50).default(10),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(2_000),
     DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(1_000),
