@@ -439,7 +439,7 @@ describe('P07.1 initial live-track snapshot', () => {
     expect(apiErrorResponseSchema.parse(objectBody(hidden)).error.code).toBe('RUN_NOT_FOUND');
   });
 
-  it('rejects malformed, foreign-run, and invalid-limit cursors', async () => {
+  it('rejects malformed, tampered, foreign-user, foreign-run, and invalid-limit cursors', async () => {
     const malformed = await read(
       ids.userDual,
       runIds.recording,
@@ -450,10 +450,28 @@ describe('P07.1 initial live-track snapshot', () => {
     const first = liveTrackResponseSchema.parse(
       objectBody(await read(ids.userDual, runIds.recording, '?limit=1').expect(200)),
     );
+    const cursor = first.nextCursor!;
+    const tamperedCursor = `${cursor.slice(0, -1)}${cursor.endsWith('A') ? 'B' : 'A'}`;
+    const tampered = await read(
+      ids.userDual,
+      runIds.recording,
+      `?cursor=${encodeURIComponent(tamperedCursor)}`,
+    ).expect(400);
+    expect(apiErrorResponseSchema.parse(objectBody(tampered)).error.code).toBe('INVALID_CURSOR');
+
+    const foreignUser = await read(
+      ids.userStranger,
+      runIds.recording,
+      `?cursor=${encodeURIComponent(cursor)}`,
+    ).expect(400);
+    expect(apiErrorResponseSchema.parse(objectBody(foreignUser)).error.code).toBe(
+      'INVALID_CURSOR',
+    );
+
     const foreign = await read(
       ids.userDual,
       runIds.finished,
-      `?cursor=${encodeURIComponent(first.nextCursor!)}`,
+      `?cursor=${encodeURIComponent(cursor)}`,
     ).expect(400);
     expect(apiErrorResponseSchema.parse(objectBody(foreign)).error.code).toBe('INVALID_CURSOR');
 

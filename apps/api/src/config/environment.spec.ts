@@ -45,6 +45,8 @@ describe('validateEnvironment', () => {
       DB_POOL_MAX: 10,
       DB_QUERY_TIMEOUT_MS: 1_000,
       PORT: 3_100,
+      LIVE_TRACK_CURSOR_SIGNING_KEY:
+        'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE',
       RUN_AUTO_FINISH_INTERVAL_MS: 60_000,
       RUN_SUMMARY_CONCURRENCY: 2,
       RUN_SUMMARY_INTERVAL_MS: 60_000,
@@ -87,6 +89,35 @@ describe('validateEnvironment', () => {
         SESSION_COOKIE_SECURE: 'false',
       }),
     ).toThrow('SESSION_COOKIE_SECURE must be true in production');
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        APP_ENV: 'production',
+      }),
+    ).toThrow('LIVE_TRACK_CURSOR_SIGNING_KEY must be replaced in production');
+  });
+
+  it('requires a canonical base64url cursor key with at least 256 bits', () => {
+    for (const signingKey of ['short', 'not+base64url', 'c2hvcnQ=']) {
+      expect(() =>
+        validateEnvironment({
+          ...validApplicationEnvironment,
+          LIVE_TRACK_CURSOR_SIGNING_KEY: signingKey,
+        }),
+      ).toThrow('LIVE_TRACK_CURSOR_SIGNING_KEY');
+    }
+
+    const productionKey = Buffer.from(
+      'deployment-specific-live-track-key-material',
+      'utf8',
+    ).toString('base64url');
+    expect(
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        APP_ENV: 'production',
+        LIVE_TRACK_CURSOR_SIGNING_KEY: productionKey,
+      }).LIVE_TRACK_CURSOR_SIGNING_KEY,
+    ).toBe(productionKey);
   });
 
   it('requires canonical explicit local identities and origins', () => {

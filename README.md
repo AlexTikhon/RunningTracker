@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is complete: the API-backed runner screen, durable IndexedDB point/request buffer, retrying upload worker, fenced cross-tab writer lease, and shared Geolocation/simulator foreground capture path are implemented. P06 is complete: it provides versioned PostGIS summary calculation, globally normalized display simplification, revision-checked atomic publication, and bounded database-coordinated workers. P07.1–P07.3 provide revision-fixed initial live-track snapshots, revision-window change pages with immediate-successor repair, and server-authoritative edge annotations from the shared PostGIS evaluator. Signed cursors and client application remain later P07 fragments. Streaming, production identity, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is complete: the API-backed runner screen, durable IndexedDB point/request buffer, retrying upload worker, fenced cross-tab writer lease, and shared Geolocation/simulator foreground capture path are implemented. P06 is complete: it provides versioned PostGIS summary calculation, globally normalized display simplification, revision-checked atomic publication, and bounded database-coordinated workers. P07.1–P07.4 provide revision-fixed initial live-track snapshots, revision-window change pages with immediate-successor repair, server-authoritative edge annotations, and signed/user-bound/expiring continuations. Client application remains P07.5. Streaming, production identity, and maps remain later stages.
 
 ## Prerequisites
 
@@ -25,6 +25,10 @@ npm run dev
 ```
 
 On POSIX systems, replace the first command with `cp .env.example .env`.
+
+The example `LIVE_TRACK_CURSOR_SIGNING_KEY` is a fixed local-only HMAC key. Every
+deployment must supply independent canonical base64url key material of at least
+32 bytes; production startup rejects the example value.
 
 - Web: http://127.0.0.1:5173
 - API liveness: http://127.0.0.1:3000/api/health/live
@@ -83,7 +87,9 @@ The run revision/raw state and `limit + 1` keyset page are read in one PostgreSQ
 
 `GET /api/orgs/:orgId/runs/:runId/live-track` fixes the current `dataRevision` as R in the same PostgreSQL statement that reads the first seq-ordered page. Continuations retain R and exclude later ingestion without holding a transaction or connection between requests.
 
-`GET /api/orgs/:orgId/runs/:runId/live-track/changes?afterRevision=A` similarly fixes target T. It returns the deduplicated, seq-ordered union of points ingested in `(A,T]` and each changed point's immediate successor in the point set visible at T. This lets a later lower-sequence insertion repair both its own edge and the next point's relationship. Every continuation retains A, T, algorithm version, and last seq while rechecking current membership, run authorization, and raw availability. The temporary cursors remain unsigned and not user-bound until P07.4.
+`GET /api/orgs/:orgId/runs/:runId/live-track/changes?afterRevision=A` similarly fixes target T. It returns the deduplicated, seq-ordered union of points ingested in `(A,T]` and each changed point's immediate successor in the point set visible at T. This lets a later lower-sequence insertion repair both its own edge and the next point's relationship. Every continuation retains A, T, algorithm version, and last seq while rechecking current membership, run authorization, and raw availability.
+
+P07.4 signs strict versioned cursor payloads with HMAC-SHA-256 and binds them to the authenticated user, organization, run, operation, revisions, algorithm version, last sequence, and expiry. A pagination chain keeps one absolute ten-minute deadline; tampered, expired, cross-user, cross-run, or operation-swapped tokens return `400 INVALID_CURSOR`. Cursor integrity never replaces the per-request session, membership, ACL, retention, algorithm, and revision checks.
 
 For both endpoints, P07.3 materializes the complete `ingested_revision <= T` point set, derives each point's immediate seq-ordered predecessor before page filtering, and calls the same versioned PostGIS edge evaluator used by summaries. `predecessorSeq` therefore remains correct on the first row of every continuation page, while `connectFromPrevious` is true only when the shared sequence, segment, accuracy, time, and speed rules accept that edge. Later ingestion cannot alter either annotation in an older fixed-revision page.
 

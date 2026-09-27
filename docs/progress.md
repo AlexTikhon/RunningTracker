@@ -13,7 +13,7 @@ Last updated: 2026-09-27.
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
-| P07 | IN PROGRESS | P07.1 revision-fixed initial snapshot and P07.2 immediate-successor change pages complete; edge annotations, signed cursors, and client application remain |
+| P07 | IN PROGRESS | P07.1–P07.4 fixed snapshots, successor changes, edge annotations, and signed identity-bound cursors complete; client application remains |
 | P08 | TODO | SSE and coach screen |
 | P09 | TODO | MVT, cache, and archive map |
 | P10 | TODO | Retention, deletion, and maintenance |
@@ -733,3 +733,25 @@ Verification evidence on 2026-09-27:
 - no migration, database privilege change, public contract shape, cursor signing/user binding/expiry, frontend synchronization, SSE, commit, push, hosted CI, or paid-provider call occurred.
 
 P07 remains IN PROGRESS. The next planned fragment is P07.4: signed, user-bound, expiring cursors for snapshot and changes. P07.5, SSE, archive maps, retention, and production identity remain unopened.
+
+## P07.4 — signed, identity-bound live-track cursors
+
+Implemented:
+
+- snapshot and changes continuations now use a strict versioned `payload.signature` envelope with HMAC-SHA-256 over the exact base64url payload and constant-time signature comparison before payload parsing;
+- signed state includes authenticated user, organization, run, operation, algorithm version, fixed target revision, last bigint sequence, and expiry; changes additionally retain the source revision with `A <= T` validation;
+- decode binds the token to the current user and route, rejects snapshot/changes interchange, and maps all signature, shape, binding, and expiry failures to `400 INVALID_CURSOR` without weakening the existing per-request session, membership, ACL, raw-state, algorithm, or revision checks;
+- the first continuation receives one absolute ten-minute deadline, which all later pages preserve rather than refresh;
+- `LIVE_TRACK_CURSOR_SIGNING_KEY` must be canonical unpadded base64url with at least 32 decoded bytes. Development/test have an explicit documented local fixture; production rejects that value and requires deployment-specific material;
+- ADR-0020 records the envelope, fixed-chain expiry, key boundary, and deliberate non-expansion to run-list/raw-history cursors or P07.5 browser state.
+
+Verification evidence on 2026-09-27:
+
+- focused cursor/config unit coverage passed 2 files / 22 tests for signed round trips, identity/route/operation binding, payload/signature/key tampering, exact expiry, fixed chain deadline, and production key validation;
+- focused P07 real-runtime-role integration passed 2 files / 17 tests, including signed pagination, tamper and cross-user rejection, fixed revisions/edges, and current ACL/raw-state rechecks;
+- `npm run db:bootstrap:test` succeeded and `npm run db:migrate:test` checksum-verified and skipped unchanged migrations `0000`–`0012`;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 60 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- full real-role/PostGIS integration passed 17 files / 171 tests; `git diff --check` passed after final documentation updates;
+- no migration, database privilege, public response schema, dependency, frontend synchronization, SSE, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
+
+P07 remains IN PROGRESS. The next planned fragment is P07.5: atomically apply snapshot/change upserts in the browser and advance the local revision only after every page succeeds. SSE, archive maps, retention, and production identity remain unopened.

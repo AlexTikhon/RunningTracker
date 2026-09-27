@@ -6,6 +6,11 @@ import { systemClock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
 import type { DatabaseClient, DatabasePool } from '../src/database/database.js';
 
+const productionCursorSigningKey = Buffer.from(
+  'health-test-deployment-cursor-key-material',
+  'utf8',
+).toString('base64url');
+
 const config = validateEnvironment({
   APP_ENV: 'test',
   DATABASE_URL:
@@ -40,6 +45,7 @@ describe('health endpoints', () => {
           'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker',
         MAINTENANCE_DATABASE_URL:
           'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker',
+        LIVE_TRACK_CURSOR_SIGNING_KEY: productionCursorSigningKey,
       });
       const { connect, pool } = poolWithQuery(vi.fn());
 

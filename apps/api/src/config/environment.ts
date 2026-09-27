@@ -6,6 +6,24 @@ import { z } from 'zod';
 const canonicalUuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
+const localLiveTrackCursorSigningKey =
+  'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE';
+
+const liveTrackCursorSigningKey = z
+  .string()
+  .min(1)
+  .max(172)
+  .refine((value) => /^[A-Za-z0-9_-]+$/u.test(value), {
+    message: 'must be unpadded base64url',
+  })
+  .refine((value) => Buffer.from(value, 'base64url').toString('base64url') === value, {
+    message: 'must use canonical unpadded base64url encoding',
+  })
+  .refine((value) => Buffer.from(value, 'base64url').length >= 32, {
+    message: 'must decode to at least 32 bytes',
+  })
+  .default(localLiveTrackCursorSigningKey);
+
 const environmentBoolean = z.union([
   z.boolean(),
   z.enum(['true', 'false']).transform((value) => value === 'true'),
@@ -155,6 +173,7 @@ const environmentSchema = z
     ALLOWED_ORIGINS: originList,
     LOCAL_AUTH_ENABLED: environmentBoolean.default(false),
     LOCAL_AUTH_USER_IDS: uuidList,
+    LIVE_TRACK_CURSOR_SIGNING_KEY: liveTrackCursorSigningKey,
     SESSION_COOKIE_SECURE: environmentBoolean.default(true),
     SESSION_STORE_MAX_ENTRIES: z.coerce.number().int().positive().max(10_000).default(100),
     SESSION_TTL_MS: z.coerce
@@ -217,6 +236,16 @@ const environmentSchema = z
         code: 'custom',
         message: 'SESSION_COOKIE_SECURE must be true in production',
         path: ['SESSION_COOKIE_SECURE'],
+      });
+    }
+    if (
+      environment.APP_ENV === 'production' &&
+      environment.LIVE_TRACK_CURSOR_SIGNING_KEY === localLiveTrackCursorSigningKey
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'LIVE_TRACK_CURSOR_SIGNING_KEY must be replaced in production',
+        path: ['LIVE_TRACK_CURSOR_SIGNING_KEY'],
       });
     }
     if (environment.LOCAL_AUTH_ENABLED && environment.LOCAL_AUTH_USER_IDS.length === 0) {

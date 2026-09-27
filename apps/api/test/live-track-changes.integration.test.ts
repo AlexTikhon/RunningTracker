@@ -440,13 +440,17 @@ describe('P07.2 revision-window live-track changes', () => {
     expect(apiErrorResponseSchema.parse(objectBody(denied)).error.code).toBe('RUN_NOT_FOUND');
 
     await ownerPool.query(
-      `UPDATE runs
-       SET raw_state = 'purging'
-       WHERE org_id = $1 AND id = $2`,
+      `UPDATE run_shares
+       SET can_read_history = true
+       WHERE org_id = $1 AND run_id = $2 AND grantee_user_id = $3`,
+      [ids.orgA, runIds.recording, ids.userDual],
+    );
+    await ownerPool.query(
+      `UPDATE runs SET raw_state = 'purging' WHERE org_id = $1 AND id = $2`,
       [ids.orgA, runIds.recording],
     );
     const unavailable = await readChanges(
-      ids.userStranger,
+      ids.userDual,
       runIds.recording,
       `?cursor=${encodeURIComponent(first.nextCursor!)}`,
     ).expect(410);

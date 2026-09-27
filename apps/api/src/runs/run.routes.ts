@@ -28,6 +28,7 @@ import type { Environment } from '../config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
 import type { TestOnlyFaultInjector } from '../testing/fault-injection.js';
+import { LiveTrackCursorCodec } from './live-track-cursor.js';
 import {
   applyRunCommand,
   createRun,
@@ -91,6 +92,10 @@ export function createRunRouter({
   const router = createRouter({ mergeParams: true });
   const authenticate = createSessionAuthentication(sessionManager);
   const mutationProtection = createAuthenticatedMutationProtection(config, sessionManager);
+  const liveTrackCursorCodec = new LiveTrackCursorCodec({
+    clock,
+    signingKey: config.LIVE_TRACK_CURSOR_SIGNING_KEY,
+  });
 
   router.get('/', authenticate, async (request, response, next) => {
     try {
@@ -142,7 +147,7 @@ export function createRunRouter({
       const query = parseContract(liveTrackQuerySchema, request.query, 'live-track query');
       const session = getAuthenticatedSession(request);
       const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
-        readLiveTrackSnapshot(client, orgId, runId, query),
+        readLiveTrackSnapshot(client, session, orgId, runId, query, liveTrackCursorCodec),
       );
       response.status(200).json(result);
     } catch (error) {
@@ -160,7 +165,7 @@ export function createRunRouter({
       );
       const session = getAuthenticatedSession(request);
       const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
-        readLiveTrackChanges(client, orgId, runId, query),
+        readLiveTrackChanges(client, session, orgId, runId, query, liveTrackCursorCodec),
       );
       response.status(200).json(result);
     } catch (error) {

@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P06 и P07.1–P07.3 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07.1 реализует initial live-track snapshot на фиксированной revision, P07.2 — revision-window changes с immediate-successor repair, P07.3 — revision-bound predecessor и edge annotations; следующий фрагмент — P07.4.
+Статус: согласованный проект архитектуры; P00–P06 и P07.1–P07.4 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07.1 реализует initial live-track snapshot на фиксированной revision, P07.2 — revision-window changes с immediate-successor repair, P07.3 — revision-bound predecessor и edge annotations, P07.4 — signed/user-bound/expiring cursors; следующий фрагмент — P07.5.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -284,7 +284,7 @@ SSE сообщает dataRevision, но не несёт всю историю. �
 
 Initial live-track фиксирует R и выдаёт точки с ingested_revision ≤ R. Пагинация сортируется по seq; cursor подписан сервером, включает org/run/user, R, algorithmVersion, последнюю seq и срок действия 10 минут.
 
-В P07.1 первый HTTP-запрос фиксирует `runs.data_revision` как R в том же SQL statement snapshot, который выбирает страницу; продолжения читают только `ingested_revision <= R` и поэтому не удерживают транзакцию между запросами. Временный cursor P07.1 связывает org/run, operation, R, algorithmVersion и last seq, но ещё не подписан и не имеет expiry: криптографическая привязка user/expiry остаётся строго P07.4. Каждый запрос всё равно заново проходит session, membership, live/history ACL и raw-state проверки (ADR-0017).
+В P07.1 первый HTTP-запрос фиксирует `runs.data_revision` как R в том же SQL statement snapshot, который выбирает страницу; продолжения читают только `ingested_revision <= R` и поэтому не удерживают транзакцию между запросами. Исторический временный cursor P07.1 связывал org/run, operation, R, algorithmVersion и last seq; P07.4 заменил его подписанным user-bound envelope с expiry. Каждый запрос всё равно заново проходит session, membership, live/history ACL и raw-state проверки (ADR-0017, ADR-0020).
 
 Changes(afterRevision=A) фиксирует T ≥ A. Изменяемые элементы:
 
@@ -293,9 +293,11 @@ Changes(afterRevision=A) фиксирует T ≥ A. Изменяемые эле
 
 Набор дедуплицируется и сортируется по seq. Для каждой записи сервер вычисляет predecessorSeq и connectFromPrevious по точкам с ingested_revision ≤ T. Это исправляет связь следующей точки при поздней вставке.
 
-В P07.2 первый запрос `/live-track/changes` фиксирует текущую `runs.data_revision` как T в том же SQL statement, materialized-набор `(A,T]` объединяется через `UNION` с immediate successors, а keyset pagination идёт по bigint `seq`. Cursor связывает operation, org/run, A/T, algorithmVersion и last seq; signing/user binding/expiry остаются P07.4 (ADR-0018).
+В P07.2 первый запрос `/live-track/changes` фиксирует текущую `runs.data_revision` как T в том же SQL statement, materialized-набор `(A,T]` объединяется через `UNION` с immediate successors, а keyset pagination идёт по bigint `seq`. Cursor связывает operation, org/run, A/T, algorithmVersion и last seq; P07.4 добавил подпись, user binding и expiry (ADR-0018, ADR-0020).
 
 В P07.3 оба live-track запроса материализуют полный набор `ingested_revision <= T` и вычисляют immediate predecessor через `lag(...)` до keyset page filter. Поэтому первая точка continuation page сохраняет predecessor с предыдущей страницы. `predecessorSeq` возвращает immediate seq-ordered predecessor даже для rejected edge; только первая точка набора получает `null`. `connectFromPrevious` вычисляется единым `app_private.evaluate_track_edge(...)` и не дублируется на frontend. Изменения после T не влияют ни на predecessor, ни на edge result старого cursor (ADR-0019).
+
+В P07.4 strict versioned cursor payload подписывается HMAC-SHA-256 и включает authenticated user, org/run, operation, A/T где применимо, algorithmVersion, last seq и абсолютный expiry. Snapshot/changes cursors не взаимозаменяемы; tampering, cross-user/route replay и expiry возвращают единый `INVALID_CURSOR`. Первый continuation фиксирует deadline через десять минут, последующие страницы не продлевают его. Production требует отдельный ключ минимум 256 bit; каждый запрос независимо перепроверяет authorization/raw state (ADR-0020).
 
 Все страницы фиксируют T и algorithmVersion; изменения после T не попадают в них. Snapshot в БД не удерживается между HTTP-запросами: воспроизводимость обеспечивается immutable точками и ingested_revision. На каждом запросе повторно проверяются ACL и raw_state.
 

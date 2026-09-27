@@ -35,6 +35,12 @@ import { z } from 'zod';
 import type { StoredSession } from '../auth/session-store.js';
 import type { Clock } from '../clock.js';
 import { ApiError } from '../http/errors.js';
+import {
+  InvalidLiveTrackCursorError,
+  type LiveTrackChangesCursor,
+  type LiveTrackCursorCodec,
+  type LiveTrackSnapshotCursor,
+} from './live-track-cursor.js';
 
 interface RunRow {
   control_revision: string;
@@ -95,15 +101,6 @@ interface RawPointPageRow {
   seq: string | null;
 }
 
-interface LiveTrackSnapshotCursor {
-  algorithmVersion: string;
-  lastSeq: string;
-  operation: 'snapshot';
-  orgId: string;
-  runId: string;
-  toRevision: string;
-}
-
 interface LiveTrackSnapshotPageRow {
   accuracy_m: number | null;
   algorithm_version: string;
@@ -116,16 +113,6 @@ interface LiveTrackSnapshotPageRow {
   recorded_at: string | null;
   segment_id: number | null;
   seq: string | null;
-}
-
-interface LiveTrackChangesCursor {
-  algorithmVersion: string;
-  fromRevision: string;
-  lastSeq: string;
-  operation: 'changes';
-  orgId: string;
-  runId: string;
-  toRevision: string;
 }
 
 type LiveTrackChangesPageRow = LiveTrackSnapshotPageRow;
@@ -151,30 +138,6 @@ const rawPointCursorSchema = z.strictObject({
   orgId: uuidSchema,
   runId: uuidSchema,
 });
-
-const liveTrackSnapshotCursorSchema = z.strictObject({
-  algorithmVersion: z.string().min(1).max(128),
-  lastSeq: seqSchema,
-  operation: z.literal('snapshot'),
-  orgId: uuidSchema,
-  runId: uuidSchema,
-  toRevision: revisionSchema,
-});
-
-const liveTrackChangesCursorSchema = z
-  .strictObject({
-    algorithmVersion: z.string().min(1).max(128),
-    fromRevision: revisionSchema,
-    lastSeq: seqSchema,
-    operation: z.literal('changes'),
-    orgId: uuidSchema,
-    runId: uuidSchema,
-    toRevision: revisionSchema,
-  })
-  .refine((cursor) => BigInt(cursor.fromRevision) <= BigInt(cursor.toRevision), {
-    message: 'The source revision must not exceed the target revision',
-    path: ['fromRevision'],
-  });
 
 export const POINTS_PER_RUN_MAX = 50_000;
 const UPLOAD_WINDOW_MS = 24 * 60 * 60 * 1_000;
@@ -335,66 +298,36 @@ function decodeRawPointCursor(cursor: string, orgId: string, runId: string): Raw
   }
 }
 
-function encodeLiveTrackSnapshotCursor(cursor: LiveTrackSnapshotCursor): string {
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
-}
-
 function decodeLiveTrackSnapshotCursor(
+  codec: LiveTrackCursorCodec,
   cursor: string,
+  userId: string,
   orgId: string,
   runId: string,
 ): LiveTrackSnapshotCursor {
   try {
-    if (!/^[A-Za-z0-9_-]+$/u.test(cursor)) {
-      throw new Error('The cursor is not base64url encoded');
+    return codec.decodeSnapshot(cursor, { orgId, runId, userId });
+  } catch (error) {
+    if (!(error instanceof InvalidLiveTrackCursorError)) {
+      throw error;
     }
-    const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-    const parsed = liveTrackSnapshotCursorSchema.safeParse(decoded);
-    if (!parsed.success) {
-      throw new Error('The cursor payload is invalid');
-    }
-    const canonical = {
-      ...parsed.data,
-      orgId: parsed.data.orgId.toLowerCase(),
-      runId: parsed.data.runId.toLowerCase(),
-    };
-    if (canonical.orgId !== orgId || canonical.runId !== runId) {
-      throw new Error('The cursor belongs to a different live-track snapshot');
-    }
-    return canonical;
-  } catch {
     throw new ApiError(400, 'INVALID_CURSOR', 'The live-track cursor is invalid');
   }
 }
 
-function encodeLiveTrackChangesCursor(cursor: LiveTrackChangesCursor): string {
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
-}
-
 function decodeLiveTrackChangesCursor(
+  codec: LiveTrackCursorCodec,
   cursor: string,
+  userId: string,
   orgId: string,
   runId: string,
 ): LiveTrackChangesCursor {
   try {
-    if (!/^[A-Za-z0-9_-]+$/u.test(cursor)) {
-      throw new Error('The cursor is not base64url encoded');
+    return codec.decodeChanges(cursor, { orgId, runId, userId });
+  } catch (error) {
+    if (!(error instanceof InvalidLiveTrackCursorError)) {
+      throw error;
     }
-    const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-    const parsed = liveTrackChangesCursorSchema.safeParse(decoded);
-    if (!parsed.success) {
-      throw new Error('The cursor payload is invalid');
-    }
-    const canonical = {
-      ...parsed.data,
-      orgId: parsed.data.orgId.toLowerCase(),
-      runId: parsed.data.runId.toLowerCase(),
-    };
-    if (canonical.orgId !== orgId || canonical.runId !== runId) {
-      throw new Error('The cursor belongs to a different live-track change set');
-    }
-    return canonical;
-  } catch {
     throw new ApiError(400, 'INVALID_CURSOR', 'The live-track cursor is invalid');
   }
 }
@@ -599,12 +532,14 @@ export async function readRunPoints(
 
 export async function readLiveTrackSnapshot(
   client: PoolClient,
+  session: Pick<StoredSession, 'userId'>,
   orgId: string,
   runId: string,
   query: LiveTrackQuery,
+  cursorCodec: LiveTrackCursorCodec,
 ): Promise<LiveTrackResponse> {
   const cursor = query.cursor
-    ? decodeLiveTrackSnapshotCursor(query.cursor, orgId, runId)
+    ? decodeLiveTrackSnapshotCursor(cursorCodec, query.cursor, session.userId, orgId, runId)
     : undefined;
   const limit = query.limit ?? 1_000;
   const result = await client.query<LiveTrackSnapshotPageRow>(
@@ -708,14 +643,15 @@ export async function readLiveTrackSnapshot(
     fromRevision: null,
     nextCursor:
       pointRows.length > limit && last
-        ? encodeLiveTrackSnapshotCursor({
+        ? cursorCodec.encodeSnapshot({
             algorithmVersion,
             lastSeq: last.seq,
             operation: 'snapshot',
             orgId,
             runId,
             toRevision,
-          })
+            userId: session.userId,
+          }, cursor?.expiresAtMs)
         : null,
     toRevision,
     upserts: pageRows.map((point) => ({
@@ -732,14 +668,22 @@ export async function readLiveTrackSnapshot(
 
 export async function readLiveTrackChanges(
   client: PoolClient,
+  session: Pick<StoredSession, 'userId'>,
   orgId: string,
   runId: string,
   query: LiveTrackChangesQuery,
+  cursorCodec: LiveTrackCursorCodec,
 ): Promise<LiveTrackResponse> {
   let cursor: LiveTrackChangesCursor | undefined;
   let fromRevision: string;
   if ('cursor' in query) {
-    cursor = decodeLiveTrackChangesCursor(query.cursor, orgId, runId);
+    cursor = decodeLiveTrackChangesCursor(
+      cursorCodec,
+      query.cursor,
+      session.userId,
+      orgId,
+      runId,
+    );
     fromRevision = cursor.fromRevision;
   } else {
     fromRevision = query.afterRevision;
@@ -881,7 +825,7 @@ export async function readLiveTrackChanges(
     fromRevision,
     nextCursor:
       pointRows.length > limit && last
-        ? encodeLiveTrackChangesCursor({
+        ? cursorCodec.encodeChanges({
             algorithmVersion,
             fromRevision,
             lastSeq: last.seq,
@@ -889,7 +833,8 @@ export async function readLiveTrackChanges(
             orgId,
             runId,
             toRevision,
-          })
+            userId: session.userId,
+          }, cursor?.expiresAtMs)
         : null,
     toRevision,
     upserts: pageRows.map((point) => ({
