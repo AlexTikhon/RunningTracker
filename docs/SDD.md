@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P06 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming; следующий фрагмент — P07.1.
+Статус: согласованный проект архитектуры; P00–P06 и P07.1 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07.1 реализует initial live-track snapshot на фиксированной revision; следующий фрагмент — P07.2.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -283,6 +283,8 @@ SSE: text/event-stream, private/no-store, отключённая proxy buffering
 SSE сообщает dataRevision, но не несёт всю историю. Клиент синхронизирует только треки, которые отображает.
 
 Initial live-track фиксирует R и выдаёт точки с ingested_revision ≤ R. Пагинация сортируется по seq; cursor подписан сервером, включает org/run/user, R, algorithmVersion, последнюю seq и срок действия 10 минут.
+
+В P07.1 первый HTTP-запрос фиксирует `runs.data_revision` как R в том же SQL statement snapshot, который выбирает страницу; продолжения читают только `ingested_revision <= R` и поэтому не удерживают транзакцию между запросами. Временный cursor P07.1 связывает org/run, operation, R, algorithmVersion и last seq, но ещё не подписан и не имеет expiry: криптографическая привязка user/expiry остаётся строго P07.4. Каждый запрос всё равно заново проходит session, membership, live/history ACL и raw-state проверки. До P07.3 поля `predecessorSeq`/`connectFromPrevious` возвращаются как `null`/`false` и не должны интерпретироваться как рассчитанные рёбра (ADR-0017).
 
 Changes(afterRevision=A) фиксирует T ≥ A. Изменяемые элементы:
 

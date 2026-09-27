@@ -13,7 +13,7 @@ Last updated: 2026-09-27.
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
-| P07 | TODO | Versioned snapshot and changes |
+| P07 | IN PROGRESS | P07.1 revision-fixed initial snapshot complete; changes, edge annotations, signed cursors, and client application remain |
 | P08 | TODO | SSE and coach screen |
 | P09 | TODO | MVT, cache, and archive map |
 | P10 | TODO | Retention, deletion, and maintenance |
@@ -674,3 +674,22 @@ Verification evidence on 2026-09-27:
 - no public HTTP/OpenAPI/frontend behavior, P07 implementation, main-database migration, hosted CI, or explicit commit/push was part of this stage.
 
 P06 is DONE. The next planned fragment is P07.1: an initial live-track snapshot at a fixed revision with bigint-sequence pagination. P07.2–P07.5, SSE, archive maps, retention, and production identity remain unopened.
+
+## P07.1 — revision-fixed initial live-track snapshot
+
+Implemented:
+
+- `GET /api/orgs/{orgId}/runs/{runId}/live-track` fixes `toRevision` from the run and reads the first bounded page in one PostgreSQL statement snapshot. Continuation pages use immutable `ingested_revision <= toRevision` plus bigint `seq` keyset ordering, without holding a database transaction between HTTP requests;
+- the temporary P07.1 cursor carries snapshot operation, organization, run, revision, algorithm version, and last sequence. It rejects malformed/foreign/future-revision or algorithm-mismatched continuations. Signing, user binding, and ten-minute expiry remain P07.4 scope;
+- every page rechecks session, active membership, current live/history authorization, and `raw_state`. Active runs require ownership or `can_read_live`; finished runs require ownership or `can_read_history`; unauthorized objects remain hidden before retention state is exposed;
+- the response uses the existing strict `TrackPage` contract, keeps PostgreSQL bigint revisions/sequences as decimal strings, and caps pages at 1,000. Until P07.3 evaluates edges on the same revision-bound set, `predecessorSeq` and `connectFromPrevious` are explicitly `null` and `false`;
+- ADR-0017 records the fixed-revision statement/pagination boundary and the deliberately deferred change, edge, cursor-signing, and client-application work.
+
+Verification evidence on 2026-09-27:
+
+- focused P07.1 real-PostgreSQL integration passed 1 file / 7 tests, including a new late point between pages, a fresh newer snapshot, empty snapshots, sequences above JavaScript's safe-integer range, the 1,000-point default bound, active/finished ACL selection, authorization-before-retention ordering, foreign cursors, and strict query limits;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 55 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- full real-role/PostGIS integration passed 16 files / 161 tests;
+- `git diff --check` passed; no migration, database privilege change, changes endpoint, edge evaluation, cursor signature/expiry, frontend synchronization, SSE, commit, push, hosted CI, or paid-provider call occurred.
+
+P07 remains IN PROGRESS. The next planned fragment is P07.2: revision-window change pages containing new points plus their immediate successors at fixed target revision T. P07.3–P07.5, SSE, archive maps, retention, and production identity remain unopened.

@@ -1,5 +1,6 @@
 import {
   ingestPointsResponseSchema,
+  liveTrackResponseSchema,
   pointsResponseSchema,
   revisionSchema,
   runListResponseSchema,
@@ -12,6 +13,8 @@ import {
   type CreateRunRequest,
   type IngestPointsRequest,
   type IngestPointsResponse,
+  type LiveTrackQuery,
+  type LiveTrackResponse,
   type PointInput,
   type PointsQuery,
   type PointsResponse,
@@ -91,6 +94,27 @@ interface RawPointPageRow {
   seq: string | null;
 }
 
+interface LiveTrackSnapshotCursor {
+  algorithmVersion: string;
+  lastSeq: string;
+  operation: 'snapshot';
+  orgId: string;
+  runId: string;
+  toRevision: string;
+}
+
+interface LiveTrackSnapshotPageRow {
+  accuracy_m: number | null;
+  algorithm_version: string;
+  current_revision: string;
+  latitude: number | null;
+  longitude: number | null;
+  raw_state: 'available' | 'purging' | 'purged';
+  recorded_at: string | null;
+  segment_id: number | null;
+  seq: string | null;
+}
+
 interface StoredCommandRow {
   payload_matches: boolean;
   response: unknown;
@@ -111,6 +135,15 @@ const rawPointCursorSchema = z.strictObject({
   lastSeq: seqSchema,
   orgId: uuidSchema,
   runId: uuidSchema,
+});
+
+const liveTrackSnapshotCursorSchema = z.strictObject({
+  algorithmVersion: z.string().min(1).max(128),
+  lastSeq: seqSchema,
+  operation: z.literal('snapshot'),
+  orgId: uuidSchema,
+  runId: uuidSchema,
+  toRevision: revisionSchema,
 });
 
 export const POINTS_PER_RUN_MAX = 50_000;
@@ -269,6 +302,38 @@ function decodeRawPointCursor(cursor: string, orgId: string, runId: string): Raw
     return canonical;
   } catch {
     throw new ApiError(400, 'INVALID_CURSOR', 'The point-history cursor is invalid');
+  }
+}
+
+function encodeLiveTrackSnapshotCursor(cursor: LiveTrackSnapshotCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeLiveTrackSnapshotCursor(
+  cursor: string,
+  orgId: string,
+  runId: string,
+): LiveTrackSnapshotCursor {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/u.test(cursor)) {
+      throw new Error('The cursor is not base64url encoded');
+    }
+    const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    const parsed = liveTrackSnapshotCursorSchema.safeParse(decoded);
+    if (!parsed.success) {
+      throw new Error('The cursor payload is invalid');
+    }
+    const canonical = {
+      ...parsed.data,
+      orgId: parsed.data.orgId.toLowerCase(),
+      runId: parsed.data.runId.toLowerCase(),
+    };
+    if (canonical.orgId !== orgId || canonical.runId !== runId) {
+      throw new Error('The cursor belongs to a different live-track snapshot');
+    }
+    return canonical;
+  } catch {
+    throw new ApiError(400, 'INVALID_CURSOR', 'The live-track cursor is invalid');
   }
 }
 
@@ -463,6 +528,108 @@ export async function readRunPoints(
       accuracyM: point.accuracy_m,
       latitude: point.latitude,
       longitude: point.longitude,
+      recordedAt: point.recorded_at,
+      segmentId: point.segment_id,
+      seq: point.seq,
+    })),
+  });
+}
+
+export async function readLiveTrackSnapshot(
+  client: PoolClient,
+  orgId: string,
+  runId: string,
+  query: LiveTrackQuery,
+): Promise<LiveTrackResponse> {
+  const cursor = query.cursor
+    ? decodeLiveTrackSnapshotCursor(query.cursor, orgId, runId)
+    : undefined;
+  const limit = query.limit ?? 1_000;
+  const result = await client.query<LiveTrackSnapshotPageRow>(
+    `SELECT run.data_revision AS current_revision,
+            run.raw_state,
+            app_private.current_track_algorithm_version() AS algorithm_version,
+            point.seq,
+            point.segment_id,
+            point.recorded_at,
+            point.longitude,
+            point.latitude,
+            point.accuracy_m
+     FROM runs AS run
+     LEFT JOIN LATERAL (
+       SELECT seq,
+              segment_id,
+              to_char(
+                recorded_at AT TIME ZONE 'UTC',
+                'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+              ) AS recorded_at,
+              ST_X(geom) AS longitude,
+              ST_Y(geom) AS latitude,
+              accuracy_m
+       FROM run_points
+       WHERE org_id = run.org_id
+         AND run_id = run.id
+         AND run.raw_state = 'available'
+         AND ingested_revision <= COALESCE($3::bigint, run.data_revision)
+         AND ($4::bigint IS NULL OR seq > $4::bigint)
+       ORDER BY seq
+       LIMIT $5
+     ) AS point ON true
+     WHERE run.org_id = $1
+       AND run.id = $2
+       AND app_private.can_read_run(run.org_id, run.id)
+     ORDER BY point.seq NULLS LAST`,
+    [orgId, runId, cursor?.toRevision ?? null, cursor?.lastSeq ?? null, limit + 1],
+  );
+  const run = result.rows[0];
+  if (!run) {
+    return throwMissingRun(client, orgId, runId);
+  }
+  if (run.raw_state !== 'available') {
+    throw new ApiError(410, 'RAW_HISTORY_UNAVAILABLE', 'Raw point history is unavailable');
+  }
+  if (
+    cursor &&
+    (BigInt(cursor.toRevision) > BigInt(run.current_revision) ||
+      cursor.algorithmVersion !== run.algorithm_version)
+  ) {
+    throw new ApiError(400, 'INVALID_CURSOR', 'The live-track cursor is invalid');
+  }
+
+  const pointRows = result.rows.filter(
+    (row): row is LiveTrackSnapshotPageRow & {
+      accuracy_m: number;
+      latitude: number;
+      longitude: number;
+      recorded_at: string;
+      segment_id: number;
+      seq: string;
+    } => row.seq !== null,
+  );
+  const pageRows = pointRows.slice(0, limit);
+  const last = pageRows.at(-1);
+  const toRevision = cursor?.toRevision ?? run.current_revision;
+  const algorithmVersion = cursor?.algorithmVersion ?? run.algorithm_version;
+  return liveTrackResponseSchema.parse({
+    algorithmVersion,
+    fromRevision: null,
+    nextCursor:
+      pointRows.length > limit && last
+        ? encodeLiveTrackSnapshotCursor({
+            algorithmVersion,
+            lastSeq: last.seq,
+            operation: 'snapshot',
+            orgId,
+            runId,
+            toRevision,
+          })
+        : null,
+    toRevision,
+    upserts: pageRows.map((point) => ({
+      accuracyM: point.accuracy_m,
+      connectFromPrevious: false,
+      coordinates: [point.longitude, point.latitude],
+      predecessorSeq: null,
       recordedAt: point.recorded_at,
       segmentId: point.segment_id,
       seq: point.seq,

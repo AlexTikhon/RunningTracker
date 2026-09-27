@@ -265,7 +265,7 @@ packages/contracts не зависит от Express или драйвера БД
 Ссылка на SDD: 9.2, 11.1–11.3.
 
 Задачи:
-- P07.1 Реализовать initial snapshot на фиксированной R, пагинацию по seq.
+- P07.1 Реализовать initial snapshot на фиксированной R, пагинацию по seq. **Выполнено и проверено 2026-09-27: один statement фиксирует R и bounded keyset page, cursor сохраняет R/algorithmVersion/last seq, поздние ingestion не меняют продолжение, ACL/raw-state перепроверяются на каждой странице; ADR-0017.**
 - P07.2 Реализовать changes(A,T): новые точки плюс непосредственные преемники на T.
 - P07.3 Вычислять predecessorSeq/connectFromPrevious на том же наборе ingested_revision ≤ T.
 - P07.4 Подписывать cursors с user/org/run, видом операции, A/T, algorithmVersion, последним ключом и expiry.
