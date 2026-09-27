@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-09-26.
+Last updated: 2026-09-27.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -12,7 +12,7 @@ Last updated: 2026-09-26.
 | P03 | DONE | P03.1–P03.5 session/security, contracts, run lifecycle/read/share APIs, and clock-driven auto-finish verified |
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
-| P06 | IN PROGRESS | P06.1–P06.4 edge evaluation, revision-bound calculation, global simplification, and atomic publication verified; multi-worker concurrency remains |
+| P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
 | P07 | TODO | Versioned snapshot and changes |
 | P08 | TODO | SSE and coach screen |
 | P09 | TODO | MVT, cache, and archive map |
@@ -652,4 +652,25 @@ Verification evidence on 2026-09-26:
 - full real-role/PostGIS integration passed 15 files / 152 tests;
 - no public HTTP/OpenAPI/frontend change, multi-process work claiming, configurable concurrency, commit, push, hosted CI, or main-database migration occurred.
 
-P06 remains IN PROGRESS. The next planned fragment is P06.5: bounded multi-worker summary-job concurrency while preserving organization → run lock order. P07 remains unopened.
+P06.4 completed atomic publication; the P06.5 continuation below adds bounded distributed work coordination.
+
+## P06.5 — bounded distributed summary workers
+
+Implemented:
+
+- `app_private.claim_stale_run_summary(scanLimit)` walks the stable stale-candidate order, takes one transaction-scoped advisory claim keyed by organization/run, and skips candidates already owned by another process;
+- each worker holds the claim through calculation/publication without taking organization/run row locks during calculation. Publication keeps the existing organization → run lock order and revision/state/tombstone correctness checks;
+- `RUN_SUMMARY_CONCURRENCY` defaults to 2 and is bounded to 1–8. A periodic cycle starts exactly that many workers, waits for every worker to settle, and only then permits the next cycle;
+- one failed worker does not cancel siblings. Commit/rollback releases claims automatically, unknown commit outcomes destroy the connection, and the maintenance pool has `concurrency + 1` capacity so auto-finish is not structurally excluded;
+- ADR-0016 records the coordination, failure, collision, and aggregate deployment-concurrency trade-offs.
+
+Verification evidence on 2026-09-27:
+
+- focused API unit tests passed 3 files / 29 tests, covering configuration bounds, transactional cleanup, exact worker fan-out, aggregation, all-settled failures, and the shared non-overlapping scheduler;
+- focused P06.5 real-PostGIS integration passed 1 file / 8 tests, including least-privilege claims, distinct simultaneous claims, exhaustion, rollback release, bounded two-worker publication, revision races, deletion, and duplicate publication;
+- migration `0012_claim_run_summary_jobs.sql` applied to the disposable `running_tracker_test` database after unchanged `0000`–`0011`; the immediate rerun skipped the complete unchanged history;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 55 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- full real-role/PostGIS integration passed 15 files / 154 tests;
+- no public HTTP/OpenAPI/frontend behavior, P07 implementation, main-database migration, hosted CI, or explicit commit/push was part of this stage.
+
+P06 is DONE. The next planned fragment is P07.1: an initial live-track snapshot at a fixed revision with bigint-sequence pagination. P07.2–P07.5, SSE, archive maps, retention, and production identity remain unopened.

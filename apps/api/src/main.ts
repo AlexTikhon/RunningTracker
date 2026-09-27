@@ -17,7 +17,7 @@ import {
 } from './lifecycle/shutdown.js';
 import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
-import { runSummaryPublicationOnce } from './maintenance/run-summary-publication.js';
+import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
 
 export interface MainDependencies {
   clock?: Clock;
@@ -113,7 +113,8 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   const summaryRunner = new PeriodicRunner({
     clock,
     intervalMs: config.RUN_SUMMARY_INTERVAL_MS,
-    runOnce: () => runSummaryPublicationOnce(maintenancePool, clock),
+    runOnce: () =>
+      runSummaryPublicationBatch(maintenancePool, clock, config.RUN_SUMMARY_CONCURRENCY),
     taskName: 'Run summary publication',
   });
   const runner: StoppableRunner = {

@@ -46,6 +46,7 @@ describe('validateEnvironment', () => {
       DB_QUERY_TIMEOUT_MS: 1_000,
       PORT: 3_100,
       RUN_AUTO_FINISH_INTERVAL_MS: 60_000,
+      RUN_SUMMARY_CONCURRENCY: 2,
       RUN_SUMMARY_INTERVAL_MS: 60_000,
       SHUTDOWN_TIMEOUT_MS: 5_000,
     });
@@ -122,6 +123,21 @@ describe('validateEnvironment', () => {
           'postgresql://running_tracker_maintenance:secret@127.0.0.1:5433/other_database',
       }),
     ).toThrow('must target the same host, port, and database as DATABASE_URL');
+  });
+
+  it('bounds summary worker concurrency', () => {
+    expect(
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        RUN_SUMMARY_CONCURRENCY: '8',
+      }).RUN_SUMMARY_CONCURRENCY,
+    ).toBe(8);
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        RUN_SUMMARY_CONCURRENCY: '9',
+      }),
+    ).toThrow('RUN_SUMMARY_CONCURRENCY');
   });
 
   it('uses TEST_DATABASE_URL instead of DATABASE_URL for integration configuration', () => {

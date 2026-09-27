@@ -25,6 +25,14 @@ export type SummaryPublicationResult =
       status: 'published' | 'stale';
     };
 
+export interface SummaryPublicationBatchResult {
+  idleCount: number;
+  publishedCount: number;
+  staleCount: number;
+}
+
+const candidateScanLimit = 1_000;
+
 const publishCandidateSql = `
   WITH calculation AS MATERIALIZED (
     SELECT
@@ -80,7 +88,7 @@ function validateCandidate(row: SummaryCandidateRow | undefined): SummaryCandida
 }
 
 export async function runSummaryPublicationOnce(
-  pool: Pick<Pool, 'query'>,
+  pool: Pick<Pool, 'connect'>,
   clock: Pick<Clock, 'utcNow'>,
 ): Promise<SummaryPublicationResult> {
   const effectiveNow = clock.utcNow();
@@ -88,39 +96,108 @@ export async function runSummaryPublicationOnce(
     throw new Error('The maintenance clock returned an invalid UTC time');
   }
 
-  const candidates = await pool.query<SummaryCandidateRow>(
-    `SELECT org_id, run_id, source_revision, algorithm_version
-     FROM app_private.find_stale_run_summaries(1)`,
+  const client = await pool.connect();
+  let releaseWithError = false;
+  let transactionActive = false;
+  let commitStarted = false;
+  try {
+    await client.query('BEGIN');
+    transactionActive = true;
+
+    const candidates = await client.query<SummaryCandidateRow>(
+      `SELECT org_id, run_id, source_revision, algorithm_version
+       FROM app_private.claim_stale_run_summary($1)`,
+      [candidateScanLimit],
+    );
+    const candidate = validateCandidate(candidates.rows[0]);
+    if (candidate === undefined) {
+      commitStarted = true;
+      await client.query('COMMIT');
+      transactionActive = false;
+      return { status: 'idle' };
+    }
+
+    const publication = await client.query<SummaryPublicationRow>(publishCandidateSql, [
+      candidate.org_id,
+      candidate.run_id,
+      candidate.source_revision,
+      candidate.algorithm_version,
+      effectiveNow.toISOString(),
+    ]);
+    const result = publication.rows[0];
+    if (
+      result === undefined ||
+      typeof result.published !== 'boolean' ||
+      (result.archive_revision !== null &&
+        (typeof result.archive_revision !== 'string' ||
+          !/^\d+$/.test(result.archive_revision)))
+    ) {
+      throw new Error('The summary publication function returned an invalid result');
+    }
+
+    commitStarted = true;
+    await client.query('COMMIT');
+    transactionActive = false;
+    return {
+      algorithmVersion: candidate.algorithm_version,
+      archiveRevision: result.archive_revision,
+      orgId: candidate.org_id,
+      runId: candidate.run_id,
+      sourceRevision: candidate.source_revision,
+      status: result.published ? 'published' : 'stale',
+    };
+  } catch (error) {
+    if (transactionActive && !commitStarted) {
+      try {
+        await client.query('ROLLBACK');
+        transactionActive = false;
+      } catch {
+        releaseWithError = true;
+      }
+    } else {
+      releaseWithError = true;
+    }
+    throw error;
+  } finally {
+    if (releaseWithError) {
+      client.release(true);
+    } else {
+      client.release();
+    }
+  }
+}
+
+export async function runSummaryPublicationBatch(
+  pool: Pick<Pool, 'connect'>,
+  clock: Pick<Clock, 'utcNow'>,
+  concurrency: number,
+): Promise<SummaryPublicationBatchResult> {
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
+    throw new Error('Run summary concurrency must be an integer between 1 and 8');
+  }
+
+  const settled = await Promise.allSettled(
+    Array.from({ length: concurrency }, () => runSummaryPublicationOnce(pool, clock)),
   );
-  const candidate = validateCandidate(candidates.rows[0]);
-  if (candidate === undefined) {
-    return { status: 'idle' };
+  const failures: unknown[] = [];
+  for (const result of settled) {
+    if (result.status === 'rejected') {
+      failures.push(result.reason);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `${failures.length} run summary worker(s) failed`);
   }
 
-  const publication = await pool.query<SummaryPublicationRow>(publishCandidateSql, [
-    candidate.org_id,
-    candidate.run_id,
-    candidate.source_revision,
-    candidate.algorithm_version,
-    effectiveNow.toISOString(),
-  ]);
-  const result = publication.rows[0];
-  if (
-    result === undefined ||
-    typeof result.published !== 'boolean' ||
-    (result.archive_revision !== null &&
-      (typeof result.archive_revision !== 'string' ||
-        !/^\d+$/.test(result.archive_revision)))
-  ) {
-    throw new Error('The summary publication function returned an invalid result');
-  }
-
+  const results = settled.map((result) => {
+    if (result.status !== 'fulfilled') {
+      throw new Error('Unreachable rejected summary worker result');
+    }
+    return result.value;
+  });
   return {
-    algorithmVersion: candidate.algorithm_version,
-    archiveRevision: result.archive_revision,
-    orgId: candidate.org_id,
-    runId: candidate.run_id,
-    sourceRevision: candidate.source_revision,
-    status: result.published ? 'published' : 'stale',
+    idleCount: results.filter((result) => result.status === 'idle').length,
+    publishedCount: results.filter((result) => result.status === 'published').length,
+    staleCount: results.filter((result) => result.status === 'stale').length,
   };
 }

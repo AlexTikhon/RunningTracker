@@ -3,7 +3,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Clock } from '../src/clock.js';
 import { loadIntegrationTestConfiguration } from '../src/config/environment.js';
-import { runSummaryPublicationOnce } from '../src/maintenance/run-summary-publication.js';
+import {
+  runSummaryPublicationBatch,
+  runSummaryPublicationOnce,
+} from '../src/maintenance/run-summary-publication.js';
 import {
   prepareTenantIsolationFixtures,
   tenantIsolationIds as fixtureIds,
@@ -15,6 +18,8 @@ const runIds = {
   finished: 'a6400000-0000-4000-8000-000000000003',
   current: 'a6400000-0000-4000-8000-000000000004',
   invalidCurrent: 'a6400000-0000-4000-8000-000000000008',
+  parallelA: 'a6400000-0000-4000-8000-000000000009',
+  parallelB: 'a6400000-0000-4000-8000-000000000010',
   purged: 'a6400000-0000-4000-8000-000000000005',
   recording: 'a6400000-0000-4000-8000-000000000006',
   revised: 'a6400000-0000-4000-8000-000000000007',
@@ -176,14 +181,22 @@ describe('P06.4 revision-checked run summary publication', () => {
 
   it('exposes only narrow discovery/publication capabilities and validates quality shape', async () => {
     const privileges = await ownerPool.query<{
+      maintenance_can_claim: boolean;
       maintenance_can_find: boolean;
       maintenance_can_publish: boolean;
       maintenance_can_write_summaries: boolean;
+      public_can_claim: boolean;
       public_can_publish: boolean;
+      runtime_can_claim: boolean;
       runtime_can_find: boolean;
       runtime_can_publish: boolean;
     }>(
       `SELECT
+         has_function_privilege(
+           'running_tracker_maintenance',
+           'app_private.claim_stale_run_summary(integer)',
+           'EXECUTE'
+         ) AS maintenance_can_claim,
          has_function_privilege(
            'running_tracker_maintenance',
            'app_private.find_stale_run_summaries(integer)',
@@ -194,6 +207,16 @@ describe('P06.4 revision-checked run summary publication', () => {
            'app_private.find_stale_run_summaries(integer)',
            'EXECUTE'
          ) AS runtime_can_find,
+         has_function_privilege(
+           'running_tracker_runtime',
+           'app_private.claim_stale_run_summary(integer)',
+           'EXECUTE'
+         ) AS runtime_can_claim,
+         has_function_privilege(
+           'public',
+           'app_private.claim_stale_run_summary(integer)',
+           'EXECUTE'
+         ) AS public_can_claim,
          has_function_privilege(
            'running_tracker_maintenance',
            'app_private.publish_run_summary(uuid,uuid,bigint,text,geometry,double precision,double precision,jsonb,timestamp with time zone)',
@@ -217,15 +240,21 @@ describe('P06.4 revision-checked run summary publication', () => {
     );
 
     expect(privileges.rows[0]).toEqual({
+      maintenance_can_claim: true,
       maintenance_can_find: true,
       maintenance_can_publish: true,
       maintenance_can_write_summaries: false,
+      public_can_claim: false,
       public_can_publish: false,
       runtime_can_find: false,
+      runtime_can_claim: false,
       runtime_can_publish: false,
     });
     await expect(
       runtimePool.query('SELECT * FROM app_private.find_stale_run_summaries(1)'),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      runtimePool.query('SELECT * FROM app_private.claim_stale_run_summary(1)'),
     ).rejects.toMatchObject({ code: '42501' });
 
     await insertRun({ id: runIds.finished });
@@ -351,6 +380,62 @@ describe('P06.4 revision-checked run summary publication', () => {
     });
   });
 
+  it('claims distinct candidates across transactions and releases claims on rollback', async () => {
+    await insertRun({ id: runIds.parallelA });
+    await insertRun({ id: runIds.parallelB });
+    const first = await maintenancePool.connect();
+    const second = await maintenancePool.connect();
+    const third = await maintenancePool.connect();
+    try {
+      await Promise.all([first.query('BEGIN'), second.query('BEGIN'), third.query('BEGIN')]);
+      const firstClaim = await first.query<{ run_id: string }>(
+        'SELECT run_id FROM app_private.claim_stale_run_summary(1000)',
+      );
+      const secondClaim = await second.query<{ run_id: string }>(
+        'SELECT run_id FROM app_private.claim_stale_run_summary(1000)',
+      );
+      expect(
+        [firstClaim.rows[0]?.run_id, secondClaim.rows[0]?.run_id].sort(),
+      ).toEqual([runIds.parallelA, runIds.parallelB].sort());
+      await expect(
+        third.query('SELECT run_id FROM app_private.claim_stale_run_summary(1000)'),
+      ).resolves.toMatchObject({ rowCount: 0 });
+
+      await first.query('ROLLBACK');
+      await expect(
+        third.query<{ run_id: string }>(
+          'SELECT run_id FROM app_private.claim_stale_run_summary(1000)',
+        ),
+      ).resolves.toMatchObject({ rows: [{ run_id: firstClaim.rows[0]?.run_id }] });
+      await second.query('ROLLBACK');
+      await third.query('ROLLBACK');
+    } finally {
+      first.release();
+      second.release();
+      third.release();
+    }
+  });
+
+  it('publishes a bounded concurrent batch without duplicate work', async () => {
+    await insertRun({ id: runIds.parallelA });
+    await insertRun({ id: runIds.parallelB });
+
+    await expect(runSummaryPublicationBatch(maintenancePool, clock, 2)).resolves.toEqual({
+      idleCount: 0,
+      publishedCount: 2,
+      staleCount: 0,
+    });
+    const state = await ownerPool.query<{ archive_revision: string; summary_count: string }>(
+      `SELECT organization.archive_revision, count(summary.run_id) AS summary_count
+       FROM organizations AS organization
+       LEFT JOIN run_summaries AS summary ON summary.org_id = organization.id
+       WHERE organization.id = $1
+       GROUP BY organization.archive_revision`,
+      [fixtureIds.orgA],
+    );
+    expect(state.rows[0]).toEqual({ archive_revision: '2', summary_count: '2' });
+  });
+
   it('calculates without the run lock and discards a revision changed before publication', async () => {
     await insertRun({ dataRevision: 1, id: runIds.revised });
     await insertPoint({
@@ -391,7 +476,15 @@ describe('P06.4 revision-checked run summary publication', () => {
       if (typeof processId !== 'number') {
         throw new Error('Missing maintenance backend identity');
       }
-      const publication = runSummaryPublicationOnce(publisher, clock);
+      const publication = runSummaryPublicationOnce(
+        {
+          connect: () => Promise.resolve({
+            query: publisher.query.bind(publisher),
+            release: () => undefined,
+          }),
+        } as never,
+        clock,
+      );
       await waitForBlockedPublication(processId);
 
       await expect(
