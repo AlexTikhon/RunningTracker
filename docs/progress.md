@@ -13,7 +13,7 @@ Last updated: 2026-09-27.
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
-| P07 | IN PROGRESS | P07.1–P07.4 fixed snapshots, successor changes, edge annotations, and signed identity-bound cursors complete; client application remains |
+| P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | TODO | SSE and coach screen |
 | P09 | TODO | MVT, cache, and archive map |
 | P10 | TODO | Retention, deletion, and maintenance |
@@ -755,3 +755,24 @@ Verification evidence on 2026-09-27:
 - no migration, database privilege, public response schema, dependency, frontend synchronization, SSE, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
 
 P07 remains IN PROGRESS. The next planned fragment is P07.5: atomically apply snapshot/change upserts in the browser and advance the local revision only after every page succeeds. SSE, archive maps, retention, and production identity remain unopened.
+
+## P07.5 — atomic browser live-track application
+
+Implemented:
+
+- browser HTTP helpers validate the shared `TrackPage` contract for snapshot and changes endpoints while preserving exact signed continuation cursors;
+- `LiveTrackStore` scopes committed state and one in-flight synchronization by authenticated user, organization, and run. A snapshot starts from an empty temporary map; changes clone the last committed map;
+- every page chain must retain operation-appropriate source revision, target revision, algorithm version, strict seq order, and acyclic cursor progress. Upserts remain private until the terminal page, when points and revision are replaced together;
+- repeated seq-keyed upserts are idempotent. Concurrent calls for one run share the same synchronization and merge revision notifications to the highest target observed during loading;
+- an algorithm change or `INVALID_CURSOR` during changes discards staged data and starts a fresh snapshot. One expired snapshot continuation may restart once; other transport, authorization, retention, or protocol failures leave the prior committed state unchanged;
+- ADR-0021 records the atomicity, single-flight, identity isolation, recovery, and in-memory lifetime boundaries.
+
+Verification evidence on 2026-09-27:
+
+- focused HTTP/store unit coverage passed 2 files / 14 tests, covering canonical URLs, atomic multi-page commit, failure rollback, late-point successor repair, idempotent replay, algorithm and cursor recovery, target coalescing, and cross-user isolation;
+- the complete web suite passed 10 files / 53 tests; strict web typechecking and lint passed;
+- `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 60 API unit tests, 53 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- the disposable test database bootstrap succeeded, migrations `0000`–`0012` checksum-verified unchanged, and focused P07 real-runtime-role/PostGIS integration passed 2 files / 17 tests;
+- no migration, database privilege, public response schema, dependency, SSE transport, coach UI, map rendering, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
+
+P07 is DONE. The next planned fragment is P08.1: one bounded SSE organization/tab connection with initial state, a shared two-second polling cycle, heartbeat, and backpressure policy. P08.2–P08.5, archive maps, retention, load verification, and production identity remain unopened.

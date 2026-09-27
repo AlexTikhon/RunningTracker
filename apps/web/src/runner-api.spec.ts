@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createRun, loadSession, readRun, sendRunCommand, uploadPointBatch } from './runner-api.js';
+import {
+  createRun,
+  loadSession,
+  readLiveTrackChangesPage,
+  readLiveTrackSnapshotPage,
+  readRun,
+  sendRunCommand,
+  uploadPointBatch,
+} from './runner-api.js';
 import type { RunnerApiError } from './runner-api.js';
 
 const csrf = { headerName: 'x-csrf-token' as const, token: 'a'.repeat(43) };
@@ -171,6 +179,45 @@ describe('runner API', () => {
         requestId: error.error.requestId,
         status: 409,
       }),
+    );
+  });
+
+  it('reads and validates snapshot and change pages through their canonical queries', async () => {
+    const snapshot = {
+      algorithmVersion: 'v1',
+      fromRevision: null,
+      nextCursor: 'snapshot-cursor',
+      toRevision: '4',
+      upserts: [],
+    };
+    const changes = {
+      algorithmVersion: 'v1',
+      fromRevision: '4',
+      nextCursor: null,
+      toRevision: '6',
+      upserts: [],
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(snapshot)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(changes)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      readLiveTrackSnapshotPage({ cursor: 'snapshot-cursor', orgId, runId }),
+    ).resolves.toEqual(snapshot);
+    await expect(
+      readLiveTrackChangesPage({ afterRevision: '4', orgId, runId }),
+    ).resolves.toEqual(changes);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      `/api/orgs/${orgId}/runs/${runId}/live-track?cursor=snapshot-cursor`,
+      { credentials: 'same-origin' },
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      `/api/orgs/${orgId}/runs/${runId}/live-track/changes?afterRevision=4`,
+      { credentials: 'same-origin' },
     );
   });
 });

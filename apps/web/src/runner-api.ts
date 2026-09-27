@@ -1,10 +1,12 @@
 import {
   apiErrorResponseSchema,
   ingestPointsResponseSchema,
+  liveTrackResponseSchema,
   runCommandResponseSchema,
   runViewSchema,
   sessionResponseSchema,
   type IngestPointsResponse,
+  type LiveTrackResponse,
   type PointInput,
   type RunCommandResponse,
   type RunCommandType,
@@ -36,6 +38,18 @@ export interface PointBatchInput {
   points: PointInput[];
   runId: string;
 }
+
+export interface LiveTrackScope {
+  orgId: string;
+  runId: string;
+}
+
+export type LiveTrackSnapshotPageInput = LiveTrackScope & {
+  cursor?: string;
+};
+
+export type LiveTrackChangesPageInput = LiveTrackScope &
+  ({ afterRevision: string; cursor?: never } | { afterRevision?: never; cursor: string });
 
 export class RunnerApiError extends Error {
   public constructor(
@@ -171,4 +185,45 @@ export async function sendRunCommand(
     },
   );
   return runCommandResponseSchema.parse(await requireSuccess(response));
+}
+
+function liveTrackUrl(
+  input: LiveTrackScope,
+  suffix: '' | '/changes',
+  query: { afterRevision?: string; cursor?: string },
+): string {
+  const parameters = new URLSearchParams();
+  if (query.afterRevision !== undefined) {
+    parameters.set('afterRevision', query.afterRevision);
+  }
+  if (query.cursor !== undefined) {
+    parameters.set('cursor', query.cursor);
+  }
+  const encodedOrgId = encodeURIComponent(input.orgId);
+  const encodedRunId = encodeURIComponent(input.runId);
+  const search = parameters.toString();
+  return `/api/orgs/${encodedOrgId}/runs/${encodedRunId}/live-track${suffix}${search === '' ? '' : `?${search}`}`;
+}
+
+export async function readLiveTrackSnapshotPage(
+  input: LiveTrackSnapshotPageInput,
+): Promise<LiveTrackResponse> {
+  const query = input.cursor === undefined ? {} : { cursor: input.cursor };
+  const response = await fetch(liveTrackUrl(input, '', query), {
+    credentials: 'same-origin',
+  });
+  return liveTrackResponseSchema.parse(await requireSuccess(response));
+}
+
+export async function readLiveTrackChangesPage(
+  input: LiveTrackChangesPageInput,
+): Promise<LiveTrackResponse> {
+  const query =
+    input.cursor === undefined
+      ? { afterRevision: input.afterRevision }
+      : { cursor: input.cursor };
+  const response = await fetch(liveTrackUrl(input, '/changes', query), {
+    credentials: 'same-origin',
+  });
+  return liveTrackResponseSchema.parse(await requireSuccess(response));
 }
