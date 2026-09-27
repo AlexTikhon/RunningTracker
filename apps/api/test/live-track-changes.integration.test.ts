@@ -203,7 +203,7 @@ describe('P07.2 revision-window live-track changes', () => {
     });
     expect(first.upserts.map(({ seq }) => seq)).toEqual(['20', '30']);
     expect(first.upserts.every(({ connectFromPrevious }) => !connectFromPrevious)).toBe(true);
-    expect(first.upserts.every(({ predecessorSeq }) => predecessorSeq === null)).toBe(true);
+    expect(first.upserts.map(({ predecessorSeq }) => predecessorSeq)).toEqual(['10', '20']);
     expect(first.nextCursor).not.toBeNull();
 
     await ownerPool.query(
@@ -234,6 +234,7 @@ describe('P07.2 revision-window live-track changes', () => {
       toRevision: '2',
     });
     expect(second.upserts.map(({ seq }) => seq)).toEqual(['40', '50']);
+    expect(second.upserts.map(({ predecessorSeq }) => predecessorSeq)).toEqual(['30', '40']);
 
     const retry = liveTrackResponseSchema.parse(
       objectBody(await readChanges(ids.userDual, runIds.recording, continuationUrl).expect(200)),
@@ -247,6 +248,49 @@ describe('P07.2 revision-window live-track changes', () => {
     );
     expect(fresh).toMatchObject({ fromRevision: '2', nextCursor: null, toRevision: '3' });
     expect(fresh.upserts.map(({ seq }) => seq)).toEqual(['25', '30']);
+    expect(fresh.upserts.map(({ predecessorSeq }) => predecessorSeq)).toEqual(['20', '25']);
+  });
+
+  it('repairs both accepted edges around a late insertion across page boundaries', async () => {
+    await ownerPool.query(
+      `INSERT INTO run_points (
+         org_id, run_id, seq, segment_id, recorded_at, received_at,
+         geom, accuracy_m, ingested_revision
+       ) VALUES
+         ($1, $2, 1, 0, '2031-01-01T10:00:00.000Z', $3,
+          ST_SetSRID(ST_MakePoint(21.00000, 52.00000), 4326), 5, 1),
+         ($1, $2, 3, 0, '2031-01-01T10:00:02.000Z', $3,
+          ST_SetSRID(ST_MakePoint(21.00002, 52.00000), 4326), 5, 1),
+         ($1, $2, 2, 0, '2031-01-01T10:00:01.000Z', $3,
+          ST_SetSRID(ST_MakePoint(21.00001, 52.00000), 4326), 5, 2)`,
+      [ids.orgA, runIds.empty, '2031-01-01T10:01:00.000Z'],
+    );
+    await ownerPool.query(
+      'UPDATE runs SET data_revision = 2 WHERE org_id = $1 AND id = $2',
+      [ids.orgA, runIds.empty],
+    );
+
+    const first = liveTrackResponseSchema.parse(
+      objectBody(
+        await readChanges(ids.userDual, runIds.empty, '?afterRevision=1&limit=1').expect(200),
+      ),
+    );
+    expect(first.upserts).toMatchObject([
+      { connectFromPrevious: true, predecessorSeq: '1', seq: '2' },
+    ]);
+
+    const second = liveTrackResponseSchema.parse(
+      objectBody(
+        await readChanges(
+          ids.userDual,
+          runIds.empty,
+          `?cursor=${encodeURIComponent(first.nextCursor!)}`,
+        ).expect(200),
+      ),
+    );
+    expect(second.upserts).toMatchObject([
+      { connectFromPrevious: true, predecessorSeq: '2', seq: '3' },
+    ]);
   });
 
   it('returns an empty page when the client already has the target revision', async () => {

@@ -264,7 +264,7 @@ describe('P07.1 initial live-track snapshot', () => {
           accuracyM: 4.3,
           connectFromPrevious: false,
           coordinates: [21.003, 52.003],
-          predecessorSeq: null,
+          predecessorSeq: '1',
           recordedAt: '2031-01-01T10:00:00.003Z',
           segmentId: 0,
           seq: '3',
@@ -277,6 +277,49 @@ describe('P07.1 initial live-track snapshot', () => {
     );
     expect(fresh.toRevision).toBe('3');
     expect(fresh.upserts.map(({ seq }) => seq)).toEqual(['1', '2', '3']);
+    expect(fresh.upserts.map(({ predecessorSeq }) => predecessorSeq)).toEqual([
+      null,
+      '1',
+      '2',
+    ]);
+  });
+
+  it('evaluates accepted and rejected edges with the shared revision-bound algorithm', async () => {
+    await ownerPool.query(
+      `INSERT INTO run_points (
+         org_id, run_id, seq, segment_id, recorded_at, received_at,
+         geom, accuracy_m, ingested_revision
+       ) VALUES
+         ($1, $2, 1, 0, '2031-01-01T10:00:00.000Z', $3,
+          ST_SetSRID(ST_MakePoint(21.00000, 52.00000), 4326), 5, 1),
+         ($1, $2, 2, 0, '2031-01-01T10:00:01.000Z', $3,
+          ST_SetSRID(ST_MakePoint(21.00001, 52.00000), 4326), 5, 1),
+         ($1, $2, 3, 1, '2031-01-01T10:00:02.000Z', $3,
+          ST_SetSRID(ST_MakePoint(21.00002, 52.00000), 4326), 5, 1),
+         ($1, $2, 4, 1, '2031-01-01T10:00:03.000Z', $3,
+          ST_SetSRID(ST_MakePoint(21.00003, 52.00000), 4326), 31, 1)`,
+      [ids.orgA, runIds.empty, '2031-01-01T10:01:00.000Z'],
+    );
+    await ownerPool.query(
+      'UPDATE runs SET data_revision = 1 WHERE org_id = $1 AND id = $2',
+      [ids.orgA, runIds.empty],
+    );
+
+    const response = liveTrackResponseSchema.parse(
+      objectBody(await read(ids.userDual, runIds.empty).expect(200)),
+    );
+    expect(response.upserts.map(({ predecessorSeq }) => predecessorSeq)).toEqual([
+      null,
+      '1',
+      '2',
+      '3',
+    ]);
+    expect(response.upserts.map(({ connectFromPrevious }) => connectFromPrevious)).toEqual([
+      false,
+      true,
+      false,
+      false,
+    ]);
   });
 
   it('returns an empty snapshot with the current revision and algorithm version', async () => {

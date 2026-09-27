@@ -107,9 +107,11 @@ interface LiveTrackSnapshotCursor {
 interface LiveTrackSnapshotPageRow {
   accuracy_m: number | null;
   algorithm_version: string;
+  connect_from_previous: boolean | null;
   current_revision: string;
   latitude: number | null;
   longitude: number | null;
+  predecessor_seq: string | null;
   raw_state: 'available' | 'purging' | 'purged';
   recorded_at: string | null;
   segment_id: number | null;
@@ -614,25 +616,56 @@ export async function readLiveTrackSnapshot(
             point.recorded_at,
             point.longitude,
             point.latitude,
-            point.accuracy_m
+            point.accuracy_m,
+            point.predecessor_seq,
+            point.connect_from_previous
      FROM runs AS run
      LEFT JOIN LATERAL (
-       SELECT seq,
-              segment_id,
+       WITH ordered_points AS MATERIALIZED (
+         SELECT point.seq,
+                point.segment_id,
+                point.recorded_at,
+                point.geom,
+                point.accuracy_m,
+                lag(point.seq) OVER point_order AS predecessor_seq,
+                lag(point.segment_id) OVER point_order AS predecessor_segment_id,
+                lag(point.recorded_at) OVER point_order AS predecessor_recorded_at,
+                lag(point.geom) OVER point_order AS predecessor_geom,
+                lag(point.accuracy_m) OVER point_order AS predecessor_accuracy_m
+         FROM run_points AS point
+         WHERE point.org_id = run.org_id
+           AND point.run_id = run.id
+           AND run.raw_state = 'available'
+           AND point.ingested_revision <= COALESCE($3::bigint, run.data_revision)
+         WINDOW point_order AS (ORDER BY point.seq)
+       )
+       SELECT point.seq,
+              point.segment_id,
               to_char(
-                recorded_at AT TIME ZONE 'UTC',
+                point.recorded_at AT TIME ZONE 'UTC',
                 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
               ) AS recorded_at,
-              ST_X(geom) AS longitude,
-              ST_Y(geom) AS latitude,
-              accuracy_m
-       FROM run_points
-       WHERE org_id = run.org_id
-         AND run_id = run.id
-         AND run.raw_state = 'available'
-         AND ingested_revision <= COALESCE($3::bigint, run.data_revision)
-         AND ($4::bigint IS NULL OR seq > $4::bigint)
-       ORDER BY seq
+              ST_X(point.geom) AS longitude,
+              ST_Y(point.geom) AS latitude,
+              point.accuracy_m,
+              point.predecessor_seq,
+              coalesce(evaluation.accepted, false) AS connect_from_previous
+       FROM ordered_points AS point
+       LEFT JOIN LATERAL app_private.evaluate_track_edge(
+         app_private.current_track_algorithm_version(),
+         point.predecessor_seq,
+         point.predecessor_segment_id,
+         point.predecessor_recorded_at,
+         point.predecessor_geom,
+         point.predecessor_accuracy_m,
+         point.seq,
+         point.segment_id,
+         point.recorded_at,
+         point.geom,
+         point.accuracy_m
+       ) AS evaluation ON point.predecessor_seq IS NOT NULL
+       WHERE ($4::bigint IS NULL OR point.seq > $4::bigint)
+       ORDER BY point.seq
        LIMIT $5
      ) AS point ON true
      WHERE run.org_id = $1
@@ -687,9 +720,9 @@ export async function readLiveTrackSnapshot(
     toRevision,
     upserts: pageRows.map((point) => ({
       accuracyM: point.accuracy_m,
-      connectFromPrevious: false,
+      connectFromPrevious: point.connect_from_previous,
       coordinates: [point.longitude, point.latitude],
-      predecessorSeq: null,
+      predecessorSeq: point.predecessor_seq,
       recordedAt: point.recorded_at,
       segmentId: point.segment_id,
       seq: point.seq,
@@ -721,17 +754,34 @@ export async function readLiveTrackChanges(
             point.recorded_at,
             point.longitude,
             point.latitude,
-            point.accuracy_m
+            point.accuracy_m,
+            point.predecessor_seq,
+            point.connect_from_previous
      FROM runs AS run
      LEFT JOIN LATERAL (
-       WITH changed AS MATERIALIZED (
-         SELECT changed_point.seq
-         FROM run_points AS changed_point
-         WHERE changed_point.org_id = run.org_id
-           AND changed_point.run_id = run.id
+       WITH ordered_points AS MATERIALIZED (
+         SELECT point.seq,
+                point.segment_id,
+                point.recorded_at,
+                point.geom,
+                point.accuracy_m,
+                point.ingested_revision,
+                lag(point.seq) OVER point_order AS predecessor_seq,
+                lag(point.segment_id) OVER point_order AS predecessor_segment_id,
+                lag(point.recorded_at) OVER point_order AS predecessor_recorded_at,
+                lag(point.geom) OVER point_order AS predecessor_geom,
+                lag(point.accuracy_m) OVER point_order AS predecessor_accuracy_m
+         FROM run_points AS point
+         WHERE point.org_id = run.org_id
+           AND point.run_id = run.id
            AND run.raw_state = 'available'
-           AND changed_point.ingested_revision > $3::bigint
-           AND changed_point.ingested_revision <= COALESCE($4::bigint, run.data_revision)
+           AND point.ingested_revision <= COALESCE($4::bigint, run.data_revision)
+         WINDOW point_order AS (ORDER BY point.seq)
+       ),
+       changed AS (
+         SELECT changed_point.seq
+         FROM ordered_points AS changed_point
+         WHERE changed_point.ingested_revision > $3::bigint
        ),
        upsert_sequences AS (
          SELECT changed.seq
@@ -741,11 +791,8 @@ export async function readLiveTrackChanges(
          FROM changed
          CROSS JOIN LATERAL (
            SELECT candidate.seq
-           FROM run_points AS candidate
-           WHERE candidate.org_id = run.org_id
-             AND candidate.run_id = run.id
-             AND candidate.ingested_revision <= COALESCE($4::bigint, run.data_revision)
-             AND candidate.seq > changed.seq
+           FROM ordered_points AS candidate
+           WHERE candidate.seq > changed.seq
            ORDER BY candidate.seq
            LIMIT 1
          ) AS successor
@@ -758,12 +805,24 @@ export async function readLiveTrackChanges(
               ) AS recorded_at,
               ST_X(stored.geom) AS longitude,
               ST_Y(stored.geom) AS latitude,
-              stored.accuracy_m
+              stored.accuracy_m,
+              stored.predecessor_seq,
+              coalesce(evaluation.accepted, false) AS connect_from_previous
        FROM upsert_sequences
-       JOIN run_points AS stored
-         ON stored.org_id = run.org_id
-        AND stored.run_id = run.id
-        AND stored.seq = upsert_sequences.seq
+       JOIN ordered_points AS stored ON stored.seq = upsert_sequences.seq
+       LEFT JOIN LATERAL app_private.evaluate_track_edge(
+         app_private.current_track_algorithm_version(),
+         stored.predecessor_seq,
+         stored.predecessor_segment_id,
+         stored.predecessor_recorded_at,
+         stored.predecessor_geom,
+         stored.predecessor_accuracy_m,
+         stored.seq,
+         stored.segment_id,
+         stored.recorded_at,
+         stored.geom,
+         stored.accuracy_m
+       ) AS evaluation ON stored.predecessor_seq IS NOT NULL
        WHERE ($5::bigint IS NULL OR stored.seq > $5::bigint)
        ORDER BY stored.seq
        LIMIT $6
@@ -835,9 +894,9 @@ export async function readLiveTrackChanges(
     toRevision,
     upserts: pageRows.map((point) => ({
       accuracyM: point.accuracy_m,
-      connectFromPrevious: false,
+      connectFromPrevious: point.connect_from_previous,
       coordinates: [point.longitude, point.latitude],
-      predecessorSeq: null,
+      predecessorSeq: point.predecessor_seq,
       recordedAt: point.recorded_at,
       segmentId: point.segment_id,
       seq: point.seq,

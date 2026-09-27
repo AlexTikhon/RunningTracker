@@ -713,3 +713,23 @@ Verification evidence on 2026-09-27:
 - no migration, database privilege change, public contract shape, edge evaluation, signed/user-bound/expiring cursor, frontend synchronization, SSE, push, hosted CI, or paid-provider call occurred.
 
 P07 remains IN PROGRESS. The next planned fragment is P07.3: compute `predecessorSeq` and `connectFromPrevious` against the same revision-bound point set T. P07.4–P07.5, SSE, archive maps, retention, and production identity remain unopened.
+
+## P07.3 — revision-bound live-track edge annotations
+
+Implemented:
+
+- both initial snapshot and revision-window change queries materialize the complete `ingested_revision <= T` point set and derive the immediate seq-ordered predecessor before keyset page filtering;
+- the first point on a continuation page therefore retains a predecessor from an earlier page. `predecessorSeq` identifies that point even when the edge is rejected, while only the first point in the fixed-revision set has no predecessor;
+- both endpoints invoke the existing immutable `app_private.evaluate_track_edge(...)` capability. `connectFromPrevious` now uses the same versioned sequence, segment, accuracy, time, geodesic-distance, and speed rules as summary calculation;
+- change-page repair selection, predecessor derivation, and edge evaluation use the same materialized T-bound set, so later ingestion cannot perturb annotations in an older pagination sequence;
+- the existing strict `TrackPage` contract, OpenAPI artifact, HTTP routes, RLS boundary, and database grants are unchanged. ADR-0019 records the page-boundary and fixed-revision semantics.
+
+Verification evidence on 2026-09-27:
+
+- focused P07.1/P07.2/P07.3 real-runtime-role integration passed 2 files / 17 tests, including accepted and rejected edges, snapshot predecessors across pages, late-insertion repair of both accepted edges across change pages, and fixed-T predecessor behavior under newer ingestion;
+- `npm run db:bootstrap:test` succeeded and `npm run db:migrate:test` checksum-verified and skipped unchanged migrations `0000`–`0012`;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 55 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- full real-role/PostGIS integration passed 17 files / 171 tests;
+- no migration, database privilege change, public contract shape, cursor signing/user binding/expiry, frontend synchronization, SSE, commit, push, hosted CI, or paid-provider call occurred.
+
+P07 remains IN PROGRESS. The next planned fragment is P07.4: signed, user-bound, expiring cursors for snapshot and changes. P07.5, SSE, archive maps, retention, and production identity remain unopened.
