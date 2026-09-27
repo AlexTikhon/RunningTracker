@@ -13,6 +13,7 @@ import {
   type CreateRunRequest,
   type IngestPointsRequest,
   type IngestPointsResponse,
+  type LiveTrackChangesQuery,
   type LiveTrackQuery,
   type LiveTrackResponse,
   type PointInput,
@@ -115,6 +116,18 @@ interface LiveTrackSnapshotPageRow {
   seq: string | null;
 }
 
+interface LiveTrackChangesCursor {
+  algorithmVersion: string;
+  fromRevision: string;
+  lastSeq: string;
+  operation: 'changes';
+  orgId: string;
+  runId: string;
+  toRevision: string;
+}
+
+type LiveTrackChangesPageRow = LiveTrackSnapshotPageRow;
+
 interface StoredCommandRow {
   payload_matches: boolean;
   response: unknown;
@@ -145,6 +158,21 @@ const liveTrackSnapshotCursorSchema = z.strictObject({
   runId: uuidSchema,
   toRevision: revisionSchema,
 });
+
+const liveTrackChangesCursorSchema = z
+  .strictObject({
+    algorithmVersion: z.string().min(1).max(128),
+    fromRevision: revisionSchema,
+    lastSeq: seqSchema,
+    operation: z.literal('changes'),
+    orgId: uuidSchema,
+    runId: uuidSchema,
+    toRevision: revisionSchema,
+  })
+  .refine((cursor) => BigInt(cursor.fromRevision) <= BigInt(cursor.toRevision), {
+    message: 'The source revision must not exceed the target revision',
+    path: ['fromRevision'],
+  });
 
 export const POINTS_PER_RUN_MAX = 50_000;
 const UPLOAD_WINDOW_MS = 24 * 60 * 60 * 1_000;
@@ -330,6 +358,38 @@ function decodeLiveTrackSnapshotCursor(
     };
     if (canonical.orgId !== orgId || canonical.runId !== runId) {
       throw new Error('The cursor belongs to a different live-track snapshot');
+    }
+    return canonical;
+  } catch {
+    throw new ApiError(400, 'INVALID_CURSOR', 'The live-track cursor is invalid');
+  }
+}
+
+function encodeLiveTrackChangesCursor(cursor: LiveTrackChangesCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeLiveTrackChangesCursor(
+  cursor: string,
+  orgId: string,
+  runId: string,
+): LiveTrackChangesCursor {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/u.test(cursor)) {
+      throw new Error('The cursor is not base64url encoded');
+    }
+    const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    const parsed = liveTrackChangesCursorSchema.safeParse(decoded);
+    if (!parsed.success) {
+      throw new Error('The cursor payload is invalid');
+    }
+    const canonical = {
+      ...parsed.data,
+      orgId: parsed.data.orgId.toLowerCase(),
+      runId: parsed.data.runId.toLowerCase(),
+    };
+    if (canonical.orgId !== orgId || canonical.runId !== runId) {
+      throw new Error('The cursor belongs to a different live-track change set');
     }
     return canonical;
   } catch {
@@ -619,6 +679,154 @@ export async function readLiveTrackSnapshot(
             algorithmVersion,
             lastSeq: last.seq,
             operation: 'snapshot',
+            orgId,
+            runId,
+            toRevision,
+          })
+        : null,
+    toRevision,
+    upserts: pageRows.map((point) => ({
+      accuracyM: point.accuracy_m,
+      connectFromPrevious: false,
+      coordinates: [point.longitude, point.latitude],
+      predecessorSeq: null,
+      recordedAt: point.recorded_at,
+      segmentId: point.segment_id,
+      seq: point.seq,
+    })),
+  });
+}
+
+export async function readLiveTrackChanges(
+  client: PoolClient,
+  orgId: string,
+  runId: string,
+  query: LiveTrackChangesQuery,
+): Promise<LiveTrackResponse> {
+  let cursor: LiveTrackChangesCursor | undefined;
+  let fromRevision: string;
+  if ('cursor' in query) {
+    cursor = decodeLiveTrackChangesCursor(query.cursor, orgId, runId);
+    fromRevision = cursor.fromRevision;
+  } else {
+    fromRevision = query.afterRevision;
+  }
+  const limit = query.limit ?? 1_000;
+  const result = await client.query<LiveTrackChangesPageRow>(
+    `SELECT run.data_revision AS current_revision,
+            run.raw_state,
+            app_private.current_track_algorithm_version() AS algorithm_version,
+            point.seq,
+            point.segment_id,
+            point.recorded_at,
+            point.longitude,
+            point.latitude,
+            point.accuracy_m
+     FROM runs AS run
+     LEFT JOIN LATERAL (
+       WITH changed AS MATERIALIZED (
+         SELECT changed_point.seq
+         FROM run_points AS changed_point
+         WHERE changed_point.org_id = run.org_id
+           AND changed_point.run_id = run.id
+           AND run.raw_state = 'available'
+           AND changed_point.ingested_revision > $3::bigint
+           AND changed_point.ingested_revision <= COALESCE($4::bigint, run.data_revision)
+       ),
+       upsert_sequences AS (
+         SELECT changed.seq
+         FROM changed
+         UNION
+         SELECT successor.seq
+         FROM changed
+         CROSS JOIN LATERAL (
+           SELECT candidate.seq
+           FROM run_points AS candidate
+           WHERE candidate.org_id = run.org_id
+             AND candidate.run_id = run.id
+             AND candidate.ingested_revision <= COALESCE($4::bigint, run.data_revision)
+             AND candidate.seq > changed.seq
+           ORDER BY candidate.seq
+           LIMIT 1
+         ) AS successor
+       )
+       SELECT stored.seq,
+              stored.segment_id,
+              to_char(
+                stored.recorded_at AT TIME ZONE 'UTC',
+                'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+              ) AS recorded_at,
+              ST_X(stored.geom) AS longitude,
+              ST_Y(stored.geom) AS latitude,
+              stored.accuracy_m
+       FROM upsert_sequences
+       JOIN run_points AS stored
+         ON stored.org_id = run.org_id
+        AND stored.run_id = run.id
+        AND stored.seq = upsert_sequences.seq
+       WHERE ($5::bigint IS NULL OR stored.seq > $5::bigint)
+       ORDER BY stored.seq
+       LIMIT $6
+     ) AS point ON true
+     WHERE run.org_id = $1
+       AND run.id = $2
+       AND app_private.can_read_run(run.org_id, run.id)
+     ORDER BY point.seq NULLS LAST`,
+    [
+      orgId,
+      runId,
+      fromRevision,
+      cursor?.toRevision ?? null,
+      cursor?.lastSeq ?? null,
+      limit + 1,
+    ],
+  );
+  const run = result.rows[0];
+  if (!run) {
+    return throwMissingRun(client, orgId, runId);
+  }
+  if (run.raw_state !== 'available') {
+    throw new ApiError(410, 'RAW_HISTORY_UNAVAILABLE', 'Raw point history is unavailable');
+  }
+  if (cursor) {
+    if (
+      BigInt(cursor.toRevision) > BigInt(run.current_revision) ||
+      cursor.algorithmVersion !== run.algorithm_version
+    ) {
+      throw new ApiError(400, 'INVALID_CURSOR', 'The live-track cursor is invalid');
+    }
+  } else if (BigInt(fromRevision) > BigInt(run.current_revision)) {
+    throw new ApiError(
+      400,
+      'INVALID_REQUEST',
+      'The source revision must not exceed the current run revision',
+    );
+  }
+
+  const pointRows = result.rows.filter(
+    (row): row is LiveTrackChangesPageRow & {
+      accuracy_m: number;
+      latitude: number;
+      longitude: number;
+      recorded_at: string;
+      segment_id: number;
+      seq: string;
+    } => row.seq !== null,
+  );
+  const pageRows = pointRows.slice(0, limit);
+  const last = pageRows.at(-1);
+  const toRevision = cursor?.toRevision ?? run.current_revision;
+  const algorithmVersion = cursor?.algorithmVersion ?? run.algorithm_version;
+  return liveTrackResponseSchema.parse({
+    algorithmVersion,
+    fromRevision,
+    nextCursor:
+      pointRows.length > limit && last
+        ? encodeLiveTrackChangesCursor({
+            algorithmVersion,
+            fromRevision,
+            lastSeq: last.seq,
+            operation: 'changes',
             orgId,
             runId,
             toRevision,

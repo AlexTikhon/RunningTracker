@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P06 и P07.1 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07.1 реализует initial live-track snapshot на фиксированной revision; следующий фрагмент — P07.2.
+Статус: согласованный проект архитектуры; P00–P06 и P07.1–P07.2 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07.1 реализует initial live-track snapshot на фиксированной revision, P07.2 — revision-window changes с immediate-successor repair; следующий фрагмент — P07.3.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -292,6 +292,8 @@ Changes(afterRevision=A) фиксирует T ≥ A. Изменяемые эле
 - их непосредственные существующие преемники в наборе на версии T.
 
 Набор дедуплицируется и сортируется по seq. Для каждой записи сервер вычисляет predecessorSeq и connectFromPrevious по точкам с ingested_revision ≤ T. Это исправляет связь следующей точки при поздней вставке.
+
+В P07.2 первый запрос `/live-track/changes` фиксирует текущую `runs.data_revision` как T в том же SQL statement, materialized-набор `(A,T]` объединяется через `UNION` с immediate successors, а keyset pagination идёт по bigint `seq`. Cursor связывает operation, org/run, A/T, algorithmVersion и last seq; signing/user binding/expiry остаются P07.4. До P07.3 edge-поля change page остаются `null`/`false`, хотя набор upserts уже содержит все точки, чьи связи потребуется пересчитать (ADR-0018).
 
 Все страницы фиксируют T и algorithmVersion; изменения после T не попадают в них. Snapshot в БД не удерживается между HTTP-запросами: воспроизводимость обеспечивается immutable точками и ingested_revision. На каждом запросе повторно проверяются ACL и raw_state.
 

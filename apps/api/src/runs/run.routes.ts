@@ -1,6 +1,7 @@
 import {
   createRunRequestSchema,
   ingestPointsRequestSchema,
+  liveTrackChangesQuerySchema,
   liveTrackQuerySchema,
   POINT_BATCH_MAX_SIZE,
   organizationPathSchema,
@@ -32,6 +33,7 @@ import {
   createRun,
   ingestRunPoints,
   listRuns,
+  readLiveTrackChanges,
   readLiveTrackSnapshot,
   readRunPoints,
   readRun,
@@ -141,6 +143,24 @@ export function createRunRouter({
       const session = getAuthenticatedSession(request);
       const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
         readLiveTrackSnapshot(client, orgId, runId, query),
+      );
+      response.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/:runId/live-track/changes', authenticate, async (request, response, next) => {
+    try {
+      const { orgId, runId } = routeInput(request);
+      const query = parseContract(
+        liveTrackChangesQuerySchema,
+        request.query,
+        'live-track changes query',
+      );
+      const session = getAuthenticatedSession(request);
+      const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+        readLiveTrackChanges(client, orgId, runId, query),
       );
       response.status(200).json(result);
     } catch (error) {

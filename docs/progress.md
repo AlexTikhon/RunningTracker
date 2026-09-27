@@ -13,7 +13,7 @@ Last updated: 2026-09-27.
 | P04 | DONE | Bounded atomic ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification passed |
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
-| P07 | IN PROGRESS | P07.1 revision-fixed initial snapshot complete; changes, edge annotations, signed cursors, and client application remain |
+| P07 | IN PROGRESS | P07.1 revision-fixed initial snapshot and P07.2 immediate-successor change pages complete; edge annotations, signed cursors, and client application remain |
 | P08 | TODO | SSE and coach screen |
 | P09 | TODO | MVT, cache, and archive map |
 | P10 | TODO | Retention, deletion, and maintenance |
@@ -693,3 +693,23 @@ Verification evidence on 2026-09-27:
 - `git diff --check` passed; no migration, database privilege change, changes endpoint, edge evaluation, cursor signature/expiry, frontend synchronization, SSE, commit, push, hosted CI, or paid-provider call occurred.
 
 P07 remains IN PROGRESS. The next planned fragment is P07.2: revision-window change pages containing new points plus their immediate successors at fixed target revision T. P07.3–P07.5, SSE, archive maps, retention, and production identity remain unopened.
+
+## P07.2 — revision-window live-track changes
+
+Implemented:
+
+- `GET /api/orgs/{orgId}/runs/{runId}/live-track/changes` accepts exactly one of `afterRevision=A` or a continuation cursor and fixes the first request's current run revision as T in the same PostgreSQL statement that selects the page;
+- the query materializes points ingested in `(A,T]`, unions each point's immediate successor from the point set at T, deduplicates the result, and keyset-paginates it in bigint `seq` order. Consecutive and disjoint insertions therefore update the exact future edge inputs needed after a late insertion;
+- cursors retain operation, organization, run, A/T, algorithm version, and last sequence. Immutable point rows plus `ingested_revision <= T` keep later ingestion out without retaining a transaction between HTTP requests;
+- every page rechecks session, active membership, current live/history authorization, and raw availability. Future source revisions, malformed/foreign/operation-mismatched cursors, and invalid query combinations fail closed;
+- the existing strict `TrackPage` contract and OpenAPI route are used unchanged. P07.2 deliberately keeps `predecessorSeq=null` and `connectFromPrevious=false`; P07.3 will calculate those fields with the shared evaluator. ADR-0018 records this boundary.
+
+Verification evidence on 2026-09-27:
+
+- focused P07.2 real-runtime-role integration passed 1 file / 8 tests, covering new points plus immediate successors, consecutive/disjoint deduplication, fixed A/T under later ingestion, deterministic retry, empty windows, bigint cursor ordering, snapshot-plus-changes set equivalence, current ACL/raw-state checks, and invalid cursors/queries;
+- `npm run db:bootstrap:test` succeeded and `npm run db:migrate:test` checksum-verified and skipped unchanged migrations `0000`–`0012`;
+- full `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 55 API unit tests, 45 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- full real-role/PostGIS integration passed 17 files / 169 tests;
+- no migration, database privilege change, public contract shape, edge evaluation, signed/user-bound/expiring cursor, frontend synchronization, SSE, push, hosted CI, or paid-provider call occurred.
+
+P07 remains IN PROGRESS. The next planned fragment is P07.3: compute `predecessorSeq` and `connectFromPrevious` against the same revision-bound point set T. P07.4–P07.5, SSE, archive maps, retention, and production identity remain unopened.
