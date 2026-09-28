@@ -15,7 +15,7 @@ Last updated: 2026-09-28.
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
-| P09 | IN PROGRESS | P09.1–P09.5 archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, and React source lifecycle verified; P09.6 remains |
+| P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
 | P10 | TODO | Retention, deletion, and maintenance |
 | P11 | TODO | Load verification and operational limits |
 | P12 | TODO | Production auth and recovery |
@@ -980,4 +980,25 @@ Verification evidence on 2026-09-28:
 - `npm audit` reported zero vulnerabilities after adding the exact dependency;
 - no shared HTTP schema, API route, database behavior, SQL/concurrency/queue/tile-byte limit, retention/delete endpoint, commit, push, hosted CI, production database write, Mapbox token, or external provider call occurred in P09.5.
 
-P09 remains IN PROGRESS. The exact next planned fragment is P09.6: add bounded tile SQL time, generation concurrency, queue depth, and uncompressed tile-byte enforcement without silently truncating features. Retention, final load verification, and production identity remain unopened.
+At the P09.5 checkpoint, P09 remained IN PROGRESS and P09.6 was the exact next planned fragment. The continuation below completes those resource limits.
+
+## P09.6 — bounded archive tile resource usage
+
+Implemented:
+
+- tile handling now uses a two-phase admission boundary: one short authenticated transaction locks and validates the organization revision before the first cache probe, then every miss leaves the transaction and pool before waiting for generation capacity;
+- a process-local deterministic scheduler admits at most two generation candidates and sixteen waiters. Request nineteen fails immediately with `503 TILE_BUSY`; completion and failure release one permit, and a queued disconnected request is removed when no same-key waiter remains;
+- per-key single-flight sits outside the scheduler, so identical authenticated keys share one queue position and one SQL generator. After admission a fresh tenant transaction repeats membership/revision validation and the cache lookup, preserving ADR-0030 ordering and safely accepting a tile populated during the wait;
+- the admitted transaction applies PostgreSQL `SET LOCAL statement_timeout = '2000ms'` before rendering. Only the matching PostgreSQL statement-timeout cancellation maps to `503 TILE_TIMEOUT`; rollback/release remains owned by the existing transaction helper;
+- complete raw MVT buffers up to and including 1 MiB are accepted. Larger buffers return `422 TILE_TOO_COMPLEX` before cache insertion; empty tiles remain cacheable and no SQL feature `LIMIT` or buffer truncation was added;
+- the SDD values remain explicit product constants rather than environment configuration. The default ten-client runtime pool retains capacity beyond the two active tile transactions; queued work holds no database resource. ADR-0032 records the lifecycle, authorization, single-flight, cancellation, and failure semantics.
+
+Verification evidence on 2026-09-28:
+
+- focused archive unit coverage passed 4 files / 14 tests, including exact 2-active/16-waiting admission, request nineteen, failure release, queued cancellation, no-client queue waiting, unrelated transaction capacity, same-key single-flight, empty/normal/exact-1-MiB/oversized results, retry after oversize, PostgreSQL timeout classification, and the absence of a feature `LIMIT`;
+- focused real PostgreSQL/PostGIS archive coverage first passed 3 files / 16 tests for timeout/size limits plus P09.4 and geometry regressions; after adding the saturation proof, the focused resource-limit file passed 1 file / 4 tests. Together these cover a deliberate ten-second statement cancelled around the two-second bound, `503 TILE_TIMEOUT`, reusable pool state, saturated tile work with an available third pool client, request-nineteen `TILE_BUSY`, raw-size errors/cache exclusion, membership/revision/cache races, string `run_id`, adjacent/antimeridian/polar geometry, empty MVT, and `private, no-store`;
+- `npm run db:migrate:test` checksum-skipped unchanged migrations `0000`–`0013`; P09.6 adds no migration or environment setting;
+- full `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 86 API unit tests, 82 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- the complete separated-role PostgreSQL/PostGIS integration suite passed 21 files / 194 tests.
+
+P09 is DONE. The exact next planned fragment is P10.1: implement the `available → purging → purged` retention state machine with bounded, restart-safe deletes. P10.2–P12 remain unopened.

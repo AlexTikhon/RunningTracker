@@ -11,6 +11,7 @@ import type { PoolClient } from 'pg';
 import { ApiError } from '../http/errors.js';
 
 export const ARCHIVE_SOURCE_LAYER = 'runs';
+export const ARCHIVE_TILE_SQL_TIMEOUT_MS = 2_000;
 
 interface ArchiveRevisionRow {
   archive_revision: string;
@@ -27,6 +28,27 @@ export interface ArchiveTileRequest {
 
 export interface ArchiveTilePipeline {
   render(client: PoolClient, request: ArchiveTileRequest): Promise<Buffer>;
+}
+
+interface PostgresErrorLike {
+  code?: unknown;
+  message?: unknown;
+}
+
+export function isPostgresStatementTimeout(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+  const candidate = error as PostgresErrorLike;
+  return (
+    candidate.code === '57014' &&
+    typeof candidate.message === 'string' &&
+    candidate.message.includes('statement timeout')
+  );
+}
+
+export async function setArchiveTileStatementTimeout(client: PoolClient): Promise<void> {
+  await client.query(`SET LOCAL statement_timeout = '${ARCHIVE_TILE_SQL_TIMEOUT_MS}ms'`);
 }
 
 interface ArchiveTileRow {

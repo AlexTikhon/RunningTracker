@@ -20,8 +20,9 @@ import {
   type ArchiveTileCacheStore,
   createArchiveTileCacheKey,
 } from './archive-tile-cache.js';
+import { ArchiveTileCoordinator } from './archive-tile-coordinator.js';
+import type { ArchiveTileGenerationScheduler } from './archive-tile-scheduler.js';
 import {
-  assertCurrentArchiveRevision,
   type ArchiveTilePipeline,
   readArchiveMetadata,
 } from './archive-service.js';
@@ -30,6 +31,7 @@ interface ArchiveRouterDependencies {
   tileCache: ArchiveTileCacheStore;
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
+  tileScheduler: ArchiveTileGenerationScheduler;
   tilePipeline: ArchiveTilePipeline;
 }
 
@@ -56,9 +58,16 @@ export function createArchiveRouter({
   sessionManager,
   tileCache,
   tilePipeline,
+  tileScheduler,
 }: ArchiveRouterDependencies): Router {
   const router = createRouter({ mergeParams: true });
   const authenticate = createSessionAuthentication(sessionManager);
+  const tileCoordinator = new ArchiveTileCoordinator({
+    cache: tileCache,
+    pipeline: tilePipeline,
+    pool,
+    scheduler: tileScheduler,
+  });
   router.use((_request, response, next) => {
     response.setHeader('Cache-Control', 'private, no-store');
     next();
@@ -85,6 +94,10 @@ export function createArchiveRouter({
   });
 
   router.get('/tiles/runs/:z/:x/:y.mvt', authenticate, async (request, response, next) => {
+    const abortController = new AbortController();
+    const abort = () => abortController.abort();
+    request.once('aborted', abort);
+    response.once('close', abort);
     try {
       const path = parseContract(tilePathSchema, request.params, 'archive tile path');
       const query = parseContract(tileQuerySchema, request.query, 'archive tile query');
@@ -95,21 +108,22 @@ export function createArchiveRouter({
         query,
         userId: session.userId,
       });
-      const tile = await withAuthenticatedTenantTransaction(
-        pool,
+      const tile = await tileCoordinator.read(
         session,
-        normalizedPath.orgId,
-        async (client) => {
-          await assertCurrentArchiveRevision(client, normalizedPath.orgId, query.revision);
-          return tileCache.getOrCreate(cacheKey, () =>
-            tilePipeline.render(client, { path: normalizedPath, query }),
-          );
-        },
+        { path: normalizedPath, query },
+        cacheKey,
+        abortController.signal,
       );
       response.setHeader('Content-Type', 'application/vnd.mapbox-vector-tile');
       response.status(200).send(tile);
     } catch (error) {
+      if (abortController.signal.aborted || response.destroyed) {
+        return;
+      }
       next(error);
+    } finally {
+      request.off('aborted', abort);
+      response.off('close', abort);
     }
   });
 

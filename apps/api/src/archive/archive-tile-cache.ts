@@ -14,6 +14,13 @@ interface ArchiveTileCacheEntry {
   tile: Buffer;
 }
 
+interface ArchiveTileFlight {
+  controller: AbortController;
+  promise: Promise<Buffer>;
+  settled: boolean;
+  waiters: number;
+}
+
 export interface ArchiveTileCacheIdentity {
   path: TilePath;
   query: TileQuery;
@@ -28,7 +35,14 @@ interface ArchiveTileCacheOptions {
 }
 
 export interface ArchiveTileCacheStore {
+  get(key: string): Buffer | undefined | Promise<Buffer | undefined>;
   getOrCreate(key: string, load: () => Promise<Buffer>): Promise<Buffer>;
+  runSingleFlight(
+    key: string,
+    load: (signal: AbortSignal) => Promise<Buffer>,
+    signal?: AbortSignal,
+  ): Promise<Buffer>;
+  set(key: string, tile: Buffer): void;
 }
 
 function positiveSafeInteger(value: number, label: string): number {
@@ -36,6 +50,18 @@ function positiveSafeInteger(value: number, label: string): number {
     throw new TypeError(`${label} must be a positive safe integer`);
   }
   return value;
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('Archive tile request was aborted');
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error
+    ? error
+    : new Error('Archive tile generation failed', { cause: error });
 }
 
 function canonicalTimestamp(value: string): string {
@@ -75,7 +101,7 @@ export function createArchiveTileCacheKey({
 export class ArchiveTileCache implements ArchiveTileCacheStore {
   readonly #clock: Pick<Clock, 'monotonicNow'>;
   readonly #entries = new Map<string, ArchiveTileCacheEntry>();
-  readonly #inFlight = new Map<string, Promise<Buffer>>();
+  readonly #inFlight = new Map<string, ArchiveTileFlight>();
   readonly #maxBytes: number;
   readonly #maxEntries: number;
   readonly #ttlMs: number;
@@ -101,31 +127,101 @@ export class ArchiveTileCache implements ArchiveTileCacheStore {
     return this.#totalBytes;
   }
 
-  public async getOrCreate(key: string, load: () => Promise<Buffer>): Promise<Buffer> {
-    const cached = this.#read(key);
-    if (cached) {
-      return cached;
+  public getOrCreate(key: string, load: () => Promise<Buffer>): Promise<Buffer> {
+    const cached = this.get(key);
+    if (cached !== undefined) {
+      return Promise.resolve(cached);
     }
 
-    const existingFlight = this.#inFlight.get(key);
-    if (existingFlight) {
-      return existingFlight;
-    }
+    return this.runSingleFlight(key, async () => {
+      const tile = await load();
+      this.set(key, tile);
+      return tile;
+    });
+  }
 
-    const flight = Promise.resolve()
-      .then(load)
-      .then((tile) => {
-        if (!Buffer.isBuffer(tile)) {
-          throw new TypeError('Archive tile loaders must return a Buffer');
+  public get(key: string): Buffer | undefined {
+    return this.#read(key);
+  }
+
+  public runSingleFlight(
+    key: string,
+    load: (signal: AbortSignal) => Promise<Buffer>,
+    signal?: AbortSignal,
+  ): Promise<Buffer> {
+    if (signal?.aborted) {
+      return Promise.reject(abortReason(signal));
+    }
+    let flight = this.#inFlight.get(key);
+    if (!flight) {
+      const controller = new AbortController();
+      flight = {
+        controller,
+        promise: Promise.resolve()
+          .then(() => load(controller.signal))
+          .then((tile) => {
+            if (!Buffer.isBuffer(tile)) {
+              throw new TypeError('Archive tile loaders must return a Buffer');
+            }
+            return tile;
+          })
+          .finally(() => {
+            const current = this.#inFlight.get(key);
+            if (current) {
+              current.settled = true;
+            }
+            this.#inFlight.delete(key);
+          }),
+        settled: false,
+        waiters: 0,
+      };
+      this.#inFlight.set(key, flight);
+    }
+    return this.#joinFlight(flight, signal);
+  }
+
+  #joinFlight(flight: ArchiveTileFlight, signal?: AbortSignal): Promise<Buffer> {
+    if (signal?.aborted) {
+      if (flight.waiters === 0 && !flight.settled) {
+        flight.controller.abort();
+      }
+      return Promise.reject(abortReason(signal));
+    }
+    flight.waiters += 1;
+    return new Promise<Buffer>((resolve, reject) => {
+      let complete = false;
+      const finish = (settle: () => void): void => {
+        if (complete) {
+          return;
         }
-        this.#store(key, tile);
-        return tile;
-      })
-      .finally(() => {
-        this.#inFlight.delete(key);
-      });
-    this.#inFlight.set(key, flight);
-    return flight;
+        complete = true;
+        if (signal) {
+          signal.removeEventListener('abort', abort);
+        }
+        flight.waiters -= 1;
+        if (flight.waiters === 0 && !flight.settled) {
+          flight.controller.abort();
+        }
+        settle();
+      };
+      const abort = (): void => {
+        finish(() =>
+          reject(signal ? abortReason(signal) : new Error('Archive tile request was aborted')),
+        );
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      void flight.promise.then(
+        (tile) => finish(() => resolve(tile)),
+        (error: unknown) => finish(() => reject(asError(error))),
+      );
+    });
+  }
+
+  public set(key: string, tile: Buffer): void {
+    if (!Buffer.isBuffer(tile)) {
+      throw new TypeError('Archive tile cache values must be a Buffer');
+    }
+    this.#store(key, tile);
   }
 
   #delete(key: string, entry: ArchiveTileCacheEntry): void {

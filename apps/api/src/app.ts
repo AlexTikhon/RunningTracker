@@ -6,6 +6,7 @@ import {
   ArchiveTileCache,
   type ArchiveTileCacheStore,
 } from './archive/archive-tile-cache.js';
+import { ArchiveTileGenerationScheduler } from './archive/archive-tile-scheduler.js';
 import {
   type ArchiveTilePipeline,
   postgisArchiveTilePipeline,
@@ -35,6 +36,7 @@ export interface AppDependencies {
   liveConnections?: LiveConnectionManager;
   archiveTileCache?: ArchiveTileCacheStore;
   archiveTilePipeline?: ArchiveTilePipeline;
+  archiveTileScheduler?: ArchiveTileGenerationScheduler;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   testOnlyRouter?: Router;
 }
@@ -47,6 +49,7 @@ export function createApp({
   liveConnections,
   archiveTileCache,
   archiveTilePipeline,
+  archiveTileScheduler,
   testOnlyFaultInjector,
   testOnlyRouter,
 }: AppDependencies): Express {
@@ -72,6 +75,8 @@ export function createApp({
       sessionManager: sessions,
     });
   const archiveTiles = archiveTileCache ?? new ArchiveTileCache({ clock });
+  const archiveTileGenerations =
+    archiveTileScheduler ?? new ArchiveTileGenerationScheduler();
 
   app.disable('x-powered-by');
   app.use(requestIdMiddleware);
@@ -89,6 +94,7 @@ export function createApp({
       sessionManager: sessions,
       tileCache: archiveTiles,
       tilePipeline: archiveTilePipeline ?? postgisArchiveTilePipeline,
+      tileScheduler: archiveTileGenerations,
     }),
   );
   app.use('/api/orgs/:orgId/live', createLiveRouter(sessions, live));

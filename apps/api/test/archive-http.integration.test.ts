@@ -316,11 +316,14 @@ describe('P09 archive HTTP, cache, and invalidation boundary', () => {
     const cacheEntered = new Promise<void>((resolve) => (enterCache = resolve));
     const cacheReleased = new Promise<void>((resolve) => (releaseCache = resolve));
     const cache: ArchiveTileCacheStore = {
-      getOrCreate: async () => {
+      get: async () => {
         enterCache();
         await cacheReleased;
         return Buffer.from('cached-tile');
       },
+      getOrCreate: () => Promise.reject(new Error('Legacy cache path must not be used')),
+      runSingleFlight: () => Promise.reject(new Error('A cache hit must not create a flight')),
+      set: () => undefined,
     };
     const sessionManager = new SessionManager({
       clock: systemClock,
@@ -377,10 +380,13 @@ describe('P09 archive HTTP, cache, and invalidation boundary', () => {
     await prepareTenantIsolationFixtures(ownerPool, loadIntegrationTestConfiguration().migration);
     let cacheRead = false;
     const cache: ArchiveTileCacheStore = {
-      getOrCreate: () => {
+      get: () => {
         cacheRead = true;
-        return Promise.resolve(Buffer.from('cached-tile'));
+        return Buffer.from('cached-tile');
       },
+      getOrCreate: () => Promise.reject(new Error('Legacy cache path must not be used')),
+      runSingleFlight: () => Promise.reject(new Error('A cache hit must not create a flight')),
+      set: () => undefined,
     };
     const sessionManager = new SessionManager({
       clock: systemClock,

@@ -1,7 +1,12 @@
 import type { PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 
-import { postgisArchiveTilePipeline } from './archive-service.js';
+import {
+  ARCHIVE_TILE_SQL_TIMEOUT_MS,
+  isPostgresStatementTimeout,
+  postgisArchiveTilePipeline,
+  setArchiveTileStatementTimeout,
+} from './archive-service.js';
 
 describe('P09.2 PostGIS archive tile pipeline', () => {
   it('passes canonical tile/filter values to one spatial MVT query', async () => {
@@ -38,6 +43,7 @@ describe('P09.2 PostGIS archive tile pipeline', () => {
     expect(sql).toContain('public.ST_AsMVTGeom');
     expect(sql).toContain("public.ST_AsMVT(mvt_rows, 'runs'");
     expect(sql).toContain('summary.run_id::text AS run_id');
+    expect(sql).not.toMatch(/\bLIMIT\b/u);
   });
 
   it('rejects an invalid database payload instead of emitting a false empty tile', async () => {
@@ -58,5 +64,27 @@ describe('P09.2 PostGIS archive tile pipeline', () => {
         },
       }),
     ).rejects.toThrow('PostGIS did not return an archive MVT payload');
+  });
+
+  it('sets the PostgreSQL timeout transaction-locally and identifies only its cancellation', async () => {
+    const query = vi.fn().mockResolvedValue({ command: 'SET' });
+    await setArchiveTileStatementTimeout({ query } as unknown as PoolClient);
+    expect(query).toHaveBeenCalledWith(
+      `SET LOCAL statement_timeout = '${ARCHIVE_TILE_SQL_TIMEOUT_MS}ms'`,
+    );
+
+    expect(
+      isPostgresStatementTimeout({
+        code: '57014',
+        message: 'canceling statement due to statement timeout',
+      }),
+    ).toBe(true);
+    expect(
+      isPostgresStatementTimeout({
+        code: '57014',
+        message: 'canceling statement due to user request',
+      }),
+    ).toBe(false);
+    expect(isPostgresStatementTimeout({ code: '55P03', message: 'lock timeout' })).toBe(false);
   });
 });

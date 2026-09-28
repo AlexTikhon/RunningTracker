@@ -43,9 +43,9 @@ also have zero payload bytes, so a byte limit alone does not bound cache metadat
   public/CDN cache. Multiple API replicas deliberately keep independent caches.
 - Byte usage and zero-byte entry metadata are bounded. Buffers are not truncated
   to fit the cache, so a miss remains semantically identical to P09.2.
-- A request waiting on another request's single-flight currently keeps its own
-  tenant transaction open. P09.6 retains generation concurrency, queue, SQL
-  timeout, and tile-size resource guards.
+- P09.6 supersedes the original transaction lifecycle for misses: ADR-0032 moves
+  single-flight/admission wait outside the tenant transaction, then revalidates
+  authorization/revision and cache state in a fresh transaction after admission.
 - TTL is an eviction bound, not an authorization mechanism. Database validation
   remains before cache lookup, and P09.4 must complete the archive epoch rules.
 

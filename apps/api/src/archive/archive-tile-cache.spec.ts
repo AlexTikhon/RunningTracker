@@ -131,6 +131,60 @@ describe('P09.3 byte-bounded archive tile LRU', () => {
     expect(failure).toHaveBeenCalledTimes(2);
   });
 
+  it('cancels shared work only after every request waiter disconnects', async () => {
+    const { cache } = controlledCache({ maxBytes: 10 });
+    let resolve!: (tile: Buffer) => void;
+    let flightSignal!: AbortSignal;
+    const load = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<Buffer>((settle) => {
+          flightSignal = signal;
+          resolve = settle;
+        }),
+    );
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = cache.runSingleFlight('tile', load, firstController.signal);
+    const second = cache.runSingleFlight('tile', load, secondController.signal);
+    await Promise.resolve();
+
+    const disconnected = new Error('first request disconnected');
+    firstController.abort(disconnected);
+    await expect(first).rejects.toBe(disconnected);
+    expect(flightSignal.aborted).toBe(false);
+    resolve(Buffer.from([1]));
+    await expect(second).resolves.toEqual(Buffer.from([1]));
+    expect(load).toHaveBeenCalledOnce();
+
+    let soleSignal!: AbortSignal;
+    const soleController = new AbortController();
+    const sole = cache.runSingleFlight(
+      'other',
+      async (signal) => {
+        soleSignal = signal;
+        await new Promise<void>((_settle, reject) => {
+          signal.addEventListener(
+            'abort',
+            () =>
+              reject(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new Error('Archive tile request was aborted'),
+              ),
+            { once: true },
+          );
+        });
+        return Buffer.alloc(0);
+      },
+      soleController.signal,
+    );
+    await Promise.resolve();
+    const cancelled = new Error('only request disconnected');
+    soleController.abort(cancelled);
+    await expect(sole).rejects.toBe(cancelled);
+    expect(soleSignal.aborted).toBe(true);
+  });
+
   it('caches empty tiles while bounding zero-byte metadata entries', async () => {
     const { cache } = controlledCache({ maxBytes: 10, maxEntries: 2 });
     const load = vi.fn(() => Promise.resolve(Buffer.alloc(0)));
