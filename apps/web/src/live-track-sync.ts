@@ -23,11 +23,15 @@ export interface LiveTrackStoreScope extends LiveTrackScope {
 }
 
 export interface LiveTrackPageSource {
-  readChanges(input: LiveTrackScope & ({ afterRevision: string } | { cursor: string })): Promise<TrackPage>;
-  readSnapshot(input: LiveTrackScope & { cursor?: string }): Promise<TrackPage>;
+  readChanges(
+    input: LiveTrackScope & ({ afterRevision: string } | { cursor: string }),
+    signal?: AbortSignal,
+  ): Promise<TrackPage>;
+  readSnapshot(input: LiveTrackScope & { cursor?: string }, signal?: AbortSignal): Promise<TrackPage>;
 }
 
 interface LiveTrackEntry {
+  abortController: AbortController | null;
   inFlight: Promise<LiveTrackState> | null;
   requestedRevision: string | null;
   state: LiveTrackState | null;
@@ -66,8 +70,8 @@ export class LiveTrackTargetUnavailableError extends Error {
 }
 
 const httpPageSource: LiveTrackPageSource = {
-  readChanges: readLiveTrackChangesPage,
-  readSnapshot: readLiveTrackSnapshotPage,
+  readChanges: (input, signal) => readLiveTrackChangesPage(input, signal),
+  readSnapshot: (input, signal) => readLiveTrackSnapshotPage(input, signal),
 };
 
 function parseScope(scope: LiveTrackStoreScope): LiveTrackStoreScope {
@@ -157,6 +161,14 @@ export class LiveTrackStore {
     return this.#entries.get(scopeKey(scope))?.state ?? null;
   }
 
+  public remove(scopeInput: LiveTrackStoreScope): void {
+    const scope = parseScope(scopeInput);
+    const key = scopeKey(scope);
+    const entry = this.#entries.get(key);
+    entry?.abortController?.abort();
+    this.#entries.delete(key);
+  }
+
   public synchronize(
     scopeInput: LiveTrackStoreScope,
     requestedRevisionInput?: string,
@@ -164,6 +176,7 @@ export class LiveTrackStore {
     const scope = parseScope(scopeInput);
     const key = scopeKey(scope);
     const entry = this.#entries.get(key) ?? {
+      abortController: null,
       inFlight: null,
       requestedRevision: null,
       state: null,
@@ -187,10 +200,13 @@ export class LiveTrackStore {
       return Promise.resolve(entry.state);
     }
 
-    const inFlight = this.#drain(scope, entry);
+    const abortController = new AbortController();
+    const inFlight = this.#drain(scope, entry, abortController.signal);
+    entry.abortController = abortController;
     entry.inFlight = inFlight;
     const clear = (): void => {
       if (entry.inFlight === inFlight) {
+        entry.abortController = null;
         entry.inFlight = null;
       }
     };
@@ -202,7 +218,11 @@ export class LiveTrackStore {
     return inFlight;
   }
 
-  async #drain(scope: LiveTrackStoreScope, entry: LiveTrackEntry): Promise<LiveTrackState> {
+  async #drain(
+    scope: LiveTrackStoreScope,
+    entry: LiveTrackEntry,
+    signal: AbortSignal,
+  ): Promise<LiveTrackState> {
     let synchronizeAtLeastOnce = true;
     while (
       synchronizeAtLeastOnce ||
@@ -211,7 +231,8 @@ export class LiveTrackStore {
     ) {
       synchronizeAtLeastOnce = false;
       const previousRevision = entry.state?.revision ?? null;
-      const nextState = await this.#synchronizeOnce(scope, entry.state);
+      const nextState = await this.#synchronizeOnce(scope, entry.state, signal);
+      signal.throwIfAborted();
       entry.state = nextState;
 
       if (
@@ -235,35 +256,40 @@ export class LiveTrackStore {
   async #synchronizeOnce(
     scope: LiveTrackStoreScope,
     current: LiveTrackState | null,
+    signal: AbortSignal,
   ): Promise<LiveTrackState> {
     if (current === null) {
-      return this.#readSnapshotWithOneRestart(scope);
+      return this.#readSnapshotWithOneRestart(scope, signal);
     }
 
     try {
-      return await this.#readChanges(scope, current);
+      return await this.#readChanges(scope, current, signal);
     } catch (error) {
       if (!(error instanceof SnapshotRequiredError) && !isInvalidCursor(error)) {
         throw error;
       }
-      return this.#readSnapshotWithOneRestart(scope);
+      return this.#readSnapshotWithOneRestart(scope, signal);
     }
   }
 
-  async #readSnapshotWithOneRestart(scope: LiveTrackStoreScope): Promise<LiveTrackState> {
+  async #readSnapshotWithOneRestart(
+    scope: LiveTrackStoreScope,
+    signal: AbortSignal,
+  ): Promise<LiveTrackState> {
     try {
-      return await this.#readSnapshot(scope);
+      return await this.#readSnapshot(scope, signal);
     } catch (error) {
       if (!isInvalidCursor(error)) {
         throw error;
       }
-      return this.#readSnapshot(scope);
+      return this.#readSnapshot(scope, signal);
     }
   }
 
-  async #readSnapshot(scope: LiveTrackStoreScope): Promise<LiveTrackState> {
+  async #readSnapshot(scope: LiveTrackStoreScope, signal: AbortSignal): Promise<LiveTrackState> {
     const requestScope = apiScope(scope);
-    let page = await this.#source.readSnapshot(requestScope);
+    let page = await this.#source.readSnapshot(requestScope, signal);
+    signal.throwIfAborted();
     if (page.fromRevision !== null) {
       throw new LiveTrackProtocolError('A live-track snapshot page must not have a source revision');
     }
@@ -282,16 +308,22 @@ export class LiveTrackStore {
         throw new LiveTrackProtocolError('A live-track cursor chain contains a cycle');
       }
       cursors.add(page.nextCursor);
-      page = await this.#source.readSnapshot({ ...requestScope, cursor: page.nextCursor });
+      page = await this.#source.readSnapshot({ ...requestScope, cursor: page.nextCursor }, signal);
+      signal.throwIfAborted();
     }
   }
 
-  async #readChanges(scope: LiveTrackStoreScope, current: LiveTrackState): Promise<LiveTrackState> {
+  async #readChanges(
+    scope: LiveTrackStoreScope,
+    current: LiveTrackState,
+    signal: AbortSignal,
+  ): Promise<LiveTrackState> {
     const requestScope = apiScope(scope);
     let page = await this.#source.readChanges({
       ...requestScope,
       afterRevision: current.revision,
-    });
+    }, signal);
+    signal.throwIfAborted();
     if (
       page.algorithmVersion !== current.algorithmVersion ||
       page.fromRevision !== current.revision
@@ -316,7 +348,8 @@ export class LiveTrackStore {
         throw new LiveTrackProtocolError('A live-track cursor chain contains a cycle');
       }
       cursors.add(page.nextCursor);
-      page = await this.#source.readChanges({ ...requestScope, cursor: page.nextCursor });
+      page = await this.#source.readChanges({ ...requestScope, cursor: page.nextCursor }, signal);
+      signal.throwIfAborted();
     }
   }
 }

@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P07 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009, D06 — в P07/ADR-0017–0021. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07 реализует revision-fixed snapshot/change reads, server-authoritative edges, signed/user-bound/expiring cursors и atomic browser application; следующий фрагмент — P08.1.
+Статус: согласованный проект архитектуры; P00–P07 и P08.1–P08.4 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009, D06 — в P07/ADR-0017–0021; stream-часть D07 решена в ADR-0023, cache-часть остаётся P09. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07 реализует revision-fixed snapshot/change reads, server-authoritative edges, signed/user-bound/expiring cursors и atomic browser application. P08.1 реализует bounded shared SSE transport, P08.2 — live authorization revalidation, P08.3 — coach live-state UI, P08.4 — selected-track synchronization и reconnect recovery; следующий фрагмент — P08.5 deployment transport profile.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -270,13 +270,21 @@ SSE: text/event-stream, private/no-store, отключённая proxy buffering
 
 Первое live.state — сразу. Затем общий backend-цикл раз в 2 с получает revisions, последние точки и актуальные права, группируя запросы. SSE-подключение не удерживает DB connection/транзакцию всё время.
 
+P08.1 реализует этот transport одним process-local hub: initial state читается через короткую runtime-role tenant transaction до открытия stream, а общий неперекрывающийся цикл группирует соединения по user/organization и ограничивает параллелизм чтений. Stream имеет собственные `streamId`/`sequence`; heartbeat отправляется SSE-комментарием и sequence не меняет. Connection/opening count ограничен конфигурацией (ADR-0022).
+
 Сообщение — полный компактный список доступных незавершённых run. При исчезновении run клиент убирает его из live-слоя. Если доступ к истории остался, отдельно загружает завершённый run.
 
 При backpressure хранится только последнее ожидающее состояние на соединение; длительно заблокированное соединение закрывается. Число одновременных соединений ограничивается. Перед новой отправкой учитываем обнаруженные изменения прав и отменяем ещё не отправленное устаревшее состояние. Уже отправленные данные отозвать невозможно.
 
+P08.1 при `response.write=false` сохраняет один newest pending state, заменяет предыдущий и закрывает stream по bounded timeout; уже принятый Node writable buffer не считается replay queue. P08.2 перепроверяет session store до и после initial read, перед poll/publish/drain/heartbeat и закрывает stream точным expiry timer. Membership denial закрывает соответствующую user/org группу и очищает pending state; grant-filtered full state заменяет pending state. Authorization checkpoint — snapshot live-state statement внутри короткой poll-транзакции: revoke после snapshot обнаруживается следующим циклом, а уже переданные байты не отзываются (ADR-0023).
+
 Позиция confirmed только при допустимом последнем ребре; при одной пригодной точке — unconfirmed; при плохой точности/времени — null. Возраст клиент рассчитывает относительно serverTime; потеря GPS отмечается даже при работающем SSE.
 
 При position=null клиент может оставить ранее показанный маркер как явно устаревший last-known position, но не считать его текущим. При исчезновении run из разрешённого списка удаляются и текущие, и last-known данные этой пробежки.
+
+P08.3 реализует browser coach state как полную замену по каждому принятому `live.state`. Последовательность сравнивается только внутри одного `streamId`; исчезнувший run немедленно теряет marker, last-known coordinate и selection. Freshness вычисляется от `serverTime` плюс monotonic browser elapsed time: initial threshold 10 секунд переводит даже current position в stale без нового сообщения. `position=null` сохраняет предыдущую координату только как stale. Transport/contract failure закрывает EventSource и очищает состояние; ручной reconnect не создаёт бесконечного auth retry. Явный набор выбранных run готовит границу для P08.4, но P08.3 не загружает geometry и не требует map token (ADR-0024).
+
+P08.4 связывает только явно выбранные и заново авторизованные run с P07.5 `LiveTrackStore`. SSE revisions сворачиваются к максимальной цели при одном in-flight chain на run; geometry остаётся атомарной до terminal page. Deselect, full-state omission/revoke, смена identity/org и disconnect abort-ят HTTP и evict-ят cached track. При смене algorithm version начинается fresh snapshot. Transport reconnect ограничен паузами 1/2/4 секунды и известным session expiry; до нового authorization-filtered full state marker, selection и geometry скрыты. Затем прежний selection intent пересекается с текущим разрешённым набором и восстанавливается через fresh snapshot, без `Last-Event-ID` replay (ADR-0025).
 
 ### 9.2 Snapshot и changes
 
@@ -300,6 +308,8 @@ Changes(afterRevision=A) фиксирует T ≥ A. Изменяемые эле
 В P07.4 strict versioned cursor payload подписывается HMAC-SHA-256 и включает authenticated user, org/run, operation, A/T где применимо, algorithmVersion, last seq и абсолютный expiry. Snapshot/changes cursors не взаимозаменяемы; tampering, cross-user/route replay и expiry возвращают единый `INVALID_CURSOR`. Первый continuation фиксирует deadline через десять минут, последующие страницы не продлевают его. Production требует отдельный ключ минимум 256 bit; каждый запрос независимо перепроверяет authorization/raw state (ADR-0020).
 
 В P07.5 browser `LiveTrackStore` изолирует состояние и один in-flight sync по user/org/run. Весь cursor chain применяется к временному seq-keyed map; публичные points/revision заменяются только после terminal page. Параллельные revision notifications сворачиваются к максимальной целевой revision, повторные upserts идемпотентны, а `INVALID_CURSOR` или смена algorithmVersion отбрасывают staged changes и запускают fresh snapshot (ADR-0021).
+
+В P08.4 selected-track coordinator передаёт `dataRevision` из полного SSE-state в `LiveTrackStore`, не создавая второй алгоритм применения страниц. Снятие выбора, исчезновение run из authorized state или disconnect отменяет текущую загрузку и удаляет cached geometry. Reconnect начинает fresh snapshot только после нового full state и повторной проверки выбранного run (ADR-0025).
 
 Все страницы фиксируют T и algorithmVersion; изменения после T не попадают в них. Snapshot в БД не удерживается между HTTP-запросами: воспроизводимость обеспечивается immutable точками и ingested_revision. На каждом запросе повторно проверяются ACL и raw_state.
 

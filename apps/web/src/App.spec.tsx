@@ -17,5 +17,7 @@ describe('App', () => {
     expect(markup).toContain('Capture source');
     expect(markup).toContain('Device GPS');
     expect(markup).toContain('Simulator · normal · seed 1');
+    expect(markup).toContain('Runner');
+    expect(markup).toContain('Coach');
   });
 });

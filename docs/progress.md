@@ -14,7 +14,7 @@ Last updated: 2026-09-27.
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
-| P08 | TODO | SSE and coach screen |
+| P08 | IN PROGRESS | P08.1–P08.4 SSE transport, live authorization, coach UI, and selected-track reconnect recovery verified; P08.5 remains |
 | P09 | TODO | MVT, cache, and archive map |
 | P10 | TODO | Retention, deletion, and maintenance |
 | P11 | TODO | Load verification and operational limits |
@@ -776,3 +776,82 @@ Verification evidence on 2026-09-27:
 - no migration, database privilege, public response schema, dependency, SSE transport, coach UI, map rendering, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
 
 P07 is DONE. The next planned fragment is P08.1: one bounded SSE organization/tab connection with initial state, a shared two-second polling cycle, heartbeat, and backpressure policy. P08.2–P08.5, archive maps, retention, load verification, and production identity remain unopened.
+
+## P08.1 — bounded shared SSE transport
+
+Implemented:
+
+- authenticated `GET /api/orgs/:orgId/live` requires an explicit event-stream Accept value, validates membership through the existing tenant boundary, emits a strict `live.state` sequence zero immediately, and keeps session tokens out of URLs;
+- the runtime-role/PostGIS live-state query returns only authorized active runs, revisions, and latest positions. It reuses the versioned edge evaluator for `confirmed`, retains usable isolated/discontinuous points as `unconfirmed`, and returns null for unusable latest accuracy/time/speed;
+- one process-level non-overlapping two-second scheduler groups equal user/organization subscriptions, applies bounded poll concurrency, and releases every short tenant transaction before writing to long-lived responses;
+- each connection has an independent UUID stream and sequence domain. A shared 15-second heartbeat uses SSE comments and does not advance application sequence;
+- backpressure stores only the newest subsequent state per connection, replaces older pending state, flushes on drain, and closes a persistently blocked writer after a configurable deadline. Open plus opening connections share a hard cap;
+- graceful shutdown stops the live hub and ends streams before the runtime pool closes. ADR-0022 records the transport, database, queue, and lifecycle boundaries.
+
+Verification evidence on 2026-09-27:
+
+- focused SSE unit/route coverage passed 1 file / 5 tests, including immediate framing/headers, shared polling, per-stream sequence, sequence-neutral heartbeat, latest-only pending replacement, timeout closure, connection cap, authentication, and Accept validation;
+- `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 66 API unit tests, 53 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- disposable database bootstrap succeeded, migrations `0000`–`0012` checksum-verified unchanged, focused real runtime-role/PostGIS integration passed 1 file / 5 tests, and the full integration suite passed 18 files / 176 tests. Coverage includes ACL-filtered active state, evaluator-bound confirmed/unconfirmed/null position quality, a later committed revision on a fresh read, empty state, and an actual immediate SSE HTTP frame;
+- no migration, database privilege, shared response schema, dependency, frontend coach UI, P08.2 live-session revalidation, proxy configuration, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
+
+P08 remains IN PROGRESS. The next planned fragment is P08.2: revalidate session expiry/revocation, membership, and grants on an open connection; remove inaccessible runs and cancel stale pending state before it can be written. P08.3–P08.5, archive maps, retention, load verification, and production identity remain unopened.
+
+## P08.2 — live authorization revalidation
+
+Implemented:
+
+- each open stream retains only the authenticated session digest, expiry, and user identity. The raw cookie token is not copied into the hub, and matching user/organization tabs still share one database read while session validity remains connection-specific;
+- session validity is checked before and after the initial database snapshot, before each shared poll, before publish/drain/heartbeat, and by an exact expiry timer. Expiry or store revocation closes only that stream without a terminal data event;
+- each successful poll still performs the active-membership check and RLS-filtered live-state read in one short runtime-role transaction. Membership denial closes all matching user/organization streams and clears pending state; transient infrastructure failures remain reconnectable transport failures rather than authorization decisions;
+- a live-grant change produces a complete filtered state. For a blocked writer this state replaces the older pending state, so an authorization change discovered by the latest completed poll cannot later flush superseded run data;
+- ADR-0023 fixes the authorization checkpoint: rights are those visible to the live-state statement snapshot inside the latest completed poll transaction. A revocation committed after that snapshot is observed by the next poll; bytes already accepted by the transport cannot be recalled. The stream part of D07 is resolved, while P09 still owns cache invalidation.
+
+Verification evidence on 2026-09-27:
+
+- focused session/SSE unit coverage passed 2 files / 17 tests, including revocation isolation across two sessions for one user, initial-read revocation, exact expiry, membership-denial cancellation, grant-filtered pending replacement, and session-store active checks;
+- `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 72 API unit tests, 53 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- `npm run db:migrate:test` checksum-verified migrations `0000`–`0012` unchanged; focused real runtime-role/PostGIS integration passed 1 file / 6 tests, and the full integration suite passed 18 files / 177 tests;
+- no migration, database privilege, shared response schema, dependency, frontend coach UI, P08.3 synchronization/UI work, proxy configuration, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
+
+P08 remains IN PROGRESS. The next planned fragment is P08.3: implement the coach screen for authorized active runs with confirmed, unconfirmed, and stale marker states plus explicit selected-track state. P08.4–P08.5, archive maps, retention, load verification, and production identity remain unopened.
+
+## P08.3 — coach live-state screen
+
+Implemented:
+
+- the application now switches between runner and coach views while retaining the existing runner lifecycle. The coach view opens one same-origin stream only after session discovery and organization UUID validation;
+- every `live.state` is parsed with the shared strict contract and atomically replaces the authorized active-run set. Non-increasing sequence values are ignored within one stream, while a new `streamId` starts a fresh ordering domain;
+- confirmed/unconfirmed remain server edge-quality results. Browser freshness uses event `serverTime` plus monotonic elapsed time and marks a current position stale at the initial 10-second threshold even if the stream remains connected;
+- `position=null` may retain the prior coordinate only as an explicitly stale last-known marker. A run omitted from the next full state loses current/last-known coordinates and track selection immediately;
+- selected tracks are an explicit authorized run-ID set ready for P08.4. This slice does not fetch geometry, instantiate Mapbox, or require an external token;
+- transport or contract failure closes native EventSource retry, clears all sensitive coach state, and offers explicit reconnect. ADR-0024 records the availability/security trade-off and leaves session-aware automatic reconnect plus selected-track revision recovery to P08.4.
+
+Verification evidence on 2026-09-27:
+
+- focused web typechecking passed and the web suite passed 13 files / 62 tests, including confirmed/unconfirmed/stale classification, server-relative time-driven staleness, null-position last-known behavior, run/removal selection cleanup, per-stream ordering, exact SSE URL, strict event parsing, fail-closed disconnect, and static coach-screen structure;
+- `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 72 API unit tests, 62 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- Docker PostGIS remained healthy; with tracked local-only configuration loaded process-locally, `npm run db:migrate:test` checksum-verified migrations `0000`–`0012` unchanged and the complete real-role/PostGIS integration suite passed 18 files / 177 tests;
+- the first integration invocation failed closed before any database work because its shell lacked `TEST_DATABASE_URL` and `TEST_MIGRATION_DATABASE_URL`; the configured rerun above is the verification result. No migration, database privilege, shared schema, dependency, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
+
+P08 remains IN PROGRESS. The next planned fragment is P08.4: bind the explicit selected-run set to `LiveTrackStore`, coalesce SSE revision targets, cancel removed/revoked work, and recover state after reconnect without partial track application. P08.5 proxy/deployment transport configuration, archive maps, retention, load verification, and production identity remain unopened.
+
+## P08.4 — selected-track revision synchronization and reconnect recovery
+
+Implemented:
+
+- the coach's explicit authorized selection now drives a scoped `SelectedTrackSynchronizer` over the P07.5 atomic `LiveTrackStore`; no second page-application algorithm was introduced;
+- each run retains one in-flight snapshot/change chain while repeated SSE notifications coalesce to the greatest requested `dataRevision`. The UI exposes loading/error state and only terminal-page committed point counts/revisions;
+- live-track HTTP reads accept abort signals. Deselect, authorized full-state omission/revoke, identity/organization change, stream loss, and component disposal abort active reads and evict committed in-memory geometry; stale completions cannot republish into a removed coordinator entry;
+- an announced algorithm-version change evicts equal-revision cached geometry and starts a fresh snapshot;
+- transport loss immediately hides marker, selected, and geometry state. For the same mounted session/organization only selected run-ID intent survives; a new full state intersects it with the newly authorized run set before restoring selection and loading a fresh snapshot;
+- native EventSource retry remains disabled. Recoverable transport failures use bounded 1/2/4-second application retries, stop before known session expiry, and retain explicit manual retry. Contract-invalid events fail closed without automatic retry. ADR-0025 records these boundaries.
+
+Verification evidence on 2026-09-27:
+
+- focused P07/P08 web coverage passed 5 files / 23 tests for atomic store behavior, abortable eviction, greatest-revision coalescing, authorization removal, algorithm replacement, reconnect selection reauthorization, retry bounds/session expiry, strict SSE parsing, and coach structure;
+- `npm run verify` passed lint, strict workspace typechecking, 8 migration-history tests, 72 API unit tests, 69 web tests, 13 contract tests, 14 fixture tests, 3 simulator CLI tests, and all production builds;
+- Docker PostGIS was healthy; process-local `.env.example` configuration was used, `npm run db:migrate:test` checksum-verified migrations `0000`–`0012` unchanged, and the complete real-role/PostGIS integration suite passed 18 files / 177 tests;
+- `git diff --check` passed. No migration, database privilege, shared response schema, dependency, proxy configuration, map provider, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
+
+P08 remains IN PROGRESS. The next planned fragment is P08.5: configure and verify the external proxy profile for disabled response buffering, bounded upstream timeouts, and browser-to-proxy HTTP/2 without changing the application SSE protocol. Archive maps, retention, load verification, and production identity remain unopened.

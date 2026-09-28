@@ -2,6 +2,7 @@ import { uuidSchema, type RunCommandType, type SessionResponse } from '@running-
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
+import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
 import { PointUploadWorker } from './point-upload-worker.js';
@@ -38,6 +39,7 @@ type StorageState =
   | { status: 'ready' }
   | { message: string; status: 'error' };
 type CaptureSourceKind = 'geolocation' | 'simulator';
+type ActiveView = 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 
@@ -74,6 +76,7 @@ export function App() {
   const [writer, setWriter] = useState<WriterOwnershipState>({ status: 'unclaimed' });
   const [capture, setCapture] = useState<CaptureState>({ status: 'idle' });
   const [captureSourceKind, setCaptureSourceKind] = useState<CaptureSourceKind>('geolocation');
+  const [activeView, setActiveView] = useState<ActiveView>('runner');
   const captureController = useRef<CaptureController | null>(null);
   const restoredUserId = useRef<string | null>(null);
   const uploadWorker = useRef<PointUploadWorker | null>(null);
@@ -467,12 +470,29 @@ export function App() {
           <span className="brand-mark" aria-hidden="true">RT</span>
           <span>Running Tracker</span>
         </div>
+        <nav className="view-switcher" aria-label="Application view">
+          <button
+            aria-current={activeView === 'runner' ? 'page' : undefined}
+            onClick={() => setActiveView('runner')}
+            type="button"
+          >
+            Runner
+          </button>
+          <button
+            aria-current={activeView === 'coach' ? 'page' : undefined}
+            onClick={() => setActiveView('coach')}
+            type="button"
+          >
+            Coach
+          </button>
+        </nav>
         <div className="service-health" aria-label="Service health">
           <StatusDot label="API" value={health.api} />
           <StatusDot label="DB" value={health.database} />
         </div>
       </header>
 
+      <div hidden={activeView !== 'runner'}>
       <section className="runner-shell" aria-labelledby="runner-title">
         <div className="runner-copy">
           <p className="eyebrow">Runner console · P05.5</p>
@@ -627,6 +647,37 @@ export function App() {
         />
         <StateCard detail={captureDetail} label="Capture" value={capture.status} />
       </section>
+      </div>
+
+      {activeView === 'coach' && (
+        <>
+          <section className="coach-org" aria-label="Coach organization">
+            <label htmlFor="coach-organization-id">Organization ID</label>
+            <input
+              autoComplete="off"
+              id="coach-organization-id"
+              onChange={(event) => setOrgId(event.target.value)}
+              placeholder="00000000-0000-4000-8000-000000000000"
+              spellCheck={false}
+              value={orgId}
+            />
+            <span>The live endpoint revalidates this identity's membership and run grants.</span>
+          </section>
+          {session.status === 'ready' && validOrgId ? (
+            <CoachScreen
+              orgId={normalizedOrgId}
+              sessionExpiresAt={session.session.expiresAt}
+              userId={session.session.identity.userId}
+            />
+          ) : (
+            <section className="coach-prerequisite" role="status">
+              {session.status === 'ready'
+                ? 'Enter a valid organization UUID to open the coach stream.'
+                : 'An active session is required before the coach stream can open.'}
+            </section>
+          )}
+        </>
+      )}
 
       <section className={`session-bar session-bar--${session.status}`} aria-live="polite">
         {session.status === 'loading' && <span>Checking session…</span>}

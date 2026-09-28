@@ -207,23 +207,33 @@ function liveTrackUrl(
 
 export async function readLiveTrackSnapshotPage(
   input: LiveTrackSnapshotPageInput,
+  signal?: AbortSignal,
 ): Promise<LiveTrackResponse> {
   const query = input.cursor === undefined ? {} : { cursor: input.cursor };
-  const response = await fetch(liveTrackUrl(input, '', query), {
+  const options: RequestInit = {
     credentials: 'same-origin',
-  });
+  };
+  if (signal !== undefined) {
+    options.signal = signal;
+  }
+  const response = await fetch(liveTrackUrl(input, '', query), options);
   return liveTrackResponseSchema.parse(await requireSuccess(response));
 }
 
 export async function readLiveTrackChangesPage(
   input: LiveTrackChangesPageInput,
+  signal?: AbortSignal,
 ): Promise<LiveTrackResponse> {
   const query =
     input.cursor === undefined
       ? { afterRevision: input.afterRevision }
       : { cursor: input.cursor };
-  const response = await fetch(liveTrackUrl(input, '/changes', query), {
+  const options: RequestInit = {
     credentials: 'same-origin',
-  });
+  };
+  if (signal !== undefined) {
+    options.signal = signal;
+  }
+  const response = await fetch(liveTrackUrl(input, '/changes', query), options);
   return liveTrackResponseSchema.parse(await requireSuccess(response));
 }

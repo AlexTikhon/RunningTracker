@@ -80,7 +80,10 @@ describe('LiveTrackStore', () => {
       revision: '2',
       points: [{ seq: '1' }, { seq: '2' }],
     });
-    expect(pages.readSnapshot.mock.calls[1]).toEqual([{ ...apiScope, cursor: 'next' }]);
+    expect(pages.readSnapshot.mock.calls[1]).toEqual([
+      { ...apiScope, cursor: 'next' },
+      expect.any(AbortSignal),
+    ]);
   });
 
   it('keeps the committed revision and points unchanged when a later change page fails', async () => {
@@ -263,5 +266,28 @@ describe('LiveTrackStore', () => {
       revision: '2',
       points: [{ seq: '2' }],
     });
+  });
+
+  it('aborts in-flight pages and evicts committed state when a scope is removed', async () => {
+    const pages = source();
+    let requestSignal: AbortSignal | undefined;
+    pages.readSnapshot.mockImplementationOnce((_input, signal) => {
+      requestSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(
+          signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException('The operation was aborted', 'AbortError'),
+        ));
+      });
+    });
+    const store = new LiveTrackStore(pages);
+
+    const synchronization = store.synchronize(scope);
+    store.remove(scope);
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(store.get(scope)).toBeNull();
+    await expect(synchronization).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
