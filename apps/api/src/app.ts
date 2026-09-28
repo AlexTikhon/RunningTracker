@@ -1,6 +1,11 @@
 import express, { type Express, type Router } from 'express';
 import type { Pool } from 'pg';
 
+import { createArchiveRouter } from './archive/archive.routes.js';
+import {
+  type ArchiveTilePipeline,
+  unavailableArchiveTilePipeline,
+} from './archive/archive-service.js';
 import { SessionManager } from './auth/session-manager.js';
 import { createSessionRouter } from './auth/session-http.js';
 import { InMemorySessionStore } from './auth/session-store.js';
@@ -24,6 +29,7 @@ export interface AppDependencies {
   pool: DatabasePool;
   sessionManager?: SessionManager;
   liveConnections?: LiveConnectionManager;
+  archiveTilePipeline?: ArchiveTilePipeline;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   testOnlyRouter?: Router;
 }
@@ -34,6 +40,7 @@ export function createApp({
   pool,
   sessionManager,
   liveConnections,
+  archiveTilePipeline,
   testOnlyFaultInjector,
   testOnlyRouter,
 }: AppDependencies): Express {
@@ -68,6 +75,14 @@ export function createApp({
   });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
+  app.use(
+    '/api/orgs/:orgId',
+    createArchiveRouter({
+      pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+      tilePipeline: archiveTilePipeline ?? unavailableArchiveTilePipeline,
+    }),
+  );
   app.use('/api/orgs/:orgId/live', createLiveRouter(sessions, live));
   app.use(
     '/api/orgs/:orgId/runs',

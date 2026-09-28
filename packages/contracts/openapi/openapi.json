@@ -986,13 +986,15 @@
         "required": true,
         "schema": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 8,
+          "maximum": 16
         }
       },
       "TileX": {
         "name": "x",
         "in": "path",
         "required": true,
+        "description": "XYZ x coordinate; must be less than 2^z.",
         "schema": {
           "type": "integer",
           "minimum": 0
@@ -1002,6 +1004,7 @@
         "name": "y",
         "in": "path",
         "required": true,
+        "description": "XYZ y coordinate; must be less than 2^z.",
         "schema": {
           "type": "integer",
           "minimum": 0

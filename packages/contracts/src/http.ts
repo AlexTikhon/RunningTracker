@@ -15,6 +15,9 @@ import {
 
 const opaqueTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
 export const POINT_BATCH_MAX_SIZE = 100;
+export const ARCHIVE_PERIOD_MAX_DAYS = 366;
+export const ARCHIVE_TILE_MIN_ZOOM = 8;
+export const ARCHIVE_TILE_MAX_ZOOM = 16;
 const queryLimit = (maximum: number) =>
   z
     .string()
@@ -230,7 +233,9 @@ export const nearbyResponseSchema = z.strictObject({
 
 export const archiveMetadataQuerySchema = z
   .strictObject({ from: timestampSchema, to: timestampSchema })
-  .superRefine((value, context) => validateOrderedRange(value, context, 366));
+  .superRefine((value, context) =>
+    validateOrderedRange(value, context, ARCHIVE_PERIOD_MAX_DAYS),
+  );
 export const archiveMetadataResponseSchema = z
   .strictObject({
     archiveRevision: revisionSchema,
@@ -251,19 +256,47 @@ export const archiveMetadataResponseSchema = z
     validateOrderedRange(metadata.filter, context, 366);
   });
 
-export const tilePathSchema = z.strictObject({
-  orgId: uuidSchema,
-  x: z.string().regex(/^\d+$/u),
-  y: z.string().regex(/^\d+$/u),
-  z: z.string().regex(/^\d+$/u),
-});
+const tileCoordinateSchema = z
+  .string()
+  .regex(/^(?:0|[1-9]\d*)$/u)
+  .transform(Number)
+  .pipe(z.int().nonnegative());
+export const tilePathSchema = z
+  .strictObject({
+    orgId: uuidSchema,
+    x: tileCoordinateSchema,
+    y: tileCoordinateSchema,
+    z: tileCoordinateSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.z < ARCHIVE_TILE_MIN_ZOOM || value.z > ARCHIVE_TILE_MAX_ZOOM) {
+      context.addIssue({
+        code: 'custom',
+        message: `Tile zoom must be between ${ARCHIVE_TILE_MIN_ZOOM} and ${ARCHIVE_TILE_MAX_ZOOM}`,
+        path: ['z'],
+      });
+      return;
+    }
+    const coordinateLimit = 2 ** value.z;
+    for (const coordinate of ['x', 'y'] as const) {
+      if (value[coordinate] >= coordinateLimit) {
+        context.addIssue({
+          code: 'custom',
+          message: `${coordinate} must be less than 2^z`,
+          path: [coordinate],
+        });
+      }
+    }
+  });
 export const tileQuerySchema = z
   .strictObject({
     from: timestampSchema,
     revision: revisionSchema,
     to: timestampSchema,
   })
-  .superRefine((value, context) => validateOrderedRange(value, context, 366));
+  .superRefine((value, context) =>
+    validateOrderedRange(value, context, ARCHIVE_PERIOD_MAX_DAYS),
+  );
 
 export const liveTrackResponseSchema = trackPageSchema;
 

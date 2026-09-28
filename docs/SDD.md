@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P08 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009, D06 — в P07/ADR-0017–0021; stream-часть D07 решена в ADR-0023, cache-часть остаётся P09. P06 фиксирует единый versioned PostGIS evaluator, revision-bound metrics и accepted chains, глобально нормализованное метрическое упрощение, revision-checked atomic publication и bounded distributed job claiming. P07 реализует revision-fixed snapshot/change reads, server-authoritative edges, signed/user-bound/expiring cursors и atomic browser application. P08.1–P08.4 реализуют bounded authorization-safe SSE, coach live-state UI, selected-track synchronization и reconnect recovery; P08.5 добавляет actual HTTP/2 TLS/Nginx deployment transport verification (ADR-0026). Следующий фрагмент — P09.1 metadata/tile endpoint contract.
+Статус: согласованный проект архитектуры; P00–P08 и P09.1 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009, D06 — в P07/ADR-0017–0021; stream-часть D07 решена в ADR-0023, cache-часть остаётся P09. P09.1 фиксирует metadata/tile HTTP validation, active membership, revision check и history-RLS pipeline boundary (ADR-0027); следующий фрагмент — P09.2 PostGIS MVT pipeline.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -502,6 +502,8 @@ GET /archive/metadata?from=...&to=...
 URL — шаблон; реальные значения orgId/filter выдаёт сервер. Revision и фильтр не предоставляют авторизацию.
 
 GET /tiles/runs/{z}/{x}/{y}.mvt?revision=...&from=...&to=... → 200 бинарный MVT; пустой набор — корректный пустой MVT. Ошибки — JSON ApiError с соответствующим HTTP status. Frontend обрабатывает ошибки tile source и при revision mismatch обновляет metadata.
+
+P09.1 реализует metadata и tile HTTP boundary: zoom ограничен 8–16, `x/y` — канонические целые в `[0,2^z)`, период упорядочен и не превышает 366 дней. Оба endpoint проходят session/active-membership и runtime-role tenant transaction; tile до pipeline перечитывает текущий `archive_revision` и возвращает `409 ARCHIVE_REVISION_CHANGED` при несовпадении. Pipeline получает тот же RLS-bound client, поэтому history ACL не заменяется revision/filter. До P09.2 генерация tile fail-closed через `503 TILE_BUSY`, без ложного empty tile (ADR-0027).
 
 ### 11.6 Ошибки
 

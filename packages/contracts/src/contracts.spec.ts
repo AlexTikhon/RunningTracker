@@ -20,6 +20,8 @@ import {
   seqSchema,
   sessionResponseSchema,
   timestampSchema,
+  tilePathSchema,
+  tileQuerySchema,
   trackPageSchema,
   uuidSchema,
 } from './index.js';
@@ -254,6 +256,31 @@ describe('ordinary HTTP contracts', () => {
     });
     expect(nearbyQuerySchema.safeParse({ latitude: '', longitude: '21', radiusM: '1' }).success).toBe(false);
     expect(nearbyQuerySchema.safeParse({ latitude: '52', longitude: '21', radiusM: '5001' }).success).toBe(false);
+  });
+
+  it('validates archive XYZ coordinates and revision-bound periods', () => {
+    const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    expect(tilePathSchema.parse({ orgId, z: '8', x: '255', y: '0' })).toEqual({
+      orgId,
+      x: 255,
+      y: 0,
+      z: 8,
+    });
+    expect(tilePathSchema.safeParse({ orgId, z: '7', x: '0', y: '0' }).success).toBe(false);
+    expect(tilePathSchema.safeParse({ orgId, z: '17', x: '0', y: '0' }).success).toBe(false);
+    expect(tilePathSchema.safeParse({ orgId, z: '8', x: '256', y: '0' }).success).toBe(false);
+    expect(tilePathSchema.safeParse({ orgId, z: '8', x: '0', y: '256' }).success).toBe(false);
+    expect(tilePathSchema.safeParse({ orgId, z: '08', x: '0', y: '0' }).success).toBe(false);
+
+    const maximumPeriod = {
+      from: '2025-01-01T00:00:00Z',
+      revision: '81',
+      to: '2026-01-02T00:00:00Z',
+    };
+    expect(tileQuerySchema.safeParse(maximumPeriod).success).toBe(true);
+    expect(
+      tileQuerySchema.safeParse({ ...maximumPeriod, to: '2026-01-02T00:00:00.001Z' }).success,
+    ).toBe(false);
   });
 
   it('keeps the P03.1 public Session and ApiError shapes compatible', () => {

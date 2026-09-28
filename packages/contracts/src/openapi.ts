@@ -343,9 +343,9 @@ export const openApiDocument = {
       Latitude: { name: 'latitude', in: 'query', required: true, schema: { type: 'number', minimum: -90, maximum: 90 } },
       RadiusM: { name: 'radiusM', in: 'query', required: true, schema: { type: 'number', minimum: 0, maximum: 5000 } },
       Revision: { name: 'revision', in: 'query', required: true, schema: schemaRef('Revision') },
-      TileZ: { name: 'z', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } },
-      TileX: { name: 'x', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } },
-      TileY: { name: 'y', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } },
+      TileZ: { name: 'z', in: 'path', required: true, schema: { type: 'integer', minimum: 8, maximum: 16 } },
+      TileX: { name: 'x', in: 'path', required: true, description: 'XYZ x coordinate; must be less than 2^z.', schema: { type: 'integer', minimum: 0 } },
+      TileY: { name: 'y', in: 'path', required: true, description: 'XYZ y coordinate; must be less than 2^z.', schema: { type: 'integer', minimum: 0 } },
     },
     schemas: {
       UUID: jsonSchema(uuidSchema),

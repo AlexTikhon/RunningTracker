@@ -15,7 +15,7 @@ Last updated: 2026-09-28.
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
-| P09 | TODO | MVT, cache, and archive map |
+| P09 | IN PROGRESS | P09.1 archive metadata/tile HTTP, validation, revision, and history-RLS boundary verified; P09.2 remains |
 | P10 | TODO | Retention, deletion, and maintenance |
 | P11 | TODO | Load verification and operational limits |
 | P12 | TODO | Production auth and recovery |
@@ -878,3 +878,24 @@ Verification evidence on 2026-09-28:
 - local test bootstrap and migration checksum verification for `0000`–`0012` passed. No migration, database privilege, application auth semantics, WebSocket, durable replay, map work, commit, push, production database write, or production secret occurred.
 
 P08 is DONE. The exact next planned fragment is P09.1: define and implement archive metadata and tile endpoints with XYZ/period validation and history ACL. P09.2+, retention, final load verification, and production identity remain unopened.
+
+## P09.1 — archive metadata and tile authorization boundary
+
+Implemented:
+
+- authenticated `GET /api/orgs/:orgId/archive/metadata` reads the current organization `archive_revision` inside the runtime-role tenant transaction and returns the exact validated filter, source layer `runs`, zoom 8–16, and a concrete revision-bound tile URL template;
+- both metadata and tile responses are private and non-cacheable at the HTTP layer. Archive periods are ordered half-open UTC ranges capped at 366 days; tile path values are canonical decimal integers with zoom 8–16 and `0 <= x,y < 2^z`;
+- every tile request checks active organization membership and the current archive revision before invoking its pipeline. A stale value returns `409 ARCHIVE_REVISION_CHANGED` without starting generation;
+- the tile pipeline receives the same runtime-role client and tenant transaction, so reads of `run_summaries` retain the existing owner/history-grant RLS policy. URL revision and period values never grant access;
+- until P09.2 installs the PostGIS candidate/projection/clipping/MVT implementation, the production pipeline fails closed with `503 TILE_BUSY`; it does not return a false empty or truncated tile. ADR-0027 records this staged boundary.
+
+Verification evidence on 2026-09-28:
+
+- focused shared-contract coverage passed 1 file / 14 tests, including zoom, coordinate, canonical-integer, revision, order, and exact 366-day boundary cases;
+- focused real runtime-role/PostGIS integration passed 1 file / 5 tests for metadata, private headers/template, history-grantee versus unrelated-member RLS visibility, revision mismatch ordering, validation, session, and active membership;
+- `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 73 API tests, 69 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- `npm run db:migrate:test` checksum-verified migrations `0000`–`0012` unchanged, and the complete real-role/PostGIS suite passed 19 files / 182 tests;
+- the generated OpenAPI 3.1 artifact includes zoom 8–16 and XYZ bounds documentation;
+- no migration, database privilege, dependency, spatial selection/projection/clipping, MVT generation, tile cache, frontend map, commit, push, hosted CI, production database write, or external map-provider call occurred.
+
+P09 remains IN PROGRESS. The exact next planned fragment is P09.2: implement the indexed PostGIS candidate selection, Web Mercator projection, buffer/clipping, and MVT encoding with string `run_id`. P09.3 cache, P09.4 cache-hit invalidation, P09.5 archive UI, P09.6 resource limits, retention, final load verification, and production identity remain unopened.
