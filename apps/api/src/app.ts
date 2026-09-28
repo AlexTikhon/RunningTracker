@@ -10,6 +10,11 @@ import { DatabaseProbe, type DatabasePool } from './database/database.js';
 import { createHealthRouter } from './health/health.routes.js';
 import { apiErrorHandler, unknownApiRoute } from './http/errors.js';
 import { requestIdMiddleware } from './http/request-id.js';
+import { createLiveRouter } from './live/live.routes.js';
+import {
+  createLiveSseHub,
+  type LiveConnectionManager,
+} from './live/live-sse.js';
 import { createRunRouter } from './runs/run.routes.js';
 import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 
@@ -18,6 +23,7 @@ export interface AppDependencies {
   config: Environment;
   pool: DatabasePool;
   sessionManager?: SessionManager;
+  liveConnections?: LiveConnectionManager;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   testOnlyRouter?: Router;
 }
@@ -27,6 +33,7 @@ export function createApp({
   config,
   pool,
   sessionManager,
+  liveConnections,
   testOnlyFaultInjector,
   testOnlyRouter,
 }: AppDependencies): Express {
@@ -43,6 +50,14 @@ export function createApp({
       store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
       ttlMs: config.SESSION_TTL_MS,
     });
+  const live =
+    liveConnections ??
+    createLiveSseHub({
+      clock,
+      config,
+      pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+    });
 
   app.disable('x-powered-by');
   app.use(requestIdMiddleware);
@@ -53,6 +68,7 @@ export function createApp({
   });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
+  app.use('/api/orgs/:orgId/live', createLiveRouter(sessions, live));
   app.use(
     '/api/orgs/:orgId/runs',
     createRunRouter({

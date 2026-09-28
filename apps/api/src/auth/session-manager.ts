@@ -72,6 +72,20 @@ export class SessionManager {
     return record;
   }
 
+  public isActive(
+    session: Pick<StoredSession, 'tokenDigest' | 'userId'>,
+  ): boolean {
+    const record = this.#store.get(session.tokenDigest);
+    if (!record) {
+      return false;
+    }
+    if (record.expiresAt.getTime() <= this.#clock.utcNow().getTime()) {
+      this.#store.delete(session.tokenDigest);
+      return false;
+    }
+    return record.userId === session.userId;
+  }
+
   public revoke(sessionToken: string): boolean {
     if (!opaqueTokenPattern.test(sessionToken)) {
       return false;

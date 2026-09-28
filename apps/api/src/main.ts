@@ -15,6 +15,7 @@ import {
   shutdownInfrastructure,
   type StoppableRunner,
 } from './lifecycle/shutdown.js';
+import { createLiveSseHub } from './live/live-sse.js';
 import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
 import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
@@ -103,7 +104,8 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
     ttlMs: config.SESSION_TTL_MS,
   });
-  const app = createApp({ clock, config, pool, sessionManager });
+  const liveSseHub = createLiveSseHub({ clock, config, pool, sessionManager });
+  const app = createApp({ clock, config, liveConnections: liveSseHub, pool, sessionManager });
   const server = createServer(app);
   const autoFinishRunner = new RunAutoFinishRunner({
     clock,
@@ -119,6 +121,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   });
   const runner: StoppableRunner = {
     stop: () => {
+      liveSseHub.stop();
       autoFinishRunner.stop();
       summaryRunner.stop();
     },

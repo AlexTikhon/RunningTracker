@@ -132,6 +132,24 @@ async function createLocalSession(
 }
 
 describe('HTTP session boundary', () => {
+  it('reports whether the exact stored session is still active', () => {
+    const clock = new ControlledClock();
+    const config = localAuthConfig();
+    const manager = deterministicManager(clock, config);
+    const created = manager.create(allowedUser);
+
+    expect(manager.isActive(created.record)).toBe(true);
+    expect(
+      manager.isActive({ ...created.record, userId: otherUser }),
+    ).toBe(false);
+    expect(manager.revoke(created.sessionToken)).toBe(true);
+    expect(manager.isActive(created.record)).toBe(false);
+
+    const expiring = manager.create(allowedUser);
+    clock.now = new Date(expiring.record.expiresAt);
+    expect(manager.isActive(expiring.record)).toBe(false);
+  });
+
   it('creates, reads, and revokes an opaque local session with aligned cookie attributes', async () => {
     const clock = new ControlledClock();
     const config = localAuthConfig();

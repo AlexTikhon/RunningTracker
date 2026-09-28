@@ -47,6 +47,11 @@ describe('validateEnvironment', () => {
       PORT: 3_100,
       LIVE_TRACK_CURSOR_SIGNING_KEY:
         'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE',
+      LIVE_SSE_BACKPRESSURE_TIMEOUT_MS: 10_000,
+      LIVE_SSE_HEARTBEAT_INTERVAL_MS: 15_000,
+      LIVE_SSE_MAX_CONNECTIONS: 64,
+      LIVE_SSE_POLL_CONCURRENCY: 2,
+      LIVE_SSE_POLL_INTERVAL_MS: 2_000,
       RUN_AUTO_FINISH_INTERVAL_MS: 60_000,
       RUN_SUMMARY_CONCURRENCY: 2,
       RUN_SUMMARY_INTERVAL_MS: 60_000,
@@ -169,6 +174,28 @@ describe('validateEnvironment', () => {
         RUN_SUMMARY_CONCURRENCY: '9',
       }),
     ).toThrow('RUN_SUMMARY_CONCURRENCY');
+  });
+
+  it('bounds live SSE connections and polling concurrency', () => {
+    expect(
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        LIVE_SSE_MAX_CONNECTIONS: '1000',
+        LIVE_SSE_POLL_CONCURRENCY: '8',
+      }),
+    ).toMatchObject({ LIVE_SSE_MAX_CONNECTIONS: 1_000, LIVE_SSE_POLL_CONCURRENCY: 8 });
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        LIVE_SSE_MAX_CONNECTIONS: '1001',
+      }),
+    ).toThrow('LIVE_SSE_MAX_CONNECTIONS');
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        LIVE_SSE_POLL_CONCURRENCY: '9',
+      }),
+    ).toThrow('LIVE_SSE_POLL_CONCURRENCY');
   });
 
   it('uses TEST_DATABASE_URL instead of DATABASE_URL for integration configuration', () => {

@@ -174,6 +174,26 @@ const environmentSchema = z
     LOCAL_AUTH_ENABLED: environmentBoolean.default(false),
     LOCAL_AUTH_USER_IDS: uuidList,
     LIVE_TRACK_CURSOR_SIGNING_KEY: liveTrackCursorSigningKey,
+    LIVE_SSE_POLL_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(60_000)
+      .default(2_000),
+    LIVE_SSE_HEARTBEAT_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(60_000)
+      .default(15_000),
+    LIVE_SSE_BACKPRESSURE_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(60_000)
+      .default(10_000),
+    LIVE_SSE_MAX_CONNECTIONS: z.coerce.number().int().positive().max(1_000).default(64),
+    LIVE_SSE_POLL_CONCURRENCY: z.coerce.number().int().positive().max(8).default(2),
     SESSION_COOKIE_SECURE: environmentBoolean.default(true),
     SESSION_STORE_MAX_ENTRIES: z.coerce.number().int().positive().max(10_000).default(100),
     SESSION_TTL_MS: z.coerce
