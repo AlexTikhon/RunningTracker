@@ -77,6 +77,10 @@ describe('P06.4 revision-checked run summary publication', () => {
   beforeEach(async () => {
     await prepareTenantIsolationFixtures(ownerPool, expectedOwner);
     await ownerPool.query('DELETE FROM runs');
+    await ownerPool.query(
+      'UPDATE organizations SET archive_revision = 0 WHERE id IN ($1, $2)',
+      [fixtureIds.orgA, fixtureIds.orgB],
+    );
   });
 
   afterAll(async () => {

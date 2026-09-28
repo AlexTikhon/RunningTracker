@@ -19,5 +19,6 @@ describe('App', () => {
     expect(markup).toContain('Simulator · normal · seed 1');
     expect(markup).toContain('Runner');
     expect(markup).toContain('Coach');
+    expect(markup).toContain('Archive');
   });
 });

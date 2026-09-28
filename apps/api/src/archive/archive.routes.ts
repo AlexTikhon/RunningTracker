@@ -17,7 +17,7 @@ import type { SessionManager } from '../auth/session-manager.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
 import {
-  type ArchiveTileCache,
+  type ArchiveTileCacheStore,
   createArchiveTileCacheKey,
 } from './archive-tile-cache.js';
 import {
@@ -27,7 +27,7 @@ import {
 } from './archive-service.js';
 
 interface ArchiveRouterDependencies {
-  tileCache: ArchiveTileCache;
+  tileCache: ArchiveTileCacheStore;
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
   tilePipeline: ArchiveTilePipeline;

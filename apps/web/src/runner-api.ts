@@ -1,10 +1,12 @@
 import {
   apiErrorResponseSchema,
+  archiveMetadataResponseSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
   runCommandResponseSchema,
   runViewSchema,
   sessionResponseSchema,
+  type ArchiveMetadataResponse,
   type IngestPointsResponse,
   type LiveTrackResponse,
   type PointInput,
@@ -42,6 +44,12 @@ export interface PointBatchInput {
 export interface LiveTrackScope {
   orgId: string;
   runId: string;
+}
+
+export interface ArchiveMetadataInput {
+  from: string;
+  orgId: string;
+  to: string;
 }
 
 export type LiveTrackSnapshotPageInput = LiveTrackScope & {
@@ -125,6 +133,21 @@ export async function loadSession(signal?: AbortSignal): Promise<SessionResponse
   }
   const response = await fetch('/api/session', options);
   return sessionResponseSchema.parse(await requireSuccess(response));
+}
+
+export async function loadArchiveMetadata(
+  input: ArchiveMetadataInput,
+  signal: AbortSignal,
+): Promise<ArchiveMetadataResponse> {
+  const query = new URLSearchParams({ from: input.from, to: input.to });
+  const response = await fetch(
+    `/api/orgs/${encodeURIComponent(input.orgId)}/archive/metadata?${query.toString()}`,
+    {
+      credentials: 'same-origin',
+      signal,
+    },
+  );
+  return archiveMetadataResponseSchema.parse(await requireSuccess(response));
 }
 
 export async function createRun(

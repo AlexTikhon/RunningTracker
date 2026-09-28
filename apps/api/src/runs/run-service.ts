@@ -33,6 +33,7 @@ import type { PoolClient } from 'pg';
 import { z } from 'zod';
 
 import type { StoredSession } from '../auth/session-store.js';
+import { lockArchiveRevisionForAclChange } from '../archive/archive-service.js';
 import type { Clock } from '../clock.js';
 import { ApiError } from '../http/errors.js';
 import {
@@ -857,6 +858,7 @@ export async function upsertRunShare(
   granteeUserId: string,
   request: UpsertRunShareRequest,
 ): Promise<RunShareResponse> {
+  await lockArchiveRevisionForAclChange(client, orgId);
   await ensureOwnedRun(client, session, orgId, runId);
   try {
     const result = await client.query<{
@@ -899,6 +901,7 @@ export async function revokeRunShare(
   runId: string,
   granteeUserId: string,
 ): Promise<void> {
+  await lockArchiveRevisionForAclChange(client, orgId);
   await ensureOwnedRun(client, session, orgId, runId);
   await client.query(
     `DELETE FROM run_shares

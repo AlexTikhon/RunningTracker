@@ -27,6 +27,10 @@ interface ArchiveTileCacheOptions {
   ttlMs?: number;
 }
 
+export interface ArchiveTileCacheStore {
+  getOrCreate(key: string, load: () => Promise<Buffer>): Promise<Buffer>;
+}
+
 function positiveSafeInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new TypeError(`${label} must be a positive safe integer`);
@@ -68,7 +72,7 @@ export function createArchiveTileCacheKey({
   ].join('/');
 }
 
-export class ArchiveTileCache {
+export class ArchiveTileCache implements ArchiveTileCacheStore {
   readonly #clock: Pick<Clock, 'monotonicNow'>;
   readonly #entries = new Map<string, ArchiveTileCacheEntry>();
   readonly #inFlight = new Map<string, Promise<Buffer>>();

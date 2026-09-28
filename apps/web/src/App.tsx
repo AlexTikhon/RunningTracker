@@ -2,6 +2,7 @@ import { uuidSchema, type RunCommandType, type SessionResponse } from '@running-
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
+import { ArchiveScreen } from './ArchiveScreen.js';
 import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
@@ -39,7 +40,7 @@ type StorageState =
   | { status: 'ready' }
   | { message: string; status: 'error' };
 type CaptureSourceKind = 'geolocation' | 'simulator';
-type ActiveView = 'coach' | 'runner';
+type ActiveView = 'archive' | 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 
@@ -87,6 +88,7 @@ export function App() {
     createInitialRunnerState,
   );
   const normalizedOrgId = orgId.trim().toLowerCase();
+  const mapboxAccessToken = (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '').trim() || null;
 
   const refreshHealth = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -485,6 +487,13 @@ export function App() {
           >
             Coach
           </button>
+          <button
+            aria-current={activeView === 'archive' ? 'page' : undefined}
+            onClick={() => setActiveView('archive')}
+            type="button"
+          >
+            Archive
+          </button>
         </nav>
         <div className="service-health" aria-label="Service health">
           <StatusDot label="API" value={health.api} />
@@ -674,6 +683,36 @@ export function App() {
               {session.status === 'ready'
                 ? 'Enter a valid organization UUID to open the coach stream.'
                 : 'An active session is required before the coach stream can open.'}
+            </section>
+          )}
+        </>
+      )}
+
+      {activeView === 'archive' && (
+        <>
+          <section className="coach-org" aria-label="Archive organization">
+            <label htmlFor="archive-organization-id">Organization ID</label>
+            <input
+              autoComplete="off"
+              id="archive-organization-id"
+              onChange={(event) => setOrgId(event.target.value)}
+              placeholder="00000000-0000-4000-8000-000000000000"
+              spellCheck={false}
+              value={orgId}
+            />
+            <span>Metadata and every tile request revalidate membership and history access.</span>
+          </section>
+          {session.status === 'ready' && validOrgId ? (
+            <ArchiveScreen
+              accessToken={mapboxAccessToken}
+              orgId={normalizedOrgId}
+              userId={session.session.identity.userId}
+            />
+          ) : (
+            <section className="coach-prerequisite" role="status">
+              {session.status === 'ready'
+                ? 'Enter a valid organization UUID to open the archive source.'
+                : 'An active session is required before the archive source can open.'}
             </section>
           )}
         </>

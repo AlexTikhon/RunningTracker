@@ -2,7 +2,10 @@ import express, { type Express, type Router } from 'express';
 import type { Pool } from 'pg';
 
 import { createArchiveRouter } from './archive/archive.routes.js';
-import { ArchiveTileCache } from './archive/archive-tile-cache.js';
+import {
+  ArchiveTileCache,
+  type ArchiveTileCacheStore,
+} from './archive/archive-tile-cache.js';
 import {
   type ArchiveTilePipeline,
   postgisArchiveTilePipeline,
@@ -30,7 +33,7 @@ export interface AppDependencies {
   pool: DatabasePool;
   sessionManager?: SessionManager;
   liveConnections?: LiveConnectionManager;
-  archiveTileCache?: ArchiveTileCache;
+  archiveTileCache?: ArchiveTileCacheStore;
   archiveTilePipeline?: ArchiveTilePipeline;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   testOnlyRouter?: Router;

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createRun,
+  loadArchiveMetadata,
   loadSession,
   readLiveTrackChangesPage,
   readLiveTrackSnapshotPage,
@@ -33,6 +34,35 @@ describe('runner API', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/session', {
       credentials: 'same-origin',
     });
+  });
+
+  it('loads revision-bound archive metadata through the canonical period query', async () => {
+    const metadata = {
+      archiveRevision: '81',
+      filter: {
+        from: '2026-09-01T00:00:00.000Z',
+        to: '2026-10-01T00:00:00.000Z',
+      },
+      maxzoom: 16,
+      minzoom: 8,
+      sourceLayer: 'runs',
+      tiles: [`/api/orgs/${orgId}/tiles/runs/{z}/{x}/{y}.mvt?revision=81`],
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(metadata)),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    await expect(loadArchiveMetadata({
+      from: metadata.filter.from,
+      orgId,
+      to: metadata.filter.to,
+    }, controller.signal)).resolves.toEqual(metadata);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/orgs/${orgId}/archive/metadata?from=2026-09-01T00%3A00%3A00.000Z&to=2026-10-01T00%3A00%3A00.000Z`,
+      { credentials: 'same-origin', signal: controller.signal },
+    );
   });
 
   it('creates a run with CSRF protection and the canonical API path', async () => {

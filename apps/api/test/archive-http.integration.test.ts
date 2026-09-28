@@ -4,6 +4,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app.js';
+import type { ArchiveTileCacheStore } from '../src/archive/archive-tile-cache.js';
 import type { ArchiveTilePipeline } from '../src/archive/archive-service.js';
 import { SessionManager } from '../src/auth/session-manager.js';
 import { InMemorySessionStore } from '../src/auth/session-store.js';
@@ -30,7 +31,7 @@ function objectBody(response: request.Response): Record<string, unknown> {
   return response.body as Record<string, unknown>;
 }
 
-describe('P09.1 archive HTTP and authorization boundary', () => {
+describe('P09 archive HTTP, cache, and invalidation boundary', () => {
   let app: ReturnType<typeof createApp>;
   let config: Environment;
   let ownerPool: Pool;
@@ -53,7 +54,7 @@ describe('P09.1 archive HTTP and authorization boundary', () => {
     ownerPool = new Pool({
       application_name: 'running-tracker-archive-http-fixtures',
       connectionString: integration.migration.connectionString,
-      max: 1,
+      max: 2,
     });
     await prepareTenantIsolationFixtures(ownerPool, integration.migration);
 
@@ -215,5 +216,226 @@ describe('P09.1 archive HTTP and authorization boundary', () => {
       .get(`/api/orgs/${ids.orgA}/tiles/runs/8/141/84.mvt?revision=0&${period}`)
       .expect(200);
     expect(renderCalls).toBe(before + 2);
+  });
+
+  it('advances the archive epoch transactionally for history ACL, summary deletion, and membership changes', async () => {
+    await prepareTenantIsolationFixtures(ownerPool, loadIntegrationTestConfiguration().migration);
+    const reader = await login(ids.userStranger);
+    const tilePath = `/api/orgs/${ids.orgA}/tiles/runs/8/140/84.mvt`;
+    const before = renderCalls;
+
+    await reader.get(`${tilePath}?revision=0&${period}`).expect(200);
+    expect(renderCalls).toBe(before + 1);
+
+    await ownerPool.query(
+      `INSERT INTO run_shares (
+         org_id, run_id, grantee_user_id, can_read_history, can_read_live
+       ) VALUES ($1, $2, $3, true, false)`,
+      [ids.orgA, ids.runFinishedLiveOnly, ids.userStranger],
+    );
+    await expect(
+      ownerPool.query<{ archive_revision: string }>(
+        'SELECT archive_revision FROM organizations WHERE id = $1',
+        [ids.orgA],
+      ),
+    ).resolves.toMatchObject({ rows: [{ archive_revision: '1' }] });
+
+    await reader.get(`${tilePath}?revision=0&${period}`).expect(409);
+    expect(renderCalls).toBe(before + 1);
+    await reader.get(`${tilePath}?revision=1&${period}`).expect(200);
+    expect(renderCalls).toBe(before + 2);
+    expect(visibleRunsByUser.get(ids.userStranger)).toEqual([ids.runFinishedLiveOnly]);
+
+    await ownerPool.query(
+      `UPDATE run_shares
+       SET can_read_live = true
+       WHERE org_id = $1 AND run_id = $2 AND grantee_user_id = $3`,
+      [ids.orgA, ids.runFinishedLiveOnly, ids.userStranger],
+    );
+    await expect(
+      ownerPool.query<{ archive_revision: string }>(
+        'SELECT archive_revision FROM organizations WHERE id = $1',
+        [ids.orgA],
+      ),
+    ).resolves.toMatchObject({ rows: [{ archive_revision: '1' }] });
+
+    const transaction = await ownerPool.connect();
+    try {
+      await transaction.query('BEGIN');
+      await transaction.query(
+        `UPDATE run_shares
+         SET can_read_history = false
+         WHERE org_id = $1 AND run_id = $2 AND grantee_user_id = $3`,
+        [ids.orgA, ids.runFinishedLiveOnly, ids.userStranger],
+      );
+      const inside = await transaction.query<{ archive_revision: string }>(
+        'SELECT archive_revision FROM organizations WHERE id = $1',
+        [ids.orgA],
+      );
+      expect(inside.rows[0]?.archive_revision).toBe('2');
+      await transaction.query('ROLLBACK');
+    } finally {
+      transaction.release();
+    }
+    const rolledBack = await ownerPool.query<{
+      archive_revision: string;
+      can_read_history: boolean;
+    }>(
+      `SELECT organization.archive_revision, share.can_read_history
+       FROM organizations AS organization
+       JOIN run_shares AS share ON share.org_id = organization.id
+       WHERE organization.id = $1
+         AND share.run_id = $2
+         AND share.grantee_user_id = $3`,
+      [ids.orgA, ids.runFinishedLiveOnly, ids.userStranger],
+    );
+    expect(rolledBack.rows[0]).toEqual({ archive_revision: '1', can_read_history: true });
+
+    await ownerPool.query(
+      'DELETE FROM run_summaries WHERE org_id = $1 AND run_id = $2',
+      [ids.orgA, ids.runFinishedBoth],
+    );
+    await ownerPool.query(
+      'UPDATE memberships SET active = false WHERE org_id = $1 AND user_id = $2',
+      [ids.orgA, ids.userStranger],
+    );
+    await expect(
+      ownerPool.query<{ archive_revision: string }>(
+        'SELECT archive_revision FROM organizations WHERE id = $1',
+        [ids.orgA],
+      ),
+    ).resolves.toMatchObject({ rows: [{ archive_revision: '3' }] });
+    await reader.get(`${tilePath}?revision=1&${period}`).expect(403);
+    expect(renderCalls).toBe(before + 2);
+  });
+
+  it('holds the archive epoch read lock across a cache hit until the response transaction commits', async () => {
+    await prepareTenantIsolationFixtures(ownerPool, loadIntegrationTestConfiguration().migration);
+    let enterCache!: () => void;
+    let releaseCache!: () => void;
+    const cacheEntered = new Promise<void>((resolve) => (enterCache = resolve));
+    const cacheReleased = new Promise<void>((resolve) => (releaseCache = resolve));
+    const cache: ArchiveTileCacheStore = {
+      getOrCreate: async () => {
+        enterCache();
+        await cacheReleased;
+        return Buffer.from('cached-tile');
+      },
+    };
+    const sessionManager = new SessionManager({
+      clock: systemClock,
+      store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
+      ttlMs: config.SESSION_TTL_MS,
+    });
+    const lockedApp = createApp({
+      archiveTileCache: cache,
+      archiveTilePipeline: {
+        render: () =>
+          Promise.reject(new Error('A cache-hit proof must not invoke the tile pipeline')),
+      },
+      clock: systemClock,
+      config,
+      pool: runtimePool,
+      sessionManager,
+    });
+    const reader = request.agent(lockedApp);
+    await reader
+      .post('/api/session')
+      .set('Origin', allowedOrigin)
+      .type('application/json')
+      .send({ userId: ids.userStranger })
+      .expect(201);
+
+    const tileResponse = reader
+      .get(`/api/orgs/${ids.orgA}/tiles/runs/8/139/84.mvt?revision=0&${period}`)
+      .then((response) => response);
+    await cacheEntered;
+
+    let membershipChangeCommitted = false;
+    const membershipChange = ownerPool
+      .query(
+        'UPDATE memberships SET active = false WHERE org_id = $1 AND user_id = $2',
+        [ids.orgA, ids.userStranger],
+      )
+      .then(() => {
+        membershipChangeCommitted = true;
+      });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(membershipChangeCommitted).toBe(false);
+    } finally {
+      releaseCache();
+    }
+    await expect(tileResponse).resolves.toMatchObject({ status: 200 });
+    await membershipChange;
+    await reader
+      .get(`/api/orgs/${ids.orgA}/tiles/runs/8/139/84.mvt?revision=0&${period}`)
+      .expect(403);
+  });
+
+  it('rechecks membership after waiting for an epoch writer and never enters the cache', async () => {
+    await prepareTenantIsolationFixtures(ownerPool, loadIntegrationTestConfiguration().migration);
+    let cacheRead = false;
+    const cache: ArchiveTileCacheStore = {
+      getOrCreate: () => {
+        cacheRead = true;
+        return Promise.resolve(Buffer.from('cached-tile'));
+      },
+    };
+    const sessionManager = new SessionManager({
+      clock: systemClock,
+      store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
+      ttlMs: config.SESSION_TTL_MS,
+    });
+    const lockedApp = createApp({
+      archiveTileCache: cache,
+      archiveTilePipeline: {
+        render: () =>
+          Promise.reject(new Error('A revoked membership must not invoke the tile pipeline')),
+      },
+      clock: systemClock,
+      config,
+      pool: runtimePool,
+      sessionManager,
+    });
+    const reader = request.agent(lockedApp);
+    await reader
+      .post('/api/session')
+      .set('Origin', allowedOrigin)
+      .type('application/json')
+      .send({ userId: ids.userStranger })
+      .expect(201);
+
+    const writer = await ownerPool.connect();
+    let transactionActive = false;
+    try {
+      await writer.query('BEGIN');
+      transactionActive = true;
+      await writer.query(
+        'UPDATE memberships SET active = false WHERE org_id = $1 AND user_id = $2',
+        [ids.orgA, ids.userStranger],
+      );
+
+      let responseSettled = false;
+      const tileResponse = reader
+        .get(`/api/orgs/${ids.orgA}/tiles/runs/8/138/84.mvt?revision=0&${period}`)
+        .then((response) => {
+          responseSettled = true;
+          return response;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(responseSettled).toBe(false);
+      expect(cacheRead).toBe(false);
+
+      await writer.query('COMMIT');
+      transactionActive = false;
+      await expect(tileResponse).resolves.toMatchObject({ status: 403 });
+      expect(cacheRead).toBe(false);
+    } finally {
+      if (transactionActive) {
+        await writer.query('ROLLBACK');
+      }
+      writer.release();
+    }
   });
 });

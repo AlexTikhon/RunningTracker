@@ -15,7 +15,7 @@ Last updated: 2026-09-28.
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
-| P09 | IN PROGRESS | P09.1–P09.3 archive HTTP/RLS, PostGIS MVT, and bounded process cache verified; P09.4 remains |
+| P09 | IN PROGRESS | P09.1–P09.5 archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, and React source lifecycle verified; P09.6 remains |
 | P10 | TODO | Retention, deletion, and maintenance |
 | P11 | TODO | Load verification and operational limits |
 | P12 | TODO | Production auth and recovery |
@@ -939,3 +939,45 @@ Verification evidence on 2026-09-28:
 - no migration, database privilege, dependency, shared HTTP schema, public/CDN cache, write-side archive epoch change, frontend map, SQL/concurrency/queue/tile-byte guard, commit, push, hosted CI, production database write, or external provider call occurred.
 
 P09 remains IN PROGRESS. The exact next planned fragment is P09.4: prove membership/revision validation before cache hits and make publish/delete/grant/membership changes advance the organization epoch atomically. P09.5 archive UI, P09.6 resource limits, retention, final load verification, and production identity remain unopened.
+
+## P09.4 — atomic archive cache invalidation boundary
+
+Implemented:
+
+- tile transactions now call an owner-defined capability that takes the organization row `FOR SHARE`, rechecks active membership after acquiring the lock, returns the locked current archive revision, and only then permits process-cache lookup. The lock remains held through the cache result and tenant-transaction commit;
+- existing summary publication retains its organization-first atomic epoch increment. Forward migration `0013_archive_cache_invalidation.sql` adds same-transaction revision triggers for published-summary deletion, effective history-grant changes, and active-membership revocation/restoration/deletion;
+- history-share changes advance the epoch only when a published summary can affect archive output. Live-only changes do not churn archive URLs, and publication supplies the epoch change when a summary did not yet exist;
+- runtime share mutation takes the organization row `FOR UPDATE` before run ownership/read locks. Concurrent share writers serialize on the organization and keep the existing organization-before-run publication lock order;
+- rollback removes both the ACL mutation and its epoch advance. Old entries require no cross-process deletion because revision remains in the complete cache key and P09.3 TTL/LRU bounds reclaim unreachable values. ADR-0030 records the authorization ordering point and availability trade-off.
+
+Verification evidence on 2026-09-28:
+
+- focused API archive-cache/pipeline unit coverage passed 2 files / 8 tests; focused runtime-role/PostgreSQL coverage passed 3 files / 26 tests for archive HTTP/cache invalidation, concurrent share mutations, and revision-checked summary publication;
+- cache-hit race harnesses proved both orderings: a membership revocation could not commit while a cached response held the shared organization lock, and a tile already past its initial membership check waited behind an epoch writer, rechecked the committed inactive membership, and never entered the cache;
+- grant integration proved stale revision URLs return `409` before cache access, history-grant changes increment the epoch, live-only changes do not, and transaction rollback restores both grant and revision. Summary deletion and membership deactivation each advanced the same organization epoch;
+- `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 80 API unit tests, 69 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- migration `0013` applied to both documented local databases; immediate reruns checksum-verified `0000`–`0013` unchanged. The complete real runtime-role/PostGIS suite passed 20 files / 190 tests;
+- no dependency, shared HTTP schema, frontend map, SQL/concurrency/queue/tile-byte limit, retention/delete endpoint, commit, push, hosted CI, production database write, or external provider call occurred.
+
+P09 remains IN PROGRESS. The exact next planned fragment is P09.5: implement the React archive source, 30-second metadata polling, focus refresh, revision replacement, error handling, and sensitive-layer cleanup after access loss. P09.6 resource limits, retention, final load verification, and production identity remain unopened.
+
+## P09.5 — React archive source and refresh lifecycle
+
+Implemented:
+
+- the application now exposes an archive view with a bounded half-open UTC period and strict shared-contract metadata loading. The source scope includes authenticated user, organization, and period; changing scope or unmounting aborts the old request and prevents stale metadata from remaining attached;
+- one controller owns the initial read, fixed 30-second poll, immediate focus/visible-tab refresh, and manual/409 refresh. It permits one in-flight request and coalesces concurrent refresh intent instead of growing a request queue;
+- a successful revision change updates the existing Mapbox vector source through `setTiles`. Source-layer or zoom-shape changes rebuild only the archive source/layer; identical metadata preserves the existing source and visible tile state;
+- HTTP 401/403 from metadata or the archive tile source clears metadata and removes the archive line layer before its source. Transient network/5xx failures preserve the last successfully authorized layer but expose an explicit error and retry path;
+- Mapbox GL JS 3.31.0 is exact-pinned and loaded as a separate browser chunk. The real map is instantiated only when the public `VITE_MAPBOX_ACCESS_TOKEN` is configured; controller, source-adapter, and React tests remain tokenless and make no external provider call. ADR-0031 records the cleanup and availability trade-off.
+
+Verification evidence on 2026-09-28:
+
+- focused web coverage passed 5 files / 21 tests for canonical metadata HTTP, initial/poll/focus/409 refresh, coalescing, transient retention, 401/403 clearing, source creation, `setTiles`, removal order, and tokenless React structure;
+- the complete web suite passed 17 files / 82 tests; web lint, strict typecheck, and the production Vite build passed. The build emitted the Mapbox runtime as a separate lazy chunk and reported its expected size warning;
+- full `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 80 API unit tests, 82 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- as a combined-worktree regression check for the pre-existing P09.4 changes, `npm run db:migrate:test` checksum-skipped unchanged migrations `0000`–`0013` and the real separated-role PostgreSQL/PostGIS suite passed 20 files / 190 tests. P09.5 itself changes no database behavior;
+- `npm audit` reported zero vulnerabilities after adding the exact dependency;
+- no shared HTTP schema, API route, database behavior, SQL/concurrency/queue/tile-byte limit, retention/delete endpoint, commit, push, hosted CI, production database write, Mapbox token, or external provider call occurred in P09.5.
+
+P09 remains IN PROGRESS. The exact next planned fragment is P09.6: add bounded tile SQL time, generation concurrency, queue depth, and uncompressed tile-byte enforcement without silently truncating features. Retention, final load verification, and production identity remain unopened.

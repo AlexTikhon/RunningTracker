@@ -16,6 +16,10 @@ interface ArchiveRevisionRow {
   archive_revision: string;
 }
 
+interface LockedArchiveRevisionRow {
+  archive_revision: string | null;
+}
+
 export interface ArchiveTileRequest {
   path: TilePath;
   query: TileQuery;
@@ -233,6 +237,37 @@ async function readArchiveRevision(client: PoolClient, orgId: string): Promise<s
   return revision;
 }
 
+async function readLockedArchiveRevision(
+  client: PoolClient,
+  orgId: string,
+  capability: 'acl_change' | 'tile',
+): Promise<string> {
+  const functionName =
+    capability === 'tile'
+      ? 'lock_archive_revision_for_tile'
+      : 'lock_archive_revision_for_acl_change';
+  const result = await client.query<LockedArchiveRevisionRow>(
+    `SELECT app_private.${functionName}($1)::text AS archive_revision`,
+    [orgId],
+  );
+  const revision = result.rows[0]?.archive_revision;
+  if (!revision || !/^\d+$/u.test(revision)) {
+    throw new ApiError(
+      403,
+      'ORG_ACCESS_DENIED',
+      'The current identity cannot access this organization',
+    );
+  }
+  return revision;
+}
+
+export async function lockArchiveRevisionForAclChange(
+  client: PoolClient,
+  orgId: string,
+): Promise<void> {
+  await readLockedArchiveRevision(client, orgId, 'acl_change');
+}
+
 function tileTemplate(orgId: string, revision: string, query: ArchiveMetadataQuery): string {
   const search = new URLSearchParams({
     revision,
@@ -263,7 +298,7 @@ export async function assertCurrentArchiveRevision(
   orgId: string,
   requestedRevision: string,
 ): Promise<void> {
-  const archiveRevision = await readArchiveRevision(client, orgId);
+  const archiveRevision = await readLockedArchiveRevision(client, orgId, 'tile');
   if (BigInt(archiveRevision) !== BigInt(requestedRevision)) {
     throw new ApiError(
       409,

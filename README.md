@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03–P08 add the session/API lifecycle, durable runner capture, versioned summaries, revision-fixed live-track reads, authorized SSE/coach recovery, and a verified HTTPS/HTTP/2 transport profile. P09.1–P09.3 now provide the revisioned archive HTTP boundary, RLS-filtered PostGIS MVT generation, and a bounded process tile cache; cache invalidation, the archive map, resource guards, and production identity remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03–P08 add the session/API lifecycle, durable runner capture, versioned summaries, revision-fixed live-track reads, authorized SSE/coach recovery, and a verified HTTPS/HTTP/2 transport profile. P09.1–P09.5 provide the revisioned archive HTTP boundary, RLS-filtered PostGIS MVT generation, bounded process cache, atomic invalidation, and the archive React/Mapbox source lifecycle; resource guards and production identity remain later stages.
 
 ## Prerequisites
 
@@ -36,6 +36,8 @@ deployment must supply independent canonical base64url key material of at least
 
 The Vite server proxies `/api` to the API, so browser requests remain same-origin in development. Liveness describes the HTTP process only; readiness returns `503` when PostgreSQL cannot be reached.
 
+The archive view loads without an external provider during tests and local API work. To render the interactive base map, set the public `VITE_MAPBOX_ACCESS_TOKEN` value before starting Vite. The token is exposed to browser code by design; do not place a secret server credential in this variable.
+
 ## Local session fixture
 
 Local login is opt-in. In `.env`, set `LOCAL_AUTH_ENABLED=true` and list only fixture identities in `LOCAL_AUTH_USER_IDS`. The example keeps it disabled. The API refuses local auth in `APP_ENV=production` before constructing the database pool or opening a listener.
@@ -61,7 +63,7 @@ P05.3 uploads at most 100 ordered points at a time and deletes only the exact se
 
 P05.4 adds a user-scoped IndexedDB lease with a per-tab UUID and monotonically increasing fencing token. One tab atomically acquires and renews the 15-second lease; stale owners cannot renew or release a successor's token. Non-owner tabs keep controls and upload work read-only and expose explicit ownership retry. This is a same-origin tab guarantee, not a distributed offline device lock; cross-device races still fail through the server's one-active-run constraint, command revisions, and canonical point conflicts.
 
-P05.5 connects device Geolocation and the seeded `normal` simulator through one capture-source interface. Capture runs only while the server-confirmed run is recording and this tab owns the lease. Each start/resume/recovery session atomically allocates a durable `segmentId`; every source callback is serialized, rechecks ownership, and verifies the fencing token again inside the IndexedDB point transaction. Stopped generations cannot persist late callbacks, and a 100-measurement queue limit fails visibly instead of growing without bound. Offline capture remains buffered and wakes the existing uploader after every durable append. No Mapbox token contract is present in tracked configuration and no token was supplied, so recording and tests remain independent of an external map; actual device permission/background behavior still requires browser/device QA.
+P05.5 connects device Geolocation and the seeded `normal` simulator through one capture-source interface. Capture runs only while the server-confirmed run is recording and this tab owns the lease. Each start/resume/recovery session atomically allocates a durable `segmentId`; every source callback is serialized, rechecks ownership, and verifies the fencing token again inside the IndexedDB point transaction. Stopped generations cannot persist late callbacks, and a 100-measurement queue limit fails visibly instead of growing without bound. Offline capture remains buffered and wakes the existing uploader after every durable append. Recording and tests remain independent of the optional public Mapbox token introduced by P09.5; actual device permission/background behavior still requires browser/device QA.
 
 ## Shared API contracts
 
@@ -75,7 +77,9 @@ The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`.
 
 P09.2 generates source layer `runs` in one PostGIS statement over RLS-visible finished summaries in the requested half-open period. Candidate branches retain GiST-compatible `display_geom && envelope` predicates, then clip to the valid Web Mercator latitude range, project to EPSG:3857, and call `ST_AsMVTGeom` with extent 4096, buffer 64, and clipping enabled. Edge tiles select and shift the opposite antimeridian world copy after projection. The only feature property is string `run_id`; empty result sets return a valid empty MVT.
 
-P09.3 adds a process-local 32 MiB binary LRU with a five-minute monotonic TTL and single-flight generation. Its key includes format version, organization, authenticated user, canonical archive revision, a SHA-256 hash of the canonical period, and XYZ. Empty tiles are cached; errors and over-capacity values are not. Cache lookup remains after active-membership and revision checks. Atomic write-side revision changes and cache-hit race verification, the archive map, and SQL/concurrency/queue/tile-byte limits remain P09.4–P09.6. The current pipeline never truncates a tile to an arbitrary first-N feature set.
+P09.3 adds a process-local 32 MiB binary LRU with a five-minute monotonic TTL and single-flight generation. Its key includes format version, organization, authenticated user, canonical archive revision, a SHA-256 hash of the canonical period, and XYZ. Empty tiles are cached; errors and over-capacity values are not. P09.4 serializes every cache hit behind active-membership/current-revision validation and advances the organization epoch atomically with archive-visible summary, history-grant, and membership changes.
+
+P09.5 pins Mapbox GL JS 3.31.0 and adds an archive view with a bounded UTC period. A controller validates metadata through the shared contract, polls every 30 seconds, refreshes immediately on focus and stale-revision tile responses, and coalesces overlapping reads. A new revision calls `VectorTileSource.setTiles`; 401/403 removes the archive layer before its source and clears metadata, while transient network/5xx failures retain the last authorized source with an explicit error. Scope changes and unmount abort in-flight reads and destroy map state. SQL/concurrency/queue/tile-byte guards remain P09.6. The current pipeline never truncates a tile to an arbitrary first-N feature set.
 
 P04.1 resolves D01 with one strict `PointInput`: required `seq`, `segmentId`, `recordedAt`, `longitude`, `latitude`, and `accuracyM`, with no nullable/extra fields. Parsing canonicalizes `seq` through PostgreSQL-bigint decimal form, every `-0` to `0`, and UTC `recordedAt` to millisecond precision using the same nearest-millisecond rounding as `timestamptz(3)`. The canonical values are used for validation, retry comparison, persistence, and the shared public type.
 

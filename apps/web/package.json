@@ -16,6 +16,7 @@
   "dependencies": {
     "@running-tracker/contracts": "0.1.0",
     "@running-tracker/fixtures": "0.1.0",
+    "mapbox-gl": "3.31.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
