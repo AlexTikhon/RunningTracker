@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is complete: the API-backed runner screen, durable IndexedDB point/request buffer, retrying upload worker, fenced cross-tab writer lease, and shared Geolocation/simulator foreground capture path are implemented. P06 is complete: it provides versioned PostGIS summary calculation, globally normalized display simplification, revision-checked atomic publication, and bounded database-coordinated workers. P07 is complete: revision-fixed snapshot/change reads, server-authoritative edges, signed continuations, and atomic browser-side application are implemented. P08.1–P08.4 add bounded SSE transport, live authorization revalidation, the coach live-state screen, and revision-coalesced selected-track recovery; proxy/deployment transport configuration, production identity, and maps remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03 is complete: it provides the development/test session boundary, strict shared contracts, atomic run creation and lifecycle commands, ACL-aware run reads/share management, and clock-driven automatic finishing. P04 is complete: bounded point ingestion, revision-bound raw history, deterministic GPS simulation, and test-safe post-commit response-loss verification are implemented. P05 is complete: the API-backed runner screen, durable IndexedDB point/request buffer, retrying upload worker, fenced cross-tab writer lease, and shared Geolocation/simulator foreground capture path are implemented. P06 is complete: it provides versioned PostGIS summary calculation, globally normalized display simplification, revision-checked atomic publication, and bounded database-coordinated workers. P07 is complete: revision-fixed snapshot/change reads, server-authoritative edges, signed continuations, and atomic browser-side application are implemented. P08 is complete: bounded authorized SSE, coach live-state and selected-track recovery now have a reproducible HTTPS/HTTP/2 Nginx transport profile with explicit no-buffer SSE behavior. Production identity and archive maps remain later stages.
 
 ## Prerequisites
 
@@ -102,6 +102,41 @@ P07.5's browser `LiveTrackStore` stages every page in a temporary seq-keyed map 
 One process-level scheduler polls every two seconds and groups tabs by user and organization so matching subscriptions share one short database read. Session validity remains per connection: the hub retains a digest reference rather than the raw cookie, closes exactly at expiry, and rechecks store revocation before poll, publish, drain, and heartbeat. Membership loss closes the affected user/organization streams and clears pending data; grant loss yields a complete filtered state that replaces any older blocked state. Per-connection `streamId` and sequence domains remain independent. A 15-second comment heartbeat is transport-only. When `response.write` reports backpressure, the hub retains only the newest not-yet-written state, replaces older pending state, and closes the connection after a bounded blocked-writer timeout. Connection count and poll concurrency are also bounded, and graceful shutdown ends streams before closing the runtime pool.
 
 The Coach view opens one stream for a validated organization and renders only the full authorized run set. Confirmed and unconfirmed describe the server-evaluated latest edge; stale is a separate browser freshness state anchored to `serverTime` plus monotonic elapsed time, initially at 10 seconds. A null current position may retain its prior coordinate only as stale. Selected tracks reuse the P07 atomic store, coalesce SSE revisions to the greatest target per run, and abort/evict work on deselection, authorization removal, identity change, or disconnect. Bounded 1/2/4-second reconnects stop before known session expiry; visible state remains cleared until a new full state reauthorizes any recoverable selection. No external map token is required for this screen.
+
+## HTTPS/HTTP/2 transport verification
+
+P08.5 adds an opt-in Compose overlay with a pinned Nginx reverse proxy. Nginx
+serves the production web build, terminates local TLS/HTTP/2 on
+`https://localhost:8443`, and forwards to the internal Express service over
+HTTP/1.1. The SSE location explicitly disables buffering, caching, compression,
+and upstream retry; its 75-second read timeout is five times the 15-second
+heartbeat. Only the TLS proxy is host-published. ADR-0026 records the security and
+timeout decisions.
+
+Generate a seven-day development-only certificate, prepare the disposable test
+database, and start the profile:
+
+```powershell
+npm run db:up
+node --env-file=.env.example scripts/bootstrap-database.mjs --test
+node --env-file=.env.example scripts/migrate.mjs --test
+npm run transport:tls
+npm run transport:up
+npm run transport:verify
+```
+
+`transport:verify` uses an actual TLS HTTP/2 client; it does not infer HTTP/2
+from configuration text. It checks the normal API, cookie-authenticated SSE
+headers and prompt framing, the 15-second heartbeat, database activity during an
+open stream, backend restart/disconnect, new-stream recovery, and eight local
+commit-to-visible latency samples. It creates and removes one exact fixture in
+`running_tracker_test`. Stop the API/proxy overlay without deleting the database
+volume with `npm run transport:down`; `npm run db:down` retains the named volume.
+
+The certificate and private key are generated under gitignored `.local/tls` and
+must never be reused outside local verification. The overlay deliberately uses
+the existing development identity fixture and tracked local database credentials;
+managed certificates, external secrets, and production identity remain P12.
 
 ## Deterministic GPS simulator
 

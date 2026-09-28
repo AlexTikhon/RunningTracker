@@ -1,0 +1,66 @@
+name: running-tracker
+
+services:
+  api:
+    image: running-tracker-api:p08.5
+    build:
+      context: ../..
+      dockerfile: infra/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgresql://running_tracker_runtime:runtime_local_only@postgres:5432/running_tracker_test
+      MAINTENANCE_DATABASE_URL: postgresql://running_tracker_maintenance:maintenance_local_only@postgres:5432/running_tracker_test
+      RUN_AUTO_FINISH_INTERVAL_MS: 60000
+      RUN_SUMMARY_INTERVAL_MS: 60000
+      RUN_SUMMARY_CONCURRENCY: 2
+      LIVE_SSE_POLL_INTERVAL_MS: 2000
+      LIVE_SSE_HEARTBEAT_INTERVAL_MS: 15000
+      LIVE_SSE_BACKPRESSURE_TIMEOUT_MS: 10000
+      LIVE_SSE_MAX_CONNECTIONS: 64
+      LIVE_SSE_POLL_CONCURRENCY: 2
+      DB_POOL_MAX: 10
+      DB_CONNECTION_TIMEOUT_MS: 2000
+      DB_QUERY_TIMEOUT_MS: 1000
+      SHUTDOWN_TIMEOUT_MS: 5000
+      LIVE_TRACK_CURSOR_SIGNING_KEY: cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE
+      LOCAL_AUTH_ENABLED: "true"
+      LOCAL_AUTH_USER_IDS: 88888888-8888-4888-8888-888888888888
+      ALLOWED_ORIGINS: https://localhost:8443
+      SESSION_COOKIE_SECURE: "true"
+      SESSION_TTL_MS: 28800000
+      SESSION_STORE_MAX_ENTRIES: 100
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    init: true
+    read_only: true
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+
+  proxy:
+    image: running-tracker-proxy:p08.5
+    build:
+      context: ../..
+      dockerfile: infra/proxy/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8443:443"
+    restart: unless-stopped
+    volumes:
+      - ../../.local/tls:/etc/nginx/tls:ro

@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-09-27.
+Last updated: 2026-09-28.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -14,7 +14,7 @@ Last updated: 2026-09-27.
 | P05 | DONE | Runner controls, durable IndexedDB buffer, upload/reconciliation, fenced writer ownership, and Geolocation/simulator foreground capture verified |
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
-| P08 | IN PROGRESS | P08.1–P08.4 SSE transport, live authorization, coach UI, and selected-track reconnect recovery verified; P08.5 remains |
+| P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | TODO | MVT, cache, and archive map |
 | P10 | TODO | Retention, deletion, and maintenance |
 | P11 | TODO | Load verification and operational limits |
@@ -855,3 +855,26 @@ Verification evidence on 2026-09-27:
 - `git diff --check` passed. No migration, database privilege, shared response schema, dependency, proxy configuration, map provider, commit, push, hosted CI, paid-provider call, or main/production database write occurred.
 
 P08 remains IN PROGRESS. The next planned fragment is P08.5: configure and verify the external proxy profile for disabled response buffering, bounded upstream timeouts, and browser-to-proxy HTTP/2 without changing the application SSE protocol. Archive maps, retention, load verification, and production identity remain unopened.
+
+## P08.5 — HTTPS/HTTP/2 reverse-proxy transport profile
+
+Implemented:
+
+- a pinned Nginx image serves the built React application over local TLS/HTTP/2 and forwards `/api/*` to a pinned Node/Express container over HTTP/1.1. Only loopback TLS port 8443 is published; the API remains internal to the Compose network and unknown TLS host names are rejected;
+- the live location disables request/response proxy buffering, cache, gzip/upstream compression, and upstream retry. It uses empty upstream `Connection`, correct `Host`/`X-Forwarded-*`, a 75-second read timeout, bounded 30-second send timeouts, and passes the application's `X-Accel-Buffering: no` header;
+- the ordinary API retains conventional proxy behavior and its application 64 KiB JSON limit, with an explicit 128 KiB edge ceiling. Existing SSE hub connection/poll/backpressure bounds are unchanged;
+- a Compose overlay targets the disposable test database and preserves the same-origin Secure/HttpOnly session design. API port 3000 is not host-published;
+- `transport:tls` creates a seven-day self-signed localhost certificate in gitignored `.local/tls` by using OpenSSL inside the pinned proxy image. No production key or secret is tracked;
+- `transport:verify` performs real ALPN/HTTP/2, web/API, cookie-authenticated SSE, framing/header, heartbeat, PostgreSQL activity, revision propagation, backend restart/disconnect, and fresh-stream checks. ADR-0026 records the protocol, timeout, security, and production/non-production boundaries.
+
+Verification evidence on 2026-09-28:
+
+- `npm run transport:verify` passed against the real Nginx → Express → PostgreSQL profile: ALPN was `h2`, API health was 200, an unconfigured authority was rejected, the initial `live.state` arrived in 40 ms, `Content-Type` was `text/event-stream; charset=utf-8`, cache policy was `private, no-store`, `X-Accel-Buffering` was `no`, and no content encoding was applied;
+- the stream remained healthy through the 15-second heartbeat and eight database commit/poll cycles. PostgreSQL `pg_stat_activity` showed one idle `running-tracker-api` connection and zero `idle in transaction` connections while SSE remained open;
+- eight local direct commit-to-proxied-state samples measured p50 1981 ms and p95 2040 ms (values 1988, 2040, 1998, 1981, 1961, 1967, 1968, 2001 ms). The heartbeat arrived at 15042 ms and the stream remained open for 78699 ms—beyond the configured 75-second proxy read timeout—before the deliberate restart. This small Windows/Docker Desktop loopback sample measures the configured two-second poll path and is preliminary only; P11 retains final load/performance validation;
+- restarting the API under the open response caused a transport disconnect. After readiness recovered, a new Secure-cookie session opened a stream with sequence zero and a different `streamId`; no replay or corrupted frame was observed;
+- `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 72 API tests, 69 web tests, 13 contract tests, 14 fixture tests, 3 simulator tests, and every production build. The complete real-role/PostGIS suite passed 18 files / 177 tests;
+- the first unconfigured test attempts exposed and then fixed three harness/profile defects: a wrong simulator workspace path in the Dockerfiles, HTTP/2 request-side end handling, and explicit PostgreSQL bigint parameter casts. The successful rerun above is the acceptance evidence;
+- local test bootstrap and migration checksum verification for `0000`–`0012` passed. No migration, database privilege, application auth semantics, WebSocket, durable replay, map work, commit, push, production database write, or production secret occurred.
+
+P08 is DONE. The exact next planned fragment is P09.1: define and implement archive metadata and tile endpoints with XYZ/period validation and history ACL. P09.2+, retention, final load verification, and production identity remain unopened.
