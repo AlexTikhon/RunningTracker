@@ -1,6 +1,6 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03–P08 add the session/API lifecycle, durable runner capture, versioned summaries, revision-fixed live-track reads, authorized SSE/coach recovery, and a verified HTTPS/HTTP/2 transport profile. P09.1 now provides the revisioned archive metadata/tile HTTP and runtime-role history-ACL boundary; PostGIS MVT generation, tile caching, the archive map, and production identity remain later stages.
+P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03–P08 add the session/API lifecycle, durable runner capture, versioned summaries, revision-fixed live-track reads, authorized SSE/coach recovery, and a verified HTTPS/HTTP/2 transport profile. P09.1–P09.3 now provide the revisioned archive HTTP boundary, RLS-filtered PostGIS MVT generation, and a bounded process tile cache; cache invalidation, the archive map, resource guards, and production identity remain later stages.
 
 ## Prerequisites
 
@@ -69,11 +69,13 @@ P05.5 connects device Geolocation and the seeded `normal` simulator through one 
 
 The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. P08.1 implements framing, polling, heartbeat, and bounded transport; P08.2 adds open-stream authorization revalidation; P08.3 consumes the strict events in the coach screen; P08.4 binds selected runs to atomic snapshot/change synchronization.
 
-## Archive tile HTTP boundary
+## Archive tiles
 
 `GET /api/orgs/:orgId/archive/metadata?from=...&to=...` returns the current archive revision, the validated half-open filter, zoom 8–16, source layer `runs`, and a concrete revision-bound tile URL template. Periods are capped at 366 days. Tile requests require canonical XYZ coordinates with `x,y < 2^z`, re-check active membership and archive revision inside a runtime-role tenant transaction, and pass that same RLS-bound client to the tile pipeline. A stale URL returns `409 ARCHIVE_REVISION_CHANGED`; responses are `private, no-store`.
 
-P09.1 deliberately fails tile generation closed with `503 TILE_BUSY` until P09.2 supplies indexed PostGIS selection, Web Mercator projection, clipping, and MVT encoding. It never represents an unavailable pipeline as a valid empty tile.
+P09.2 generates source layer `runs` in one PostGIS statement over RLS-visible finished summaries in the requested half-open period. Candidate branches retain GiST-compatible `display_geom && envelope` predicates, then clip to the valid Web Mercator latitude range, project to EPSG:3857, and call `ST_AsMVTGeom` with extent 4096, buffer 64, and clipping enabled. Edge tiles select and shift the opposite antimeridian world copy after projection. The only feature property is string `run_id`; empty result sets return a valid empty MVT.
+
+P09.3 adds a process-local 32 MiB binary LRU with a five-minute monotonic TTL and single-flight generation. Its key includes format version, organization, authenticated user, canonical archive revision, a SHA-256 hash of the canonical period, and XYZ. Empty tiles are cached; errors and over-capacity values are not. Cache lookup remains after active-membership and revision checks. Atomic write-side revision changes and cache-hit race verification, the archive map, and SQL/concurrency/queue/tile-byte limits remain P09.4–P09.6. The current pipeline never truncates a tile to an arbitrary first-N feature set.
 
 P04.1 resolves D01 with one strict `PointInput`: required `seq`, `segmentId`, `recordedAt`, `longitude`, `latitude`, and `accuracyM`, with no nullable/extra fields. Parsing canonicalizes `seq` through PostgreSQL-bigint decimal form, every `-0` to `0`, and UTC `recordedAt` to millisecond precision using the same nearest-millisecond rounding as `timestamptz(3)`. The canonical values are used for validation, retry comparison, persistence, and the shared public type.
 

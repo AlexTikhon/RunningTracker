@@ -17,12 +17,17 @@ import type { SessionManager } from '../auth/session-manager.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
 import {
+  type ArchiveTileCache,
+  createArchiveTileCacheKey,
+} from './archive-tile-cache.js';
+import {
   assertCurrentArchiveRevision,
   type ArchiveTilePipeline,
   readArchiveMetadata,
 } from './archive-service.js';
 
 interface ArchiveRouterDependencies {
+  tileCache: ArchiveTileCache;
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
   tilePipeline: ArchiveTilePipeline;
@@ -49,6 +54,7 @@ function organizationId(request: Request): string {
 export function createArchiveRouter({
   pool,
   sessionManager,
+  tileCache,
   tilePipeline,
 }: ArchiveRouterDependencies): Router {
   const router = createRouter({ mergeParams: true });
@@ -83,13 +89,21 @@ export function createArchiveRouter({
       const path = parseContract(tilePathSchema, request.params, 'archive tile path');
       const query = parseContract(tileQuerySchema, request.query, 'archive tile query');
       const normalizedPath = { ...path, orgId: path.orgId.toLowerCase() };
+      const session = getAuthenticatedSession(request);
+      const cacheKey = createArchiveTileCacheKey({
+        path: normalizedPath,
+        query,
+        userId: session.userId,
+      });
       const tile = await withAuthenticatedTenantTransaction(
         pool,
-        getAuthenticatedSession(request),
+        session,
         normalizedPath.orgId,
         async (client) => {
           await assertCurrentArchiveRevision(client, normalizedPath.orgId, query.revision);
-          return tilePipeline.render(client, { path: normalizedPath, query });
+          return tileCache.getOrCreate(cacheKey, () =>
+            tilePipeline.render(client, { path: normalizedPath, query }),
+          );
         },
       );
       response.setHeader('Content-Type', 'application/vnd.mapbox-vector-tile');

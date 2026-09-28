@@ -15,7 +15,7 @@ Last updated: 2026-09-28.
 | P06 | DONE | Edge evaluation, revision-bound calculation, global simplification, atomic publication, and bounded distributed workers verified |
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
-| P09 | IN PROGRESS | P09.1 archive metadata/tile HTTP, validation, revision, and history-RLS boundary verified; P09.2 remains |
+| P09 | IN PROGRESS | P09.1–P09.3 archive HTTP/RLS, PostGIS MVT, and bounded process cache verified; P09.4 remains |
 | P10 | TODO | Retention, deletion, and maintenance |
 | P11 | TODO | Load verification and operational limits |
 | P12 | TODO | Production auth and recovery |
@@ -899,3 +899,43 @@ Verification evidence on 2026-09-28:
 - no migration, database privilege, dependency, spatial selection/projection/clipping, MVT generation, tile cache, frontend map, commit, push, hosted CI, production database write, or external map-provider call occurred.
 
 P09 remains IN PROGRESS. The exact next planned fragment is P09.2: implement the indexed PostGIS candidate selection, Web Mercator projection, buffer/clipping, and MVT encoding with string `run_id`. P09.3 cache, P09.4 cache-hit invalidation, P09.5 archive UI, P09.6 resource limits, retention, final load verification, and production identity remain unopened.
+
+## P09.2 — PostGIS archive MVT pipeline
+
+Implemented:
+
+- the production tile seam now executes one parameterized PostGIS statement on the existing runtime-role client. It selects only RLS-visible finished summaries in the validated half-open period and exposes only a string `run_id` plus geometry in source layer `runs`;
+- normal and antimeridian candidate branches each retain an explicit GiST-compatible `display_geom && search envelope` predicate plus exact intersection. Edge tiles also select the opposite world edge and shift that copy by one Web Mercator world width after projection, avoiding PROJ longitude normalization and world-spanning lines;
+- candidate geometry is clipped with `ST_ClipByBox2D` to the valid ±85.0511287798066° Web Mercator latitude range before EPSG:3857 projection. `ST_AsMVTGeom` receives the unexpanded tile bounds with extent 4096, buffer 64, and clipping enabled; selection uses the matching 64/4096 margin;
+- duplicate normal/wrapped candidates are merged per run before encoding. Empty/degenerate non-line results are omitted, while no visible features produce the valid zero-byte empty MVT rather than an error or false partial result;
+- a dependency-free test decoder verifies the actual protobuf layer, string property, line commands, and tile coordinates. ADR-0028 records the projection, clipping, antimeridian, privacy, and staged resource-limit boundaries.
+
+Verification evidence on 2026-09-28:
+
+- focused API unit coverage passed 1 file / 2 tests for the single parameterized spatial query and fail-closed database-result validation;
+- focused real runtime-role/PostGIS coverage passed 1 file / 4 tests after decoding generated MVTs for adjacent buffered tiles, both antimeridian world edges, polar clipping, valid empty output, and history-grant exclusion;
+- `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 74 API unit tests, 69 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- `npm run db:migrate:test` checksum-verified migrations `0000`–`0012` unchanged, and the complete real-role/PostGIS suite passed 20 files / 186 tests;
+- no migration, database privilege, shared HTTP schema, dependency, tile cache, cache-hit authorization path, frontend map, SQL/concurrency/queue/tile-byte guard, commit, push, hosted CI, production database write, or external map-provider call occurred.
+
+P09 remains IN PROGRESS. The exact next planned fragment is P09.3: add the bounded byte-size LRU, five-minute TTL, single-flight generation, and the complete SDD cache key. P09.4 cache-hit membership/revision enforcement, P09.5 archive UI, P09.6 resource limits, retention, final load verification, and production identity remain unopened.
+
+## P09.3 — bounded process archive tile cache
+
+Implemented:
+
+- each API process owns one injected/testable archive cache with a 32 MiB binary payload budget, five-minute monotonic TTL, and true access-order LRU eviction. A separate 4096-entry ceiling bounds metadata even when every cached tile is the valid zero-byte empty MVT;
+- the complete SDD identity is `formatVersion / orgId / userId / archiveRevision / canonicalFilterHash / z/x/y`. UUIDs are lowercased, revision strings are canonicalized through `BigInt`, semantically empty trailing fractional timestamp zeros are removed without discarding higher precision, and the ordered period is represented by a SHA-256 hash;
+- successful buffers, including empty tiles, are cached. A buffer larger than the cache capacity is returned without retention; generation failures and invalid non-buffer results are never cached;
+- an in-flight promise map coalesces concurrent generation only for an identical authenticated key and removes the flight on either success or failure. Different users never share generated bytes;
+- the existing route still completes session authentication, active-membership verification, and current archive-revision comparison inside the runtime-role tenant transaction before calling the cache. P09.4 retains atomic write-side epoch changes and cache-hit race verification; P09.3 does not claim those later guarantees.
+
+Verification evidence on 2026-09-28:
+
+- focused API unit coverage passed 2 files / 8 tests for full key identity/canonicalization, byte and entry bounds, access-order eviction, exact TTL expiry, empty/oversize/failure behavior, single-flight cleanup, and the P09.2 pipeline contract;
+- focused runtime-role/PostGIS archive HTTP integration passed 1 file / 6 tests, including canonical same-user cache reuse and isolation for another authenticated user after the membership/revision boundary;
+- `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 80 API unit tests, 69 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- `npm run db:migrate:test` checksum-verified migrations `0000`–`0012` unchanged, and the complete runtime-role/PostGIS suite passed 20 files / 187 tests;
+- no migration, database privilege, dependency, shared HTTP schema, public/CDN cache, write-side archive epoch change, frontend map, SQL/concurrency/queue/tile-byte guard, commit, push, hosted CI, production database write, or external provider call occurred.
+
+P09 remains IN PROGRESS. The exact next planned fragment is P09.4: prove membership/revision validation before cache hits and make publish/delete/grant/membership changes advance the organization epoch atomically. P09.5 archive UI, P09.6 resource limits, retention, final load verification, and production identity remain unopened.

@@ -196,4 +196,24 @@ describe('P09.1 archive HTTP and authorization boundary', () => {
       .get(`/api/orgs/${ids.orgA}/tiles/runs/8/142/84.mvt?revision=0&${period}`)
       .expect(403);
   });
+
+  it('reuses canonical tile bytes only within the authenticated user cache key', async () => {
+    const historyReader = await login(ids.userDual);
+    const before = renderCalls;
+    await historyReader
+      .get(`/api/orgs/${ids.orgA}/tiles/runs/8/141/84.mvt?revision=000&${period}`)
+      .expect(200);
+    await historyReader
+      .get(
+        `/api/orgs/${ids.orgA}/tiles/runs/8/141/84.mvt?revision=0&from=2026-09-01T00%3A00%3A00.000Z&to=2026-10-01T00%3A00%3A00.000Z`,
+      )
+      .expect(200);
+    expect(renderCalls).toBe(before + 1);
+
+    const unrelatedMember = await login(ids.userStranger);
+    await unrelatedMember
+      .get(`/api/orgs/${ids.orgA}/tiles/runs/8/141/84.mvt?revision=0&${period}`)
+      .expect(200);
+    expect(renderCalls).toBe(before + 2);
+  });
 });

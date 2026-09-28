@@ -2,9 +2,10 @@ import express, { type Express, type Router } from 'express';
 import type { Pool } from 'pg';
 
 import { createArchiveRouter } from './archive/archive.routes.js';
+import { ArchiveTileCache } from './archive/archive-tile-cache.js';
 import {
   type ArchiveTilePipeline,
-  unavailableArchiveTilePipeline,
+  postgisArchiveTilePipeline,
 } from './archive/archive-service.js';
 import { SessionManager } from './auth/session-manager.js';
 import { createSessionRouter } from './auth/session-http.js';
@@ -29,6 +30,7 @@ export interface AppDependencies {
   pool: DatabasePool;
   sessionManager?: SessionManager;
   liveConnections?: LiveConnectionManager;
+  archiveTileCache?: ArchiveTileCache;
   archiveTilePipeline?: ArchiveTilePipeline;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   testOnlyRouter?: Router;
@@ -40,6 +42,7 @@ export function createApp({
   pool,
   sessionManager,
   liveConnections,
+  archiveTileCache,
   archiveTilePipeline,
   testOnlyFaultInjector,
   testOnlyRouter,
@@ -65,6 +68,7 @@ export function createApp({
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
     });
+  const archiveTiles = archiveTileCache ?? new ArchiveTileCache({ clock });
 
   app.disable('x-powered-by');
   app.use(requestIdMiddleware);
@@ -80,7 +84,8 @@ export function createApp({
     createArchiveRouter({
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
-      tilePipeline: archiveTilePipeline ?? unavailableArchiveTilePipeline,
+      tileCache: archiveTiles,
+      tilePipeline: archiveTilePipeline ?? postgisArchiveTilePipeline,
     }),
   );
   app.use('/api/orgs/:orgId/live', createLiveRouter(sessions, live));

@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P08 и P09.1 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009, D06 — в P07/ADR-0017–0021; stream-часть D07 решена в ADR-0023, cache-часть остаётся P09. P09.1 фиксирует metadata/tile HTTP validation, active membership, revision check и history-RLS pipeline boundary (ADR-0027); следующий фрагмент — P09.2 PostGIS MVT pipeline.
+Статус: согласованный проект архитектуры; P00–P08 и P09.1–P09.3 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009, D06 — в P07/ADR-0017–0021; stream-часть D07 решена в ADR-0023, cache-часть остаётся P09. P09.1 фиксирует metadata/tile HTTP validation, active membership, revision check и history-RLS pipeline boundary (ADR-0027); P09.2 реализует PostGIS MVT generation и world-edge handling (ADR-0028); P09.3 добавляет bounded process LRU и single-flight (ADR-0029). Следующий фрагмент — P09.4 atomic cache invalidation boundary.
 Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
 
 Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
@@ -357,6 +357,8 @@ formatVersion / orgId / userId / archiveRevision / canonicalFilterHash / z/x/y.
 
 HTTP тайлов: application/vnd.mapbox-vector-tile, Cache-Control: private, no-store. Mapbox может держать видимые тайлы в оперативной памяти. Готовые сетевые ответы обслуживает LRU; публичный CDN для них не используется.
 
+P09.3 реализует process-local LRU: payload budget 32 МиБ, отдельный лимит 4096 entries для bounded metadata при empty tiles, monotonic TTL 5 минут и single-flight по полному ключу. UUID, revision и timestamps канонизируются до hash/key construction; пустые buffers сохраняются, oversize buffers и rejected generation — нет. Lookup вызывается только после существующих membership/revision checks внутри tenant transaction. P09.4 остаётся владельцем атомарного write-side изменения revision при publish/delete/grant/membership events и конкурентной проверки cache-hit boundary (ADR-0029).
+
 Активный клиент проверяет archive metadata раз в 30 с; при возвращении на вкладку — сразу. При новой revision меняет URL шаблона через setTiles, при отзыве доступа очищает слой. TTL не является механизмом соблюдения 60 с. [Mapbox VectorTileSource](https://docs.mapbox.com/mapbox-gl-js/api/sources/#vectortilesource)
 
 ## 11. API-контракты
@@ -503,7 +505,9 @@ URL — шаблон; реальные значения orgId/filter выдаё�
 
 GET /tiles/runs/{z}/{x}/{y}.mvt?revision=...&from=...&to=... → 200 бинарный MVT; пустой набор — корректный пустой MVT. Ошибки — JSON ApiError с соответствующим HTTP status. Frontend обрабатывает ошибки tile source и при revision mismatch обновляет metadata.
 
-P09.1 реализует metadata и tile HTTP boundary: zoom ограничен 8–16, `x/y` — канонические целые в `[0,2^z)`, период упорядочен и не превышает 366 дней. Оба endpoint проходят session/active-membership и runtime-role tenant transaction; tile до pipeline перечитывает текущий `archive_revision` и возвращает `409 ARCHIVE_REVISION_CHANGED` при несовпадении. Pipeline получает тот же RLS-bound client, поэтому history ACL не заменяется revision/filter. До P09.2 генерация tile fail-closed через `503 TILE_BUSY`, без ложного empty tile (ADR-0027).
+P09.1 реализует metadata и tile HTTP boundary: zoom ограничен 8–16, `x/y` — канонические целые в `[0,2^z)`, период упорядочен и не превышает 366 дней. Оба endpoint проходят session/active-membership и runtime-role tenant transaction; tile до pipeline перечитывает текущий `archive_revision` и возвращает `409 ARCHIVE_REVISION_CHANGED` при несовпадении. Pipeline получает тот же RLS-bound client, поэтому history ACL не заменяется revision/filter. До подключения P09.2 этот seam fail-closed через `503 TILE_BUSY`, без ложного empty tile (ADR-0027).
+
+P09.2 подключает production pipeline к этому seam: отдельные `&&` candidate branches сохраняют возможность GiST selection для обычной и противоположной antimeridian envelopes, геометрия обрезается до допустимого Web Mercator world до projection, world copies сдвигаются после projection, а `ST_AsMVTGeom` использует extent 4096, buffer 64 и clipping. Результат содержит только строковый `run_id`; пустой набор кодируется как пустой MVT. Cache invalidation и resource limits остаются P09.4–P09.6 (ADR-0028).
 
 ### 11.6 Ошибки
 
