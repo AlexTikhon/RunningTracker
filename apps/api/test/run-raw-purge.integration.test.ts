@@ -17,6 +17,7 @@ import { createDatabasePool } from '../src/database/database.js';
 import {
   purgeRunRawPointsBatch,
   RUN_RAW_PURGE_BATCH_LIMIT,
+  runRawPurgeOnce,
 } from '../src/maintenance/run-raw-purge.js';
 import {
   prepareTenantIsolationFixtures,
@@ -31,6 +32,10 @@ const runIds = {
   partialPublication: 'a6500000-0000-4000-8000-000000000004',
   recording: 'a6500000-0000-4000-8000-000000000005',
   rollback: 'a6500000-0000-4000-8000-000000000006',
+  ageBoundary: 'a6500000-0000-4000-8000-000000000007',
+  blockedSummary: 'a6500000-0000-4000-8000-000000000008',
+  eligibleWorker: 'a6500000-0000-4000-8000-000000000009',
+  tooYoung: 'a6500000-0000-4000-8000-000000000010',
 } as const;
 
 const validQualityStats = {
@@ -233,11 +238,12 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
     client: Pick<Pool, 'query'> | PoolClient,
     runId: string,
     limit: number,
+    effectiveNow = '2031-01-10T00:00:00.000Z',
   ): Promise<QueryResult<RawPurgeRow>> {
     return client.query<RawPurgeRow>(
       `SELECT previous_raw_state, current_raw_state, deleted_count, completed, has_more
-       FROM app_private.purge_run_raw_points_batch($1, $2, $3)`,
-      [ids.orgA, runId, limit],
+       FROM app_private.purge_run_raw_points_batch($1, $2, $3, $4)`,
+      [ids.orgA, runId, limit, effectiveNow],
     );
   }
 
@@ -278,17 +284,17 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
       `SELECT
          has_function_privilege(
            'running_tracker_maintenance',
-           'app_private.purge_run_raw_points_batch(uuid,uuid,integer)',
+           'app_private.purge_run_raw_points_batch(uuid,uuid,integer,timestamp with time zone)',
            'EXECUTE'
          ) AS maintenance_execute,
          has_function_privilege(
            'running_tracker_runtime',
-           'app_private.purge_run_raw_points_batch(uuid,uuid,integer)',
+           'app_private.purge_run_raw_points_batch(uuid,uuid,integer,timestamp with time zone)',
            'EXECUTE'
          ) AS runtime_execute,
          has_function_privilege(
            'public',
-           'app_private.purge_run_raw_points_batch(uuid,uuid,integer)',
+           'app_private.purge_run_raw_points_batch(uuid,uuid,integer,timestamp with time zone)',
            'EXECUTE'
          ) AS public_execute,
          has_table_privilege('running_tracker_maintenance', 'runs', 'SELECT')
@@ -315,7 +321,7 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
          procedure.proconfig AS settings
        FROM pg_proc AS procedure
        WHERE procedure.oid =
-         'app_private.purge_run_raw_points_batch(uuid,uuid,integer)'::regprocedure`,
+         'app_private.purge_run_raw_points_batch(uuid,uuid,integer,timestamp with time zone)'::regprocedure`,
     );
     expect(privileges.rows[0]).toEqual({
       maintenance_execute: true,
@@ -353,12 +359,133 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
     });
   });
 
+  it('keeps candidate and backlog inspection maintenance-only', async () => {
+    const privileges = await ownerPool.query<{
+      maintenance_blocker: boolean;
+      maintenance_claim: boolean;
+      public_blocker: boolean;
+      public_claim: boolean;
+      runtime_blocker: boolean;
+      runtime_claim: boolean;
+    }>(
+      `SELECT
+         has_function_privilege(
+           'running_tracker_maintenance',
+           'app_private.claim_run_raw_purge_candidate(timestamp with time zone,integer)',
+           'EXECUTE'
+         ) AS maintenance_claim,
+         has_function_privilege(
+           'running_tracker_runtime',
+           'app_private.claim_run_raw_purge_candidate(timestamp with time zone,integer)',
+           'EXECUTE'
+         ) AS runtime_claim,
+         has_function_privilege(
+           'public',
+           'app_private.claim_run_raw_purge_candidate(timestamp with time zone,integer)',
+           'EXECUTE'
+         ) AS public_claim,
+         has_function_privilege(
+           'running_tracker_maintenance',
+           'app_private.has_overdue_raw_purge_summary_blocker(timestamp with time zone)',
+           'EXECUTE'
+         ) AS maintenance_blocker,
+         has_function_privilege(
+           'running_tracker_runtime',
+           'app_private.has_overdue_raw_purge_summary_blocker(timestamp with time zone)',
+           'EXECUTE'
+         ) AS runtime_blocker,
+         has_function_privilege(
+           'public',
+           'app_private.has_overdue_raw_purge_summary_blocker(timestamp with time zone)',
+           'EXECUTE'
+         ) AS public_blocker`,
+    );
+    expect(privileges.rows[0]).toEqual({
+      maintenance_blocker: true,
+      maintenance_claim: true,
+      public_blocker: false,
+      public_claim: false,
+      runtime_blocker: false,
+      runtime_claim: false,
+    });
+  });
+
+  it('revalidates the upload, seven-day, and current-summary gates inside purge', async () => {
+    await seedRun(runIds.ageBoundary, 1, { summary: true });
+
+    await expect(
+      purgeDirect(
+        maintenancePool,
+        runIds.ageBoundary,
+        1,
+        '2031-01-03T00:00:00.000Z',
+      ),
+    ).rejects.toMatchObject({ code: '55000' });
+    await expect(
+      purgeDirect(
+        maintenancePool,
+        runIds.ageBoundary,
+        1,
+        '2031-01-08T23:59:59.999Z',
+      ),
+    ).rejects.toMatchObject({ code: '55000' });
+    await expect(
+      purgeDirect(
+        maintenancePool,
+        runIds.ageBoundary,
+        1,
+        '2031-01-09T00:00:00.000Z',
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ completed: true, current_raw_state: 'purged', deleted_count: 1 }],
+    });
+  });
+
+  it('claims only eligible runs and reports an overdue summary blocker without an identity', async () => {
+    await seedRun(runIds.blockedSummary, 1, { summary: true });
+    await ownerPool.query(
+      'DELETE FROM run_summaries WHERE org_id = $1 AND run_id = $2',
+      [ids.orgA, runIds.blockedSummary],
+    );
+    await seedRun(runIds.tooYoung, 1, { summary: true });
+    await ownerPool.query(
+      `UPDATE runs
+       SET finished_at = '2031-01-05T00:00:00.000Z'
+       WHERE org_id = $1 AND id = $2`,
+      [ids.orgA, runIds.tooYoung],
+    );
+    await seedRun(runIds.eligibleWorker, 1, { summary: true });
+
+    await expect(runRawPurgeOnce(maintenancePool, new FixedClock())).resolves.toMatchObject({
+      completed: true,
+      orgId: ids.orgA,
+      runId: runIds.eligibleWorker,
+      status: 'completed',
+    });
+    await expect(runRawPurgeOnce(maintenancePool, new FixedClock())).resolves.toEqual({
+      status: 'blocked',
+    });
+
+    const states = await ownerPool.query<{ id: string; raw_state: string }>(
+      `SELECT id, raw_state
+       FROM runs
+       WHERE org_id = $1
+       ORDER BY id`,
+      [ids.orgA],
+    );
+    expect(states.rows).toEqual([
+      { id: runIds.blockedSummary, raw_state: 'available' },
+      { id: runIds.eligibleWorker, raw_state: 'purged' },
+      { id: runIds.tooYoung, raw_state: 'available' },
+    ]);
+  });
+
   it('bounds each commit, resumes after restart, hides partial raw data, and preserves archive state', async () => {
     await seedRun(runIds.bounded, RUN_RAW_PURGE_BATCH_LIMIT + 1, { summary: true });
     await ownerPool.query('UPDATE organizations SET archive_revision = 7 WHERE id = $1', [ids.orgA]);
 
     await expect(
-      purgeRunRawPointsBatch(maintenancePool, ids.orgA, runIds.bounded),
+      purgeRunRawPointsBatch(maintenancePool, ids.orgA, runIds.bounded, new FixedClock()),
     ).resolves.toEqual({
       completed: false,
       currentRawState: 'purging',
@@ -422,7 +549,12 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
     });
     try {
       await expect(
-        purgeRunRawPointsBatch(restartedWorkerPool, ids.orgA, runIds.bounded),
+        purgeRunRawPointsBatch(
+          restartedWorkerPool,
+          ids.orgA,
+          runIds.bounded,
+          new FixedClock(),
+        ),
       ).resolves.toEqual({
         completed: true,
         currentRawState: 'purged',
@@ -434,7 +566,7 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
       await restartedWorkerPool.end();
     }
     await expect(
-      purgeRunRawPointsBatch(maintenancePool, ids.orgA, runIds.bounded),
+      purgeRunRawPointsBatch(maintenancePool, ids.orgA, runIds.bounded, new FixedClock()),
     ).resolves.toEqual({
       completed: true,
       currentRawState: 'purged',
@@ -485,7 +617,7 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
   });
 
   it('rolls back the state transition and point deletion together', async () => {
-    await seedRun(runIds.rollback, 3);
+    await seedRun(runIds.rollback, 3, { summary: true });
     const transaction = await maintenancePool.connect();
     try {
       await transaction.query('BEGIN');
@@ -517,7 +649,7 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
   });
 
   it('serializes concurrent purge attempts without double deletion', async () => {
-    await seedRun(runIds.concurrent, 5);
+    await seedRun(runIds.concurrent, 5, { summary: true });
     const first = await maintenancePool.connect();
     const second = await maintenancePool.connect();
     try {
@@ -634,7 +766,7 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
   });
 
   it('does not claim or publish a summary from a partially purged point set', async () => {
-    await seedRun(runIds.partialPublication, 3);
+    await seedRun(runIds.partialPublication, 3, { summary: true });
     await expect(purgeDirect(maintenancePool, runIds.partialPublication, 2)).resolves.toMatchObject({
       rows: [{ current_raw_state: 'purging', deleted_count: 2 }],
     });
@@ -666,6 +798,6 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
         'SELECT 1 FROM run_summaries WHERE org_id = $1 AND run_id = $2',
         [ids.orgA, runIds.partialPublication],
       ),
-    ).resolves.toMatchObject({ rowCount: 0 });
+    ).resolves.toMatchObject({ rowCount: 1 });
   });
 });

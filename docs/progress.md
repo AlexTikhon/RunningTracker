@@ -16,7 +16,7 @@ Last updated: 2026-09-29.
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
-| P10 | IN PROGRESS | P10.1 bounded restart-safe raw purge and summary serialization verified; eligibility/deletion follow-ups remain |
+| P10 | IN PROGRESS | P10.1–P10.2 bounded raw purge, eligibility, summary serialization, and restart-first scheduling verified; deletion follow-ups remain |
 | P11 | TODO | Load verification and operational limits |
 | P12 | TODO | Production auth and recovery |
 
@@ -1021,4 +1021,24 @@ Verification evidence on 2026-09-29:
 - `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 90 API unit tests, 82 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
 - the complete separated-role PostgreSQL/PostGIS integration suite passed 22 files / 200 tests, covering the new purge suite plus all ingestion, raw-history, live-track, summary, archive HTTP/MVT/cache, and role/RLS regressions. The immediate migration rerun checksum-skipped unchanged migrations `0000`–`0014`, and `git diff --check` passed.
 
-P10.1 is DONE. P10 remains IN PROGRESS. The exact next planned fragment is P10.2: select only retention-eligible runs after the seven-day target, closed upload window, and current summary checks. P10.3–P12 remain unopened.
+P10.1 is DONE. P10 remains IN PROGRESS. The continuation below completes P10.2 retention eligibility and scheduling.
+
+## P10.2 — retention eligibility and restart-first scheduling
+
+Implemented:
+
+- forward-only migration `0015_raw_retention_eligibility.sql` replaces the direct purge signature with a controlled-clock capability that revalidates eligibility after the shared summary/purge advisory lock and run-row lock. An `available` run must be finished, at least seven days past `finished_at`, strictly beyond the 24-hour upload window, and have a summary matching its current data revision, algorithm version, and quality schema;
+- the transactional claimant scans at most 1,000 candidates, prioritizes committed `purging` recovery, skips advisory-locked runs without waiting, and only then selects new eligible work in stable oldest-first order. A committed partial purge resumes without rechecking eligibility; a `purged` explicit retry remains deterministic;
+- each non-overlapping periodic cycle uses one injected UTC instant, claims at most one run, and commits at most one 1,000-point batch. `RUN_RAW_PURGE_INTERVAL_MS` defaults to 60 seconds, and the maintenance pool reserves independent capacity for summary workers, auto-finish, and raw purge;
+- when no work is claimable, a maintenance-only existence check detects an overdue upload-closed run blocked by a missing/stale summary. The process emits an identity-free warning while leaving the run and raw points unchanged; structured metrics and alert routing remain P11.1;
+- the claim, blocker, and mutating functions are `SECURITY DEFINER` with fixed `pg_catalog` search paths. Runtime/PUBLIC cannot execute them, and maintenance still has no direct application-table DML. ADR-0034 records the time boundaries, revalidation point, recovery priority, and deferred deletion scope.
+
+Verification evidence on 2026-09-29:
+
+- focused maintenance unit coverage passed 1 file / 9 tests for bounded SQL arguments, claim/commit ordering, completed/idle/blocked mapping, malformed database results, invalid clocks, and unknown commit outcomes;
+- focused separated-role PostgreSQL/PostGIS coverage passed 1 file / 9 tests, including function privileges, exact 24-hour/seven-day gates, current-summary enforcement, eligible-only selection, identity-free blocker reporting, durable resume, rollback, concurrency, summary serialization, and archive/raw-HTTP regressions;
+- migration `0015` applied only to the disposable `running_tracker_test` database after checksum-skipping unchanged `0000`–`0014`; no main/production database was connected to or migrated.
+- `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 95 API unit tests, 82 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- the complete separated-role PostgreSQL/PostGIS integration suite passed 22 files / 203 tests across ingestion, raw history, live/summary/archive behavior, P10.1 recovery, and P10.2 eligibility/scheduling regressions.
+
+P10.2 is DONE. P10 remains IN PROGRESS. The exact next planned fragment is P10.3: implement owner deletion and annual retention with an atomic tombstone and archive revision change. P10.4–P12 remain unopened.

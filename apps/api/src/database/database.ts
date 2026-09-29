@@ -39,7 +39,7 @@ export function createMaintenanceDatabasePool(config: Environment): Pool {
     application_name: 'running-tracker-maintenance',
     connectionString: config.MAINTENANCE_DATABASE_URL,
     connectionTimeoutMillis: config.DB_CONNECTION_TIMEOUT_MS,
-    max: config.RUN_SUMMARY_CONCURRENCY + 1,
+    max: config.RUN_SUMMARY_CONCURRENCY + 2,
   });
 
   pool.on('error', (error) => {

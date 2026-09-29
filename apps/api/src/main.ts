@@ -18,6 +18,7 @@ import {
 import { createLiveSseHub } from './live/live-sse.js';
 import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
+import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
 
 export interface MainDependencies {
@@ -119,10 +120,23 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
       runSummaryPublicationBatch(maintenancePool, clock, config.RUN_SUMMARY_CONCURRENCY),
     taskName: 'Run summary publication',
   });
+  const rawPurgeRunner = new PeriodicRunner({
+    clock,
+    intervalMs: config.RUN_RAW_PURGE_INTERVAL_MS,
+    runOnce: async () => {
+      const result = await runRawPurgeOnce(maintenancePool, clock);
+      if (result.status === 'blocked') {
+        console.warn('Raw retention is overdue because a current summary is unavailable');
+      }
+      return result;
+    },
+    taskName: 'Run raw retention purge',
+  });
   const runner: StoppableRunner = {
     stop: () => {
       liveSseHub.stop();
       autoFinishRunner.stop();
+      rawPurgeRunner.stop();
       summaryRunner.stop();
     },
   };
@@ -135,6 +149,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   }
 
   autoFinishRunner.start();
+  rawPurgeRunner.start();
   summaryRunner.start();
   registerShutdown({
     clock,
