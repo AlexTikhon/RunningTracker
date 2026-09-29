@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-09-28.
+Last updated: 2026-09-29.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -16,7 +16,7 @@ Last updated: 2026-09-28.
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
-| P10 | TODO | Retention, deletion, and maintenance |
+| P10 | IN PROGRESS | P10.1 bounded restart-safe raw purge and summary serialization verified; eligibility/deletion follow-ups remain |
 | P11 | TODO | Load verification and operational limits |
 | P12 | TODO | Production auth and recovery |
 
@@ -1002,3 +1002,23 @@ Verification evidence on 2026-09-28:
 - the complete separated-role PostgreSQL/PostGIS integration suite passed 21 files / 194 tests.
 
 P09 is DONE. The exact next planned fragment is P10.1: implement the `available → purging → purged` retention state machine with bounded, restart-safe deletes. P10.2–P12 remain unopened.
+
+## P10.1 — bounded restart-safe raw point purge
+
+Implemented:
+
+- forward-only migration `0014_raw_retention_purge.sql` adds a maintenance-only `SECURITY DEFINER` capability for one explicit finished run. It shares the P06 per-run summary advisory-lock namespace, locks the run row, changes `available` to `purging` before deletion, removes at most one deterministic `seq`-ordered batch, and changes to `purged` only after confirming that no points remain;
+- the accepted limit range is 1–1,000 and the typed Node boundary always uses 1,000. There is no internal completion loop or candidate scanner. A committed partial batch remains `purging`; a new process resumes from remaining rows; rollback restores both rows and state; `purged` retries return a deterministic zero-delete completion;
+- the summary claimant now revalidates finished/raw-available/revision/staleness state after acquiring its transaction advisory lock. An already-claimed summary completes before purge, while a committed `purging` run cannot enter production calculation. Existing publication checks still reject independently supplied partial/stale calculations;
+- the runtime role's legacy column-level `UPDATE(raw_state)` grant is revoked. Runtime/PUBLIC cannot execute the purge function, maintenance has no direct application-table SELECT/UPDATE/DELETE, and the capability fixes `search_path` to `pg_catalog`;
+- raw purge preserves the run, summary, display geometry/statistics, history grants, and `archive_revision`. Existing authorized ingestion/history/live snapshot/change paths return `410 RAW_HISTORY_UNAVAILABLE` as soon as `purging` commits; unauthorized callers retain the authorization-safe `404` boundary. ADR-0033 records the state, lock order, crash recovery, and deferred scope.
+
+Verification evidence on 2026-09-29:
+
+- focused maintenance unit coverage passed 1 file / 4 tests; focused separated-role PostgreSQL/PostGIS coverage passed 1 file / 6 tests, including 1,001-point bounding, new-client resume, rollback, idempotency, concurrent purge attempts, HTTP denial while one point physically remained, archive/grant survival, and unchanged archive revision;
+- controlled advisory-lock barriers proved that a claimed three-point summary published completely before purge proceeded, while a partially purged run was not claimable and a direct partial calculation could not publish;
+- only the disposable `running_tracker_test` database was rebuilt after the uncommitted migration changed, then migrations `0000`–`0014` applied from empty history. Main/production databases were not connected to or migrated;
+- `npm run verify` passed lint, strict workspace typechecking, 10 infrastructure/migration tests, 90 API unit tests, 82 web tests, 14 contract tests, 14 fixture tests, 3 simulator tests, and every production build;
+- the complete separated-role PostgreSQL/PostGIS integration suite passed 22 files / 200 tests, covering the new purge suite plus all ingestion, raw-history, live-track, summary, archive HTTP/MVT/cache, and role/RLS regressions. The immediate migration rerun checksum-skipped unchanged migrations `0000`–`0014`, and `git diff --check` passed.
+
+P10.1 is DONE. P10 remains IN PROGRESS. The exact next planned fragment is P10.2: select only retention-eligible runs after the seven-day target, closed upload window, and current summary checks. P10.3–P12 remain unopened.
