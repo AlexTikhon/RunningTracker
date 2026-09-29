@@ -1,108 +1,108 @@
 # Running Tracker — System Design Document v1.0
 
-Дата: 21 сентября 2026
-Статус: согласованный проект архитектуры; P00–P09 и P10.1–P10.2 проверены локально, а DB-фрагменты — под разделёнными PostgreSQL-ролями. D01 resolved в P04.1, D02 решён для доверенного tenant context, D03 разделён на выполненную локальную session boundary и оставшуюся P12 production identity integration, D04 решён в ADR-0010 с явной offline/cross-device границей, D05 — в ADR-0009, D06 — в P07/ADR-0017–0021; stream-часть D07 решена в ADR-0023, cache-часть решена в ADR-0030. P09.1 фиксирует metadata/tile HTTP validation, active membership, revision check и history-RLS pipeline boundary (ADR-0027); P09.2 реализует PostGIS MVT generation и world-edge handling (ADR-0028); P09.3 добавляет bounded process LRU и single-flight (ADR-0029); P09.4 сериализует cache hits с атомарными archive epoch changes (ADR-0030); P09.5 добавляет React/Mapbox source lifecycle с bounded polling и fail-closed cleanup (ADR-0031); P09.6 ограничивает SQL/concurrency/queue/raw tile bytes без удержания DB clients во время queue wait (ADR-0032). P10.1 добавляет maintenance-only bounded/restart-safe raw purge с общей summary advisory-lock boundary (ADR-0033); P10.2 добавляет authoritative eligibility и restart-first scheduler (ADR-0034). Следующий точный фрагмент — P10.3 owner/annual deletion.
-Область: персональный учебный проект для практики backend, геоданных и fullstack-архитектуры.
+Date: September 21, 2026
+Status: agreed architecture draft; P00–P09 and P10.1–P10.2 verified locally, and the DB fragments under separated PostgreSQL roles. D01 resolved in P04.1, D02 resolved for the trusted tenant context, D03 split into a completed local session boundary and a remaining P12 production identity integration, D04 resolved in ADR-0010 with an explicit offline/cross-device boundary, D05 — in ADR-0009, D06 — in P07/ADR-0017–0021; the stream part of D07 is resolved in ADR-0023, the cache part is resolved in ADR-0030. P09.1 fixes metadata/tile HTTP validation, active membership, revision check, and the history-RLS pipeline boundary (ADR-0027); P09.2 implements PostGIS MVT generation and world-edge handling (ADR-0028); P09.3 adds a bounded process LRU and single-flight (ADR-0029); P09.4 serializes cache hits with atomic archive epoch changes (ADR-0030); P09.5 adds a React/Mapbox source lifecycle with bounded polling and fail-closed cleanup (ADR-0031); P09.6 bounds SQL/concurrency/queue/raw tile bytes without holding DB clients during the queue wait (ADR-0032). P10.1 adds a maintenance-only bounded/restart-safe raw purge with a shared summary advisory-lock boundary (ADR-0033); P10.2 adds authoritative eligibility and a restart-first scheduler (ADR-0034). The next exact fragment is P10.3, owner/annual deletion.
+Scope: a personal learning project for practicing backend, geospatial, and full-stack architecture.
 
-Этот документ заменяет фрагменты v0.1–v0.5. При расхождении действует v1.0. Численные ограничения, не заданные пользователем, являются начальными проектными параметрами, подлежащими проверке.
+This document supersedes fragments v0.1–v0.5. In case of discrepancy, v1.0 governs. Numeric limits not specified by the user are initial design parameters, subject to verification.
 
-## 1. Назначение и границы
+## 1. Purpose and boundaries
 
-Пользователь записывает пробежку. Тренер с явным разрешением наблюдает текущую позицию и трек. После завершения сохраняются история, статистика и архивная линия на карте.
+The user records a run. A coach with explicit permission observes the current position and track. After completion, history, statistics, and an archived line on the map are stored.
 
-Организации — беговые клубы. Пробежка принадлежит одному пользователю и одной организации. Членство или роль тренера не открывают чужие координаты автоматически.
+Organizations are running clubs. A run belongs to a single user and a single organization. Membership or a coach role does not automatically expose someone else's coordinates.
 
-Mapbox предоставляет базовую карту. Наш Node.js backend генерирует MVT-тайлы архивных пробежек. Активный трек и маркеры рисуются отдельным динамическим слоем.
+Mapbox provides the base map. Our Node.js backend generates MVT tiles for archived runs. The active track and markers are drawn as a separate dynamic layer.
 
-Включено:
+In scope:
 
-- надёжный приём измерений, повторы и офлайн-догрузка;
-- обработка GPS-качества, история, архивные сводки;
-- изоляция организаций и разрешения на пробежку;
-- live-наблюдение, восстановление состояния;
-- генерация и кэширование приватных тайлов.
+- reliable ingestion of measurements, retries, and offline catch-up;
+- GPS quality processing, history, archive summaries;
+- organization isolation and run permissions;
+- live observation, state recovery;
+- generation and caching of private tiles.
 
-Не включено: routing, dispatch, map matching, чат, удалённое управление записью тренером, фоновые гарантии мобильного GPS, multiregion и высокая доступность.
+Out of scope: routing, dispatch, map matching, chat, remote recording control by a coach, background guarantees for mobile GPS, multiregion, and high availability.
 
-Это практика смежных компетенций вакансии Mapbox Data Tooling, а не копия внутренней архитектуры Mapbox.
+This is practice for competencies adjacent to the Mapbox Data Tooling role, not a copy of Mapbox's internal architecture.
 
-## 2. Требования и расчёт нагрузки
+## 2. Requirements and load estimate
 
-| Параметр | Решение |
+| Parameter | Decision |
 |---|---|
-| Пользователи | До 10; один активный run на пользователя |
-| География | Глобальное хранение WGS84; карта ограничена Web Mercator |
-| Запись | Браузер в foreground или воспроизводимый GPS-симулятор |
-| Источник run | Одно устройство, без передачи записи другому |
-| Частота | Целевая: новая точка раз в 2 с; API устройства не гарантирует интервал |
-| Длительность | До 24 часов с момента создания run на сервере |
-| Пачка | 1–100 уникальных seq; до 64 КиБ JSON |
-| Защитный предел | 50 000 исходных точек на run |
-| Офлайн | Локальный буфер, догрузка до 24 часов после серверного завершения |
-| Raw retention | Целевые 7 дней после finished_at |
-| Архив | 1 год после finished_at, либо до удаления владельцем |
-| Live | Цель p95 ≤ 5 с от свежего измерения до экрана наблюдателя при нормальной связи |
-| Архивная карта | Цель ≤ 60 с после commit опубликованной сводки, в активной вкладке |
-| Размещение | Один регион, один backend-процесс и один PostgreSQL |
-| Бюджет | Цель ≤ €30/мес. без карт; тарифы и конфигурация ещё не выбраны |
+| Users | Up to 10; one active run per user |
+| Geography | Global storage in WGS84; the map is bounded by Web Mercator |
+| Recording | Browser in the foreground, or a reproducible GPS simulator |
+| Run source | A single device; a run cannot be handed off to another device |
+| Frequency | Target: one new point every 2 s; the device API does not guarantee the interval |
+| Duration | Up to 24 hours from the moment the run is created on the server |
+| Batch | 1–100 unique seq; up to 64 KiB JSON |
+| Safety limit | 50,000 raw points per run |
+| Offline | Local buffer, catch-up up to 24 hours after server-side completion |
+| Raw retention | Target 7 days after finished_at |
+| Archive | 1 year after finished_at, or until deleted by the owner |
+| Live | Target p95 ≤ 5 s from a fresh measurement to the observer's screen under normal connectivity |
+| Archive map | Target ≤ 60 s after the commit of a published summary, in an active tab |
+| Deployment | One region, one backend process, one PostgreSQL instance |
+| Budget | Target ≤ €30/month excluding maps; pricing and configuration not yet chosen |
 
-Нагрузка: 10 / 2 = 5 новых точек/с. При часовой ежедневной пробежке каждого пользователя — 18 000 точек/день и 126 000 за неделю. При непрерывной записи — около 3,0 млн за неделю. За год — примерно 3 650 архивных run при обычном сценарии.
+Load: 10 / 2 = 5 new points/s. With a one-hour daily run for each user, that is 18,000 points/day and 126,000 per week. With continuous recording, roughly 3.0 million per week. Over a year, roughly 3,650 archived runs under the ordinary scenario.
 
-Первоначальная оценка 200–400 байт/точку была до окончательного набора индексов. Для планирования v1.0 резервируем 300–600 байт с индексами: около 38–76 МБ на 126 000 точек; WAL, backups, bloat и свободное место считаются отдельно. Проверяем реальное значение через pg_total_relation_size на итоговой схеме.
+An initial estimate of 200–400 bytes/point predated the final index set. For v1.0 planning we reserve 300–600 bytes with indexes: roughly 38–76 MB for 126,000 points; WAL, backups, bloat, and free space are estimated separately. We verify the real figure via pg_total_relation_size on the final schema.
 
-10 наблюдателей, каждый видит всех 10 бегунов: до 100 записей компактного состояния за один цикл. Для SSE это до 5 сообщений/с при цикле 2 с и одном сообщении на наблюдателя. Изменения треков догружаются отдельно.
+10 observers, each watching all 10 runners: up to 100 compact state records per cycle. For SSE that is up to 5 messages/s at a 2 s cycle with one message per observer. Track changes are fetched separately.
 
-Браузерная запись не гарантируется при скрытой вкладке/блокировке экрана. Не создаём новые точки из устаревшего измерения ради соблюдения частоты. Для реального background tracking потребуется мобильный клиент. [Geolocation](https://www.w3.org/TR/geolocation/)
+Browser-based recording is not guaranteed with a hidden tab / locked screen. We do not create new points from a stale measurement just to satisfy the target frequency. Real background tracking would require a mobile client. [Geolocation](https://www.w3.org/TR/geolocation/)
 
-## 3. Архитектура
+## 3. Architecture
 
 ~~~mermaid
 flowchart LR
-    R["React: бегун + локальный буфер"] -->|"HTTPS: команды, GPS"| API["Express 5 API"]
-    C["React: тренер"] -->|"HTTP: snapshots / changes"| API
-    API -->|"SSE: актуальные состояния"| C
+    R["React: runner + local buffer"] -->|"HTTPS: commands, GPS"| API["Express 5 API"]
+    C["React: coach"] -->|"HTTP: snapshots / changes"| API
+    API -->|"SSE: current states"| C
     API --> DB[("PostgreSQL + PostGIS")]
-    W["Фоновые задачи в backend"] --> DB
+    W["Background jobs in backend"] --> DB
     C -->|"Z/X/Y + revision"| T["Tile handler + LRU"]
     T --> DB
-    R --> M["Mapbox: базовая карта"]
+    R --> M["Mapbox: base map"]
     C --> M
 ~~~
 
-Один модульный монолит: Identity/Access, Runs/Ingestion, TrackProcessing, Live, ArchiveTiles, Maintenance. Фоновые задачи — модули того же развёртывания; состояние задач восстанавливается из БД.
+A single modular monolith: Identity/Access, Runs/Ingestion, TrackProcessing, Live, ArchiveTiles, Maintenance. Background jobs are modules of the same deployment; job state is recovered from the DB.
 
-HTTP-адаптер реализован на Express 5. Конфигурация валидируется до создания зависимостей; `pg.Pool`, clock и последующие сервисы передаются явно, без DI-контейнера. Импорт модулей не открывает порт, соединение с БД и таймеры. Выбор заменяет исходный NestJS-каркас согласно ADR-0002 и сделан ради явного lifecycle и учебной прозрачности, а не на основании неподтверждённого выигрыша производительности.
+The HTTP adapter is implemented with Express 5. Configuration is validated before dependencies are created; `pg.Pool`, the clock, and downstream services are passed explicitly, without a DI container. Importing modules does not open a port, a DB connection, or timers. This choice replaces the original NestJS skeleton per ADR-0002 and is made for explicit lifecycle and learning transparency, not on the basis of an unproven performance gain.
 
-Геометрия для MVT обрабатывается в PostGIS, а не переносится целиком в Node.js. LRU хранит готовые бинарные тайлы. Redis, Kafka, Kubernetes и отдельная time-series БД для MVP не нужны.
+Geometry for MVT is processed in PostGIS rather than being fully moved into Node.js. LRU stores ready-made binary tiles. Redis, Kafka, Kubernetes, and a separate time-series database are not needed for the MVP.
 
-## 4. Реестр решений и альтернатив
+## 4. Decision and alternatives registry
 
-| Решение | Обоснование | Что изменит выбор |
+| Decision | Rationale | What would change the choice |
 |---|---|---|
-| PostgreSQL + PostGIS | Ограничения целостности, ACL, SQL и пространственные операции | Существующий Mongo-стек с документными сценариями и меньшей геообработкой |
-| Отдельные immutable точки | Идемпотентность, поздняя доставка, последовательное чтение | Не меняем на растущий массив при росте нагрузки |
-| SSE + HTTP | Наблюдение однонаправленное; запись уже HTTP | Частый двусторонний обмен может оправдать WebSocket |
-| Polling остаётся альтернативой | Для 10 пользователей раз в 2 с достаточно | Предпочтителен, если эксплуатационная простота важнее практики streaming |
-| MVT по запросу в PostGIS | Обработка рядом с данными, индивидуальные права | Очень высокая нагрузка или публичные стабильные наборы → предварительная генерация |
-| LRU процесса | Один backend, небольшой объём | Несколько реплик с выгодой общего кэша → Redis |
-| Полный пересчёт итоговой сводки | Простой контроль поздних точек | Большие run/дорогая обработка → инкрементальные или секционные расчёты |
-| Без run_latest | Индексное получение последних точек дешёво | Большой поток proximity-запросов → отдельная current-position проекция |
+| PostgreSQL + PostGIS | Integrity constraints, ACLs, SQL, and spatial operations | An existing Mongo stack with document-oriented scenarios and less geo-processing |
+| Separate immutable points | Idempotency, late delivery, sequential reads | We do not switch to a growing array as load grows |
+| SSE + HTTP | Observation is one-directional; recording is already HTTP | Frequent bidirectional exchange might justify WebSocket |
+| Polling remains an alternative | Sufficient for 10 users every 2 s | Preferable if operational simplicity matters more than streaming practice |
+| On-demand MVT in PostGIS | Processing near the data, per-request permissions | Very high load or public stable datasets → pre-generation |
+| Process-local LRU | Single backend, small volume | Multiple replicas benefiting from a shared cache → Redis |
+| Full recompute of the final summary | Simple handling of late points | Large runs/expensive processing → incremental or partitioned computation |
+| No run_latest | Indexed retrieval of latest points is cheap | A large volume of proximity queries → a separate current-position projection |
 
-MongoDB 2dsphere подходит для proximity и геообластей. При пяти точках в секунду нет основания объявлять одну БД «быстрее» без измерений. Time-series коллекции MongoDB имеют отдельные ограничения, включая unique indexes и часть geo-операций; их нельзя считать прозрачной заменой обычной коллекции. [MongoDB](https://www.mongodb.com/docs/manual/core/timeseries/timeseries-limitations/)
+MongoDB 2dsphere is suitable for proximity and geo-areas. At five points per second there is no basis for declaring one database "faster" without measurements. MongoDB time-series collections have separate limitations, including unique indexes and some geo-operations; they cannot be treated as a transparent substitute for a regular collection. [MongoDB](https://www.mongodb.com/docs/manual/core/timeseries/timeseries-limitations/)
 
-## 5. Логическая схема
+## 5. Logical schema
 
-UUID используются для идентификаторов, timestamptz — для времени, bigint — для seq/revisions. PostgreSQL `bigint` имеет знаковый 64-битный диапазон; schema CHECK дополнительно требует неотрицательные revisions и положительный seq. Стандартный parser `pg` возвращает `int8` десятичной строкой даже без `::text`; API сохраняет эту форму, а клиент сравнивает через `BigInt`, не лексикографически.
+UUIDs are used for identifiers, timestamptz for time, bigint for seq/revisions. PostgreSQL `bigint` has a signed 64-bit range; a schema CHECK additionally requires non-negative revisions and a positive seq. The standard `pg` parser returns `int8` as a decimal string even without `::text`; the API preserves this form, and the client compares via `BigInt`, not lexicographically.
 
-`segment_id` хранится как PostgreSQL `integer`: физический диапазон от -2 147 483 648 до 2 147 483 647, прикладной CHECK сужает его до 0…2 147 483 647. Координаты PostGIS `geometry` представлены IEEE-754 binary64 (`double precision`): они не являются десятичными fixed-point значениями. Для `Point` и каждой вершины `MultiLineString` проверяются конечность и диапазоны longitude/latitude; nullable `display_geom` остаётся допустимым. `timestamptz(3)` хранит миллисекундную точность, нормализует timezone и округляет более точный вход до ближайшей миллисекунды.
+`segment_id` is stored as a PostgreSQL `integer`: a physical range from -2,147,483,648 to 2,147,483,647, with an application-level CHECK narrowing it to 0…2,147,483,647. PostGIS `geometry` coordinates are represented as IEEE-754 binary64 (`double precision`): they are not decimal fixed-point values. For a `Point` and every vertex of a `MultiLineString`, finiteness and longitude/latitude ranges are checked; a nullable `display_geom` remains valid. `timestamptz(3)` stores millisecond precision, normalizes the timezone, and rounds more precise input to the nearest millisecond.
 
-D01 canonical `PointInput` resolved в P04.1. Объект strict и содержит ровно шесть обязательных non-null полей из §11.1. `seq` принимается как положительная decimal bigint-строка и канонизируется через `BigInt(...).toString()`; `segmentId` — integer 0…2 147 483 647; longitude/latitude — конечные binary64 в диапазонах −180…180/−90…90; `accuracyM` — конечное неотрицательное binary64. JSON numeric spelling исчезает при parsing, `-0` нормализуется в `0`. `recordedAt` принимает только ISO UTC `Z`, округляется до ближайшей миллисекунды с переносом секунды и сериализуется ровно тремя дробными цифрами. Retry equality сравнивает только эти шесть канонических полей; `received_at` и `ingested_revision` не участвуют.
+D01 canonical `PointInput` resolved in P04.1. The object is strict and contains exactly six required non-null fields from §11.1. `seq` is accepted as a positive decimal bigint string and canonicalized via `BigInt(...).toString()`; `segmentId` is an integer 0…2,147,483,647; longitude/latitude are finite binary64 within −180…180/−90…90; `accuracyM` is a finite non-negative binary64. JSON numeric spelling is discarded during parsing, `-0` is normalized to `0`. `recordedAt` accepts only ISO UTC `Z`, is rounded to the nearest millisecond with second carry, and is serialized with exactly three fractional digits. Retry equality compares only these six canonical fields; `received_at` and `ingested_revision` do not participate.
 
-### 5.1 Таблицы
+### 5.1 Tables
 
-| Таблица | Ключевые поля |
+| Table | Key fields |
 |---|---|
-| users | id, идентификатор внешней identity |
+| users | id, external identity identifier |
 | organizations | id, archive_revision |
 | memberships | org_id, user_id, role, active |
 | runs | org_id, id, user_id, status, started_at, created_at, finished_at, data_revision, control_revision, raw_state |
@@ -110,278 +110,278 @@ D01 canonical `PointInput` resolved в P04.1. Объект strict и содер�
 | run_points | org_id, run_id, seq, segment_id, recorded_at, received_at, geom, accuracy_m, ingested_revision |
 | run_summaries | org_id, run_id, source_revision, algorithm_version, display_geom, distance_m, observed_duration_s, quality_stats, computed_at |
 | run_shares | org_id, run_id, grantee_user_id, can_read_history, can_read_live |
-| run_tombstones | org_id, run_id, owner_user_id, deleted_at, expires_at; без координат |
+| run_tombstones | org_id, run_id, owner_user_id, deleted_at, expires_at; no coordinates |
 
-run_tombstones не имеет FK на удаляемый run. Его owner связан с membership той же организации через `ON DELETE RESTRICT`, поэтому деактивация membership сохраняет tombstone. Запись tombstone, проверка фактического владельца удаляемого run, удаление run и изменение archive_revision должны выполняться атомарно будущей P10-транзакцией. Схема сама по себе не запрещает повторный INSERT того же run ID. Экспорт журнала удалений для disaster recovery — отдельная эксплуатационная обязанность, описанная в разделе 12.
+run_tombstones has no FK to the deleted run. Its owner is linked to a membership in the same organization via `ON DELETE RESTRICT`, so deactivating a membership preserves the tombstone. Writing the tombstone, verifying the actual owner of the run being deleted, deleting the run, and changing archive_revision must all happen atomically in a future P10 transaction. The schema alone does not prevent a repeated INSERT of the same run ID. Exporting a deletion log for disaster recovery is a separate operational responsibility, described in section 12.
 
-`run_commands.canonical_payload` и `response` — non-null JSONB objects. Такое хранение не обеспечивает канонизацию, семантическое сравнение повторов, валидацию команды или атомарность с изменением `runs`; это обязанности P03-транзакции.
+`run_commands.canonical_payload` and `response` are non-null JSONB objects. This storage alone does not provide canonicalization, semantic retry comparison, command validation, or atomicity with changes to `runs`; those are responsibilities of the P03 transaction.
 
-raw_state: available → purging → purged. status: recording ↔ paused → finished. finished — терминальное состояние.
+raw_state: available → purging → purged. status: recording ↔ paused → finished. finished is a terminal state.
 
-geom: geometry(Point,4326), longitude первым. display_geom: geometry(MultiLineString,4326), nullable при отсутствии допустимых участков.
+geom: geometry(Point,4326), longitude first. display_geom: geometry(MultiLineString,4326), nullable when there are no valid segments.
 
-Составной PK run_points: (org_id, run_id, seq). Составной FK на runs(org_id,id), ON DELETE CASCADE. Аналогичные связи у shares, summaries и commands.
+Composite PK for run_points: (org_id, run_id, seq). Composite FK to runs(org_id,id), ON DELETE CASCADE. Similar relations for shares, summaries, and commands.
 
-memberships деактивируем вместо удаления связанной записи: выход из клуба не должен каскадно уничтожать пробежки. Деактивация запрещает новый доступ и участие в shares.
+Memberships are deactivated rather than having their related record deleted: leaving a club must not cascade-destroy runs. Deactivation forbids new access and participation in shares.
 
-### 5.2 Версии
+### 5.2 Revisions
 
-| Версия | Область | Когда меняется |
+| Revision | Scope | When it changes |
 |---|---|---|
-| data_revision | Один run | Новые точки или изменение статуса |
-| control_revision | Один run | Принятая команда жизненного цикла |
-| ingested_revision | Одна точка | Фиксируется при первой вставке; неизменна |
-| source_revision | Одна сводка | Версия run, по которой выполнен расчёт |
-| archive_revision | Организация | Публикация сводки, удаление, изменения archive ACL/membership |
-| algorithm_version | Обработка трека | Изменение правил фильтрации/геометрии |
+| data_revision | A single run | New points or a status change |
+| control_revision | A single run | An accepted lifecycle command |
+| ingested_revision | A single point | Fixed at first insert; immutable |
+| source_revision | A single summary | The run version the calculation was based on |
+| archive_revision | Organization | Summary publication, deletion, archive ACL/membership changes |
+| algorithm_version | Track processing | A change to filtering/geometry rules |
 
-control_revision отделена от data_revision: GPS-записи не должны постоянно конфликтовать с pause/resume.
+control_revision is separated from data_revision: GPS records must not constantly conflict with pause/resume.
 
-### 5.3 Индексы
+### 5.3 Indexes
 
 - runs: PK (org_id,id); (org_id,user_id,started_at DESC,id DESC).
 - runs: partial UNIQUE(user_id) WHERE status IN ('recording','paused').
 - runs: (finished_at) WHERE status='finished'.
 - run_points: PK (org_id,run_id,seq).
-- run_points: (org_id,run_id,ingested_revision,seq) для восстановления изменений.
+- run_points: (org_id,run_id,ingested_revision,seq) for reading back changes.
 - run_summaries: PK (org_id,run_id), GiST(display_geom).
 - run_shares: PK (org_id,run_id,grantee_user_id).
 - run_commands: PK (org_id,run_id,command_id).
-- run_tombstones: PK (org_id,run_id); (expires_at) для будущей очистки.
+- run_tombstones: PK (org_id,run_id); (expires_at) for future cleanup.
 
-На исходных точках нет GiST. История читается по run, не по произвольной области мира.
+There is no GiST on raw points. History is read by run, not by an arbitrary area of the world.
 
-## 6. Запись и жизненный цикл
+## 6. Recording and lifecycle
 
-### 6.1 Создание и команды
+### 6.1 Creation and commands
 
-Начало записи требует успешного создания run онлайн; офлайн-старт нового run не входит в MVP. После создания устройство может буферизовать GPS и команды локально.
+Starting a recording requires successfully creating a run online; offline creation of a new run is out of scope for the MVP. After creation, the device may buffer GPS and commands locally.
 
-Клиент создаёт runId и commandId один раз и сохраняет до подтверждения. Повтор создания с тем же id и исходным payload возвращает существующий run; изменение исходного payload — конфликт. Идентификаторы удалённых run не переиспользуются: tombstone без координат хранится в пределах годового срока.
+The client creates runId and commandId once and stores them until confirmed. Retrying creation with the same id and the original payload returns the existing run; a changed original payload is a conflict. Deleted run identifiers are not reused: a coordinate-free tombstone is retained for up to one year.
 
-Допустимые команды: pause, resume, finish. Команда содержит expectedControlRevision и уникальный commandId. Проверка дубликата команды предшествует проверке expectedControlRevision. Повтор возвращает сохранённый ответ; новый конфликтующий переход — 409.
+Allowed commands: pause, resume, finish. A command carries expectedControlRevision and a unique commandId. The duplicate-command check precedes the expectedControlRevision check. A retry returns the stored response; a new conflicting transition returns 409.
 
-Команды из локальной очереди отправляются последовательно. После resume клиент увеличивает segment_id; после разрыва измерений также начинает новый сегмент. segment_id — метка группировки, не доказательство серверного времени паузы.
+Commands from the local queue are sent sequentially. After resume, the client increments segment_id; after a measurement gap it also starts a new segment. segment_id is a grouping label, not proof of server-side pause duration.
 
-Автозавершение выполняется не позднее ближайшего цикла maintenance после created_at + 24 часа. finished_at устанавливается сервером один раз. Оно определяет окна догрузки/retention, но не используется как точная длительность реальной пробежки.
+Auto-finish runs no later than the nearest maintenance cycle after created_at + 24 hours. finished_at is set by the server exactly once. It determines the catch-up/retention windows, but is not used as the precise duration of the actual run.
 
-### 6.2 Транзакция ingestion
+### 6.2 The ingestion transaction
 
-1. Проверить сессию, организацию, владение run и размер тела.
-2. Проверить диапазоны координат, конечность чисел, seq > 0, segment_id ≥ 0, accuracy_m ≥ 0.
-3. Начать READ COMMITTED; заблокировать runs через FOR UPDATE.
-4. Проверить raw_state и сравнить существующие seq с каноническим payload.
-5. Для новых точек проверить окно догрузки и лимит общего числа точек.
-6. Если есть новые точки, увеличить data_revision один раз; вставить их с этой ingested_revision.
-7. COMMIT, затем ACK.
+1. Verify the session, organization, run ownership, and body size.
+2. Verify coordinate ranges, number finiteness, seq > 0, segment_id ≥ 0, accuracy_m ≥ 0.
+3. Begin READ COMMITTED; lock the run row via FOR UPDATE.
+4. Check raw_state and compare existing seq against the canonical payload.
+5. For new points, check the catch-up window and the total point-count limit.
+6. If there are new points, bump data_revision once; insert them with this ingested_revision.
+7. COMMIT, then ACK.
 
-Одинаковый ключ с другим исходным содержимым отклоняет всю пачку. received_at и ingested_revision не участвуют в сравнении клиентского payload. Один ON CONFLICT DO NOTHING недостаточен.
+The same key with different source content rejects the whole batch. received_at and ingested_revision do not participate in comparing the client payload. A single ON CONFLICT DO NOTHING is not sufficient.
 
-После закрытия окна догрузки подтверждаем точные повторы, пока исходные строки ещё доступны; новые точки отклоняем. После начала purging не обещаем распознать старый повтор — возвращаем RAW_HISTORY_UNAVAILABLE.
+After the catch-up window closes, we confirm exact retries while the raw rows are still available; new points are rejected. After purging has begun, we no longer promise to recognize an old retry — we return RAW_HISTORY_UNAVAILABLE.
 
-Пауза/finish не отклоняют ранее записанные точки только из-за текущего статуса. Окно догрузки регулируется серверным временем; оно не гарантирует достоверность заявленных устройством timestamps.
+Pause/finish do not reject previously recorded points solely due to the current status. The catch-up window is governed by server time; it does not guarantee the trustworthiness of the device's claimed timestamps.
 
-Время устройства сохраняем как исходное. Для live пригодности допускаем только recorded_at не старше 15 с и не более чем на 5 с впереди серверного времени. Нарушение этого условия не уничтожает офлайн-историю.
+We store device time as-is. For live eligibility we only accept a recorded_at no older than 15 s and no more than 5 s ahead of server time. Violating this condition does not destroy the offline history.
 
-### 6.3 Гарантия сохранения
+### 6.3 Durability guarantee
 
-Локальный буфер в IndexedDB хранит измерение и seq до ACK конкретной пачки. Повтор — с backoff и jitter; постоянная ошибка 4xx не повторяется бесконечно.
+A local IndexedDB buffer stores the measurement and seq until a specific batch's ACK. Retries use backoff and jitter; a permanent 4xx error is not retried indefinitely.
 
-В P05.5 Geolocation и детерминированный симулятор используют единый foreground `CaptureSource`. Начало, resume и восстановление записи атомарно выделяют новый локальный `segment_id`; callbacks сериализуются и принимаются только текущим поколением capture. Проверка owner/fencing token выполняется повторно в той же IndexedDB-транзакции, которая выделяет seq и сохраняет точку, поэтому устаревшая вкладка не может записать измерение после lease takeover. Офлайн не останавливает capture, но скрытая вкладка/блокировка экрана не получают background-гарантий.
+In P05.5, Geolocation and the deterministic simulator use a single foreground `CaptureSource`. Starting, resuming, and recovering a recording atomically allocate a new local `segment_id`; callbacks are serialized and accepted only by the current capture generation. The owner/fencing-token check is re-performed within the same IndexedDB transaction that allocates the seq and stores the point, so a stale tab cannot write a measurement after a lease takeover. Being offline does not stop capture, but a hidden tab / locked screen gets no background guarantees.
 
-ACK означает commit PostgreSQL при fsync=on и synchronous_commit=on. Это защищает от обычного сбоя процесса при исправном постоянном хранилище. Потеря диска/узла без реплики может потерять подтверждённые данные; резервное копирование имеет отдельный RPO. [PostgreSQL WAL](https://www.postgresql.org/docs/current/runtime-config-wal.html)
+ACK means a PostgreSQL commit under fsync=on and synchronous_commit=on. This protects against an ordinary process crash on healthy persistent storage. Disk/node loss without a replica can lose confirmed data; backups have a separate RPO. [PostgreSQL WAL](https://www.postgresql.org/docs/current/runtime-config-wal.html)
 
-## 7. Обработка геоданных
+## 7. Geospatial processing
 
-Порядок трека определяется seq; recorded_at используется для интервалов. received_at не разрывает трек после офлайн-догрузки.
+Track order is determined by seq; recorded_at is used for intervals. received_at does not break the track after an offline catch-up.
 
-Допустимое ребро между соседними по seq точками требует:
+A valid edge between seq-adjacent points requires:
 
-- последовательных seq и одинакового segment_id;
-- accuracy_m ≤ 30 у обеих точек;
-- 0 < разница времени ≤ 10 с;
-- геодезической скорости ≤ 12 м/с.
+- consecutive seq and the same segment_id;
+- accuracy_m ≤ 30 for both points;
+- 0 < time difference ≤ 10 s;
+- geodesic speed ≤ 12 m/s.
 
-Пороги — параметры algorithm_version, не обещание точности GPS. Недопустимая точка/ребро не создаёт автоматического соединения через пропуск. В P06.1 `app_private.current_track_algorithm_version()` возвращает `v1`, а единый `app_private.evaluate_track_edge(...)` выполняет PostGIS/geography-проверку для будущих summary и live-track запросов. Неизвестная версия отклоняется; primary rejection reason выбирается в порядке seq gap → segment break → poor accuracy → nonpositive recorded-time delta → excessive time gap → excessive speed (ADR-0012).
+The thresholds are algorithm_version parameters, not a promise of GPS accuracy. An invalid point/edge does not create an automatic connection by skipping over it. In P06.1, `app_private.current_track_algorithm_version()` returns `v1`, and a single `app_private.evaluate_track_edge(...)` performs the PostGIS/geography check for both future summary and live-track queries. An unknown version is rejected; the primary rejection reason is chosen in the order seq gap → segment break → poor accuracy → nonpositive recorded-time delta → excessive time gap → excessive speed (ADR-0012).
 
-distance_m — сумма ST_Distance(a.geom::geography,b.geom::geography) допустимых рёбер, до упрощения. observed_duration_s — сумма их временных интервалов; не называем её moving time. Высоту не учитываем. [ST_Distance](https://postgis.net/docs/ST_Distance.html)
+distance_m is the sum of ST_Distance(a.geom::geography,b.geom::geography) over valid edges, before simplification. observed_duration_s is the sum of their time intervals; we do not call it moving time. Elevation is not accounted for. [ST_Distance](https://postgis.net/docs/ST_Distance.html)
 
-Сохраняем counts исходных точек, плохой точности и разрывов по причинам. `acceptedPointCount` считает уникальные концы хотя бы одного допустимого ребра; изолированные точки не становятся accepted. При отсутствии допустимых рёбер distance и observed duration равны 0, а `insufficientData=true`.
+We store counts of raw points, poor accuracy, and gaps by cause. `acceptedPointCount` counts unique endpoints of at least one valid edge; isolated points do not become accepted. When there are no valid edges, distance and observed duration are 0, and `insufficientData=true`.
 
-В P06.2 `app_private.calculate_run_summary(org, run, sourceRevision, algorithmVersion)` читает только точки с `ingested_revision <= sourceRevision`, применяет единый evaluator к соседям в порядке seq и возвращает metrics, полный `QualityStats` и несжатые допустимые цепочки как nullable `MultiLineString`. Функция доступна maintenance-роли без прямого SELECT на таблицы; она не публикует summary и не меняет archive revision (ADR-0013).
+In P06.2, `app_private.calculate_run_summary(org, run, sourceRevision, algorithmVersion)` reads only points with `ingested_revision <= sourceRevision`, applies the single evaluator to seq-ordered neighbors, and returns the metrics, the full `QualityStats`, and the uncompressed valid chains as a nullable `MultiLineString`. The function is available to the maintenance role without direct SELECT on the tables; it does not publish the summary and does not change the archive revision (ADR-0013).
 
-Из допустимых цепочек строим MultiLineString. Одиночные точки не становятся фиктивными линиями. Для архива — Douglas–Peucker с начальным допуском около 5 м в локальной метрической проекции:
+We build a MultiLineString from the valid chains. Single points do not become fictitious lines. For the archive, we use Douglas–Peucker with an initial tolerance of roughly 5 m in a local metric projection:
 
-- части до 20 км по накопленной длине, с общей граничной точкой;
-- локальная азимутальная эквидистантная проекция;
-- упрощение с сохранением концов, обратное преобразование в 4326;
-- нормализация/разделение при пересечении антимеридиана.
+- segments up to 20 km by cumulative length, sharing a boundary point;
+- a local azimuthal-equidistant projection;
+- endpoint-preserving simplification, then transformed back to 4326;
+- normalization/splitting at the antimeridian.
 
-Это инженерное приближение для отображения, не строгая глобальная метрическая гарантия. Web Mercator не используется для точной дистанции. ST_Simplify измеряет tolerance в единицах входной SRS. [ST_Simplify](https://postgis.net/docs/ST_Simplify.html), [ST_Transform](https://postgis.net/docs/ST_Transform.html)
+This is an engineering approximation for display, not a strict global metric guarantee. Web Mercator is not used for precise distance. ST_Simplify measures tolerance in the units of the input SRS. [ST_Simplify](https://postgis.net/docs/ST_Simplify.html), [ST_Transform](https://postgis.net/docs/ST_Transform.html)
 
-В P06.3 `app_private.simplify_display_geometry(acceptedChains, algorithmVersion)` реализует этот pipeline как отдельную pure maintenance capability. Cumulative geodesic M-measure делит каждую цепочку на части не длиннее 20 км с общей граничной точкой; каждая часть упрощается с tolerance 5 м в локальной azimuthal-equidistant проекции. После обратного преобразования долготы разворачиваются в непрерывный ряд, пересечения каждой границы `180 + 360k` разделяются, а компоненты переводятся обратно в диапазон `[-180, 180]`. Нулевые display-компоненты отбрасываются; metrics из P06.2 не пересчитываются по упрощённой геометрии (ADR-0014).
+In P06.3, `app_private.simplify_display_geometry(acceptedChains, algorithmVersion)` implements this pipeline as a separate pure maintenance capability. A cumulative geodesic M-measure splits each chain into segments no longer than 20 km sharing a boundary point; each segment is simplified with a 5 m tolerance in a local azimuthal-equidistant projection. After transforming back, longitudes are unwrapped into a continuous sequence, crossings of each `180 + 360k` boundary are split, and the components are mapped back into the `[-180, 180]` range. Zero-length display components are discarded; the P06.2 metrics are not recomputed from the simplified geometry (ADR-0014).
 
-Полный пересчёт завершённых run запускается раз в минуту:
+A full recompute of finished runs runs once a minute:
 
-1. Зафиксировать source revision, затем прочитать revision-bound точки и выполнить calculation/simplification в одном коротком statement snapshot.
-2. Рассчитать результат без удержания блокировки run.
-3. При публикации заблокировать organization, затем run; сверить revision, состояние и отсутствие удаления.
-4. Записать summary и увеличить archive_revision в одной транзакции.
-5. При расхождении версии отбросить результат и повторить позже.
+1. Fix the source revision, then read revision-bound points and perform the calculation/simplification within a single short statement snapshot.
+2. Compute the result without holding a lock on the run.
+3. When publishing, lock the organization, then the run; recheck the revision, state, and the absence of a deletion.
+4. Write the summary and bump archive_revision in a single transaction.
+5. On a revision mismatch, discard the result and retry later.
 
-P06.4 реализует этот protocol через maintenance-only `find_stale_run_summaries` и `publish_run_summary`. Расчёт и упрощение выполняются одним materialized statement, поэтому используют один MVCC snapshot без run lock. Публикация блокирует organization, затем run, и под блокировками повторно проверяет status/raw state, точный `data_revision`, отсутствие tombstone и уже актуальной summary. Успешный upsert и увеличение `archive_revision` выполняются атомарно; stale/deleted/duplicate результат не меняет ни summary, ни revision. Точная v1-форма `QualityStats` проверяется publication capability, а table CHECK остаётся version-agnostic object guard (ADR-0015).
+P06.4 implements this protocol via the maintenance-only `find_stale_run_summaries` and `publish_run_summary`. Calculation and simplification run in a single materialized statement, so they use one MVCC snapshot without a run lock. Publication locks the organization, then the run, and under those locks rechecks status/raw state, the exact `data_revision`, the absence of a tombstone, and whether a summary is already current. The successful upsert and the archive_revision bump happen atomically; a stale/deleted/duplicate result changes neither the summary nor the revision. The exact v1 shape of `QualityStats` is checked by the publication capability, while the table CHECK remains a version-agnostic object guard (ADR-0015).
 
-P06.5 добавляет `claim_stale_run_summary`: каждый worker в явной транзакции получает transaction-scoped advisory claim для пары organization/run и пропускает уже занятые candidates. Claim удерживается через calculation/publication, но не блокирует строки organization/run; row locks появляются только внутри прежней publication capability в порядке organization → run. `RUN_SUMMARY_CONCURRENCY` ограничивает один process 1–8 параллельными workers (default 2), цикл ожидает settlement всех workers, а maintenance pool имеет один дополнительный slot для auto-finish. Commit/rollback/connection loss автоматически освобождают claim; revision/state checks остаются correctness fence (ADR-0016).
+P06.5 adds `claim_stale_run_summary`: each worker obtains a transaction-scoped advisory claim for an organization/run pair in an explicit transaction and skips already-claimed candidates. The claim is held through calculation/publication but does not lock the organization/run rows; row locks appear only inside the earlier publication capability, in organization → run order. `RUN_SUMMARY_CONCURRENCY` bounds a single process to 1–8 parallel workers (default 2), the cycle waits for all workers to settle, and the maintenance pool has one extra slot for auto-finish. Commit/rollback/connection loss automatically release the claim; the revision/state checks remain the correctness fence (ADR-0016).
 
-Все операции, которым нужны обе блокировки, соблюдают порядок organization → run. Ingestion блокирует только run и никогда затем не запрашивает organization lock.
+All operations that need both locks respect the organization → run order. Ingestion locks only the run and never subsequently requests an organization lock.
 
-## 8. Чтение, права и согласованность
+## 8. Reads, permissions, and consistency
 
-Владелец читает свой run. Для чужого требуется активное membership и явный grant:
+An owner reads their own run. For someone else's run, an active membership and an explicit grant are required:
 
-- can_read_live — незавершённый run, включая его текущий трек;
-- can_read_history — история, сводка и архивные тайлы;
-- изменение точек/статуса — только владелец;
-- shares изменяет только владелец.
+- can_read_live — an unfinished run, including its current track;
+- can_read_history — history, the summary, and archive tiles;
+- modifying points/status — owner only;
+- shares are modified by the owner only.
 
-RLS включается на всех tenant-owned таблицах. Runtime-role не владелец, не superuser, без BYPASSRLS. Tenant/user context задаётся сервером transaction-local после аутентификации. API остаётся доверенной границей; клиент не подключается к PostgreSQL.
+RLS is enabled on all tenant-owned tables. The runtime role is not the owner, not a superuser, and has no BYPASSRLS. The tenant/user context is set by the server transaction-locally after authentication. The API remains the trusted boundary; the client does not connect directly to PostgreSQL.
 
-ACL применяется к точкам/сводкам также при прямом запросе, а не только при чтении runs. Политики проверяются интеграционно под реальной runtime-role. Maintenance использует отдельную ограниченную роль. [PostgreSQL RLS](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
+The ACL applies to points/summaries even on a direct query, not only when reading runs. Policies are verified via integration tests under the real runtime role. Maintenance uses a separate restricted role. [PostgreSQL RLS](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
 
-P02A фиксирует минимальную матрицу до появления run/share API: runtime читает только собственную строку `users`, текущую `organizations` и собственную активную `memberships`, причём все три требуют активного membership для пары transaction-local user/org. DML этих таблиц runtime-role не выдан; fixtures выполняются migration/object owner. Пустой или некорректный context возвращает ноль строк. `app_private.has_active_membership()` — узкий `SECURITY DEFINER`: он возвращает только boolean, принадлежит object owner, имеет фиксированный `search_path`, закрыт от PUBLIC и исполняется только runtime-role. Это устраняет рекурсивное обращение policy `memberships` к самой себе, но не заменяет RLS.
+P02A fixes the minimal matrix before the run/share API exists: the runtime reads only its own `users` row, the current `organizations` row, and its own active `memberships`, and all three require an active membership for the transaction-local user/org pair. The runtime role has no DML granted on these tables; fixtures are executed by the migration/object owner. An empty or invalid context returns zero rows. `app_private.has_active_membership()` is a narrow `SECURITY DEFINER`: it returns only a boolean, is owned by the object owner, has a fixed `search_path`, is revoked from PUBLIC, and is executed only by the runtime role. This eliminates the `memberships` policy's recursive self-reference, but does not replace RLS.
 
-Роли P02A: privileged bootstrap создаёт extension/roles и не используется API; `running_tracker_owner` выполняет миграции и владеет application objects; `running_tracker_runtime` подключается из API; `running_tracker_maintenance` пока имеет только CONNECT, без table/DDL прав. Возможность runtime-role вызвать `set_config` не защищает от произвольного SQL с украденными DB credentials. P03.1 теперь контролирует HTTP context: `userId` берётся только из проверенной server-side session, client-selected `orgId` валидируется, а active membership повторно проверяется внутри той же runtime-role транзакции до прикладного callback. Это локальная development/test boundary; production identity/provider остаётся P12.
+P02A roles: the privileged bootstrap creates extensions/roles and is not used by the API; `running_tracker_owner` runs migrations and owns application objects; `running_tracker_runtime` is what the API connects as; `running_tracker_maintenance` currently has only CONNECT, with no table/DDL privileges. The runtime role's ability to call `set_config` does not protect against arbitrary SQL with stolen DB credentials. P03.1 now controls the HTTP context: `userId` is taken only from a verified server-side session, the client-selected `orgId` is validated, and active membership is rechecked inside the same runtime-role transaction before the application callback runs. This is a local development/test boundary; the production identity/provider remains P12.
 
-P02B storage/ACL описана ADR-0004/0005/0006. Live-grant действует только для `recording`/`paused`, history-grant — только для `finished`; роль coach сама доступа не добавляет. Взаимная рекурсия policies исключена узкими boolean `SECURITY DEFINER` predicates с фиксированным `search_path`; PUBLIC EXECUTE закрыт. `run_points` наследует текущий parent ACL и разрешает owner INSERT без UPDATE/DELETE; `run_summaries` доступна runtime только для чтения истории. `run_commands` допускает SELECT/INSERT только активному владельцу parent run и не даёт runtime UPDATE/DELETE; grants не раскрывают command payload/response. `run_tombstones` доступна runtime только для SELECT собственного marker при активном membership и не обращается к уже удалённому run. Direct SELECT и JOIN, grant/status combinations, revocation, invalid context и denied mutations проверены под реальной runtime-role. Forward-only миграция `0004` проверяет каждую вершину `display_geom`, а `0005` добавляет commands/tombstones. D02 решён в границах доверенного transaction-local context; HTTP authentication/session boundary остаётся P03.
+P02B storage/ACL is described in ADR-0004/0005/0006. A live grant applies only to `recording`/`paused`, a history grant only to `finished`; the coach role by itself grants no access. Mutual recursion between policies is eliminated by narrow boolean `SECURITY DEFINER` predicates with a fixed `search_path`; PUBLIC EXECUTE is revoked. `run_points` inherits its current parent ACL and allows owner INSERT without UPDATE/DELETE; `run_summaries` is available to the runtime for history reads only. `run_commands` allows SELECT/INSERT only to the active owner of the parent run and grants the runtime no UPDATE/DELETE; the grants do not expose command payload/response. `run_tombstones` is available to the runtime only for SELECT of its own marker under active membership, and does not touch an already-deleted run. Direct SELECT and JOIN, grant/status combinations, revocation, invalid context, and denied mutations are verified under the real runtime role. The forward-only migration `0004` checks every vertex of `display_geom`, and `0005` adds commands/tombstones. D02 is resolved within the bounds of the trusted transaction-local context; the HTTP authentication/session boundary remains P03.
 
-История: индексный проход по (org_id,run_id,seq), страницы до 1 000 точек. Для raw replay курсор содержит data_revision; изменение версии требует перезапуска чтения. Для live используется иной стабильный протокол из раздела 9.
+History: an indexed pass over (org_id,run_id,seq), pages up to 1,000 points. For raw replay, the cursor contains data_revision; a version change requires restarting the read. Live uses a different stable protocol, described in section 9.
 
-Архивная область: ST_Intersects(display_geom,envelope4326), ACL и период до pagination. До 100 run на странице, курсор (started_at,id). Семантика — пересечение отображаемой упрощённой линии, не доказательство фактического нахождения в точке.
+Archive area: ST_Intersects(display_geom,envelope4326), ACL, and the period, before pagination. Up to 100 runs per page, cursor (started_at,id). The semantics are an intersection of the displayed simplified line, not proof of actually being at that point.
 
-Текущие позиции в радиусе: доступные recording run → две последние точки через LATERAL → качество последнего ребра и свежесть → ST_DWithin(...::geography,...,radius_m). До 10 кандидатов; без пространственного индекса current positions. Не заменяем непригодную последнюю точку старой, выдавая её за свежую.
+Current positions within a radius: eligible recording runs → the two most recent points via LATERAL → the quality of the latest edge and freshness → ST_DWithin(...::geography,...,radius_m). Up to 10 candidates; no spatial index on current positions. We do not substitute an unusable latest point with an older one and present it as fresh.
 
-## 9. Live и восстановление
+## 9. Live and recovery
 
-### 9.1 SSE состояния
+### 9.1 SSE state
 
-Одна вкладка открывает один GET /api/orgs/{orgId}/live. Аутентификация — same-origin Secure/HttpOnly session cookie. State-changing HTTP защищены Origin/CSRF-проверкой; токены не размещаются в URL.
+A single tab opens a single GET /api/orgs/{orgId}/live. Authentication is a same-origin Secure/HttpOnly session cookie. State-changing HTTP requests are protected by an Origin/CSRF check; tokens are never placed in the URL.
 
-SSE: text/event-stream, private/no-store, отключённая proxy buffering, heartbeat каждые 15 с, HTTP/2 на внешнем входе. Нативный EventSource автоматически переподключается, но не создаёт durable replay. [SSE](https://html.spec.whatwg.org/multipage/server-sent-events.html)
+SSE: text/event-stream, private/no-store, proxy buffering disabled, a heartbeat every 15 s, HTTP/2 at the external edge. The native EventSource automatically reconnects, but does not create a durable replay. [SSE](https://html.spec.whatwg.org/multipage/server-sent-events.html)
 
-Первое live.state — сразу. Затем общий backend-цикл раз в 2 с получает revisions, последние точки и актуальные права, группируя запросы. SSE-подключение не удерживает DB connection/транзакцию всё время.
+The first live.state is sent immediately. Then a shared backend cycle runs every 2 s, fetching revisions, the latest points, and current permissions, batching the queries. An SSE connection does not hold a DB connection/transaction the whole time.
 
-P08.1 реализует этот transport одним process-local hub: initial state читается через короткую runtime-role tenant transaction до открытия stream, а общий неперекрывающийся цикл группирует соединения по user/organization и ограничивает параллелизм чтений. Stream имеет собственные `streamId`/`sequence`; heartbeat отправляется SSE-комментарием и sequence не меняет. Connection/opening count ограничен конфигурацией (ADR-0022).
+P08.1 implements this transport as a single process-local hub: the initial state is read via a short runtime-role tenant transaction before the stream opens, and a shared non-overlapping cycle groups connections by user/organization and bounds read concurrency. A stream has its own `streamId`/`sequence`; the heartbeat is sent as an SSE comment and does not change the sequence. The connection/opening count is bounded by configuration (ADR-0022).
 
-Сообщение — полный компактный список доступных незавершённых run. При исчезновении run клиент убирает его из live-слоя. Если доступ к истории остался, отдельно загружает завершённый run.
+A message is the full compact list of accessible unfinished runs. When a run disappears, the client removes it from the live layer. If access to history remains, it loads the finished run separately.
 
-При backpressure хранится только последнее ожидающее состояние на соединение; длительно заблокированное соединение закрывается. Число одновременных соединений ограничивается. Перед новой отправкой учитываем обнаруженные изменения прав и отменяем ещё не отправленное устаревшее состояние. Уже отправленные данные отозвать невозможно.
+Under backpressure, only the latest pending state is kept per connection; a connection blocked for too long is closed. The number of concurrent connections is bounded. Before a new send, we account for detected permission changes and cancel any not-yet-sent stale state. Data already sent cannot be recalled.
 
-P08.1 при `response.write=false` сохраняет один newest pending state, заменяет предыдущий и закрывает stream по bounded timeout; уже принятый Node writable buffer не считается replay queue. P08.2 перепроверяет session store до и после initial read, перед poll/publish/drain/heartbeat и закрывает stream точным expiry timer. Membership denial закрывает соответствующую user/org группу и очищает pending state; grant-filtered full state заменяет pending state. Authorization checkpoint — snapshot live-state statement внутри короткой poll-транзакции: revoke после snapshot обнаруживается следующим циклом, а уже переданные байты не отзываются (ADR-0023).
+When `response.write=false`, P08.1 keeps a single newest pending state, replaces the previous one, and closes the stream after a bounded timeout; an already-accepted Node writable buffer is not considered a replay queue. P08.2 rechecks the session store before and after the initial read, before poll/publish/drain/heartbeat, and closes the stream at an exact expiry timer. A membership denial closes the corresponding user/org group and clears pending state; a grant-filtered full state replaces the pending state. The authorization checkpoint is the live-state snapshot statement inside the short poll transaction: a revoke after the snapshot is detected on the next cycle, and already-delivered bytes are not revoked (ADR-0023).
 
-Позиция confirmed только при допустимом последнем ребре; при одной пригодной точке — unconfirmed; при плохой точности/времени — null. Возраст клиент рассчитывает относительно serverTime; потеря GPS отмечается даже при работающем SSE.
+A position is confirmed only with a valid last edge; with a single usable point it is unconfirmed; with poor accuracy/timing it is null. The client computes age relative to serverTime; a GPS loss is flagged even with a working SSE connection.
 
-При position=null клиент может оставить ранее показанный маркер как явно устаревший last-known position, но не считать его текущим. При исчезновении run из разрешённого списка удаляются и текущие, и last-known данные этой пробежки.
+With position=null, the client may keep the previously shown marker as an explicitly stale last-known position, but must not treat it as current. When a run disappears from the allowed list, both the current and last-known data for that run are removed.
 
-P08.3 реализует browser coach state как полную замену по каждому принятому `live.state`. Последовательность сравнивается только внутри одного `streamId`; исчезнувший run немедленно теряет marker, last-known coordinate и selection. Freshness вычисляется от `serverTime` плюс monotonic browser elapsed time: initial threshold 10 секунд переводит даже current position в stale без нового сообщения. `position=null` сохраняет предыдущую координату только как stale. Transport/contract failure закрывает EventSource и очищает состояние; ручной reconnect не создаёт бесконечного auth retry. Явный набор выбранных run готовит границу для P08.4, но P08.3 не загружает geometry и не требует map token (ADR-0024).
+P08.3 implements the browser coach state as a full replacement on every accepted `live.state`. Sequence is compared only within a single `streamId`; a disappeared run immediately loses its marker, last-known coordinate, and selection. Freshness is computed from `serverTime` plus monotonic browser elapsed time: an initial threshold of 10 seconds moves even the current position to stale without a new message. `position=null` retains the previous coordinate only as stale. A transport/contract failure closes the EventSource and clears the state; a manual reconnect does not create an infinite auth retry. An explicit set of selected runs prepares the boundary for P08.4, but P08.3 does not load geometry and requires no map token (ADR-0024).
 
-P08.4 связывает только явно выбранные и заново авторизованные run с P07.5 `LiveTrackStore`. SSE revisions сворачиваются к максимальной цели при одном in-flight chain на run; geometry остаётся атомарной до terminal page. Deselect, full-state omission/revoke, смена identity/org и disconnect abort-ят HTTP и evict-ят cached track. При смене algorithm version начинается fresh snapshot. Transport reconnect ограничен паузами 1/2/4 секунды и известным session expiry; до нового authorization-filtered full state marker, selection и geometry скрыты. Затем прежний selection intent пересекается с текущим разрешённым набором и восстанавливается через fresh snapshot, без `Last-Event-ID` replay (ADR-0025).
+P08.4 links only explicitly selected and freshly re-authorized runs to the P07.5 `LiveTrackStore`. SSE revisions collapse to the greatest target with one in-flight chain per run; geometry remains atomic up to the terminal page. Deselection, full-state omission/revoke, an identity/org change, and disconnect all abort the HTTP request and evict the cached track. On an algorithm-version change, a fresh snapshot begins. Transport reconnect is bounded by 1/2/4-second pauses and a known session expiry; until a new authorization-filtered full state arrives, the marker, selection, and geometry are hidden. The prior selection intent is then intersected with the currently allowed set and restored via a fresh snapshot, without `Last-Event-ID` replay (ADR-0025).
 
-P08.5 фиксирует проверяемый внешний transport: pinned Nginx завершает TLS 1.2/1.3 и HTTP/2, обслуживает production build React и передаёт `/api` во внутренний Express по HTTP/1.1. Для `/api/orgs/*/live` отключены proxy buffering/cache/gzip/upstream compression и retry; `proxy_read_timeout=75s`, send timeouts равны 30s, а `X-Accel-Buffering: no` передаётся клиенту. Same-origin Secure/HttpOnly cookie остаётся единственным credential stream. Локальный сертификат генерируется на семь дней в gitignored каталоге; managed TLS/secrets/production identity остаются P12 (ADR-0026).
+P08.5 fixes a verifiable external transport: a pinned Nginx terminates TLS 1.2/1.3 and HTTP/2, serves the production React build, and forwards `/api` to the internal Express over HTTP/1.1. For `/api/orgs/*/live`, proxy buffering/cache/gzip/upstream compression and retry are disabled; `proxy_read_timeout=75s`, send timeouts are 30s, and `X-Accel-Buffering: no` is passed to the client. The same-origin Secure/HttpOnly cookie remains the sole credential channel. A local certificate is generated for seven days in a gitignored directory; managed TLS/secrets/production identity remain P12 (ADR-0026).
 
-### 9.2 Snapshot и changes
+### 9.2 Snapshot and changes
 
-SSE сообщает dataRevision, но не несёт всю историю. Клиент синхронизирует только треки, которые отображает.
+SSE reports dataRevision but does not carry the full history. The client synchronizes only the tracks it displays.
 
-Initial live-track фиксирует R и выдаёт точки с ingested_revision ≤ R. Пагинация сортируется по seq; cursor подписан сервером, включает org/run/user, R, algorithmVersion, последнюю seq и срок действия 10 минут.
+An initial live-track fixes R and returns points with ingested_revision ≤ R. Pagination is sorted by seq; the cursor is server-signed and includes org/run/user, R, algorithmVersion, the last seq, and a 10-minute expiry.
 
-В P07.1 первый HTTP-запрос фиксирует `runs.data_revision` как R в том же SQL statement snapshot, который выбирает страницу; продолжения читают только `ingested_revision <= R` и поэтому не удерживают транзакцию между запросами. Исторический временный cursor P07.1 связывал org/run, operation, R, algorithmVersion и last seq; P07.4 заменил его подписанным user-bound envelope с expiry. Каждый запрос всё равно заново проходит session, membership, live/history ACL и raw-state проверки (ADR-0017, ADR-0020).
+In P07.1, the first HTTP request fixes `runs.data_revision` as R within the same SQL statement snapshot that selects the page; continuations read only `ingested_revision <= R` and therefore do not hold a transaction across requests. The earlier P07.1 temporary cursor linked org/run, the operation, R, algorithmVersion, and the last seq; P07.4 replaced it with a signed user-bound envelope with expiry. Every request still rechecks the session, membership, live/history ACL, and raw-state on each call (ADR-0017, ADR-0020).
 
-Changes(afterRevision=A) фиксирует T ≥ A. Изменяемые элементы:
+Changes(afterRevision=A) fixes T ≥ A. The changed items are:
 
-- точки с A < ingested_revision ≤ T;
-- их непосредственные существующие преемники в наборе на версии T.
+- points with A < ingested_revision ≤ T;
+- their immediate existing successors in the set at version T.
 
-Набор дедуплицируется и сортируется по seq. Для каждой записи сервер вычисляет predecessorSeq и connectFromPrevious по точкам с ingested_revision ≤ T. Это исправляет связь следующей точки при поздней вставке.
+The set is deduplicated and sorted by seq. For each entry the server computes predecessorSeq and connectFromPrevious over points with ingested_revision ≤ T. This corrects the connection to the next point on a late insert.
 
-В P07.2 первый запрос `/live-track/changes` фиксирует текущую `runs.data_revision` как T в том же SQL statement, materialized-набор `(A,T]` объединяется через `UNION` с immediate successors, а keyset pagination идёт по bigint `seq`. Cursor связывает operation, org/run, A/T, algorithmVersion и last seq; P07.4 добавил подпись, user binding и expiry (ADR-0018, ADR-0020).
+In P07.2, the first `/live-track/changes` request fixes the current `runs.data_revision` as T within the same SQL statement, a materialized `(A,T]` set is combined with immediate successors via `UNION`, and keyset pagination proceeds over bigint `seq`. The cursor links the operation, org/run, A/T, algorithmVersion, and the last seq; P07.4 added the signature, user binding, and expiry (ADR-0018, ADR-0020).
 
-В P07.3 оба live-track запроса материализуют полный набор `ingested_revision <= T` и вычисляют immediate predecessor через `lag(...)` до keyset page filter. Поэтому первая точка continuation page сохраняет predecessor с предыдущей страницы. `predecessorSeq` возвращает immediate seq-ordered predecessor даже для rejected edge; только первая точка набора получает `null`. `connectFromPrevious` вычисляется единым `app_private.evaluate_track_edge(...)` и не дублируется на frontend. Изменения после T не влияют ни на predecessor, ни на edge result старого cursor (ADR-0019).
+In P07.3, both live-track requests materialize the full `ingested_revision <= T` set and compute the immediate predecessor via `lag(...)` before the keyset page filter. So the first point of a continuation page retains its predecessor from the previous page. `predecessorSeq` returns the immediate seq-ordered predecessor even for a rejected edge; only the very first point of the set gets `null`. `connectFromPrevious` is computed by the single `app_private.evaluate_track_edge(...)` and is not duplicated on the frontend. Changes after T do not affect either the predecessor or the edge result of an old cursor (ADR-0019).
 
-В P07.4 strict versioned cursor payload подписывается HMAC-SHA-256 и включает authenticated user, org/run, operation, A/T где применимо, algorithmVersion, last seq и абсолютный expiry. Snapshot/changes cursors не взаимозаменяемы; tampering, cross-user/route replay и expiry возвращают единый `INVALID_CURSOR`. Первый continuation фиксирует deadline через десять минут, последующие страницы не продлевают его. Production требует отдельный ключ минимум 256 bit; каждый запрос независимо перепроверяет authorization/raw state (ADR-0020).
+In P07.4, a strict versioned cursor payload is signed with HMAC-SHA-256 and includes the authenticated user, org/run, the operation, A/T where applicable, algorithmVersion, the last seq, and an absolute expiry. Snapshot/changes cursors are not interchangeable; tampering, cross-user/route replay, and expiry all return a single `INVALID_CURSOR`. The first continuation fixes a ten-minute deadline, and later pages do not extend it. Production requires a separate key of at least 256 bits; every request independently rechecks authorization/raw state (ADR-0020).
 
-В P07.5 browser `LiveTrackStore` изолирует состояние и один in-flight sync по user/org/run. Весь cursor chain применяется к временному seq-keyed map; публичные points/revision заменяются только после terminal page. Параллельные revision notifications сворачиваются к максимальной целевой revision, повторные upserts идемпотентны, а `INVALID_CURSOR` или смена algorithmVersion отбрасывают staged changes и запускают fresh snapshot (ADR-0021).
+In P07.5, the browser `LiveTrackStore` isolates state and a single in-flight sync per user/org/run. The entire cursor chain is applied to a temporary seq-keyed map; the public points/revision are replaced only after the terminal page. Concurrent revision notifications collapse to the greatest target revision, repeated upserts are idempotent, and `INVALID_CURSOR` or an algorithmVersion change discards staged changes and triggers a fresh snapshot (ADR-0021).
 
-В P08.4 selected-track coordinator передаёт `dataRevision` из полного SSE-state в `LiveTrackStore`, не создавая второй алгоритм применения страниц. Снятие выбора, исчезновение run из authorized state или disconnect отменяет текущую загрузку и удаляет cached geometry. Reconnect начинает fresh snapshot только после нового full state и повторной проверки выбранного run (ADR-0025).
+In P08.4, the selected-track coordinator passes `dataRevision` from the full SSE state into `LiveTrackStore`, without creating a second page-application algorithm. Deselecting, a run disappearing from the authorized state, or a disconnect cancels the current load and removes the cached geometry. Reconnect starts a fresh snapshot only after a new full state and a recheck of the selected run (ADR-0025).
 
-Все страницы фиксируют T и algorithmVersion; изменения после T не попадают в них. Snapshot в БД не удерживается между HTTP-запросами: воспроизводимость обеспечивается immutable точками и ingested_revision. На каждом запросе повторно проверяются ACL и raw_state.
+All pages fix T and algorithmVersion; changes after T do not appear in them. A DB snapshot is not held across HTTP requests: reproducibility is provided by immutable points and ingested_revision. Every request rechecks the ACL and raw_state.
 
-После получения всех страниц клиент атомарно применяет upserts и продвигает локальную revision. При повторе применяются те же ключи; одновременно — одна синхронизация на run. SSE-версии, пришедшие во время загрузки, объединяются в последнюю целевую revision.
+After all pages are received, the client atomically applies the upserts and advances the local revision. On a retry, the same keys are applied; there is one sync per run at a time. SSE versions arriving during the load are merged into the latest target revision.
 
-При истёкшем курсоре, новой algorithmVersion или потере локального состояния — новый snapshot. При finish право live прекращается; продолжение истории требует can_read_history. При purging/purged подробный трек недоступен.
+On an expired cursor, a new algorithmVersion, or loss of local state — a new snapshot. On finish, the live right ends; continuing the history requires can_read_history. While purging/purged, the detailed track is unavailable.
 
-run seq не является курсором изменений. Last-Event-ID не используется как обещание воспроизведения SSE. При сбое после DB commit следующая проверка состояния всё равно обнаружит новую revision.
+The run seq is not a change cursor. Last-Event-ID is not used as a promise of SSE replay. On a failure after a DB commit, the next state check will still discover the new revision.
 
-## 10. Архивные тайлы и кэш
+## 10. Archive tiles and cache
 
-### 10.1 Генерация
+### 10.1 Generation
 
-XYZ, z=8…16; 0 ≤ x,y < 2^z. Ниже z8 слой скрыт; выше z16 — overzoom. На низком масштабе возможен переход к отдельным агрегатам в будущем.
+XYZ, z=8…16; 0 ≤ x,y < 2^z. Below z8 the layer is hidden; above z16 is overzoom. At low zoom, a switch to separate aggregates is possible in the future.
 
-Источник: опубликованные summaries, завершённые run, history ACL, абсолютный диапазон дат. Выдаётся последний опубликованный summary; если он отстаёт от data_revision из-за поздних точек, детали показывают pending recompute, а публикация новой сводки обновляет archive_revision.
+Source: published summaries, finished runs, history ACL, an absolute date range. The latest published summary is returned; if it lags behind data_revision due to late points, the details show a pending recompute, and publishing a new summary updates archive_revision.
 
 PostGIS pipeline:
 
-1. ST_TileEnvelope(z,x,y) в 3857.
-2. Выбор кандидатов по расширенной области и GiST(display_geom) в 4326.
-3. Фильтры доступа/периода.
-4. Обрезка до допустимой Web Mercator-области, ST_Transform в 3857.
-5. ST_AsMVTGeom с extent=4096, buffer=64, clip_geom=true.
-6. Удаление пустых/выродившихся не-линейных результатов, ST_AsMVT.
+1. ST_TileEnvelope(z,x,y) in 3857.
+2. Candidate selection over the expanded area and GiST(display_geom) in 4326.
+3. Access/period filters.
+4. Clip to the valid Web Mercator area, ST_Transform into 3857.
+5. ST_AsMVTGeom with extent=4096, buffer=64, clip_geom=true.
+6. Drop empty/degenerate non-linear results, ST_AsMVT.
 
-Для selection margin=64/4096; в ST_AsMVTGeom передаются нерасширенные tile bounds. На антимеридиане split search envelope и при необходимости shift соседней world-copy перед clip. [ST_TileEnvelope](https://postgis.net/docs/ST_TileEnvelope.html), [ST_AsMVTGeom](https://postgis.net/docs/ST_AsMVTGeom.html)
+For selection, margin=64/4096; unexpanded tile bounds are passed into ST_AsMVTGeom. At the antimeridian, the search envelope is split and, if needed, an adjacent world-copy is shifted before clipping. [ST_TileEnvelope](https://postgis.net/docs/ST_TileEnvelope.html), [ST_AsMVTGeom](https://postgis.net/docs/ST_AsMVTGeom.html)
 
-MVT layer: runs. Свойство run_id — строковый UUID; не числовой feature ID. Личные имена и исходные GPS-данные не включаются. Один run может присутствовать в нескольких тайлах. [ST_AsMVT](https://postgis.net/docs/ST_AsMVT.html)
+MVT layer: runs. The run_id property is a string UUID, not a numeric feature ID. Personal names and raw GPS data are not included. A single run can appear in multiple tiles. [ST_AsMVT](https://postgis.net/docs/ST_AsMVT.html)
 
-Пагинации и LIMIT 100 в MVT нет. Начальные предохранители: до 1 МиБ несжатого тайла, до 2 с SQL, максимум 2 параллельные генерации на процесс, очередь до 16 запросов. Превышение не маскируется усечённой геометрией: явная ошибка, метрика, предложение сузить период/приблизить карту.
+There is no pagination or LIMIT 100 in MVT. Initial safeguards: up to 1 MiB of uncompressed tile, up to 2 s of SQL, at most 2 parallel generations per process, a queue of up to 16 requests. Exceeding these is not masked with truncated geometry: an explicit error, a metric, and a suggestion to narrow the period/zoom in.
 
-### 10.2 Кэш и revision
+### 10.2 Cache and revision
 
-LRU процесса: 32 МиБ бинарных данных, TTL 5 минут, single-flight для одного ключа. Ключ:
+Process-local LRU: 32 MiB of binary data, TTL 5 minutes, single-flight for a given key. Key:
 formatVersion / orgId / userId / archiveRevision / canonicalFilterHash / z/x/y.
 
-Пустые тайлы кэшируются; ошибки и отказы доступа — нет. Membership и текущая archive_revision проверяются до чтения кэша, из БД. ACL-изменения и изменение revision атомарны.
+Empty tiles are cached; errors and access denials are not. Membership and the current archive_revision are checked before reading the cache, from the DB. ACL changes and a revision change are atomic.
 
-При cache miss revision, ACL и геометрия читаются в согласованном snapshot. Запрос со старой revision получает 409 ARCHIVE_REVISION_CHANGED, а не исторический тайл. При конкурентном изменении авторизация имеет момент проверки; уже начатый/доставленный ответ нельзя ретроактивно отозвать.
+On a cache miss, the revision, ACL, and geometry are read within a consistent snapshot. A request with a stale revision gets a 409 ARCHIVE_REVISION_CHANGED, not a historical tile. Under a concurrent change, authorization has a point-in-time check; a response already started/delivered cannot be retroactively revoked.
 
-Публикация/удаление summary, изменение archive grants, деактивация membership увеличивают organization archive_revision. Грубая инвалидация затрагивает все тайлы организации; для 10 пользователей это приемлемо.
+Publishing/deleting a summary, changing archive grants, and deactivating a membership all bump the organization's archive_revision. Coarse invalidation affects all of an organization's tiles; for 10 users this is acceptable.
 
-HTTP тайлов: application/vnd.mapbox-vector-tile, Cache-Control: private, no-store. Mapbox может держать видимые тайлы в оперативной памяти. Готовые сетевые ответы обслуживает LRU; публичный CDN для них не используется.
+Tile HTTP: application/vnd.mapbox-vector-tile, Cache-Control: private, no-store. Mapbox may keep visible tiles in memory. Ready network responses are served from the LRU; a public CDN is not used for them.
 
-P09.3 реализует process-local LRU: payload budget 32 МиБ, отдельный лимит 4096 entries для bounded metadata при empty tiles, monotonic TTL 5 минут и single-flight по полному ключу. UUID, revision и timestamps канонизируются до hash/key construction; пустые buffers сохраняются, oversize buffers и rejected generation — нет. P09.4 добавляет DB ordering point: tile transaction берёт organization `FOR SHARE`, затем повторно проверяет active membership/current revision и только после этого читает cache; publish, summary delete, effective history-grant и membership active-state changes атомарно продвигают organization epoch. Runtime share mutation сначала берёт organization `FOR UPDATE`, сохраняя organization-before-run lock order. Старые cache entries остаются недостижимыми по revision key и истекают по P09.3 bounds (ADR-0030).
+P09.3 implements a process-local LRU: a 32 MiB payload budget, a separate 4096-entry limit for bounded metadata on empty tiles, a monotonic 5-minute TTL, and single-flight on the full key. UUIDs, revisions, and timestamps are canonicalized before hash/key construction; empty buffers are stored, oversized buffers and rejected generations are not. P09.4 adds a DB ordering point: the tile transaction takes the organization `FOR SHARE`, then rechecks active membership/current revision, and only then reads the cache; publish, summary delete, effective history-grant, and membership active-state changes all atomically advance the organization epoch. A runtime share mutation first takes the organization `FOR UPDATE`, preserving the organization-before-run lock order. Old cache entries become unreachable by revision key and expire per the P09.3 bounds (ADR-0030).
 
-P09.6 разделяет cache miss на короткий authenticated/locked probe, bounded ожидание без PostgreSQL client и повторную authenticated/locked transaction после admission. Один process допускает максимум две generation и 16 ожидающих distinct cache keys; same-key callers остаются одним single-flight. Вторая transaction повторно проверяет membership/revision и cache, затем устанавливает transaction-local `statement_timeout=2000ms`. Полный raw MVT размером ровно до 1 МиБ включительно кэшируется/возвращается; больший не кэшируется и получает `422 TILE_TOO_COMPLEX`. Queue overflow и statement timeout различаются как `503 TILE_BUSY` и `503 TILE_TIMEOUT`; feature `LIMIT`/truncation не используются (ADR-0032).
+P09.6 splits a cache miss into a short authenticated/locked probe, a bounded wait with no PostgreSQL client held, and a repeated authenticated/locked transaction after admission. A single process allows at most two concurrent generations and 16 pending distinct cache keys; same-key callers remain a single single-flight. The second transaction rechecks membership/revision and the cache, then sets a transaction-local `statement_timeout=2000ms`. A full raw MVT of exactly up to 1 MiB inclusive is cached/returned; a larger one is not cached and gets `422 TILE_TOO_COMPLEX`. Queue overflow and a statement timeout are distinguished as `503 TILE_BUSY` and `503 TILE_TIMEOUT`; feature `LIMIT`/truncation are not used (ADR-0032).
 
-Активный клиент проверяет archive metadata раз в 30 с; при возвращении на вкладку — сразу. При новой revision меняет URL шаблона через setTiles, при отзыве доступа очищает слой. TTL не является механизмом соблюдения 60 с. [Mapbox VectorTileSource](https://docs.mapbox.com/mapbox-gl-js/api/sources/#vectortilesource)
+An active client checks archive metadata every 30 s; on returning to the tab, immediately. On a new revision, it changes the template URL via setTiles; on access revocation, it clears the layer. TTL is not a mechanism for enforcing the 60 s target. [Mapbox VectorTileSource](https://docs.mapbox.com/mapbox-gl-js/api/sources/#vectortilesource)
 
-P09.5 реализует этот lifecycle отдельным controller, не связанным с Mapbox runtime: один metadata request активен на scope, дополнительные poll/focus/409 refresh сворачиваются, а смена user/org/period отменяет старый request. React-адаптер применяет новый revision через `setTiles`, но удаляет layer и source при 401/403. Временная network/5xx ошибка сохраняет последний успешно авторизованный source с видимым error state; удаление source всегда выполняется до удаления provider map. Mapbox GL JS 3.31.0 загружается отдельным browser chunk только при наличии публичного `VITE_MAPBOX_ACCESS_TOKEN`; tokenless tests не вызывают внешний provider (ADR-0031).
+P09.5 implements this lifecycle as a separate controller, decoupled from the Mapbox runtime: one metadata request is active per scope, extra poll/focus/409 refreshes collapse together, and a user/org/period change cancels the old request. The React adapter applies a new revision via `setTiles`, but removes the layer and source on 401/403. A transient network/5xx error keeps the last successfully authorized source with a visible error state; the source is always removed before the provider map is removed. Mapbox GL JS 3.31.0 loads as a separate browser chunk only when a public `VITE_MAPBOX_ACCESS_TOKEN` is present; tokenless tests do not call the external provider (ADR-0031).
 
-## 11. API-контракты
+## 11. API contracts
 
-Базовый prefix прикладного API: /api/orgs/{orgId}; session API использует `/api/session`. Все даты — ISO 8601 UTC, координаты — longitude/latitude. Идентификатор пользователя берётся из проверенной server-side session, не из headers/body/query.
+Application API base prefix: /api/orgs/{orgId}; the session API uses `/api/session`. All dates are ISO 8601 UTC, coordinates are longitude/latitude. The user identifier is taken from the verified server-side session, not from headers/body/query.
 
 ### 11.0 Session boundary
 
-| Метод и путь | Требования | Успех |
+| Method and path | Requirements | Success |
 |---|---|---|
-| POST /api/session | Только явно включённый development/test local auth; exact configured Origin; application/json; `{ userId }` из server allowlist | 201 `{ identity: { userId }, expiresAt, csrf: { headerName, token } }` + session cookie |
-| GET /api/session | Валидная unexpired/unrevoked session cookie | 200 с тем же публичным session response |
-| DELETE /api/session | Session cookie + exact Origin + session-bound `x-csrf-token` | 204, server-side revoke и очищенная cookie |
+| POST /api/session | Only when explicitly enabled development/test local auth; exact configured Origin; application/json; `{ userId }` from a server allowlist | 201 `{ identity: { userId }, expiresAt, csrf: { headerName, token } }` + session cookie |
+| GET /api/session | A valid, unexpired/unrevoked session cookie | 200 with the same public session response |
+| DELETE /api/session | Session cookie + exact Origin + session-bound `x-csrf-token` | 204, server-side revoke and a cleared cookie |
 
-Opaque session token хранится у клиента только в `HttpOnly` cookie и индексирует серверную запись по digest. Cookie использует `SameSite=Strict`, `Path=/`, без `Domain`; `Secure` обязателен для HTTPS, а явное исключение разрешено только в development/test для локального HTTP. Все session responses используют `Cache-Control: no-store`. Expiry проверяется сервером через внедряемые часы.
+The opaque session token is stored client-side only in an `HttpOnly` cookie and indexes the server-side record by digest. The cookie uses `SameSite=Strict`, `Path=/`, no `Domain`; `Secure` is required for HTTPS, and an explicit exemption is allowed only in development/test for local HTTP. All session responses use `Cache-Control: no-store`. Expiry is checked server-side via an injectable clock.
 
-Локальный in-memory store ограничен, внедряем, не создаёт фоновых timers и теряет session state при перезапуске. Local auth по умолчанию выключен и запрещён в production до создания pool/listener. Bootstrap login защищён exact configured Origin и JSON-only запросом; allowed Origin не выводится из Host/X-Forwarded. Остальные state-changing session-authenticated routers переиспользуют session → Origin → CSRF middleware chain. Production provider/real login остаётся P12.
+The local in-memory store is bounded, injectable, creates no background timers, and loses session state on restart. Local auth is disabled by default and forbidden in production until a pool/listener exists. Bootstrap login is protected by an exact configured Origin and a JSON-only request; the allowed Origin is not derived from Host/X-Forwarded. The remaining state-changing session-authenticated routers reuse the session → Origin → CSRF middleware chain. The production provider/real login remains P12.
 
-### 11.1 Общие типы
+### 11.1 Common types
 
 ~~~ts
 type UUID = string;
@@ -423,7 +423,7 @@ interface TrackPoint {
   predecessorSeq: Seq | null; connectFromPrevious: boolean;
 }
 interface TrackPage {
-  fromRevision: Revision | null; // null для initial snapshot
+  fromRevision: Revision | null; // null for the initial snapshot
   toRevision: Revision;
   algorithmVersion: string;
   upserts: TrackPoint[];
@@ -435,40 +435,40 @@ interface ApiError {
 }
 ~~~
 
-TypeScript не заменяет runtime-валидацию на обеих границах.
-Счётчики `QualityStats` — неотрицательные целые, `insufficientData` — boolean. Текущий P02B CHECK гарантирует только JSON object; полная проверка ключей, типов и вычисление значений принадлежат P06 summary publication.
+TypeScript does not replace runtime validation at either boundary.
+`QualityStats` counters are non-negative integers, `insufficientData` is a boolean. The current P02B CHECK guarantees only a JSON object; full key/type validation and value computation belong to P06 summary publication.
 
-### 11.2 Запись и управление
+### 11.2 Recording and control
 
-| Метод и путь | Запрос | Успех |
+| Method and path | Request | Success |
 |---|---|---|
-| PUT /runs/{runId} | { startedAt } | 201 RunView; повтор 200 RunView |
+| PUT /runs/{runId} | { startedAt } | 201 RunView; retry 200 RunView |
 | POST /runs/{runId}/commands | { commandId, type: pause/resume/finish, expectedControlRevision } | 200 { commandId, status, controlRevision, dataRevision, finishedAt } |
 | POST /runs/{runId}/points | { points: PointInput[] } | 200 { dataRevision, insertedCount, duplicateCount } |
-| DELETE /runs/{runId} | — | 204, каскадное удаление + archive revision |
-| PUT /runs/{runId}/shares/{userId} | { canReadLive, canReadHistory } | 200 с сохранёнными boolean |
+| DELETE /runs/{runId} | — | 204, cascading delete + archive revision |
+| PUT /runs/{runId}/shares/{userId} | { canReadLive, canReadHistory } | 200 with the stored booleans |
 | DELETE /runs/{runId}/shares/{userId} | — | 204 |
 
-POST points атомарен: при успехе все уникальные seq запроса сохранены или совпадают с существующими. Дубли внутри пачки нормализуются; конфликт содержания отклоняет пачку.
+POST points is atomic: on success, all unique seq values in the request are either stored or match existing ones. Duplicates within a batch are normalized; a content conflict rejects the batch.
 
-DELETE идемпотентен для владельца с учётом tombstone. Повторный PUT удалённого run — 410 RUN_DELETED.
+DELETE is idempotent for the owner, accounting for the tombstone. A repeated PUT on a deleted run returns 410 RUN_DELETED.
 
-### 11.3 Чтение
+### 11.3 Reads
 
-| Метод и путь | Параметры | Ответ |
+| Method and path | Parameters | Response |
 |---|---|---|
 | GET /runs | from, to, limit≤100, cursor | { items: RunView[], nextCursor } |
 | GET /runs/{runId} | — | RunView |
 | GET /runs/{runId}/points | cursor, limit≤1000 | { dataRevision, points: PointInput[], nextCursor } |
 | GET /runs/{runId}/live-track | cursor, limit≤1000 | TrackPage |
-| GET /runs/{runId}/live-track/changes | afterRevision или cursor, limit≤1000 | TrackPage |
-| GET /runs/{runId}/track | mode=archive | GeoJSON Feature с MultiLineString/null, sourceRevision, algorithmVersion |
+| GET /runs/{runId}/live-track/changes | afterRevision or cursor, limit≤1000 | TrackPage |
+| GET /runs/{runId}/track | mode=archive | GeoJSON Feature with MultiLineString/null, sourceRevision, algorithmVersion |
 | GET /archive/runs | bbox, from, to, limit≤100, cursor | { items: RunView[], nextCursor } |
 | GET /live/nearby | longitude, latitude, radiusM≤5000 | { serverTime, items: [{ runId, coordinates, recordedAt, distanceM }] } |
 
-from/to задают полуинтервал по started_at. Для archive period максимум 366 дней. bbox: west,south,east,north; west>east означает пересечение антимеридиана. nearby использует только confirmed/fresh позиции.
+from/to define a half-open interval over started_at. For the archive period, the maximum is 366 days. bbox: west,south,east,north; west>east means crossing the antimeridian. nearby uses only confirmed/fresh positions.
 
-Raw points endpoint выдаёт исходные данные только по history ACL/владению; live-track — незавершённые по live ACL либо завершённые по history ACL. Это позволяет догрузить финальное состояние, если право истории осталось.
+The raw points endpoint returns raw data only per history ACL/ownership; live-track returns unfinished runs per live ACL or finished runs per history ACL. This allows catching up on the final state if the history right remains.
 
 ### 11.4 SSE
 
@@ -489,7 +489,7 @@ interface LiveState {
 }
 ~~~
 
-streamId новый при подключении, sequence упорядочивает сообщения только этого соединения. При потере сессии соединение закрывается; клиент проверяет session endpoint и не запускает бесконечную авторизационную ошибку. Проверка истечения сессии выполняется и на живом соединении.
+streamId is new on each connection, sequence orders messages only within that connection. On session loss, the connection is closed; the client checks the session endpoint and does not enter an infinite auth-error loop. Session-expiry checking also happens on a live connection.
 
 ### 11.5 Tiles
 
@@ -505,147 +505,148 @@ GET /archive/metadata?from=...&to=...
 }
 ~~~
 
-URL — шаблон; реальные значения orgId/filter выдаёт сервер. Revision и фильтр не предоставляют авторизацию.
+The URL is a template; the server supplies the real orgId/filter values. The revision and filter do not grant authorization.
 
-GET /tiles/runs/{z}/{x}/{y}.mvt?revision=...&from=...&to=... → 200 бинарный MVT; пустой набор — корректный пустой MVT. Ошибки — JSON ApiError с соответствующим HTTP status. Frontend обрабатывает ошибки tile source и при revision mismatch обновляет metadata.
+GET /tiles/runs/{z}/{x}/{y}.mvt?revision=...&from=...&to=... → 200 binary MVT; an empty set is a valid empty MVT. Errors are a JSON ApiError with the appropriate HTTP status. The frontend handles tile-source errors and refreshes metadata on a revision mismatch.
 
-P09.1 реализует metadata и tile HTTP boundary: zoom ограничен 8–16, `x/y` — канонические целые в `[0,2^z)`, период упорядочен и не превышает 366 дней. Оба endpoint проходят session/active-membership и runtime-role tenant transaction; tile до pipeline перечитывает текущий `archive_revision` и возвращает `409 ARCHIVE_REVISION_CHANGED` при несовпадении. Pipeline получает тот же RLS-bound client, поэтому history ACL не заменяется revision/filter. До подключения P09.2 этот seam fail-closed через `503 TILE_BUSY`, без ложного empty tile (ADR-0027).
+P09.1 implements the metadata and tile HTTP boundary: zoom is bounded 8–16, `x/y` are canonical integers in `[0,2^z)`, the period is ordered and does not exceed 366 days. Both endpoints go through session/active-membership checks and a runtime-role tenant transaction; before the pipeline, the tile handler rereads the current `archive_revision` and returns `409 ARCHIVE_REVISION_CHANGED` on a mismatch. The pipeline receives the same RLS-bound client, so history ACL is not superseded by revision/filter. Before P09.2 is wired in, this seam fails closed with `503 TILE_BUSY`, rather than a false empty tile (ADR-0027).
 
-P09.2 подключает production pipeline к этому seam: отдельные `&&` candidate branches сохраняют возможность GiST selection для обычной и противоположной antimeridian envelopes, геометрия обрезается до допустимого Web Mercator world до projection, world copies сдвигаются после projection, а `ST_AsMVTGeom` использует extent 4096, buffer 64 и clipping. Результат содержит только строковый `run_id`; пустой набор кодируется как пустой MVT. P09.4 закрывает cache invalidation, P09.5 — frontend source lifecycle, P09.6 — bounded SQL/concurrency/queue/raw-byte resource usage (ADR-0028, ADR-0030–0032).
+P09.2 connects the production pipeline to this seam: separate `&&` candidate branches preserve GiST selection for the ordinary and the opposite antimeridian envelopes, geometry is clipped to the valid Web Mercator world before projection, world copies are shifted after projection, and `ST_AsMVTGeom` uses extent 4096, buffer 64, and clipping. The result contains only a string `run_id`; an empty set is encoded as an empty MVT. P09.4 closes cache invalidation, P09.5 the frontend source lifecycle, P09.6 bounded SQL/concurrency/queue/raw-byte resource usage (ADR-0028, ADR-0030–0032).
 
-### 11.6 Ошибки
+### 11.6 Errors
 
-Application errors используют единый envelope `ApiError` из 11.1; server-generated UUID совпадает в `X-Request-Id` и `error.requestId`, входной request-id header не отражается. `details` допускает только безопасные validation metadata. Stack, SQL, credentials, cookies, session/CSRF tokens и внутренние error objects не возвращаются. Health endpoints остаются отдельным operational contract с прежними status/body semantics `{ status, checks? }`, но также получают `X-Request-Id`.
+Application errors use the single `ApiError` envelope from 11.1; the server-generated UUID matches in `X-Request-Id` and `error.requestId`, and an inbound request-id header is not reflected. `details` allows only safe validation metadata. Stack traces, SQL, credentials, cookies, session/CSRF tokens, and internal error objects are never returned. Health endpoints remain a separate operational contract with their previous status/body semantics `{ status, checks? }`, but they also get `X-Request-Id`.
 
-| Status | Коды и поведение |
+| Status | Codes and behavior |
 |---|---|
-| 400 | INVALID_REQUEST, INVALID_CURSOR; исправление запроса |
-| 401 | AUTH_REQUIRED; восстановить сессию |
-| 403 | ORG_ACCESS_DENIED; прекратить подписки организации |
-| 404 | RUN_NOT_FOUND; также для недоступного конкретного run |
+| 400 | INVALID_REQUEST, INVALID_CURSOR; fix the request |
+| 401 | AUTH_REQUIRED; restore the session |
+| 403 | ORG_ACCESS_DENIED; stop the organization's subscriptions |
+| 404 | RUN_NOT_FOUND; also for a specific run that is inaccessible |
 | 409 | POINT_CONFLICT, CONTROL_REVISION_CONFLICT, ACTIVE_RUN_EXISTS, UPLOAD_WINDOW_CLOSED, ARCHIVE_REVISION_CHANGED, HISTORY_REVISION_CHANGED, CURSOR_EXPIRED, ALGORITHM_CHANGED |
 | 410 | RAW_HISTORY_UNAVAILABLE, RUN_DELETED |
 | 413 | BATCH_TOO_LARGE |
 | 422 | RUN_POINT_LIMIT, TILE_TOO_COMPLEX |
-| 429 | RATE_LIMITED; учитывать Retry-After |
-| 503 | DATABASE_UNAVAILABLE, TILE_BUSY, TILE_TIMEOUT; ограниченный retry с jitter |
+| 429 | RATE_LIMITED; honor Retry-After |
+| 503 | DATABASE_UNAVAILABLE, TILE_BUSY, TILE_TIMEOUT; bounded retry with jitter |
 
-Conflict/error details не содержат чужие точки. Авторизация проверяется раньше выдачи информации о retention и конфликтах объекта.
+Conflict/error details never contain someone else's points. Authorization is checked before any retention or object-conflict information is revealed.
 
-## 12. Retention, удаление, backups
+## 12. Retention, deletion, backups
 
-Через 7 дней после finished_at maintenance проверяет закрытое upload window и актуальную summary. Под блокировкой run ставит raw_state=purging; новые raw-запросы получают 410, пересчёты из raw запрещены. Затем удаляет points ограниченными пачками и ставит purged. Повтор задачи безопасен.
+Seven days after finished_at, maintenance checks for a closed upload window and a current summary. Under a run lock it sets raw_state=purging; new raw requests get 410, and recomputation from raw data is forbidden. It then deletes points in bounded batches and sets purged. Retrying the job is safe.
 
-P10.1 реализовал явный one-run primitive: общий с summary worker transaction advisory lock, затем run-row lock, переход в `purging` до удаления, одна `seq`-ordered пачка максимум 1 000 строк за транзакцию и атомарный `purged` при отсутствии остатка. Committed `purging` и оставшиеся строки являются единственным состоянием восстановления; rollback возвращает и строки, и state. Runtime больше не может менять `raw_state` напрямую. P10.2 ниже добавляет выбор по семи дням, закрытому upload window и актуальности summary; начальный лимит 1 000 подлежит измерению/настройке в P11.
+P10.1 implemented an explicit one-run primitive: a transaction advisory lock shared with the summary worker, then a run-row lock, a transition to `purging` before deletion, one `seq`-ordered batch of at most 1,000 rows per transaction, and an atomic `purged` when nothing remains. Committed `purging` state plus any remaining rows are the sole recovery state; a rollback restores both the rows and the state. The runtime can no longer change `raw_state` directly. P10.2 below adds selection by the seven-day window, a closed upload window, and summary currency; the initial limit of 1,000 is subject to measurement/tuning in P11.
 
-P10.2 передаёт один управляемый UTC instant в bounded transactional claimant и purge. Новая работа начинается только при `finished_at + 7 days <= now`, строго закрытом 24-часовом upload window и summary текущих `data_revision`/algorithm/quality schema; те же условия повторно проверяются внутри mutating capability после общей advisory lock и run-row lock. Committed `purging` всегда выбирается раньше новой работы и возобновляется без повторной eligibility. Один settled цикл удаляет не более одной пачки; overdue run без текущей summary остаётся неизменным и создаёт identity-free warning. Structured metrics/alert routing остаются P11.1 (ADR-0034).
+P10.2 threads a single managed UTC instant through the bounded transactional claimant and purge. New work starts only when `finished_at + 7 days <= now`, the 24-hour upload window is strictly closed, and the summary is current for `data_revision`/algorithm/quality schema; the same conditions are rechecked inside the mutating capability after the shared advisory lock and the run-row lock. Committed `purging` is always selected ahead of new work and resumes without a re-eligibility check. One settled cycle deletes at most one batch; an overdue run without a current summary is left unchanged and produces an identity-free warning. Structured metrics/alert routing remain P11.1 (ADR-0034).
 
-Если summary не построена, удаление откладывается с алертом: семь дней — целевой срок, не жёсткое юридическое обещание. После purged доступны только summary и архивная геометрия; точный replay/пересчёт невозможен.
+If a summary has not been built, deletion is deferred with an alert: seven days is a target, not a hard legal promise. After purged, only the summary and the archived geometry are available; exact replay/recompute is impossible.
 
-Через год удаляется run со связанными данными; archive_revision увеличивается. Явное удаление владельцем действует раньше и удаляет также локальные серверные кэши через смену версии ключей. Старые недоступные LRU entries вытесняются/истекают максимум через 5 минут.
+After one year, the run and its associated data are deleted; archive_revision is bumped. Explicit owner deletion takes effect earlier and also clears local server caches via a key-version change. Old unreachable LRU entries are evicted/expire after at most 5 minutes.
 
-Ежедневный зашифрованный backup вне хоста; retention 7 дней. Начальные цели аварийного восстановления: RPO ≤24 часа, RTO ≤4 часа, подлежат проверке restore drill. Бэкапы могут содержать удалённые данные до истечения срока; перед возвратом восстановленной БД в доступ необходимы повторное применение последующих удалений из отдельно сохраняемого журнала удаления и восстановление актуальных ограничений доступа.
+A daily encrypted off-host backup; retention 7 days. Initial disaster-recovery targets: RPO ≤24 hours, RTO ≤4 hours, subject to a restore-drill verification. Backups may contain deleted data until it expires; before returning a restored DB to access, subsequent deletions must be reapplied from a separately preserved deletion log, and current access restrictions must be restored.
 
-Это отдельная эксплуатационная задача. Пока проверенного restore-процесса нет, сервис не заявляет соответствующий RPO/RTO достигнутым.
+This is a separate operational task. Until a verified restore process exists, the service does not claim the corresponding RPO/RTO as achieved.
 
-## 13. Развёртывание и эксплуатация
+## 13. Deployment and operations
 
-Локально: Docker Compose, PostgreSQL/PostGIS, Express 5, React, GPS-симулятор. Демо: один хост/регион, TLS reverse proxy, persistent DB volume, внешний backup. Backend и PostgreSQL имеют независимые resource limits.
+Locally: Docker Compose, PostgreSQL/PostGIS, Express 5, React, the GPS simulator. Demo: a single host/region, a TLS reverse proxy, a persistent DB volume, an external backup. The backend and PostgreSQL have independent resource limits.
 
-Начальные пределы: DB pool 10 соединений на backend, максимум 2 одновременных tile-query, максимум 2 summary jobs. Длительные SSE не занимают pool slots. Запросы и фоновые задачи имеют timeouts. Лимиты уточняются измерениями, а не числом пользователей само по себе.
+Initial limits: a DB pool of 10 connections per backend, at most 2 concurrent tile queries, at most 2 summary jobs. Long-lived SSE connections do not occupy pool slots. Requests and background jobs have timeouts. Limits are refined by measurement, not by user count alone.
 
-Продуктовая аутентификация подключается в P12 через проверенный identity provider; регистрация/восстановление пароля не реализуются собственным криптографическим протоколом. P03.1 предоставляет только явно включаемую development/test identity/session fixture с opaque token и bounded process-local store; production startup с ней запрещён, перезапуск теряет локальные сессии.
+Production authentication is wired in during P12 via a verified identity provider; registration/password recovery are not implemented as a custom cryptographic protocol. P03.1 provides only an explicitly enabled development/test identity/session fixture with an opaque token and a bounded process-local store; production startup with it is forbidden, and a restart loses local sessions.
 
-Graceful shutdown прекращает приём новых HTTP-соединений, ограниченно ждёт активные запросы и закрытие pool; при превышении общего deadline принудительно закрывает HTTP-соединения и завершает процесс с ошибкой. После старта jobs находят незавершённую работу в БД.
+Graceful shutdown stops accepting new HTTP connections, waits a bounded time for active requests and pool closure, and forcibly closes HTTP connections and exits with an error if the overall deadline is exceeded. After startup, jobs discover unfinished work in the DB.
 
-## 14. Узкие места и развитие
+## 14. Bottlenecks and evolution
 
-| Узел | Риск | Сигнал | Следующий шаг |
+| Node | Risk | Signal | Next step |
 |---|---|---|---|
-| PostgreSQL write path | WAL, индексы, всплеск догрузок | commit p95, I/O, pool wait | batching, quotas; затем оценка очереди |
-| Summary processing | Полные пересчёты больших run | revision lag, CPU | секционный расчёт/отдельные workers |
-| Tile generation | Много геометрии в одном тайле | bytes, SQL p95, timeout | LOD, subdivision, projected index; затем pre-generation |
-| Organization revision | Грубая инвалидация/горячая строка | miss ratio, lock wait | версии dataset/пользовательских scopes |
-| Live reconciliation | Рост зрителей и ACL-запросов | cycle duration >2 с | commit notifications + периодическая сверка |
-| Raw retention | DELETE/autovacuum не успевают | dead tuples, table growth | партиционирование после пересмотра ключей |
-| Один сервер | Недоступность/потеря узла | health/backup failures | managed DB/реплика, несколько API |
+| PostgreSQL write path | WAL, indexes, catch-up spikes | commit p95, I/O, pool wait | batching, quotas; then queue evaluation |
+| Summary processing | Full recomputes of large runs | revision lag, CPU | partitioned computation/separate workers |
+| Tile generation | Too much geometry in one tile | bytes, SQL p95, timeout | LOD, subdivision, a projected index; then pre-generation |
+| Organization revision | Coarse invalidation/hot row | miss ratio, lock wait | dataset/per-user scope versions |
+| Live reconciliation | Growing viewers and ACL queries | cycle duration >2 s | commit notifications + periodic reconciliation |
+| Raw retention | DELETE/autovacuum falling behind | dead tuples, table growth | partitioning after revisiting keys |
+| Single server | Unavailability/node loss | health/backup failures | managed DB/replica, multiple API instances |
 
-Партиционирование по времени не добавляется механически: глобальная уникальность (org_id,run_id,seq) должна быть сохранена, а PostgreSQL требует учитывать ключ партиции в соответствующих unique constraints. Проектирование дедупликации потребуется пересмотреть.
+Time-based partitioning is not added mechanically: global uniqueness of (org_id,run_id,seq) must be preserved, and PostgreSQL requires the partition key to be included in the relevant unique constraints. Deduplication design would need to be revisited.
 
-При нескольких API общий tile-cache может стать Redis. Уведомления между экземплярами не заменяют восстановление по БД. Для обязательной обработки каждого события отдельными сервисами потребуется durable outbox; переход SSE → WebSocket этого не решает.
+With multiple API instances, the shared tile cache could become Redis. Cross-instance notifications do not replace recovery from the DB. Guaranteed per-event processing by separate services would require a durable outbox; switching SSE → WebSocket does not solve this by itself.
 
-## 15. Проверка и критерии приёмки
+## 15. Verification and acceptance criteria
 
-### Корректность
+### Correctness
 
-- Повтор и конкурентный повтор пачки: одна строка на ключ.
-- Commit успешен, ACK потерян: повтор безопасен.
-- Одинаковый seq с другим payload: атомарный отказ.
-- Порядок 41,43,42: исправляется ребро к 43.
-- Changes pagination на фиксированной T не меняется от новых вставок.
-- Конкурентные pause/resume, finish и GPS: контролируемые переходы.
-- Точные повторы после upload window подтверждаются до raw purge.
-- Summary старой revision не публикуется.
-- Purge после сбоя продолжается, неполная история не пересчитывается.
-- Удалённый run не воскресает от retry, summary job или восстановления backup.
+- Retry and concurrent retry of a batch: one row per key.
+- Commit succeeds, ACK is lost: a retry is safe.
+- The same seq with a different payload: an atomic rejection.
+- Order 41,43,42: the edge to 43 is corrected.
+- Changes pagination at a fixed T is unaffected by new inserts.
+- Concurrent pause/resume, finish, and GPS: controlled transitions.
+- Exact retries after the upload window are confirmed before the raw purge.
+- A summary of a stale revision is not published.
+- Purge resumes after a crash; incomplete history is not recomputed.
+- A deleted run is not resurrected by a retry, a summary job, or a backup restore.
 
-### Геометрия
+### Geometry
 
-- Неподвижный GPS, известная дистанция, резкие повороты, выброс, clock rollback.
-- Разрыв измерений отличается от задержки передачи.
-- Упрощение не меняет сохранённую distance_m.
-- Антимеридиан, полярное ограничение Web Mercator, соседние тайлы.
-- Пустой/выродившийся трек имеет явное состояние качества.
+- Stationary GPS, a known distance, sharp turns, an outlier, a clock rollback.
+- A measurement gap is distinguished from a transmission delay.
+- Simplification does not change the stored distance_m.
+- The antimeridian, Web Mercator's polar limit, adjacent tiles.
+- An empty/degenerate track has an explicit quality state.
 
-### Доступ
+### Access
 
-- Cross-tenant чтение, запись, shares и cache hit.
-- Обход API через SQL под runtime-role всё ещё ограничен RLS.
-- can_read_live не открывает завершённую историю.
-- Отзыв grant/membership проверяется в SSE, snapshots, changes, tiles.
-- Нельзя получить чужие counts/ошибки существования через geo-запрос.
+- Cross-tenant reads, writes, shares, and cache hits.
+- Bypassing the API via SQL under the runtime role is still constrained by RLS.
+- can_read_live does not expose finished history.
+- Grant/membership revocation is verified across SSE, snapshots, changes, tiles.
+- Someone else's counts/existence errors cannot be obtained via a geo query.
 
-### Нагрузка
-Обычный набор: 126 тыс. raw points, 3 650 summaries. Стресс: 3 млн raw points, 10 одновременных офлайн-пачек по 100 точек, 10 наблюдателей, pan/zoom bursts и concurrent summary job.
+### Load
 
-Начальные цели:
+Ordinary dataset: 126k raw points, 3,650 summaries. Stress: 3M raw points, 10 concurrent offline batches of 100 points, 10 observers, pan/zoom bursts, and a concurrent summary job.
 
-- ingestion HTTP p95 ≤500 мс без клиентской сети;
-- свежий GPS → экран p95 ≤5 с;
-- публикация summary → активная карта ≤60 с;
-- стабильный объём LRU и SSE pending buffers;
-- отсутствие starvation ingestion от tile jobs.
+Initial targets:
 
-EXPLAIN (ANALYZE,BUFFERS) оценивает SQL; отдельно измеряем JSON/MVT bytes, сериализацию и frontend frame time. Маленький sequential scan не является ошибкой. Ни одна цель пока не подтверждена тестами.
+- ingestion HTTP p95 ≤500 ms excluding client-side network;
+- fresh GPS → screen p95 ≤5 s;
+- summary publication → active map ≤60 s;
+- a stable LRU footprint and SSE pending-buffer size;
+- no ingestion starvation from tile jobs.
 
-Метрики: point commit latency, duplicates/conflicts, data age, live-cycle duration, SSE reconnects/backpressure, summary lag, tile bytes/time/hit ratio, pool wait, dead tuples, backup age, purge failures. В логах — requestId и технические идентификаторы, без GPS, payload, session tokens.
+EXPLAIN (ANALYZE,BUFFERS) evaluates SQL; JSON/MVT bytes, serialization, and frontend frame time are measured separately. A small sequential scan is not by itself a bug. None of the targets are yet confirmed by tests.
 
-## 16. Порядок реализации
+Metrics: point commit latency, duplicates/conflicts, data age, live-cycle duration, SSE reconnects/backpressure, summary lag, tile bytes/time/hit ratio, pool wait, dead tuples, backup age, purge failures. Logs contain requestId and technical identifiers, no GPS, payload, or session tokens.
 
-1. P02A foundation: Compose, migration owner/runtime/maintenance roles, trusted fixtures, organizations/memberships, transaction helper и базовая RLS.
-   Выполнено, когда identity/tenant integration tests проходят под runtime-role.
-2. P02B schema/ACL: runs, points, commands, summaries, shares, tombstones, composite FK и полная D02 matrix.
-   Готово, когда direct child-table reads и cross-tenant links не обходят run/share ACL.
-3. Вертикальный сценарий: create run → batch → повтор → history → finish; IndexedDB и симулятор.
-   Готово, когда данные сохраняются после потери ответа и переподключения.
+## 16. Implementation order
+
+1. P02A foundation: Compose, migration owner/runtime/maintenance roles, trusted fixtures, organizations/memberships, the transaction helper, and baseline RLS.
+   Done when identity/tenant integration tests pass under the runtime role.
+2. P02B schema/ACL: runs, points, commands, summaries, shares, tombstones, composite FKs, and the full D02 matrix.
+   Done when direct child-table reads and cross-tenant links cannot bypass run/share ACL.
+3. Vertical scenario: create run → batch → retry → history → finish; IndexedDB and the simulator.
+   Done when data survives a lost response and a reconnect.
 4. Track processing: edge rules, summary, revisions, late points, purge.
-   Готово, когда геометрические fixtures и конкурентный пересчёт проверены.
+   Done when geometric fixtures and concurrent recompute are verified.
 5. Live: SSE state, snapshot/changes, reconnect, ACL revocation, React markers/track.
-   Готово, когда соблюдается контракт восстановления и измерен live p95.
-6. Archive tiles: MVT, границы мира, ACL, LRU, revision refresh.
-   Готово, когда соседние тайлы корректны и неподвижная карта обновляется.
-7. Эксплуатация: limits, метрики, нагрузка, restore drill и документация запуска.
-   Готово, когда известны измеренные пределы и проверено восстановление.
+   Done when the recovery contract is respected and live p95 is measured.
+6. Archive tiles: MVT, world boundaries, ACL, LRU, revision refresh.
+   Done when adjacent tiles are correct and a stationary map updates.
+7. Operations: limits, metrics, load, a restore drill, and launch documentation.
+   Done when the measured limits are known and recovery is verified.
 
-Не начинаем с микросервисов или Redis. Первый демонстрируемый результат — одна надёжно записанная и восстановленная пробежка; инфраструктура добавляется по проверяемым требованиям.
+We do not start with microservices or Redis. The first demonstrable result is a single reliably recorded and recovered run; infrastructure is added per verifiable requirements.
 
-## 17. Что уточнить в ходе реализации
+## 17. What to clarify during implementation
 
-- Фактические пороги GPS-качества и погрешность дистанции на реальных треках.
-- Поведение выбранного браузера/устройства; для background tracking понадобится отдельный клиент.
-- Точные версии runtime/PostGIS/Mapbox SDK: зафиксировать lockfiles/образы после smoke test.
-- Провайдер, цена Mapbox и хостинга; бюджет пока проектный.
-- Правила отображения очень плотных тайлов после измерения.
-- Identity provider и проверенный процесс восстановления с журналом удалений.
+- Actual GPS quality thresholds and distance error on real tracks.
+- The behavior of the chosen browser/device; background tracking will need a separate client.
+- Exact runtime/PostGIS/Mapbox SDK versions: pin lockfiles/images after a smoke test.
+- The Mapbox and hosting provider and pricing; the budget is a design target for now.
+- Rendering rules for very dense tiles, after measurement.
+- The identity provider and a verified recovery process with a deletion log.
 
-Эти пункты не блокируют реализацию вертикального сценария, но не должны выдаваться за уже проверенные свойства системы.
+These items do not block implementing the vertical scenario, but must not be presented as already-verified properties of the system.

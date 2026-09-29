@@ -101,8 +101,8 @@ would double-count whenever a summary existed.
    matching the raw-purge precedent of not printing identity in warnings.
 9. The tombstone's `expires_at` is `deleted_at + interval '1 year'`, the
    annual period the SDD already documents for tombstone retention
-   (`docs/SDD.md` section 6.1: "tombstone... хранится в пределах годового
-   срока"). Cleanup, reuse after expiry, and the exact post-expiry `PUT`
+   (`docs/SDD.md` section 6.1: "the tombstone... is retained for up to
+   one year"). Cleanup, reuse after expiry, and the exact post-expiry `PUT`
    contract remain P10.4 (D08); this stage only assigns the stored value.
 10. `PUT /runs/:runId` already rejects a tombstoned run ID with `410
     RUN_DELETED` by querying `run_tombstones` under RLS scoped to

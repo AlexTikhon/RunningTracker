@@ -1,58 +1,58 @@
-# Running Tracker — план пошаговой реализации для coding-агента
+# Running Tracker — step-by-step implementation plan for the coding agent
 
-Версия: 1.0  
-Дата: 29 сентября 2026
-Статус: P00–P09 завершены и проверены локально: archive HTTP/RLS boundary, PostGIS MVT pipeline, bounded process cache, atomic invalidation, React/Mapbox source lifecycle и bounded tile resource usage. P10.1–P10.3 выполнены: bounded raw purge, retention eligibility/scheduling, owner deletion и годовой retention с atomic tombstone/archive revision. D01, D02, D04, D05 и D06 решены, stream-часть D07 зафиксирована в ADR-0023. Следующий фрагмент — P10.4 tombstone lifetime and late retry contract. D03 разделён: локальная HTTP/session boundary выполнена, production identity integration остаётся P12.
-Основание: running-tracker-sdd-v1.0.md, разделы 1–17.
+Version: 1.0
+Date: September 29, 2026
+Status: P00–P09 complete and verified locally: archive HTTP/RLS boundary, PostGIS MVT pipeline, bounded process cache, atomic invalidation, React/Mapbox source lifecycle, and bounded tile resource usage. P10.1–P10.3 complete: bounded raw purge, retention eligibility/scheduling, owner deletion, and annual retention with atomic tombstone/archive revision. D01, D02, D04, D05, and D06 are resolved; the stream portion of D07 is fixed in ADR-0023. The next exact increment is P10.4, tombstone lifetime and late retry contract. D03 is split: the local HTTP/session boundary is complete, production identity integration remains P12.
+Basis: running-tracker-sdd-v1.0.md, sections 1–17.
 
-## 1. Режим исполнения
+## 1. Execution mode
 
-Единица работы — один этап Pxx, явно указанный в поручении. По умолчанию первое поручение охватывает P00–P01. Объединять следующие этапы можно по заданию пользователя; не пытаться реализовать весь SDD в одном изменении.
+The unit of work is a single Pxx stage, explicitly named in the assignment. By default, the first assignment covers P00–P01. Later stages may be combined at the user's request; do not attempt to implement the entire SDD in a single change.
 
-Внутри назначенного этапа агент самостоятельно выполняет реализацию, необходимые проверки и исправления. Не запрашивать согласование каждого файла или обычного технического выбора. Завершение этапа — естественная граница отчёта и обучения, а не отдельный approval workflow.
+Within an assigned stage, the agent independently performs the implementation, the necessary checks, and any fixes. Do not request approval for each file or for ordinary technical choices. Completing a stage is the natural boundary for a report and for learning, not a separate approval workflow.
 
-Перед началом:
-1. Прочитать SDD, этот план, инструкции репозитория и текущий progress.
-2. Проверить рабочую директорию, git status, существующую структуру и инструменты.
-3. Сохранить существующую работу пользователя; не перезаписывать её ради шаблона.
-4. Выбрать первый незавершённый этап в назначенном диапазоне с выполненными зависимостями.
-5. Кратко объяснить цель этапа, конкретный результат и основные проверки.
+Before starting:
+1. Read the SDD, this plan, the repository instructions, and the current progress.
+2. Check the working directory, git status, existing structure, and tooling.
+3. Preserve the user's existing work; do not overwrite it for the sake of a template.
+4. Select the first incomplete stage within the assigned range whose dependencies are satisfied.
+5. Briefly explain the stage's goal, the concrete outcome, and the main checks.
 
-После этапа обновить docs/progress.md: задачи, результат, выполненные команды, фактические итоги, ограничения, решения и следующий этап. Невыполненный тест не обозначать как успешный; сгенерированный код не считать проверенной реализацией.
+After a stage, update docs/progress.md: tasks, outcome, commands run, actual results, constraints, decisions, and the next stage. Do not mark a failed test as passing; do not treat generated code as a verified implementation.
 
-Публичный deploy, платные ресурсы, создание удалённого репозитория и отправка изменений во внешние сервисы не входят в этот план сами по себе.
+Public deployment, paid resources, creating a remote repository, and pushing changes to external services are not part of this plan by themselves.
 
-## 2. Источники истины и управление изменениями
+## 2. Sources of truth and change management
 
-- docs/SDD.md — продуктовые и архитектурные требования.
-- docs/implementation-plan.md — порядок задач и критерии приёмки.
-- docs/adr/ — значимые решения с причиной и последствиями.
-- Runtime-схемы/API-spec — точный машинный контракт после его реализации.
-- Миграции — фактическая схема данных.
-- docs/progress.md — доказательства выполнения.
+- docs/SDD.md — product and architecture requirements.
+- docs/implementation-plan.md — task order and acceptance criteria.
+- docs/adr/ — significant decisions with rationale and consequences.
+- Runtime schemas/API spec — the exact machine contract once implemented.
+- Migrations — the actual data schema.
+- docs/progress.md — evidence of completion.
 
-При расхождении кода и SDD агент не подгоняет документацию под случайную реализацию. Сначала объясняет расхождение и выбирает исправление.
+When code and the SDD diverge, the agent does not adjust the documentation to match an incidental implementation. It first explains the discrepancy and chooses a fix.
 
-Обычные технические уточнения в границах требований агент фиксирует самостоятельно. Противоречия, меняющие продуктовый смысл — например, сокращение истории, отказ от глобальной географии или изменение прав тренера — требуют решения пользователя. Пока ответ отсутствует, продолжать независимые задачи.
+Ordinary technical clarifications within the bounds of the requirements are decided by the agent on its own. Contradictions that change product meaning — for example, shortening history, dropping global geography, or changing coach permissions — require a user decision. While an answer is pending, continue with independent tasks.
 
-Зависимости и поддерживаемые версии проверяются по официальной документации в момент реализации, затем фиксируются lockfile и версиями образов. Не использовать latest-теги как воспроизводимую конфигурацию.
+Dependencies and supported versions are verified against official documentation at implementation time, then pinned via lockfile and image versions. Do not use `latest` tags as a reproducible configuration.
 
-## 3. Целевая структура репозитория
+## 3. Target repository structure
 
-Для нового пустого проекта — один workspace, без дополнительных orchestration-фреймворков:
+For a new empty project — a single workspace, without additional orchestration frameworks:
 
 ~~~text
 apps/
   api/                 Express 5: HTTP, ingestion, access, live, jobs, tiles
   web/                 React + TypeScript
 packages/
-  contracts/           Runtime-схемы запросов/ответов и публичные типы
-  fixtures/            Детерминированные сценарии GPS
+  contracts/           Runtime schemas for requests/responses and public types
+  fixtures/            Deterministic GPS scenarios
 tools/
-  simulator/           Отправка GPS и моделирование сетевых сбоев
+  simulator/           GPS transmission and network failure simulation
 db/
   migrations/
-  test-support/        Роли/fixtures для изолированной тестовой БД
+  test-support/        Roles/fixtures for an isolated test database
 infra/
   compose/
   proxy/
@@ -64,383 +64,383 @@ docs/
   runbooks/
 ~~~
 
-Если существует репозиторий, адаптироваться к его соглашениям.
+If a repository already exists, adapt to its conventions.
 
-Базовый вариант: npm workspaces, React + Vite, Express 5, PostgreSQL/PostGIS, параметризованный SQL через pg и последовательные SQL-миграции. Express выбран в ADR-0002 ради явного управления зависимостями, конфигурацией и lifecycle; это не заявление о выигрыше производительности. Выбор migration runner фиксируется в P01. Не добавлять ORM только ради CRUD, если критические запросы всё равно требуют SQL/PostGIS.
+Baseline choice: npm workspaces, React + Vite, Express 5, PostgreSQL/PostGIS, parameterized SQL via `pg`, and sequential SQL migrations. Express was chosen in ADR-0002 for explicit control over dependencies, configuration, and lifecycle; this is not a claim of a performance win. The migration runner choice is fixed in P01. Do not add an ORM purely for CRUD if the critical queries require SQL/PostGIS anyway.
 
-packages/contracts не зависит от Express или драйвера БД. apps/web не импортирует серверные модели, secrets и infrastructure-код.
+packages/contracts does not depend on Express or the DB driver. apps/web does not import server models, secrets, or infrastructure code.
 
-Геодезические расчёты выполняет PostGIS. Клиент использует серверный connectFromPrevious; отдельного независимого алгоритма GPS-фильтрации на frontend нет.
+Geodetic calculations are performed by PostGIS. The client uses the server-computed connectFromPrevious; there is no separate independent GPS-filtering algorithm on the frontend.
 
-## 4. Карта этапов
+## 4. Stage map
 
-| Этап | Результат | Зависимость |
+| Stage | Outcome | Dependency |
 |---|---|---|
-| P00 | Проверенные входные данные и локальный backlog решений | — |
-| P01 | Воспроизводимый каркас, API/web, PostgreSQL/PostGIS | P00 |
-| P02A | Роли, identity/organization schema, tenant helper и базовая RLS | P01 |
-| P02B | Run/point/share schema, ограничения и полная ACL/RLS-матрица | P02A |
-| P03 | Создание run, команды, HTTP/session-контракты | P02B |
-| P04 | Надёжный ingestion, raw history и GPS-симулятор | P03 |
-| P05 | Запись из браузера с локальным буфером | P04 |
-| P06 | Геообработка и согласованная публикация сводок | P04 |
-| P07 | Snapshot/changes с устойчивой пагинацией | P06 |
-| P08 | SSE и работающий экран тренера | P05, P07 |
-| P09 | MVT, кэш, архивный слой и инвалидация | P06, P08 |
-| P10 | Retention, удаление, tombstones и восстановление jobs | P09 |
-| P11 | Измерения, ограничения нагрузки и эксплуатационные метрики | P08–P10 |
-| P12 | Production auth, recovery и готовность к размещению | P11 |
-
-Рабочий порядок по умолчанию: P00 → P01 → P02A → P02B → P03 → … → P12. Возможность независимых ветвей не означает поручение запускать дополнительных агентов.
-
-Вехи:
-- P04: backend умеет надёжно сохранить и прочитать одну пробежку.
-- P05: пользователь записывает пробежку в браузере.
-- P08: тренер видит и восстанавливает live-трек.
-- P09: завершённая пробежка появляется в собственных тайлах.
-- P12: готова проверенная конфигурация размещения; публичная публикация — отдельное действие.
-
-## 5. Подробные этапы
-
-### P00 — Проверка исходных условий
-
-Ссылка на SDD: 1–5, 17.
-
-Задачи:
-- P00.1 Проверить выбранный репозиторий и среду: Node, package manager, Docker, доступность PostGIS-образа, занятые порты. Не устанавливать системные компоненты без необходимости.
-- P00.2 Перенести SDD и план в docs/, сохранив исходный смысл; создать progress с задачами P00–P12.
-- P00.3 Зафиксировать конкретные версии инструментов и короткий ADR о workspace, SQL-доступе и тестовом подходе.
-- P00.4 Создать список обязательных уточнений реализации из раздела 6 этого плана с этапами-владельцами.
-
-Готово, когда:
-- выбран корректный корень проекта;
-- ограничения среды записаны отдельно от архитектурных ограничений;
-- команды установки и запуска имеют определённые prerequisites;
-- продуктовый код ещё не подменяет неразобранные требования.
-
-### P01 — Рабочий каркас и окружение
-
-Ссылка на SDD: 3, 13.
-
-Задачи:
-- P01.1 Настроить workspace, TypeScript strict, Express 5 API и web, lockfile, lint/typecheck/build; исправить изоляцию integration config, переносимость checksum и ограниченные DB/shutdown deadlines.
-- P01.2 Поднять PostgreSQL с PostGIS и persistent volume; подготовить migration runner и отдельную тестовую БД.
-- P01.3 Реализовать health/liveness и readiness с проверкой БД, graceful shutdown, validated env config, .env.example без secrets.
-- P01.4 Настроить same-origin доступ /api для frontend в development; минимальные страницы подключения и состояния.
-- P01.5 Добавить CI-проверки либо переносимые CI-команды: build, typecheck, lint, integration tests с реальным PostGIS.
-
-Проверки:
-- запуск из чистого checkout по README;
-- SELECT PostGIS_Full_Version() успешно выполняется;
-- потеря БД меняет readiness, но не притворяется падением HTTP-процесса;
-- зависший health query завершается в заданный deadline и не удерживает pool slot;
-- одинаковый SQL после LF/Windows checkout имеет одинаковый checksum, а содержательное изменение отклоняется;
-- web и API доступны через документированные адреса.
-
-Границы: без auth-provider, RLS бизнес-таблиц, карты, Redis и streaming.
-
-### P02A — Identity/organization schema и базовая tenant-изоляция
-
-Ссылка на SDD: 5, 8.
-
-Задачи:
-- P02A.1 Создать users, organizations с archive_revision и memberships с role/active, PK/FK/UNIQUE/CHECK и индексами.
-- P02A.2 Разделить privileged bootstrap, migration/object owner, runtime и maintenance credentials; права выдавать явно.
-- P02A.3 Реализовать один-client transaction helper с transaction-local tenant/user context, явными rollback/commit semantics и безопасным release.
-- P02A.4 Зафиксировать минимальную матрицу identity/organization reads и реализовать fail-closed, нерекурсивную RLS.
-- P02A.5 Подготовить отдельные owner fixtures для двух организаций, multi-membership и inactive/no-membership случаев.
-
-Проверки:
-- реальные SQL-запросы под runtime-role, а не под владельцем;
-- разрешённый SELECT и запрещённые SELECT/INSERT/UPDATE/DELETE по P02A-матрице;
-- connection reuse из pool не переносит контекст предыдущего запроса;
-- параллельные tenant-транзакции не смешивают контекст;
-- runtime не владеет таблицами, не имеет superuser/BYPASSRLS и не выполняет DDL;
-- privileged maintenance не доступен обычному HTTP-коду;
-
-Готово, когда существует исполняемая P02A-матрица доступа под реальной runtime-role. Моки repository не являются доказательством RLS.
-
-### P02B — Run schema и полная ACL/RLS-матрица
-
-Ссылка на SDD: 5, 8.
-
-Задачи:
-- P02B.1 Создать runs, run_points, run_commands, run_summaries, run_shares, run_tombstones и индексы SDD.
-- P02B.2 Добавить CHECK/UNIQUE/FK, состояния, revisions, единицы измерения и ограничения диапазонов. SQL-поля для сравнения payload не должны незаметно терять точность.
-- P02B.3 Завершить D02: нерекурсивные runs/shares policies и child-table ACL без обхода прямым чтением.
-- P02B.4 Проверить cross-tenant composite FK, owner/grantee access и denied mutations под runtime-role.
-
-Готово, когда исполняемая матрица покрывает run/share/child tables, а прямое чтение points/summaries не обходит ACL.
-
-Состояние на 2026-09-23: P02B.1–P02B.4 и D02 проверены на реальной БД; D01 canonical `PointInput`/retry comparison resolved в P04.1. Тем самым оставшаяся причина держать P02B открытым устранена, P02B считается DONE.
-
-### P03 — Session boundary, команды и API-основа
-
-Ссылка на SDD: 6.1, 8, 11.
-
-Задачи:
-- P03.1 Реализовать session boundary, CSRF/Origin-проверки, requestId и единый ApiError. Локальная identity fixture разрешена только в development/test; production startup с ней запрещён. **Выполнено и проверено 2026-09-21; ADR-0007.**
-- P03.2 Создать runtime-контракты, OpenAPI для обычного HTTP и описание SSE; bigint/seq сериализуются строками. **Выполнено и проверено 2026-09-22; D01 canonicalization намеренно оставлена P04.**
-- P03.3 Реализовать PUT run и POST commands: idempotency, expectedControlRevision, terminal finish, один активный run на пользователя. **Выполнено и проверено 2026-09-22 на реальном PostgreSQL: row lock, concurrent create/commands/replay и rollback atomicity.**
-- P03.4 Реализовать GET run/list, управление shares и проверку активного membership. **Выполнено и проверено 2026-09-22 на реальном PostgreSQL: owner/shared ACL, keyset pagination, owner-only share upsert/revoke и active-membership boundary.**
-- P03.5 Выполнить автоfinish через внедряемые часы и повторяемую maintenance-задачу. **Выполнено и проверено 2026-09-23: узкая SECURITY DEFINER capability, injected UTC clock, non-overlapping scheduler, bounded shutdown и конкурентные real-PostgreSQL проверки.**
-
-Проверки:
-- retry создания и команды возвращает согласованный результат;
-- тот же commandId с другим payload отклоняется;
-- повтор команды проверяется до expectedControlRevision;
-- конкурентные pause/resume/finish не нарушают state machine;
-- GPS-изменение data_revision не создаёт control_revision conflict;
-- изменяющие запросы без корректной CSRF/Origin-защиты отклоняются.
-
-Границы: внешняя identity-интеграция остаётся P12; API уже использует полноценную границу сессии.
-
-### P04 — Ingestion, история и симулятор
-
-Ссылка на SDD: 6.2–6.3, 8, 11.2–11.3.
-
-Задачи:
-- P04.1 Реализовать bounded atomic batch, canonical payload comparison, FOR UPDATE и ACK после commit. **Выполнено и проверено 2026-09-23, включая `ingested_revision` только для новых точек и отсутствие revision bump для повторов.**
-- P04.2 Ранее выделенный revision-инвариант поглощён P04.1, поскольку является частью атомарного ingestion-контракта; отдельной реализации не осталось.
-- P04.3 Добавить raw history с limit, курсором, revision mismatch и проверками доступа. **Выполнено и проверено 2026-09-25: единый statement snapshot, keyset по `seq`, cursor-bound `data_revision`, history ACL и retention/error ordering.**
-- P04.4 Создать симулятор с seed/virtual clock: normal, duplicates, reordered, delayed batch, dropped response, clock jump, GPS spike. **Выполнено и проверено 2026-09-26: reusable fixtures, детерминированный FIFO virtual clock, JSONL CLI и все семь сценариев; server-side fault hook оставлен P04.5.**
-- P04.5 Добавить безопасное fault injection в тестовой среде для случая commit выполнен, ответ потерян. **Выполнено и проверено 2026-09-26: injected dependency доступна только при `APP_ENV=test`, разрыв выполняется после подтверждённого COMMIT, retry/history/finish доказаны HTTP и SQL.**
-
-Проверки:
-- два конкурентных идентичных batch создают ровно один набор;
-- одна конфликтующая точка отклоняет всю пачку;
-- порядок 41 → 43 → 42 корректно читается;
-- старые повторы после upload window подтверждаются, новые точки отклоняются;
-- raw_state=purging/purged даёт явную ошибку;
-- максимумы body/batch/run проверяются до неограниченного расхода ресурсов;
-- API сохраняет точные исходные значения в рамках принятой канонизации.
-
-Демонстрация: создать run → отправить точки → потерять ACK → повторить → прочитать историю → finish. Результат подтверждается SQL и HTTP, без UI карты.
-
-### P05 — Браузерная запись и локальный буфер
-
-Ссылка на SDD: 2, 6, 11.
-
-Задачи:
-- P05.1 Реализовать экран бегуна: start/pause/resume/finish, recording/upload/offline/error состояния. **Выполнено и проверено 2026-09-26: same-origin session discovery, shared-contract validation, revision-aware API controls, exact-request retry и responsive state dashboard.**
-- P05.2 Сохранять seq и точку в одной IndexedDB-транзакции; команды также сохранять до подтверждения. **Выполнено и проверено 2026-09-26: user/run-scoped bigint seq allocation, canonical point buffer, explicit batch ACK deletion, durable exact-request queue и reload recovery.**
-- P05.3 Upload worker: bounded batches, backoff/jitter, удаление только подтверждённой пачки, остановка на постоянной ошибке. **Выполнено и проверено 2026-09-26: последовательные пачки ≤100, точная ACK-проверка/удаление, capped full-jitter и Retry-After, offline/reconnect, permanent stop и authoritative reconciliation.**
-- P05.4 Один владелец записи среди вкладок; зафиксировать механизм lease/lock и обнаружение конфликтующего writer. **Выполнено и проверено 2026-09-26: user-scoped IndexedDB lease, per-tab UUID, fencing token, bounded expiry/renewal, stale-owner rejection и explicit read-only conflict UX.**
-- P05.5 Подключить Geolocation и симулятор через одинаковый интерфейс источника. Добавить Mapbox при наличии токена, сохранив возможность тестирования записи без внешней карты. **Выполнено и проверено 2026-09-26: общий source/controller, bounded callback queue, durable segment allocation, transactional lease fencing, stale-callback rejection, seeded simulator и tokenless recording UI; Mapbox не активирован, потому что tracked token contract отсутствует и токен не был предоставлен.**
-
-Проверки:
-- reload и временный offline не сбрасывают seq/буфер;
-- duplicate ACK не удаляет ещё не подтверждённые точки;
-- finish офлайн и server auto-finish обрабатываются через reconciliation;
-- stale GPS callback не выдаётся за новое измерение;
-- вторая вкладка не начинает независимую запись того же run;
-- браузерный тест проверяет восстановление после отключения сети.
-
-Границы: foreground recording. Не объявлять PWA решением background GPS.
-
-### P06 — Геометрия и архивные сводки
-
-Ссылка на SDD: 7.
-
-Задачи:
-- P06.1 Реализовать единую версионированную проверку рёбер, используемую summary и live-track. **Выполнено и проверено 2026-09-26: `v1` PostGIS evaluator, стабильный rejection precedence, geodesic distance и least-privilege EXECUTE для runtime/maintenance; ADR-0012.**
-- P06.2 Рассчитать distance/observed_duration в PostGIS, quality counters, сегменты и insufficient_data. **Выполнено и проверено 2026-09-26: revision-bound maintenance calculation, exact `QualityStats`, accepted chains без bridging и ADR-0013.**
-- P06.3 Выполнить метрическое упрощение и нормализацию глобальной геометрии. Пограничные случаи реализуются, а не заменяются региональным допущением. **Выполнено и проверено 2026-09-26: cumulative-geodesic части ≤20 км, локальная azimuthal-equidistant проекция, Douglas–Peucker 5 м, сохранение endpoints и split/normalization антимеридиана; ADR-0014.**
-- P06.4 Добавить job поиска устаревших summaries, snapshot, compare revision и атомарную публикацию с archive_revision. **Выполнено и проверено 2026-09-26: один candidate за цикл, materialized calculation snapshot без run lock, organization → run publication locks, revision/state/tombstone compare, атомарные summary upsert + archive revision и ADR-0015.**
-- P06.5 Ограничить конкурентность jobs; соблюдать organization → run lock order. **Выполнено и проверено 2026-09-27: transaction-scoped advisory claims между процессами, configurable 1–8 worker batch, all-settled cycles, maintenance pool headroom и ADR-0016.**
-
-Проверки:
-- простые геометрические эталоны с независимо заданным ожидаемым результатом;
-- шум неподвижного GPS, резкий поворот, выброс, пропуск seq, отрицательный dt, pause;
-- дата доставки не разрывает непрерывные измерения;
-- антимеридиан, высокая широта, один point, пустая линия;
-- упрощение не меняет сохранённую distance;
-- новая точка во время job исключает публикацию устаревшей summary;
-- удалённый run не восстанавливается фоновой задачей.
-
-Готово, когда fixtures показывают не только успешный расчёт, но и объяснимые причины исключения данных.
-
-### P07 — Версионированный snapshot и changes
-
-Ссылка на SDD: 9.2, 11.1–11.3.
-
-Задачи:
-- P07.1 Реализовать initial snapshot на фиксированной R, пагинацию по seq. **Выполнено и проверено 2026-09-27: один statement фиксирует R и bounded keyset page, cursor сохраняет R/algorithmVersion/last seq, поздние ingestion не меняют продолжение, ACL/raw-state перепроверяются на каждой странице; ADR-0017.**
-- P07.2 Реализовать changes(A,T): новые точки плюс непосредственные преемники на T. **Выполнено и проверено 2026-09-27: первый statement фиксирует T, materialized `(A,T]` объединяется с immediate successors на T, набор дедуплицируется и keyset-пагинируется по bigint seq; ACL/raw-state перепроверяются на каждой странице; ADR-0018.**
-- P07.3 Вычислять predecessorSeq/connectFromPrevious на том же наборе ingested_revision ≤ T. **Выполнено и проверено 2026-09-27: полный point set материализуется на T, predecessor вычисляется до page filter, а shared PostGIS evaluator формирует server-authoritative connectivity для snapshot и changes; ADR-0019.**
-- P07.4 Подписывать cursors с user/org/run, видом операции, A/T, algorithmVersion, последним ключом и expiry. **Выполнено и проверено 2026-09-27: versioned HMAC-SHA-256 envelope, identity/route/operation binding, единый десятиминутный deadline на page chain и production key guard; ADR-0020.**
-- P07.5 Реализовать клиентское применение upserts с продвижением revision только после всех страниц. **Выполнено и проверено 2026-09-27: user/org/run-scoped `LiveTrackStore`, staged seq-keyed application, atomic terminal-page commit, single-flight target coalescing и snapshot fallback для invalid cursor/algorithm changes; ADR-0021.**
-
-Проверки:
-- late insert 42 исправляет связь 43;
-- вставка нескольких последовательных/разрозненных точек корректно обновляет преемников;
-- между страницами приходят новые точки: результат старой T неизменен;
-- повтор и перезапуск страниц не создаёт дублей;
-- смена algorithmVersion/expiry/потеря локального состояния запускает snapshot;
-- revoke/finish/purge между страницами прекращает выдачу по актуальным правам;
-- сервер не держит DB-транзакцию между HTTP-запросами.
-
-Проверка эквивалентности: initial snapshot на A + все changes до T даёт тот же набор точек и рёбер, что свежий snapshot на T.
-
-### P08 — SSE и экран тренера
-
-Ссылка на SDD: 9, 11.4.
-
-Задачи:
-- P08.1 Реализовать одно SSE на организацию/вкладку, initial state, общий цикл 2 с, heartbeat, ограниченную очередь. **Выполнено и проверено 2026-09-27: process-level grouped polling, short runtime-role snapshots, per-stream ordering, heartbeat, connection/poll bounds и latest-only backpressure с timeout; ADR-0022.**
-- P08.2 Перепроверять сессию/membership/grants на живом соединении, удалять недоступные run. **Выполнено и проверено 2026-09-27: per-connection session digest/expiry validation, exact expiry timer, membership-denial disconnect, grant-filtered full-state replacement и отмена pending state; ADR-0023.**
-- P08.3 Экран тренера: доступные пробежки, confirmed/unconfirmed/stale markers, выбранные треки. **Выполнено и проверено 2026-09-27: strict SSE client, full-state coach reducer, server-relative 10-second freshness, fail-closed last-known cleanup, explicit authorized track selection и responsive tokenless UI; ADR-0024.**
-- P08.4 Синхронизация по revisions: одна загрузка на run, объединение уведомлений, восстановление после reconnect. **Выполнено и проверено 2026-09-27: selected-run coordinator поверх atomic `LiveTrackStore`, greatest-revision coalescing, abort/eviction при removal/revoke/disconnect, algorithm-version snapshot replacement и bounded same-session reconnect recovery; ADR-0025.**
-- P08.5 Настроить proxy buffering/timeouts и browser-to-proxy HTTP/2 для проверяемого deployment profile. **Выполнено и проверено 2026-09-28: pinned Nginx HTTPS/HTTP/2 edge, internal HTTP/1.1 Express upstream, SSE-specific no-buffer/no-cache/no-compression/no-retry policy, reproducible local TLS и actual ALPN/restart/DB-activity/latency harness; ADR-0026.**
-
-Проверки:
-- DB commit без SSE-уведомления всё равно обнаруживается следующим циклом;
-- backend restart приводит к snapshot/changes, без потери сохранённых точек;
-- медленный читатель не увеличивает память без ограничения;
-- открытый stream не удерживает DB connection;
-- can_read_live не открывает finished history;
-- остановка GPS делает позицию stale при работающем соединении;
-- revoke очищает и current, и last-known данные.
-
-Измерить предварительный end-to-end p95; итоговый результат — P11.
-
-### P09 — MVT, кэш и архивная карта
-
-Ссылка на SDD: 10, 11.5.
-
-Задачи:
-- P09.1 Реализовать metadata, tile endpoint, диапазоны XYZ, period validation и history ACL. **Выполнено и проверено 2026-09-28: revision-bound metadata/template, strict zoom 8–16 and XYZ/366-day validation, active-membership/revision checks, runtime-role RLS pipeline boundary и fail-closed handoff к P09.2; ADR-0027.**
-- P09.2 PostGIS pipeline: indexed selection, projection, buffering, clipping, MVT; run_id остаётся строкой. **Выполнено и проверено 2026-09-28: GiST-compatible WGS84 candidate branches, Web Mercator world clipping/projection, extent 4096 + buffer 64 MVT, shifted antimeridian copies, decoded adjacent/polar/empty tiles и runtime-role history RLS; ADR-0028.**
-- P09.3 Добавить LRU по bytes, TTL, single-flight и все составляющие ключа SDD. **Выполнено и проверено 2026-09-28: process-local 32 МиБ/4096-entry LRU, monotonic five-minute TTL, canonical full identity, empty-tile caching, failure/oversize exclusion и per-key single-flight; ADR-0029.**
-- P09.4 Проверять членство/revision до cache hit; publish/delete/grant changes меняют epoch атомарно. **Выполнено и проверено 2026-09-28: shared organization epoch lock до cache lookup, повторная membership/revision validation, атомарные summary-delete/history-grant/membership triggers, organization-first share mutation lock order и rollback/concurrent cache-hit proof; ADR-0030.**
-- P09.5 React archive source, metadata polling 30 с, refresh при focus, обработка ошибок и очистка после revoke. **Выполнено и проверено 2026-09-28: pinned Mapbox adapter, bounded metadata controller, focus/409 refresh, `setTiles` revision replacement, transient-error retention и 401/403 sensitive-layer cleanup; ADR-0031.**
-- P09.6 Ограничить SQL/concurrency/queue/tile bytes; не возвращать первые N features как полный тайл. **Выполнено и проверено 2026-09-28: two-phase admission без DB client во время queue wait, per-key single-flight, 2 active + 16 waiting, PostgreSQL-local 2-second timeout, inclusive 1 МиБ raw-buffer bound, explicit `TILE_BUSY`/`TILE_TIMEOUT`/`TILE_TOO_COMPLEX`; ADR-0032.**
-
-Проверки:
-- декодировать MVT и проверять source-layer/properties/геометрию;
-- соседние тайлы, crossing ±180°, polar clipping, empty tile;
-- один пользователь не получает чужой тайл при warm cache;
-- конкурентные запросы одного ключа вызывают одну генерацию;
-- revision mismatch приводит к metadata refresh;
-- неподвижная карта получает новую summary в пределах целевого времени;
-- изменение числа features сверх лимита не скрывается молчаливым усечением.
-
-Кэш — оптимизация. Его очистка/потеря не меняет правильность результата.
-
-### P10 — Retention, удаление и обслуживание
-
-Ссылка на SDD: 6.1, 12.
-
-Задачи:
-- P10.1 Реализовать available → purging → purged, bounded deletes и повторный запуск. **Выполнено и проверено 2026-09-29: maintenance-only one-run primitive, 1,000-row `seq` batches, durable restart state, rollback/idempotency, shared summary advisory-lock serialization, runtime `raw_state` mutation revoked; ADR-0033.**
-- P10.2 Разрешать purge только при актуальной summary и закрытом upload window. **Выполнено и проверено 2026-09-29: seven-day/upload-window/current-summary revalidation inside the locked purge capability, bounded transactional claim, restart-first periodic scheduling и identity-free overdue warning; ADR-0034.**
-- P10.3 Реализовать owner deletion и годовой retention с tombstone и archive revision. **Выполнено и проверено 2026-09-29: общая SQL-примитив `execute_run_deletion`, отдельные runtime/maintenance `SECURITY DEFINER` capabilities, shared per-run advisory lock → organization → run lock order, атомарный tombstone + cascade delete + ровно одно archive_revision-приращение независимо от наличия summary, идемпотентный/конкурентно-безопасный owner DELETE и годовой maintenance retention worker; ADR-0035.**
-- P10.4 Зафиксировать срок действия tombstone и контракт запоздалого retry; устранить неоднозначность SDD через ADR.
-- P10.5 Подготовить экспорт/журнал удалений и runbook recovery; end-to-end restore — P12.
-
-Проверки:
-- управляемые часы заменяют ожидание семи дней;
-- crash после нескольких пачек удаления не приводит к partial summary;
-- DELETE конкурирует с ingestion/summary/tiles безопасно;
-- повтор DELETE идемпотентен, retry create не возвращает удалённый run в пределах гарантированного окна;
-- сырой replay после purge недоступен, архивная summary остаётся;
-- отказ summary вызывает наблюдаемое превышение retention, а не тихую потерю истории.
-
-### P11 — Нагрузочная проверка и эксплуатационные пределы
-
-Ссылка на SDD: 13–15.
-
-Задачи:
-- P11.1 Добавить метрики/структурированные логи без координат и secrets.
-- P11.2 Генерировать обычный и стрессовый наборы SDD с seed и воспроизводимым распределением ACL/географии.
-- P11.3 Проверить ingestion + viewers + pan/zoom + jobs одновременно, включая пачки после offline.
-- P11.4 Собрать EXPLAIN ANALYZE BUFFERS, реальные размеры таблиц/индексов, bytes ответа и память.
-- P11.5 Применить только подтверждённые оптимизации; сохранить отчёт до/после.
-
-Отчёт обязан содержать:
-- commit приложения, версии БД/образов, CPU/RAM/диск;
-- длительность, concurrency, warm/cold cache и распределение данных;
-- p50/p95/p99, ошибки, таймауты, pool wait, queue depth;
-- фактический GPS→browser latency;
-- достигнутые и недостигнутые цели отдельно.
-
-Готово, когда ограничения известны из измерений. Красивый график без методики не подтверждает SLO.
-
-### P12 — Production auth и recovery
-
-Ссылка на SDD: 12–13, 17.
-
-Задачи:
-- P12.1 Подключить выбранный identity provider через стандартный протокол, real sessions, logout/expiry; production не содержит dev login.
-- P12.2 Подготовить TLS/proxy/config/secrets, resource limits и deployment runbook для одного региона.
-- P12.3 Выполнить backup/restore в изолированной среде, проверить RPO/RTO и применение последующих удалений.
-- P12.4 Проверить восстановление актуальных прав; старая резервная копия не должна молча возвращать отозванные grants.
-- P12.5 Обновить README, SDD, API-spec и progress по фактической реализации; подготовить итоговое demo.
-
-Если нет credentials/provider/целевого окружения: завершить независимую конфигурацию и тесты, явно отметить конкретный внешний блокер. Не создавать аккаунт или платный ресурс по догадке. Локальная подстановка не считается выполнением production auth/restore.
-
-Результат этапа — проверенная готовность к размещению. Публикация выполняется только в рамках отдельного поручения.
-
-## 6. Обязательные уточнения, которые агент должен закрыть
-
-| ID | Вопрос | Владелец | Ожидаемый результат |
+| P00 | Verified inputs and a local decision backlog | — |
+| P01 | Reproducible skeleton, API/web, PostgreSQL/PostGIS | P00 |
+| P02A | Roles, identity/organization schema, tenant helper, and baseline RLS | P01 |
+| P02B | Run/point/share schema, constraints, and the full ACL/RLS matrix | P02A |
+| P03 | Run creation, commands, HTTP/session contracts | P02B |
+| P04 | Reliable ingestion, raw history, and a GPS simulator | P03 |
+| P05 | Browser recording with a local buffer | P04 |
+| P06 | Geo-processing and consistent summary publication | P04 |
+| P07 | Snapshot/changes with resilient pagination | P06 |
+| P08 | SSE and a working coach screen | P05, P07 |
+| P09 | MVT, cache, archive layer, and invalidation | P06, P08 |
+| P10 | Retention, deletion, tombstones, and recovery jobs | P09 |
+| P11 | Measurements, load limits, and operational metrics | P08–P10 |
+| P12 | Production auth, recovery, and deployment readiness | P11 |
+
+Default working order: P00 → P01 → P02A → P02B → P03 → … → P12. The possibility of independent branches is not an instruction to launch additional agents.
+
+Milestones:
+- P04: the backend can reliably store and read a single run.
+- P05: the user records a run in the browser.
+- P08: the coach sees and can recover a live track.
+- P09: a finished run appears in its own tiles.
+- P12: a verified deployment configuration is ready; public publication is a separate action.
+
+## 5. Detailed stages
+
+### P00 — Verifying initial conditions
+
+SDD reference: 1–5, 17.
+
+Tasks:
+- P00.1 Verify the selected repository and environment: Node, package manager, Docker, PostGIS image availability, occupied ports. Do not install system components unless necessary.
+- P00.2 Move the SDD and the plan into docs/, preserving their original meaning; create progress with tasks P00–P12.
+- P00.3 Record concrete tool versions and a short ADR on the workspace, SQL access, and testing approach.
+- P00.4 Create a list of required implementation clarifications from section 6 of this plan, with owning stages.
+
+Done when:
+- a correct project root has been chosen;
+- environment constraints are recorded separately from architectural constraints;
+- install and run commands have defined prerequisites;
+- product code does not yet paper over unresolved requirements.
+
+### P01 — Working skeleton and environment
+
+SDD reference: 3, 13.
+
+Tasks:
+- P01.1 Set up the workspace, TypeScript strict mode, Express 5 API and web, lockfile, lint/typecheck/build; fix integration config isolation, checksum portability, and bounded DB/shutdown deadlines.
+- P01.2 Bring up PostgreSQL with PostGIS and a persistent volume; prepare a migration runner and a separate test database.
+- P01.3 Implement health/liveness and readiness with a DB check, graceful shutdown, validated env config, and a .env.example without secrets.
+- P01.4 Configure same-origin /api access for the frontend in development; minimal connection and status pages.
+- P01.5 Add CI checks or portable CI commands: build, typecheck, lint, integration tests against real PostGIS.
+
+Checks:
+- runs from a clean checkout per the README;
+- `SELECT PostGIS_Full_Version()` succeeds;
+- loss of the DB flips readiness but does not masquerade as an HTTP process crash;
+- a hung health query completes within its deadline and does not hold a pool slot;
+- the same SQL has the same checksum after an LF vs. Windows checkout, while a substantive change is rejected;
+- web and API are reachable at documented addresses.
+
+Boundaries: no auth provider, no business-table RLS, no map, no Redis, no streaming.
+
+### P02A — Identity/organization schema and baseline tenant isolation
+
+SDD reference: 5, 8.
+
+Tasks:
+- P02A.1 Create users, organizations with archive_revision, and memberships with role/active, along with PK/FK/UNIQUE/CHECK constraints and indexes.
+- P02A.2 Separate privileged bootstrap, migration/object owner, runtime, and maintenance credentials; grant privileges explicitly.
+- P02A.3 Implement a single-client transaction helper with a transaction-local tenant/user context, explicit rollback/commit semantics, and safe release.
+- P02A.4 Fix the minimal matrix of identity/organization reads and implement fail-closed, non-recursive RLS.
+- P02A.5 Prepare separate owner fixtures for two organizations, multi-membership, and inactive/no-membership cases.
+
+Checks:
+- real SQL queries run under the runtime role, not the owner;
+- allowed SELECT and denied SELECT/INSERT/UPDATE/DELETE per the P02A matrix;
+- connection reuse from the pool does not carry over the previous request's context;
+- concurrent tenant transactions do not mix context;
+- the runtime role does not own tables, has no superuser/BYPASSRLS, and performs no DDL;
+- privileged maintenance access is unreachable from ordinary HTTP code.
+
+Done when an executable P02A access matrix exists under the real runtime role. Repository mocks are not proof of RLS.
+
+### P02B — Run schema and the full ACL/RLS matrix
+
+SDD reference: 5, 8.
+
+Tasks:
+- P02B.1 Create runs, run_points, run_commands, run_summaries, run_shares, run_tombstones, and the SDD's indexes.
+- P02B.2 Add CHECK/UNIQUE/FK constraints, states, revisions, units, and range limits. SQL fields used for payload comparison must not silently lose precision.
+- P02B.3 Complete D02: non-recursive runs/shares policies and child-table ACLs that cannot be bypassed by direct reads.
+- P02B.4 Verify cross-tenant composite FKs, owner/grantee access, and denied mutations under the runtime role.
+
+Done when the executable matrix covers run/share/child tables, and direct reads of points/summaries cannot bypass the ACL.
+
+Status as of 2026-09-23: P02B.1–P02B.4 and D02 are verified against a real database; D01 canonical `PointInput`/retry comparison was resolved in P04.1. This removes the remaining reason to keep P02B open, so P02B is considered DONE.
+
+### P03 — Session boundary, commands, and the API foundation
+
+SDD reference: 6.1, 8, 11.
+
+Tasks:
+- P03.1 Implement the session boundary, CSRF/Origin checks, requestId, and a unified ApiError. The local identity fixture is allowed only in development/test; production startup with it is forbidden. **Completed and verified 2026-09-21; ADR-0007.**
+- P03.2 Create runtime contracts, OpenAPI for ordinary HTTP, and an SSE description; bigint/seq are serialized as strings. **Completed and verified 2026-09-22; D01 canonicalization deliberately deferred to P04.**
+- P03.3 Implement PUT run and POST commands: idempotency, expectedControlRevision, terminal finish, one active run per user. **Completed and verified 2026-09-22 against real PostgreSQL: row lock, concurrent create/commands/replay, and rollback atomicity.**
+- P03.4 Implement GET run/list, share management, and an active-membership check. **Completed and verified 2026-09-22 against real PostgreSQL: owner/shared ACL, keyset pagination, owner-only share upsert/revoke, and the active-membership boundary.**
+- P03.5 Implement auto-finish via an injectable clock and a repeatable maintenance job. **Completed and verified 2026-09-23: a narrow SECURITY DEFINER capability, an injected UTC clock, a non-overlapping scheduler, bounded shutdown, and concurrent real-PostgreSQL checks.**
+
+Checks:
+- retrying create and a command returns a consistent result;
+- the same commandId with a different payload is rejected;
+- a command retry is checked before expectedControlRevision;
+- concurrent pause/resume/finish do not break the state machine;
+- a GPS-driven data_revision change does not create a control_revision conflict;
+- mutating requests without valid CSRF/Origin protection are rejected.
+
+Boundaries: external identity integration remains P12; the API already has a full session boundary.
+
+### P04 — Ingestion, history, and the simulator
+
+SDD reference: 6.2–6.3, 8, 11.2–11.3.
+
+Tasks:
+- P04.1 Implement bounded atomic batches, canonical payload comparison, FOR UPDATE, and ACK after commit. **Completed and verified 2026-09-23, including `ingested_revision` only for new points and no revision bump on retries.**
+- P04.2 The previously separate revision invariant is absorbed into P04.1, since it is part of the atomic ingestion contract; no separate implementation remains.
+- P04.3 Add raw history with a limit, cursor, revision-mismatch handling, and access checks. **Completed and verified 2026-09-25: a single statement snapshot, keyset pagination by `seq`, a cursor bound to `data_revision`, history ACL, and retention/error ordering.**
+- P04.4 Build a simulator with a seed/virtual clock: normal, duplicates, reordered, delayed batch, dropped response, clock jump, GPS spike. **Completed and verified 2026-09-26: reusable fixtures, a deterministic FIFO virtual clock, a JSONL CLI, and all seven scenarios; server-side fault hook deferred to P04.5.**
+- P04.5 Add safe fault injection in the test environment for the case where the commit succeeded but the response was lost. **Completed and verified 2026-09-26: the injected dependency is available only under `APP_ENV=test`, the disconnect happens after a confirmed COMMIT, and retry/history/finish are proven by HTTP and SQL.**
+
+Checks:
+- two concurrent identical batches produce exactly one set of rows;
+- one conflicting point rejects the whole batch;
+- the order 41 → 43 → 42 reads back correctly;
+- old retries after the upload window are confirmed, new points are rejected;
+- raw_state=purging/purged yields an explicit error;
+- body/batch/run maximums are checked before unbounded resource consumption;
+- the API preserves exact source values within the accepted canonicalization.
+
+Demonstration: create a run → send points → lose the ACK → retry → read history → finish. The result is confirmed via SQL and HTTP, without a map UI.
+
+### P05 — Browser recording and local buffer
+
+SDD reference: 2, 6, 11.
+
+Tasks:
+- P05.1 Implement the runner screen: start/pause/resume/finish, recording/upload/offline/error states. **Completed and verified 2026-09-26: same-origin session discovery, shared-contract validation, revision-aware API controls, exact-request retry, and a responsive state dashboard.**
+- P05.2 Store seq and the point in a single IndexedDB transaction; also store commands until confirmed. **Completed and verified 2026-09-26: user/run-scoped bigint seq allocation, a canonical point buffer, explicit batch-ACK deletion, a durable exact-request queue, and reload recovery.**
+- P05.3 Upload worker: bounded batches, backoff/jitter, deletion of only the confirmed batch, stopping on a permanent error. **Completed and verified 2026-09-26: sequential batches ≤100, exact ACK verification/deletion, capped full jitter and Retry-After, offline/reconnect handling, permanent stop, and authoritative reconciliation.**
+- P05.4 A single recording owner across tabs; fix the lease/lock mechanism and detection of a conflicting writer. **Completed and verified 2026-09-26: a user-scoped IndexedDB lease, a per-tab UUID, a fencing token, bounded expiry/renewal, stale-owner rejection, and an explicit read-only conflict UX.**
+- P05.5 Connect Geolocation and the simulator through the same source interface. Add Mapbox when a token is available, while preserving the ability to test recording without an external map. **Completed and verified 2026-09-26: a shared source/controller, a bounded callback queue, durable segment allocation, transactional lease fencing, stale-callback rejection, a seeded simulator, and a tokenless recording UI; Mapbox was not activated because there is no tracked token contract and no token was provided.**
+
+Checks:
+- reload and a temporary offline period do not reset seq/buffer;
+- a duplicate ACK does not delete points that are not yet confirmed;
+- an offline finish and a server auto-finish are handled via reconciliation;
+- a stale GPS callback is not presented as a new measurement;
+- a second tab does not start an independent recording of the same run;
+- a browser test verifies recovery after a network disconnect.
+
+Boundaries: foreground recording. Do not present a PWA as a solution for background GPS.
+
+### P06 — Geometry and archive summaries
+
+SDD reference: 7.
+
+Tasks:
+- P06.1 Implement a single versioned edge check, used by both summary and live-track. **Completed and verified 2026-09-26: a `v1` PostGIS evaluator, stable rejection precedence, geodesic distance, and least-privilege EXECUTE for runtime/maintenance; ADR-0012.**
+- P06.2 Compute distance/observed_duration in PostGIS, quality counters, segments, and insufficient_data. **Completed and verified 2026-09-26: revision-bound maintenance calculation, exact `QualityStats`, accepted chains without bridging, and ADR-0013.**
+- P06.3 Perform metric simplification and normalization of global geometry. Edge cases are implemented, not replaced by a regional assumption. **Completed and verified 2026-09-26: cumulative-geodesic parts ≤20 km, a local azimuthal-equidistant projection, Douglas–Peucker at 5 m, endpoint preservation, and antimeridian split/normalization; ADR-0014.**
+- P06.4 Add a job that finds stale summaries, snapshots, compares revisions, and atomically publishes with archive_revision. **Completed and verified 2026-09-26: one candidate per cycle, a materialized calculation snapshot without a run lock, organization → run publication locks, revision/state/tombstone comparison, atomic summary upsert + archive revision increment, and ADR-0015.**
+- P06.5 Bound job concurrency; respect the organization → run lock order. **Completed and verified 2026-09-27: transaction-scoped advisory claims across processes, a configurable 1–8 worker batch, all-settled cycles, maintenance pool headroom, and ADR-0016.**
+
+Checks:
+- simple geometric references with an independently defined expected result;
+- stationary GPS noise, a sharp turn, an outlier, a seq gap, a negative dt, a pause;
+- late delivery does not break continuous measurements;
+- antimeridian, high latitude, a single point, an empty line;
+- simplification does not change the stored distance;
+- a new point arriving during the job excludes publication of a stale summary;
+- a deleted run is not resurrected by the background job.
+
+Done when fixtures show not only successful calculation but also explainable reasons for excluding data.
+
+### P07 — Versioned snapshot and changes
+
+SDD reference: 9.2, 11.1–11.3.
+
+Tasks:
+- P07.1 Implement an initial snapshot at a fixed R, paginated by seq. **Completed and verified 2026-09-27: a single statement fixes R and a bounded keyset page, the cursor stores R/algorithmVersion/last seq, late ingestion does not change the continuation, ACL/raw-state are rechecked on every page; ADR-0017.**
+- P07.2 Implement changes(A,T): new points plus their immediate successors at T. **Completed and verified 2026-09-27: the first statement fixes T, a materialized `(A,T]` set is unioned with immediate successors at T, the set is deduplicated and keyset-paginated by bigint seq; ACL/raw-state are rechecked on every page; ADR-0018.**
+- P07.3 Compute predecessorSeq/connectFromPrevious over the same set with ingested_revision ≤ T. **Completed and verified 2026-09-27: the full point set is materialized at T, the predecessor is computed before the page filter, and a shared PostGIS evaluator produces server-authoritative connectivity for both snapshot and changes; ADR-0019.**
+- P07.4 Sign cursors with user/org/run, operation kind, A/T, algorithmVersion, the last key, and expiry. **Completed and verified 2026-09-27: a versioned HMAC-SHA-256 envelope, identity/route/operation binding, a single ten-minute deadline across the page chain, and a production key guard; ADR-0020.**
+- P07.5 Implement client-side upsert application, advancing the revision only after all pages. **Completed and verified 2026-09-27: a user/org/run-scoped `LiveTrackStore`, staged seq-keyed application, atomic terminal-page commit, single-flight target coalescing, and a snapshot fallback for invalid cursors/algorithm changes; ADR-0021.**
+
+Checks:
+- a late insert at 42 fixes the connection to 43;
+- inserting several sequential/scattered points correctly updates successors;
+- new points arrive between pages: the result for the old T is unchanged;
+- retrying and restarting pages creates no duplicates;
+- a change in algorithmVersion/expiry, or loss of local state, triggers a snapshot;
+- revoke/finish/purge between pages stops delivery per current permissions;
+- the server does not hold a DB transaction between HTTP requests.
+
+Equivalence check: an initial snapshot at A plus all changes up to T yields the same set of points and edges as a fresh snapshot at T.
+
+### P08 — SSE and the coach screen
+
+SDD reference: 9, 11.4.
+
+Tasks:
+- P08.1 Implement one SSE connection per organization/tab, initial state, a shared 2 s cycle, heartbeat, and a bounded queue. **Completed and verified 2026-09-27: process-level grouped polling, short runtime-role snapshots, per-stream ordering, heartbeat, connection/poll bounds, and latest-only backpressure with a timeout; ADR-0022.**
+- P08.2 Recheck session/membership/grants on the live connection, dropping runs that are no longer accessible. **Completed and verified 2026-09-27: per-connection session digest/expiry validation, an exact expiry timer, membership-denial disconnect, grant-filtered full-state replacement, and cancellation of pending state; ADR-0023.**
+- P08.3 Coach screen: available runs, confirmed/unconfirmed/stale markers, selected tracks. **Completed and verified 2026-09-27: a strict SSE client, a full-state coach reducer, server-relative 10-second freshness, fail-closed last-known cleanup, explicit authorized track selection, and a responsive tokenless UI; ADR-0024.**
+- P08.4 Revision-based synchronization: one load per run, coalescing notifications, recovery after reconnect. **Completed and verified 2026-09-27: a selected-run coordinator on top of the atomic `LiveTrackStore`, greatest-revision coalescing, abort/eviction on removal/revoke/disconnect, algorithm-version snapshot replacement, and bounded same-session reconnect recovery; ADR-0025.**
+- P08.5 Configure proxy buffering/timeouts and browser-to-proxy HTTP/2 for a verifiable deployment profile. **Completed and verified 2026-09-28: a pinned Nginx HTTPS/HTTP/2 edge, an internal HTTP/1.1 Express upstream, an SSE-specific no-buffer/no-cache/no-compression/no-retry policy, reproducible local TLS, and an actual ALPN/restart/DB-activity/latency harness; ADR-0026.**
+
+Checks:
+- a DB commit without an SSE notification is still discovered by the next cycle;
+- a backend restart leads to snapshot/changes, without losing stored points;
+- a slow reader does not cause unbounded memory growth;
+- an open stream does not hold a DB connection;
+- can_read_live does not expose finished history;
+- GPS loss marks the position stale even while the connection is up;
+- a revoke clears both current and last-known data.
+
+Measure a preliminary end-to-end p95; the final result is P11.
+
+### P09 — MVT, cache, and the archive map
+
+SDD reference: 10, 11.5.
+
+Tasks:
+- P09.1 Implement metadata, the tile endpoint, XYZ range checks, period validation, and history ACL. **Completed and verified 2026-09-28: revision-bound metadata/template, strict zoom 8–16 and XYZ/366-day validation, active-membership/revision checks, a runtime-role RLS pipeline boundary, and a fail-closed handoff to P09.2; ADR-0027.**
+- P09.2 PostGIS pipeline: indexed selection, projection, buffering, clipping, MVT; run_id remains a string. **Completed and verified 2026-09-28: GiST-compatible WGS84 candidate branches, Web Mercator world clipping/projection, extent 4096 + buffer 64 MVT, shifted antimeridian copies, decoded adjacent/polar/empty tiles, and runtime-role history RLS; ADR-0028.**
+- P09.3 Add a byte-bounded LRU, TTL, single-flight, and all the SDD's key components. **Completed and verified 2026-09-28: a process-local 32 MiB/4096-entry LRU, a monotonic five-minute TTL, canonical full identity, empty-tile caching, failure/oversize exclusion, and per-key single-flight; ADR-0029.**
+- P09.4 Check membership/revision before a cache hit; publish/delete/grant changes bump the epoch atomically. **Completed and verified 2026-09-28: a shared organization epoch lock before cache lookup, repeated membership/revision validation, atomic summary-delete/history-grant/membership triggers, an organization-first share-mutation lock order, and rollback/concurrent cache-hit proof; ADR-0030.**
+- P09.5 React archive source, metadata polling every 30 s, refresh on focus, error handling, and cleanup after revoke. **Completed and verified 2026-09-28: a pinned Mapbox adapter, a bounded metadata controller, focus/409 refresh, `setTiles` revision replacement, transient-error retention, and 401/403 sensitive-layer cleanup; ADR-0031.**
+- P09.6 Bound SQL/concurrency/queue/tile bytes; never return the first N features as a complete tile. **Completed and verified 2026-09-28: two-phase admission with no DB client held during the queue wait, per-key single-flight, 2 active + 16 waiting, a PostgreSQL-local 2-second timeout, an inclusive 1 MiB raw-buffer bound, and explicit `TILE_BUSY`/`TILE_TIMEOUT`/`TILE_TOO_COMPLEX`; ADR-0032.**
+
+Checks:
+- decode the MVT and verify the source layer/properties/geometry;
+- adjacent tiles, crossing ±180°, polar clipping, an empty tile;
+- one user does not receive another's tile on a warm cache;
+- concurrent requests for the same key trigger a single generation;
+- a revision mismatch causes a metadata refresh;
+- a stationary map receives a new summary within the target time;
+- a feature count over the limit is not hidden by silent truncation.
+
+The cache is an optimization. Clearing or losing it does not change the correctness of the result.
+
+### P10 — Retention, deletion, and maintenance
+
+SDD reference: 6.1, 12.
+
+Tasks:
+- P10.1 Implement available → purging → purged, bounded deletes, and safe restart. **Completed and verified 2026-09-29: a maintenance-only one-run primitive, 1,000-row `seq` batches, durable restart state, rollback/idempotency, shared summary advisory-lock serialization, and runtime `raw_state` mutation revoked; ADR-0033.**
+- P10.2 Allow purge only when the summary is current and the upload window is closed. **Completed and verified 2026-09-29: seven-day/upload-window/current-summary revalidation inside the locked purge capability, a bounded transactional claim, restart-first periodic scheduling, and an identity-free overdue warning; ADR-0034.**
+- P10.3 Implement owner deletion and annual retention with tombstone and archive revision. **Completed and verified 2026-09-29: a shared SQL primitive `execute_run_deletion`, separate runtime/maintenance `SECURITY DEFINER` capabilities, a shared per-run advisory lock → organization → run lock order, an atomic tombstone + cascade delete + exactly one archive_revision increment regardless of whether a summary exists, an idempotent/concurrency-safe owner DELETE, and an annual maintenance retention worker; ADR-0035.**
+- P10.4 Fix the tombstone's lifetime and the late-retry contract; resolve the SDD's ambiguity via an ADR.
+- P10.5 Prepare a deletion export/log and a recovery runbook; end-to-end restore is P12.
+
+Checks:
+- an injectable clock replaces waiting seven days;
+- a crash after several deletion batches does not leave a partial summary;
+- DELETE competes safely with ingestion/summary/tiles;
+- a repeated DELETE is idempotent, and a retried create does not bring back a deleted run within the guaranteed window;
+- raw replay is unavailable after purge, the archive summary remains;
+- a summary failure produces an observable retention overrun, not a silent loss of history.
+
+### P11 — Load testing and operational limits
+
+SDD reference: 13–15.
+
+Tasks:
+- P11.1 Add metrics/structured logs without coordinates and secrets.
+- P11.2 Generate the SDD's ordinary and stress datasets with a seed and a reproducible ACL/geography distribution.
+- P11.3 Test ingestion + viewers + pan/zoom + jobs concurrently, including batches after offline periods.
+- P11.4 Collect EXPLAIN ANALYZE BUFFERS, real table/index sizes, response bytes, and memory.
+- P11.5 Apply only confirmed optimizations; keep a before/after report.
+
+The report must contain:
+- the application commit, DB/image versions, CPU/RAM/disk;
+- duration, concurrency, warm/cold cache, and data distribution;
+- p50/p95/p99, errors, timeouts, pool wait, queue depth;
+- actual GPS→browser latency;
+- goals met and not met, listed separately.
+
+Done when the limits are known from measurements. A nice-looking graph without a methodology does not confirm an SLO.
+
+### P12 — Production auth and recovery
+
+SDD reference: 12–13, 17.
+
+Tasks:
+- P12.1 Connect the chosen identity provider via a standard protocol, with real sessions and logout/expiry; production contains no dev login.
+- P12.2 Prepare TLS/proxy/config/secrets, resource limits, and a deployment runbook for a single region.
+- P12.3 Perform backup/restore in an isolated environment, verify RPO/RTO, and apply subsequent deletions.
+- P12.4 Verify recovery of current permissions; an old backup must not silently restore revoked grants.
+- P12.5 Update the README, SDD, API spec, and progress to match the actual implementation; prepare the final demo.
+
+If credentials/a provider/a target environment are unavailable: complete the independent configuration and tests, and explicitly flag the specific external blocker. Do not create an account or a paid resource on a guess. A local substitute does not count as completing production auth/restore.
+
+The stage's outcome is verified deployment readiness. Publication happens only as a separate assignment.
+
+## 6. Required clarifications the agent must close
+
+| ID | Question | Owner | Expected outcome |
 |---|---|---|---|
-| D01 | Точная канонизация PointInput для повторов: числа, -0, timestamps, seq | P02B/P04 | RESOLVED в P04.1: strict shape, bigint decimal seq, `-0` → `0`, UTC nearest-ms timestamp, canonical retry equality |
-| D02 | RLS runs/shares без рекурсии и обхода child-table ACL | P02A/P02B | P02A identity baseline + P02B run/share matrix и runtime-role тесты |
-| D03a | Session endpoint, локальная identity, CSRF/Origin и production guard | P03 | Явный HTTP/session contract и fail-fast local-auth guard — RESOLVED в ADR-0007 |
-| D03b | Production identity/session provider integration | P12 | Стандартный provider/protocol без local/anonymous fallback; TODO |
-| D04 | Одна записывающая вкладка/устройство, reload и конфликт writer | P05 | Конкретный lease/ownership механизм; не полагаться только на UI |
-| D05 | Очередь offline commands после server auto-finish | P05 | Терминальный reconciliation, сохранение оставшихся GPS в допустимом окне |
-| D06 | Начальная пагинация и changes с фиксированной T | P07 | RESOLVED: fixed-revision chains, successor repair, atomic client application и equivalence coverage; ADR-0017–0021 |
-| D07 | Membership revoke конкурирует с активным stream/cache | P08/P09 | Чёткий момент проверки, отмена ещё не отправленных данных; без обещания отозвать доставленное |
-| D08 | Replay создания после истечения tombstone | P10 | Ограниченная во времени гарантия или иной механизм; бессрочное обещание при TTL не допускается |
-| D09 | Журнал удалений/ACL переживает потерю узла | P10/P12 | Объяснённый порядок, RPO и restore drill; обычная таблица в потерянной БД недостаточна |
-| D10 | Реальные допуски GPS и упрощения по всему миру | P06/P11 | Fixtures + результаты, явные пределы точности |
+| D01 | Exact canonicalization of PointInput for retries: numbers, -0, timestamps, seq | P02B/P04 | RESOLVED in P04.1: strict shape, bigint decimal seq, `-0` → `0`, UTC nearest-ms timestamp, canonical retry equality |
+| D02 | RLS for runs/shares without recursion or child-table ACL bypass | P02A/P02B | P02A identity baseline + P02B run/share matrix and runtime-role tests |
+| D03a | Session endpoint, local identity, CSRF/Origin, and a production guard | P03 | Explicit HTTP/session contract and a fail-fast local-auth guard — RESOLVED in ADR-0007 |
+| D03b | Production identity/session provider integration | P12 | Standard provider/protocol without a local/anonymous fallback; TODO |
+| D04 | Single recording tab/device, reload, and writer conflict | P05 | A concrete lease/ownership mechanism; not relying on the UI alone |
+| D05 | Offline command queue after a server auto-finish | P05 | Terminal reconciliation, preserving remaining GPS within the allowed window |
+| D06 | Initial pagination and changes with a fixed T | P07 | RESOLVED: fixed-revision chains, successor repair, atomic client application, and equivalence coverage; ADR-0017–0021 |
+| D07 | Membership revoke racing an active stream/cache | P08/P09 | A clear check point, cancellation of not-yet-sent data; no promise to revoke delivered data |
+| D08 | Replay of creation after tombstone expiry | P10 | A time-bounded guarantee or another mechanism; an indefinite promise on TTL is not allowed |
+| D09 | Deletion log/ACL surviving node loss | P10/P12 | An explained order, RPO, and a restore drill; a plain table in a lost DB is insufficient |
+| D10 | Real-world GPS tolerances and worldwide simplification | P06/P11 | Fixtures + results, explicit accuracy limits |
 
-Не превращать эти уточнения в незаметное расширение проекта. Например, для D09 может быть нужен отдельный небольшой механизм надёжного экспорта; это не основание вводить Kafka для всей системы.
+Do not let these clarifications become an unnoticed scope expansion. For example, D09 might need a separate small reliable-export mechanism; that is not grounds to introduce Kafka for the whole system.
 
-## 7. Стратегия проверки
+## 7. Verification strategy
 
-- Unit: чистые правила, canonicalization, cursors, клиентский reducer и состояния upload. Не дублировать реализацию тестом, повторяющим тот же алгоритм.
-- Integration: реальные PostgreSQL/PostGIS и runtime-role; транзакции, constraints, RLS, revisions, геооперации.
-- Contract: runtime schemas, error codes, bigint serialization и соответствие OpenAPI.
-- Browser: запись, IndexedDB reload/offline, observer reconnect, grant revoke, archive refresh.
-- Load/failure: отдельно от быстрых CI; воспроизводимые seeds и отчёт.
+- Unit: pure rules, canonicalization, cursors, the client reducer, and upload states. Do not duplicate an implementation with a test that repeats the same algorithm.
+- Integration: real PostgreSQL/PostGIS and the runtime role; transactions, constraints, RLS, revisions, geo-operations.
+- Contract: runtime schemas, error codes, bigint serialization, and OpenAPI conformance.
+- Browser: recording, IndexedDB reload/offline, observer reconnect, grant revoke, archive refresh.
+- Load/failure: separate from fast CI; reproducible seeds and a report.
 
-Конкурентные тесты синхронизировать барьерами/хуками, не случайными sleep. Время внедрять через clock abstraction. Для внешней карты тестировать integration отдельно; core ingestion и ACL не зависят от Mapbox token.
+Synchronize concurrency tests with barriers/hooks, not random sleeps. Inject time via a clock abstraction. Test the external map integration separately; core ingestion and ACL do not depend on a Mapbox token.
 
-После изменений выполнять соответствующие проверки, затем общий typecheck/build. Повторять полный дорогой load suite только после изменений, способных повлиять на его выводы.
+After changes, run the relevant checks, then the general typecheck/build. Rerun the full expensive load suite only after changes that could affect its conclusions.
 
-## 8. Общий Definition of Done
+## 8. General Definition of Done
 
-Этап завершён, если:
-1. Выполнен назначенный scope и соблюдены зависимости.
-2. Проверены значимые happy/failure/security paths этапа.
-3. Код запускается по документации; миграции воспроизводимы.
-4. Контракты и документация согласованы с реализацией.
-5. Нет secrets, GPS payload в логах и неограниченных очередей.
-6. Ограничения и непроверенные утверждения отмечены явно.
-7. progress содержит доказательства и следующий этап.
+A stage is complete if:
+1. The assigned scope is done and dependencies are respected.
+2. The stage's significant happy/failure/security paths are verified.
+3. The code runs per the documentation; migrations are reproducible.
+4. Contracts and documentation match the implementation.
+5. There are no secrets, no GPS payload in logs, and no unbounded queues.
+6. Constraints and unverified claims are explicitly noted.
+7. Progress contains evidence and the next stage.
 
-Если проверка не запускалась из-за среды, статус этапа — частично выполнен/blocked, а не done. Не создавать фиктивные success outputs.
+If a check could not be run due to the environment, the stage's status is partially done/blocked, not done. Do not fabricate success output.
 
-## 9. Формат отчёта агента
+## 9. Agent report format
 
 ~~~text
-Этап: Pxx
-Результат: конкретное доступное поведение.
-Изменения: ключевые файлы/модули.
-Проверка: выполненные команды и их результаты.
-Решения: ADR/изменения SDD с причинами.
-Ограничения: что не реализовано или не проверено.
-Демонстрация: как воспроизвести результат.
-Следующий этап: Pyy и его prerequisites.
+Stage: Pxx
+Outcome: concrete observable behavior.
+Changes: key files/modules.
+Verification: commands run and their results.
+Decisions: ADRs/SDD changes with rationale.
+Constraints: what is not implemented or not verified.
+Demonstration: how to reproduce the result.
+Next stage: Pyy and its prerequisites.
 ~~~
 
-Техническое объяснение пользователю: кратко, на уровне senior frontend/fullstack. Объяснять новые backend/DB trade-offs на конкретном коде, а не повторять базовые JavaScript-концепции.
+Technical explanation for the user: brief, at a senior frontend/fullstack level. Explain new backend/DB trade-offs using concrete code, rather than repeating basic JavaScript concepts.
 
-## 10. Текущий статус
+## 10. Current status
 
-P00–P02A.1 и полная DB schema/ACL-подчасть P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) проверены локально воспроизводимыми unit/build и real PostgreSQL/PostGIS integration-командами. D02 решён в границах доверенного tenant context. Авторитетные команды и evidence находятся в `README.md` и `progress.md`.
+P00–P02A.1 and the full DB schema/ACL sub-part of P02B (`runs`, `run_shares`, `run_points`, `run_summaries`, `run_commands`, `run_tombstones`) are verified locally by reproducible unit/build and real PostgreSQL/PostGIS integration commands. D02 is resolved within the bounds of the trusted tenant context. Authoritative commands and evidence live in `README.md` and `progress.md`.
 
-P02B DONE после разрешения D01 в P04.1. P03.1–P03.5 выполнены: session boundary, shared strict runtime contracts, OpenAPI 3.1 ordinary-HTTP artifact, отдельный SSE protocol contract, атомарные `PUT run`/`POST commands`, ACL-aware run list/read, owner-only share management и clock-driven maintenance auto-finish. P04.1 bounded atomic point ingestion, P04.3 revision-bound raw history, P04.4 deterministic GPS simulator и P04.5 safe test-only response-loss injection выполнены; P04 DONE. P05.1–P05.5 выполнены: runner control UI/state, durable IndexedDB persistence, bounded point upload/reconciliation, fenced single-writer ownership и общий Geolocation/simulator foreground capture path; P05 DONE. P06.1–P06.5 выполнены: versioned PostGIS edge validation, revision-bound calculation, global metric display simplification, atomic publication и bounded distributed job claiming; P06 DONE. P07.1–P07.5 выполнены: revision-fixed snapshot/change reads, revision-bound edge annotations, signed identity-bound cursors и atomic browser application; P07 DONE. P08.1–P08.5 выполнены: authorization-safe SSE, coach/selected-track recovery и проверенный external HTTPS/HTTP/2 proxy profile; P08 DONE. P09.1–P09.6 завершены: revisioned archive HTTP/RLS boundary, PostGIS MVT pipeline, bounded process cache, атомарная cache-hit invalidation boundary, React/Mapbox source lifecycle и bounded resource admission; P09 DONE. P10.1–P10.3 завершены: maintenance-only bounded raw purge, summary serialization, authoritative retention eligibility, restart-first periodic scheduling, owner-executed `DELETE` и annual retention deletion с atomic tombstone/archive revision; P10 IN PROGRESS. Следующий точный фрагмент — P10.4 tombstone lifetime and late retry contract. Production identity/session provider остаётся P12.
+P02B is DONE after resolving D01 in P04.1. P03.1–P03.5 are complete: the session boundary, shared strict runtime contracts, the OpenAPI 3.1 ordinary-HTTP artifact, a separate SSE protocol contract, atomic `PUT run`/`POST commands`, ACL-aware run list/read, owner-only share management, and clock-driven maintenance auto-finish. P04.1 bounded atomic point ingestion, P04.3 revision-bound raw history, P04.4 deterministic GPS simulator, and P04.5 safe test-only response-loss injection are complete; P04 is DONE. P05.1–P05.5 are complete: runner control UI/state, durable IndexedDB persistence, bounded point upload/reconciliation, fenced single-writer ownership, and a shared Geolocation/simulator foreground capture path; P05 is DONE. P06.1–P06.5 are complete: versioned PostGIS edge validation, revision-bound calculation, global metric display simplification, atomic publication, and bounded distributed job claiming; P06 is DONE. P07.1–P07.5 are complete: revision-fixed snapshot/change reads, revision-bound edge annotations, signed identity-bound cursors, and atomic browser application; P07 is DONE. P08.1–P08.5 are complete: authorization-safe SSE, coach/selected-track recovery, and a verified external HTTPS/HTTP/2 proxy profile; P08 is DONE. P09.1–P09.6 are complete: a revisioned archive HTTP/RLS boundary, the PostGIS MVT pipeline, a bounded process cache, an atomic cache-hit invalidation boundary, the React/Mapbox source lifecycle, and bounded resource admission; P09 is DONE. P10.1–P10.3 are complete: a maintenance-only bounded raw purge, summary serialization, authoritative retention eligibility, restart-first periodic scheduling, an owner-executed `DELETE`, and annual retention deletion with an atomic tombstone/archive revision; P10 is IN PROGRESS. The next exact increment is P10.4, tombstone lifetime and late retry contract. The production identity/session provider remains P12.
