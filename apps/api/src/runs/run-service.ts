@@ -352,6 +352,32 @@ async function throwMissingRun(client: PoolClient, orgId: string, runId: string)
   throw new ApiError(404, 'RUN_NOT_FOUND', 'The run does not exist or is not accessible');
 }
 
+interface DeleteRunRow {
+  outcome: 'already_deleted' | 'deleted' | 'not_found';
+}
+
+export async function deleteRun(
+  client: PoolClient,
+  session: Pick<StoredSession, 'userId'>,
+  orgId: string,
+  runId: string,
+  clock: Clock,
+): Promise<void> {
+  const effectiveNow = clock.utcNow();
+  const result = await client.query<DeleteRunRow>(
+    `SELECT outcome
+     FROM app_private.delete_run_as_owner($1, $2, $3, $4)`,
+    [orgId, runId, session.userId, effectiveNow.toISOString()],
+  );
+  const outcome = result.rows[0]?.outcome;
+  if (outcome !== 'deleted' && outcome !== 'already_deleted' && outcome !== 'not_found') {
+    throw new Error('The run deletion function returned an invalid result');
+  }
+  if (outcome === 'not_found') {
+    throw new ApiError(404, 'RUN_NOT_FOUND', 'The run does not exist or is not accessible');
+  }
+}
+
 async function readOwnedRun(
   client: PoolClient,
   orgId: string,

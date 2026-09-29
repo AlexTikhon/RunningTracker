@@ -32,6 +32,7 @@ import { LiveTrackCursorCodec } from './live-track-cursor.js';
 import {
   applyRunCommand,
   createRun,
+  deleteRun,
   ingestRunPoints,
   listRuns,
   readLiveTrackChanges,
@@ -182,6 +183,19 @@ export function createRunRouter({
         createRun(client, session, orgId, runId, body, clock),
       );
       response.status(result.created ? 201 : 200).json(result.run);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/:runId', ...mutationProtection, async (request, response, next) => {
+    try {
+      const { orgId, runId } = routeInput(request);
+      const session = getAuthenticatedSession(request);
+      await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+        deleteRun(client, session, orgId, runId, clock),
+      );
+      response.status(204).end();
     } catch (error) {
       next(error);
     }
