@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 
@@ -178,6 +178,17 @@ const environmentSchema = z
       .positive()
       .max(24 * 60 * 60 * 1_000)
       .default(300_000),
+    DELETION_JOURNAL_DIR: z
+      .string()
+      .min(1)
+      .refine((value) => isAbsolute(value), { message: 'must be an absolute path' })
+      .optional(),
+    RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60 * 1_000)
+      .default(30_000),
     RUN_SUMMARY_INTERVAL_MS: z.coerce
       .number()
       .int()
@@ -274,6 +285,14 @@ const environmentSchema = z
         code: 'custom',
         message: 'SESSION_COOKIE_SECURE must be true in production',
         path: ['SESSION_COOKIE_SECURE'],
+      });
+    }
+    if (environment.APP_ENV === 'production' && environment.DELETION_JOURNAL_DIR === undefined) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'DELETION_JOURNAL_DIR must be set in production: deletions must be exported off the database host',
+        path: ['DELETION_JOURNAL_DIR'],
       });
     }
     if (

@@ -16,8 +16,13 @@ import {
   type StoppableRunner,
 } from './lifecycle/shutdown.js';
 import { createLiveSseHub } from './live/live-sse.js';
+import {
+  createFileDeletionJournalSink,
+  type DeletionJournalSink,
+} from './maintenance/deletion-journal-sink.js';
 import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
+import { runDeletionJournalExportOnce } from './maintenance/run-deletion-journal-export.js';
 import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runRetentionDeleteOnce } from './maintenance/run-retention-delete.js';
 import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
@@ -26,6 +31,7 @@ import { runTombstoneReclaimOnce } from './maintenance/run-tombstone-reclaim.js'
 export interface MainDependencies {
   clock?: Clock;
   createMaintenancePool?: typeof createMaintenanceDatabasePool;
+  createDeletionJournalSink?: (directory: string) => DeletionJournalSink;
   createPool?: typeof createDatabasePool;
   loadConfig?: typeof loadEnvironment;
 }
@@ -146,8 +152,33 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     runOnce: () => runTombstoneReclaimOnce(maintenancePool, clock),
     taskName: 'Run tombstone reclamation',
   });
+  let deletionJournalSink: DeletionJournalSink | undefined;
+  if (config.DELETION_JOURNAL_DIR !== undefined) {
+    deletionJournalSink = (
+      dependencies.createDeletionJournalSink ?? createFileDeletionJournalSink
+    )(config.DELETION_JOURNAL_DIR);
+    try {
+      await deletionJournalSink.verify();
+    } catch (error) {
+      await Promise.allSettled([pool.end(), maintenancePool.end()]);
+      throw new Error('The deletion journal directory is not writable', { cause: error });
+    }
+  } else {
+    console.warn('Deletion journal export is disabled because DELETION_JOURNAL_DIR is not set');
+  }
+  const sink = deletionJournalSink;
+  const deletionJournalRunner =
+    sink === undefined
+      ? undefined
+      : new PeriodicRunner({
+          clock,
+          intervalMs: config.RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS,
+          runOnce: () => runDeletionJournalExportOnce(maintenancePool, sink, clock),
+          taskName: 'Run deletion journal export',
+        });
   const runner: StoppableRunner = {
     stop: () => {
+      deletionJournalRunner?.stop();
       liveSseHub.stop();
       autoFinishRunner.stop();
       rawPurgeRunner.stop();
@@ -168,6 +199,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   rawPurgeRunner.start();
   retentionDeleteRunner.start();
   tombstoneReclaimRunner.start();
+  deletionJournalRunner?.start();
   summaryRunner.start();
   registerShutdown({
     clock,

@@ -65,6 +65,7 @@ export async function prepareTenantIsolationFixtures(
     await client.query('DELETE FROM run_shares');
     await client.query('DELETE FROM runs');
     await client.query('DELETE FROM run_tombstones');
+    await client.query('DELETE FROM run_deletion_journal');
     await client.query('DELETE FROM memberships');
     await client.query('DELETE FROM organizations');
     await client.query('DELETE FROM users');

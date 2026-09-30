@@ -335,8 +335,8 @@ Tasks:
 - P10.1 Implement available → purging → purged, bounded deletes, and safe restart. **Completed and verified 2026-09-29: a maintenance-only one-run primitive, 1,000-row `seq` batches, durable restart state, rollback/idempotency, shared summary advisory-lock serialization, and runtime `raw_state` mutation revoked; ADR-0033.**
 - P10.2 Allow purge only when the summary is current and the upload window is closed. **Completed and verified 2026-09-29: seven-day/upload-window/current-summary revalidation inside the locked purge capability, a bounded transactional claim, restart-first periodic scheduling, and an identity-free overdue warning; ADR-0034.**
 - P10.3 Implement owner deletion and annual retention with tombstone and archive revision. **Completed and verified 2026-09-29: a shared SQL primitive `execute_run_deletion`, separate runtime/maintenance `SECURITY DEFINER` capabilities, a shared per-run advisory lock → organization → run lock order, an atomic tombstone + cascade delete + exactly one archive_revision increment regardless of whether a summary exists, an idempotent/concurrency-safe owner DELETE, and an annual maintenance retention worker; ADR-0035.**
-- P10.5 Prepare a deletion export/log and a recovery runbook; end-to-end restore is P12.
 - P10.4 Fix the tombstone's lifetime and the late-retry contract; resolve the SDD's ambiguity via an ADR. **Completed and verified 2026-09-29: one-year guaranteed window with the tombstone row authoritative until reclaimed, a maintenance-only bounded `SKIP LOCKED` reclaim (`0017_tombstone_expiry.sql`, `RUN_TOMBSTONE_RECLAIM_INTERVAL_MS`), reuse only after reclamation, marker takeover so a later deletion never fails on an existing marker; D08 resolved; ADR-0036.**
+- P10.5 Prepare a deletion export/log and a recovery runbook; end-to-end restore is P12. **Completed and verified 2026-09-29: an identifier-only `run_deletion_journal` written in the deletion transaction (`0018_deletion_journal.sql`), an at-least-once maintenance export to `DELETION_JOURNAL_DIR` that removes rows only after the file is durable, an owner-only idempotent `restore:reapply-deletions` command that never touches a run created after the deletion, and `docs/runbooks/deletion-journal-and-recovery.md`; D09's mechanism is done, its restore drill and access recovery remain P12.3/P12.4; ADR-0037.**
 
 Checks:
 - an injectable clock replaces waiting seven days;
@@ -393,8 +393,8 @@ The stage's outcome is verified deployment readiness. Publication happens only a
 | D05 | Offline command queue after a server auto-finish | P05 | Terminal reconciliation, preserving remaining GPS within the allowed window |
 | D06 | Initial pagination and changes with a fixed T | P07 | RESOLVED: fixed-revision chains, successor repair, atomic client application, and equivalence coverage; ADR-0017–0021 |
 | D07 | Membership revoke racing an active stream/cache | P08/P09 | A clear check point, cancellation of not-yet-sent data; no promise to revoke delivered data |
-| D09 | Deletion log/ACL surviving node loss | P10/P12 | An explained order, RPO, and a restore drill; a plain table in a lost DB is insufficient |
 | D08 | Replay of creation after tombstone expiry | P10 | A time-bounded guarantee or another mechanism; an indefinite promise on TTL is not allowed | RESOLVED in P10.4 (ADR-0036)
+| D09 | Deletion log/ACL surviving node loss | P10/P12 | An explained order, RPO, and a restore drill; a plain table in a lost DB is insufficient. PARTIAL — P10.5 + ADR-0037: off-host deletion journal, export order, reapplication tool, and runbook; the restore drill and ACL recovery remain P12.3/P12.4 |
 | D10 | Real-world GPS tolerances and worldwide simplification | P06/P11 | Fixtures + results, explicit accuracy limits |
 
 Do not let these clarifications become an unnoticed scope expansion. For example, D09 might need a separate small reliable-export mechanism; that is not grounds to introduce Kafka for the whole system.

@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -41,6 +42,7 @@ describe('health endpoints', () => {
     (appEnvironment) => {
       const guardedConfig = validateEnvironment({
         APP_ENV: appEnvironment,
+        DELETION_JOURNAL_DIR: resolve('/var/lib/running-tracker/deletion-journal'),
         DATABASE_URL:
           'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker',
         MAINTENANCE_DATABASE_URL:

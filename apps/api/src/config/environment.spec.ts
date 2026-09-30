@@ -123,9 +123,46 @@ describe('validateEnvironment', () => {
       validateEnvironment({
         ...validApplicationEnvironment,
         APP_ENV: 'production',
+        DELETION_JOURNAL_DIR: resolve('/var/lib/running-tracker/deletion-journal'),
         LIVE_TRACK_CURSOR_SIGNING_KEY: productionKey,
       }).LIVE_TRACK_CURSOR_SIGNING_KEY,
     ).toBe(productionKey);
+  });
+
+  it('bounds the deletion journal export settings and requires the directory in production', () => {
+    const journalDirectory = resolve('/var/lib/running-tracker/deletion-journal');
+    const environment = validateEnvironment({
+      ...validApplicationEnvironment,
+      DELETION_JOURNAL_DIR: journalDirectory,
+    });
+    expect(environment.DELETION_JOURNAL_DIR).toBe(journalDirectory);
+    expect(environment.RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS).toBe(30_000);
+    expect(validateEnvironment(validApplicationEnvironment).DELETION_JOURNAL_DIR).toBeUndefined();
+
+    for (const interval of ['0', '-1', '1.5', 'abc', String(24 * 60 * 60 * 1_000 + 1)]) {
+      expect(() =>
+        validateEnvironment({
+          ...validApplicationEnvironment,
+          RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS: interval,
+        }),
+      ).toThrow('RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS');
+    }
+    expect(() =>
+      validateEnvironment({ ...validApplicationEnvironment, DELETION_JOURNAL_DIR: 'relative/dir' }),
+    ).toThrow('DELETION_JOURNAL_DIR');
+    expect(() =>
+      validateEnvironment({ ...validApplicationEnvironment, DELETION_JOURNAL_DIR: '' }),
+    ).toThrow('DELETION_JOURNAL_DIR');
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        APP_ENV: 'production',
+        LIVE_TRACK_CURSOR_SIGNING_KEY: Buffer.from(
+          'deployment-specific-live-track-key-material',
+          'utf8',
+        ).toString('base64url'),
+      }),
+    ).toThrow('DELETION_JOURNAL_DIR must be set in production');
   });
 
   it('requires canonical explicit local identities and origins', () => {

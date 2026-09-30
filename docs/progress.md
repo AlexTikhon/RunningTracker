@@ -16,7 +16,7 @@ Last updated: 2026-09-29.
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
-| P10 | IN PROGRESS | P10.1–P10.3 bounded raw purge, eligibility, summary serialization, restart-first scheduling, and owner/annual deletion with atomic tombstone/archive revision verified; tombstone lifetime/late-retry contract remains |
+| P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 is PARTIAL: the restore drill and access-restriction recovery remain P12.3/P12.4 |
 | P11 | TODO | Load verification and operational limits |
 | P12 | TODO | Production auth and recovery |
 
@@ -1090,12 +1090,42 @@ Limitations: the maintenance clock is trusted like the other P10 jobs; cross-mem
 
 P10.4 is DONE. P10 remains IN PROGRESS. The exact next planned fragment is P10.5 — deletion export/log and recovery runbook.
 
+## P10.5 — durable deletion journal, reapplication tool, and recovery runbook (D09)
+
+Implemented:
+
 - forward-only migration `0018_deletion_journal.sql` adds `run_deletion_journal` (identity `journal_seq`, org, run, owner, `deleted_at`; identifiers and one timestamp only, no foreign keys, no runtime/maintenance table privilege) and replaces `execute_run_deletion` (same signature, same grants) so the single primitive behind owner deletion and annual retention inserts the journal row in the same transaction as the tombstone and cascade delete. A committed deletion always has its row; a rolled-back one never leaves one; a repeated idempotent owner delete adds none;
+- maintenance-only `claim_deletion_journal_batch(1..1000)` (`FOR UPDATE SKIP LOCKED`, oldest first) and `ack_deletion_journal_batch(bigint[])` (at most 1000). `runDeletionJournalExportOnce` holds one transaction across claim, durable file write, acknowledgement, and COMMIT, so rows leave the database only after the file exists; any earlier failure rolls back and keeps them, and a crash between write and COMMIT re-exports (at-least-once). The file sink writes a temporary file, fsyncs, renames, and fsyncs the directory (best effort on Windows), and file names never repeat (export instant, sequence range, random suffix) because the source sequence restarts after a restore;
+- `DELETION_JOURNAL_DIR` (absolute; required in production, optional otherwise with a startup warning) and `RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS` (default 30000, max 24 h) in configuration, `.env.example`, and README. With the directory set, startup proves it writable before the listener binds; a sixth `PeriodicRunner` exports batches of at most 500 rows;
+- strict journal format (`v: 1` JSON lines, unknown keys, non-canonical UUIDs/instants, blank lines, and a missing final newline reject the whole file) so a deletion is never silently skipped;
 - owner-only `app_private.reapply_journaled_deletion` (granted to nobody) and `npm run restore:reapply-deletions -- --journal-dir <dir>` with `RESTORE_DATABASE_URL`. The command refuses any role but `running_tracker_owner`, reads every file before touching the database, applies each entry in its own transaction, is idempotent, and prints only counts. It deletes a run that still exists and existed at the journaled instant (journaling it again on the new node), leaves a run created after the deletion (ID reuse) alone, restores or lengthens but never shortens a missing/shorter tombstone, and skips expired windows and organizations/members absent from the restored data;
+- ADR-0037, `docs/runbooks/deletion-journal-and-recovery.md` (configuration, monitoring, file retention, ordered restore procedure, failure modes, P12.3 drill checklist), SDD section 12, README, implementation plan, and decision backlog updated.
+
+Verification evidence on 2026-09-29 (repository root, disposable `running_tracker_test` database, process-local values from `.env.example`):
+
 - before the migration was applied, the new integration file failed at its first fixture query (`relation "run_deletion_journal" does not exist`), the intended RED; `node scripts/migrate.mjs --test` then applied `0018` from unchanged `0000`–`0017`, and a rerun checksum-skipped all nineteen files;
+- `apps/api/test/run-deletion-journal.integration.test.ts` passed 18/18, three consecutive runs: table/function privilege matrix and `42501` denials for runtime and maintenance, argument bounds, exactly-one identifier-only row per owner deletion and per annual-retention deletion, none for a repeated delete or a rolled-back deletion, export drain with rows removed only after the file, sink failure keeping every row and a later retry succeeding, simulated crash between write and COMMIT with duplicate tolerance, two concurrent exporters taking disjoint batches while a 1,200-row backlog drained completely in order, and reapplication for every outcome plus idempotence, archive-revision advance exactly once, `410 RUN_DELETED` on `PUT` after reapplication, and resumption after a failed entry;
 - `npm run verify` exited 0: 147 API unit tests (24 files, +32 over P10.4: journal format, sink, exporter, reapplication and command line, configuration bounds and the production requirement), 82 web, 14 contracts, 14 fixtures, 3 simulator, and every build;
 - complete separated-role integration suite: 25 files / 253 tests (up from 24 / 235), rerunning every earlier deletion, purge, summary, archive, RLS, and tenant-isolation regression;
+- built-command smoke against the test database: owner role exit 0 with counts only; the runtime role refused with exit 1; a corrupt journal file refused before any database access with exit 1;
+- `git diff --check` reported only benign LF→CRLF checkout notices. No historical migration was edited, and nothing was committed or pushed.
+
+Limitations:
+
+- no backup or restore was performed: the procedure and tool are tested against a real database, but RPO/RTO are not claimed as achieved and the drill is P12.3;
+- the application cannot verify that `DELETION_JOURNAL_DIR` is off-host or durable, does not sign or encrypt journal files, and does not prune them (the runbook gives the retention rule);
+- reapplication does not restore revoked shares or memberships; that is P12.4;
+- the sixth maintenance runner was added to the existing maintenance pool without resizing it.
+
+P10.5 is DONE and with it P10. D09 is PARTIAL. The exact next planned stage is P11 — load verification and operational limits, starting with P11.1 metrics and structured logs without coordinates or secrets.
+
+- `npm run verify` exited 0: lint, strict typecheck, 10 infrastructure tests, 183 API unit tests (31 files, up from 147 / 24 at P10.5), 82 web, 14 contract, 14 fixture, 3 simulator tests, and every build;
 - the uncommitted P10.4/P10.5 work and this change are still in the working tree together; nothing has been committed.
+
+- real seeding into a new `running_tracker_load_test` database (created with `CREATE DATABASE`, then the existing bootstrap and migrations `0000`–`0018`): `ordinary` produced 126,000 points, 3,650 summaries, and 21,900 shares in about 15 s with `run_points` at 45.6 MB (about 361 bytes per point including indexes) and digest `7c83dac6…`; a second seed with `--reset` gave the same digest and a run without `--reset` refused; `stress` produced 3,000,000 points in about 78 s with `run_points` at 1.09 GB (about 363 bytes per point) and a different digest; all summaries were valid geometries. The database was then reseeded with `ordinary`;
+- `git diff --check` reported only benign LF→CRLF notices. No migration or dependency was added, and nothing was committed or pushed.
+
+Limitations:
 
 - the seeded runs have no `run_commands`, tombstones, or active runs, so replay of their original commands is not exercised; P11.3 creates live runs through the API;
 - the display geometry is analytic, not the output of the production simplifier, and the simplifier's cost on 42,857-point runs remains a P11.3/P11.4 measurement;
