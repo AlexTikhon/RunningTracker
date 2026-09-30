@@ -10,6 +10,7 @@
     "lint": "eslint src test *.ts",
     "start": "node dist/entrypoint.js",
     "restore:reapply-deletions": "node --import tsx src/restore/reapply-deletions-main.ts",
+    "load:seed": "node --import tsx src/loadtest/seed-dataset-main.ts",
     "pretest": "npm run build --workspace=@running-tracker/contracts",
     "test": "vitest run --config vitest.config.ts",
     "pretest:integration": "npm run build --workspace=@running-tracker/contracts",

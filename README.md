@@ -209,6 +209,31 @@ Start the API with `METRICS_PORT=9464` and run `curl http://127.0.0.1:9464/metri
 
 Logs are one JSON line per event with an allow-listed set of technical fields (request ID, route template, status, duration, task, error class and short code, and a few counters). Coordinates, request bodies, cookies, tokens, and error messages are dropped by construction, and only failed (5xx) requests are logged. Data age, summary lag, dead tuples, and backup age are not exported yet (P11.4 and P12.3), and metrics are per process and reset on restart.
 
+## Load datasets (P11.2)
+
+`npm run load:seed -- --profile ordinary|stress|smoke [--seed N] [--as-of <UTC instant>] [--reset]` writes one deterministic organization into a dedicated database and prints a JSON manifest (organization and member IDs, counts, per-phase timings, relation sizes, and a reproducibility digest). It is never pointed at `running_tracker` or `running_tracker_test`: the command refuses any database whose name does not end in `_load_test`, and it connects as `running_tracker_owner` because the seeder is a test-data writer, not application code.
+
+```powershell
+# one-time: create the database, then reuse the existing bootstrap/migration scripts with the URLs pointed at it
+docker compose -f infra/compose/docker-compose.yml exec -T postgres psql -U running_tracker -d postgres -c "CREATE DATABASE running_tracker_load_test"
+# set TEST_BOOTSTRAP_/TEST_MIGRATION_/TEST_/TEST_MAINTENANCE_DATABASE_URL to .../running_tracker_load_test, then:
+npm run db:bootstrap:test
+npm run db:migrate:test
+$env:LOAD_DATABASE_URL = 'postgresql://running_tracker_owner:owner_local_only@127.0.0.1:5433/running_tracker_load_test'
+npm run load:seed -- --profile ordinary --as-of 2032-03-01T00:00:00.000Z
+```
+
+- `ordinary` is the SDD estimate: 10 members, one finished run per member per day for 365 days (3,650 runs and summaries), and 126,000 raw points (seven days of 1,800-point runs).
+- `stress` keeps the same archive and holds 3,000,000 raw points, split over the same 70 recent runs (42,857–42,858 points, about 23.8 hours each, below the 50,000-point run limit).
+- `smoke` is a five-member, seconds-long profile used by the integration test.
+- Runs older than seven days are `purged` and keep only their summary, matching the retention rules. There are no active runs, so P11.3 creates its live runs through the API.
+- Geography: members are spread over eight anchors (Lisbon, New York, Tokyo, Sydney, Reykjavik, Nairobi, Buenos Aires, and a route centred on the antimeridian near Taveuni, whose display geometry is split into several parts). Routes are loops with a few metres of deterministic GPS noise.
+- ACL: the last two members are coaches with history and live grants from every runner; every other ordered member pair draws a standing policy (40% none, 20% history only, 10% live only, 30% both) applied to all of the owner's runs.
+- The same seed and `--as-of` give the same rows: every value derives from a SHA-256 of the seed and a key, and the manifest `digest` (an MD5 over runs, points, summaries, and shares) is identical after `--reset`. It is stable on one PostgreSQL/PostGIS build; it is not promised across builds with different floating-point formatting.
+- The seeded data does not contain `run_commands`, tombstones, or an active session, so it exercises reads, tiles, live state, summaries, and retention, not idempotent replay of the original create/finish commands.
+
+A run without `--reset` refuses a database that already holds any user, organization, or run. Seeding is one transaction and is followed by `ANALYZE`, so a failure leaves nothing behind and planner statistics match the data.
+
 ## Verification
 
 ```powershell

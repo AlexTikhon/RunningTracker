@@ -2,7 +2,7 @@
 
 Version: 1.0
 Date: September 29, 2026
-Status: P00–P09 complete and verified locally: archive HTTP/RLS boundary, PostGIS MVT pipeline, bounded process cache, atomic invalidation, React/Mapbox source lifecycle, and bounded tile resource usage. P10.1–P10.3 complete: bounded raw purge, retention eligibility/scheduling, owner deletion, and annual retention with atomic tombstone/archive revision. D01, D02, D04, D05, and D06 are resolved; the stream portion of D07 is fixed in ADR-0023. The next exact increment is P10.4, tombstone lifetime and late retry contract. D03 is split: the local HTTP/session boundary is complete, production identity integration remains P12.
+Status: P00–P09 complete and verified locally: archive HTTP/RLS boundary, PostGIS MVT pipeline, bounded process cache, atomic invalidation, React/Mapbox source lifecycle, and bounded tile resource usage. P10 complete: bounded raw purge, retention eligibility/scheduling, owner deletion, annual retention with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation, and the durable deletion journal with reapplication tool and runbook. P11.1 complete: in-process metrics with a separate scrape listener and allow-list structured logging. D01, D02, D04, D05, D06, and D08 are resolved; the stream portion of D07 is fixed in ADR-0023. The next exact increment is P11.2, the seeded ordinary and stress datasets. D03 is split: the local HTTP/session boundary is complete, production identity integration remains P12.
 Basis: running-tracker-sdd-v1.0.md, sections 1–17.
 
 ## 1. Execution mode
@@ -351,8 +351,8 @@ Checks:
 SDD reference: 13–15.
 
 Tasks:
-- P11.2 Generate the SDD's ordinary and stress datasets with a seed and a reproducible ACL/geography distribution.
 - P11.1 Add metrics/structured logs without coordinates and secrets. **Completed and verified 2026-09-29: an in-process registry (counters/gauges/histograms, bounded label cardinality) behind an optional loopback `METRICS_PORT` listener, allow-list JSON logging with error class/code only, and instrumentation of HTTP, ingestion commit latency, live SSE, archive tiles, pool checkout wait, maintenance cycles, and process memory; data age, summary lag, dead tuples, and backup age remain for P11.4/P12.3; ADR-0038.**
+- P11.2 Generate the SDD's ordinary and stress datasets with a seed and a reproducible ACL/geography distribution. **Completed and verified 2026-09-29: `npm run load:seed` writes one deterministic organization (10 members, 3,650 finished runs and summaries, and 126,000 or 3,000,000 raw points in the seven most recent days) into a dedicated `*_load_test` database as the object owner in one transaction, with eight geography anchors including an antimeridian route, a coach/runner ACL distribution, and a reproducibility digest; ADR-0039.**
 - P11.3 Test ingestion + viewers + pan/zoom + jobs concurrently, including batches after offline periods.
 - P11.4 Collect EXPLAIN ANALYZE BUFFERS, real table/index sizes, response bytes, and memory.
 - P11.5 Apply only confirmed optimizations; keep a before/after report.

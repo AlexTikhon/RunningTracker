@@ -623,6 +623,8 @@ Initial targets:
 
 EXPLAIN (ANALYZE,BUFFERS) evaluates SQL; JSON/MVT bytes, serialization, and frontend frame time are measured separately. A small sequential scan is not by itself a bug. None of the targets are yet confirmed by tests.
 
+P11.2 generates both datasets with `npm run load:seed` from a seed and a UTC instant into a dedicated `*_load_test` database (ADR-0039). The ordinary set has 10 members, 3,650 finished runs with summaries (one per member per day for a year), and 126,000 raw points in the seven most recent days; the stress set keeps that archive and holds 3,000,000 raw points, about 23.8 hours per recent run. Geography covers eight regions including a route straddling the antimeridian; access is a coach/runner distribution with every none/history/live/both combination. Seeded data has no active runs, commands, or tombstones.
+
 Metrics: point commit latency, duplicates/conflicts, data age, live-cycle duration, SSE reconnects/backpressure, summary lag, tile bytes/time/hit ratio, pool wait, dead tuples, backup age, purge failures. Logs contain requestId and technical identifiers, no GPS, payload, or session tokens.
 
 P11.1 implements these as an in-process registry rendered by a separate, optional scrape listener (`METRICS_PORT`, loopback by default) and as allow-listed JSON logs (ADR-0038). Exported: point commit latency, inserted/duplicate/rejected points, HTTP latency by route template, live-cycle duration, SSE open streams/limit rejections/backpressure closes, tile bytes/time/hit result/queue depth, pool checkout wait and state, per-job cycle outcome/duration/last success, and blocked raw purges (retention overrun). Not yet exported: data age, summary lag, dead tuples, and backup age (P11.4, P12.3).

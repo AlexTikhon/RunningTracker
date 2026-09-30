@@ -17,7 +17,7 @@ Last updated: 2026-09-29.
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
 | P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 is PARTIAL: the restore drill and access-restriction recovery remain P12.3/P12.4 |
-| P11 | TODO | Load verification and operational limits |
+| P11 | IN PROGRESS | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038) and P11.2 (deterministic ordinary/stress datasets, ADR-0039) verified; P11.3–P11.5 (load runs, EXPLAIN evidence, confirmed optimizations) remain |
 | P12 | TODO | Production auth and recovery |
 
 ## P00 — verified inputs
@@ -1152,6 +1152,22 @@ Limitations:
 - `observePool` wraps the promise form of `Pool.connect` in place and leaves the callback form alone, which nothing in the codebase uses;
 - the uncommitted P10.4/P10.5 work and this change are still in the working tree together; nothing has been committed.
 
+P11.1 is DONE. P11 remains IN PROGRESS. The exact next planned fragment is P11.2 — the seeded ordinary (126k raw points, 3,650 summaries) and stress (3M raw points) datasets with a reproducible ACL/geography distribution.
+
+## P11.2 — deterministic ordinary and stress datasets
+
+Implemented:
+
+- `apps/api/src/loadtest/`: a pure planner (`dataset-plan.ts`), a single-transaction owner-role seeder (`seed-dataset.ts`), and the `npm run load:seed -- --profile ordinary|stress|smoke [--seed N] [--as-of <UTC instant>] [--reset]` command (`LOAD_DATABASE_URL`, documented in `.env.example` and the README). It prints a JSON manifest: organization and member IDs, counts, per-phase timings, relation sizes, and a reproducibility digest;
+- the SDD volumes are exact: 10 members × 365 days = 3,650 finished runs and summaries; `ordinary` holds 126,000 raw points (70 runs of 1,800 points in the last seven days) and `stress` holds 3,000,000 (42,857 or 42,858 points per run, about 23.8 hours at 2 s, under the 24-hour and 50,000-point limits). Older runs are `purged` with only a summary. Runs carry the batch-derived `data_revision` (`ceil(points/100) + 1`), and summaries carry the current algorithm version and valid `quality_stats`, so `find_stale_run_summaries` does not list them;
+- geography: eight anchors (both hemispheres, equator, high latitude) and one route centred on 180° whose raw points fall on both sides and whose display MultiLineString splits into parts (365 multipart summaries, exactly that member's runs); ACL: the last two members are coaches with both grants from every runner, and every other ordered pair draws a standing none/history/live/both policy (40/20/10/30%) applied to all of the owner's runs;
+- everything derives from SHA-256 of `seed:key` (plan) or `md5(seed:run:seq)` (per-point noise, in SQL), so the same seed and instant give the same rows;
+- safety: only databases ending in `_load_test` are accepted by the command; `--reset` (TRUNCATE of the dataset tables) works only there; a non-empty database is refused without `--reset`; the seeder requires the `running_tracker_owner` role. The suffix still ends in `_test`, so the existing bootstrap/migration scripts work on it with the URL variables pointed at `running_tracker_load_test` and no script changed. ADR-0039 records the decisions.
+
+Verification evidence on 2026-09-29 (repository root, `--env-file=.env.example` values):
+
+- RED observed for the seeder: the first integration run failed with `window function calls cannot be nested` (the summary geometry query) and, after that fix, with the smoke profile having four members and therefore no antimeridian member (raised to five) and an assertion that every antimeridian-member run splits, which is false for the short 60-point archived runs (now asserted as at least one split run). The plan and CLI specs were written together with their code, so those two files have no observed RED;
+- `dataset-plan.spec.ts` 14 tests and `seed-dataset-cli.spec.ts` 5 tests; the new `load-dataset.integration.test.ts` passed 9 tests against real PostgreSQL/PostGIS: exact volumes, every constraint, point contiguity/order/revision consistency, valid current summaries, antimeridian coverage, reproducible digest and a different one for another seed, whole-transaction rollback, target/role/non-empty refusals, and per-member visible runs, summaries, and points under the runtime role matching the planned history grants, with a member of another organization seeing nothing;
 - `npm run verify` exited 0: 202 API unit tests (33 files, +19 over P11.1), 82 web, 14 contracts, 14 fixtures, 3 simulator, and every build;
 - complete separated-role integration suite: 27 files / 263 tests (up from 26 / 254);
 - real seeding into a new `running_tracker_load_test` database (created with `CREATE DATABASE`, then the existing bootstrap and migrations `0000`–`0018`): `ordinary` produced 126,000 points, 3,650 summaries, and 21,900 shares in about 15 s with `run_points` at 45.6 MB (about 361 bytes per point including indexes) and digest `7c83dac6…`; a second seed with `--reset` gave the same digest and a run without `--reset` refused; `stress` produced 3,000,000 points in about 78 s with `run_points` at 1.09 GB (about 363 bytes per point) and a different digest; all summaries were valid geometries. The database was then reseeded with `ordinary`;
@@ -1163,3 +1179,6 @@ Limitations:
 - the display geometry is analytic, not the output of the production simplifier, and the simplifier's cost on 42,857-point runs remains a P11.3/P11.4 measurement;
 - the digest is stable on one PostgreSQL/PostGIS build only;
 - the bytes-per-point figures are a first observation on a fresh load, before any bloat or WAL and without the measurement method P11.4 requires; they are not a P11.4 result;
+- the load database persists in the local Docker volume (about 1.1 GB while the stress data is loaded); hosted CI does not run it.
+
+P11.2 is DONE. P11 remains IN PROGRESS. The exact next planned fragment is P11.3 — concurrent ingestion, viewers, pan/zoom, jobs, and offline batches against the seeded datasets.
