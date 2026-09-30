@@ -9,13 +9,16 @@ import { createApiMetrics } from '../observability/api-metrics.js';
 import { createLogger } from '../observability/logger.js';
 import type { DatabasePool } from '../database/database.js';
 import { ApiError } from '../http/errors.js';
+import type { PoolClient } from 'pg';
+
 import {
+  createLiveSseHub,
   LiveSseHub,
   type LiveConnectionManager,
   type ReadLiveState,
   type LiveStreamResponse,
 } from './live-sse.js';
-import type { LiveStateSnapshot } from './live-state.js';
+import { liveStateSql, type LiveStateSnapshot } from './live-state.js';
 
 const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const userId = '11111111-1111-4111-8111-111111111111';
@@ -120,6 +123,62 @@ function eventData(frame: string): Record<string, unknown> {
   }
   return JSON.parse(line.slice('data: '.length)) as Record<string, unknown>;
 }
+
+describe('createLiveSseHub', () => {
+  it('reads the live state in a transaction that declares the live visibility scope', async () => {
+    const statements: { text: string; values: unknown[] | undefined }[] = [];
+    const client = {
+      query: vi.fn((text: string, values?: unknown[]) => {
+        statements.push({ text, values });
+        if (text.includes('AS allowed')) {
+          return Promise.resolve({ command: 'SELECT', rows: [{ allowed: true }] });
+        }
+        if (text === 'COMMIT') {
+          return Promise.resolve({ command: 'COMMIT', rows: [] });
+        }
+        if (text === liveStateSql) {
+          return Promise.resolve({ command: 'SELECT', rows: [] });
+        }
+        if (text.includes('current_track_algorithm_version')) {
+          return Promise.resolve({
+            command: 'SELECT',
+            rows: [{ algorithm_version: 'v1', server_time: new Date('2031-01-01T00:00:00.000Z') }],
+          });
+        }
+        return Promise.resolve({ command: 'SELECT', rows: [] });
+      }),
+      release: vi.fn(),
+    } as unknown as PoolClient;
+    const config = validateEnvironment({
+      ALLOWED_ORIGINS: 'http://127.0.0.1:5173',
+      APP_ENV: 'test',
+      DATABASE_URL:
+        'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker_test',
+      LOCAL_AUTH_ENABLED: 'true',
+      LOCAL_AUTH_USER_IDS: userId,
+      MAINTENANCE_DATABASE_URL:
+        'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker_test',
+      SESSION_COOKIE_SECURE: 'false',
+    });
+    const hub = createLiveSseHub({
+      clock: controlledClock(),
+      config,
+      pool: { connect: () => Promise.resolve(client) },
+      sessionManager: { isActive: () => true } as unknown as Parameters<
+        typeof createLiveSseHub
+      >[0]['sessionManager'],
+    });
+
+    await hub.connect(subscription(), new EventEmitter(), new FakeStreamResponse());
+
+    const setup = statements.find(({ text }) => text.includes("set_config('app.user_id'"));
+    expect(setup?.text).toContain("set_config('app.visibility_scope', $3, true)");
+    expect(setup?.values).toEqual([userId, orgId, 'live']);
+    const order = statements.map(({ text }) => text);
+    expect(order.indexOf(setup?.text ?? '')).toBeLessThan(order.indexOf(liveStateSql));
+    hub.stop();
+  });
+});
 
 describe('LiveSseHub', () => {
   it('sends immediate state and shares each poll read across matching tab connections', async () => {

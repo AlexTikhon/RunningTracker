@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 
 import type { StoredSession } from '../auth/session-store.js';
 import { ApiError } from '../http/errors.js';
-import { withTenantTransaction } from './tenant-transaction.js';
+import { withTenantTransaction, type TenantContext } from './tenant-transaction.js';
 
 const canonicalUuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -12,11 +12,12 @@ export async function withAuthenticatedTenantTransaction<Result>(
   session: Pick<StoredSession, 'userId'>,
   orgId: string,
   callback: (client: PoolClient) => Promise<Result>,
+  options: Pick<TenantContext, 'visibilityScope'> = {},
 ): Promise<Result> {
   if (!canonicalUuidPattern.test(orgId)) {
     throw new ApiError(400, 'INVALID_REQUEST', 'orgId must be a canonical UUID');
   }
-  return withTenantTransaction(pool, { orgId, userId: session.userId }, async (client) => {
+  return withTenantTransaction(pool, { orgId, userId: session.userId, ...options }, async (client) => {
     const membership = await client.query<{ allowed: boolean }>(
       `SELECT EXISTS (
          SELECT 1

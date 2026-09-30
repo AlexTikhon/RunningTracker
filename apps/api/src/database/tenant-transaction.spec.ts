@@ -52,6 +52,38 @@ describe('withTenantTransaction', () => {
     expect(harness.release).toHaveBeenCalledWith(undefined);
   });
 
+  it('declares the live visibility scope in the same statement as the identity, and only when asked', async () => {
+    const harness = createHarness();
+
+    await withTenantTransaction(
+      harness.pool,
+      { ...context, visibilityScope: 'live' },
+      () => Promise.resolve('result'),
+    );
+
+    expect(harness.query.mock.calls).toEqual([
+      ['BEGIN'],
+      [
+        "SELECT set_config('app.user_id', $1, true), set_config('app.org_id', $2, true), set_config('app.visibility_scope', $3, true)",
+        [context.userId, context.orgId, 'live'],
+      ],
+      ['COMMIT'],
+    ]);
+  });
+
+  it('rejects an unknown visibility scope before touching the pool', async () => {
+    const harness = createHarness();
+
+    await expect(
+      withTenantTransaction(
+        harness.pool,
+        { ...context, visibilityScope: 'history' as unknown as 'live' },
+        () => Promise.resolve('never'),
+      ),
+    ).rejects.toThrow(TypeError);
+    expect(harness.connect).not.toHaveBeenCalled();
+  });
+
   it('rolls back and preserves the callback error', async () => {
     const harness = createHarness();
     const callbackError = new Error('callback failed');

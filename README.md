@@ -268,6 +268,10 @@ npm run load:report -- --since <UTC instant> --out <absolute path>   # relative 
 - `load:run` now also samples which API and maintenance backends wait for a lock (`pg_locks`, every 250 ms, no statement text) and accepts `--no-tiles`.
 - `load:report` turns the result files into `docs/reports/p11-measurements.md`: environment, goals met / not met / not confirmed under explicit rules, per-profile pooled percentiles, EXPLAIN tables, and sizes. Everything in it is computed from the result files. See ADR-0041.
 
+## Set-based run visibility (P11.5)
+
+The SELECT policies on `runs`, `run_points`, and `run_summaries` no longer call a definer function per row. Migration `0019` adds `app_private.readable_run_keys()` and `app_private.history_readable_run_keys()`, which return the readable `(org_id, run_id)` pairs once per statement; the policies probe that set. The per-row functions remain the specification, and `test/rls-set-policies.integration.test.ts` compares the sets with them for every fixture identity. A caller that reads only a few live rows (the live SSE poll) may declare `visibilityScope: 'live'` on `withTenantTransaction`; it can only narrow the result. The before/after numbers, produced by the same `load:explain`, `load:run`, and `load:report` commands, are in `docs/reports/p11-measurements.md` (before) and `docs/reports/p11-5-measurements-after.md` (after); see ADR-0042. To re-measure, apply the migration to the load database with the existing scripts pointed at it and rerun the commands above.
+
 ## Verification
 
 ```powershell

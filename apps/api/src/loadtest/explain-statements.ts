@@ -48,6 +48,8 @@ export type ResponseSpec =
 export interface ExplainTenant {
   orgId: string;
   userId: string;
+  /** Declared exactly as the production caller of the statement declares it. */
+  visibilityScope?: 'live';
 }
 
 export interface ExplainStatement {
@@ -263,7 +265,7 @@ export function planExplainStatements(dataset: DatasetPlan, options: ExplainPlan
       role: 'runtime',
       sql: liveStateSql,
       staticValues: [orgId],
-      tenant: coachTenant,
+      tenant: { ...coachTenant, visibilityScope: 'live' },
     },
     {
       description: `Insert of ${ingestionBatchSize} new points into a recording run (rolled back)`,

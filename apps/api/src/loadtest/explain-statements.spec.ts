@@ -79,6 +79,15 @@ describe('planExplainStatements', () => {
     expect(statement('summary/publish-current-run').role).toBe('maintenance');
   });
 
+  it('measures the live-state poll under the same visibility scope the live hub declares', () => {
+    expect(statement('live-state/ten-active-runs').tenant?.visibilityScope).toBe('live');
+    for (const item of plan.statements) {
+      if (item.name !== 'live-state/ten-active-runs') {
+        expect(item.tenant?.visibilityScope, item.name).toBeUndefined();
+      }
+    }
+  });
+
   it('separates statements that need the seeded state from those that need active runs, and rolls back every write', () => {
     const needsActive = plan.statements.filter(({ needs }) => needs === 'active-runs').map(({ name }) => name);
     const rolledBack = plan.statements.filter(({ mode }) => mode === 'rollback').map(({ name }) => name);

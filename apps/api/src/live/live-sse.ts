@@ -437,8 +437,14 @@ export function createLiveSseHub(options: {
     pollConcurrency: config.LIVE_SSE_POLL_CONCURRENCY,
     pollIntervalMs: config.LIVE_SSE_POLL_INTERVAL_MS,
     readState: ({ orgId, session }) =>
-      withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
-        readLiveState(client, orgId),
+      // The poll reads a few live rows every cycle: it declares the narrow scope so the run visibility
+      // policies do not build the identity's whole readable set for it (migration 0019).
+      withAuthenticatedTenantTransaction(
+        pool,
+        session,
+        orgId,
+        (client) => readLiveState(client, orgId),
+        { visibilityScope: 'live' },
       ),
     validateSession: (session) => sessionManager.isActive(session),
   });

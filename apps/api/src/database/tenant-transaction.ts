@@ -5,6 +5,12 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 export interface TenantContext {
   orgId: string;
   userId: string;
+  /**
+   * Narrows what the run visibility policies return for the whole transaction. `live` limits reads of
+   * runs and points to recording or paused runs; it can only remove rows, never add one (migration 0019),
+   * so it is safe to omit and is used only by callers that read a handful of live rows.
+   */
+  visibilityScope?: 'live';
 }
 
 export class TenantTransactionCommitError extends Error {
@@ -26,6 +32,13 @@ function validatedUuid(name: keyof TenantContext, value: string): string {
     throw new TypeError(`${name} must be a canonical UUID`);
   }
   return value.toLowerCase();
+}
+
+function validatedVisibilityScope(value: unknown): 'live' | undefined {
+  if (value === undefined || value === 'live') {
+    return value;
+  }
+  throw new TypeError("visibilityScope must be omitted or 'live'");
 }
 
 function asError(error: unknown, fallback: string): Error {
@@ -58,6 +71,7 @@ export async function withTenantTransaction<Result>(
 ): Promise<Result> {
   const userId = validatedUuid('userId', context.userId);
   const orgId = validatedUuid('orgId', context.orgId);
+  const visibilityScope = validatedVisibilityScope(context.visibilityScope);
   const client = await pool.connect();
   let phase: 'connected' | 'begun' | 'committing' | 'complete' = 'connected';
   let destroyReason: Error | undefined;
@@ -65,10 +79,15 @@ export async function withTenantTransaction<Result>(
   try {
     await client.query('BEGIN');
     phase = 'begun';
-    await client.query(
-      "SELECT set_config('app.user_id', $1, true), set_config('app.org_id', $2, true)",
-      [userId, orgId],
-    );
+    await (visibilityScope
+      ? client.query(
+          "SELECT set_config('app.user_id', $1, true), set_config('app.org_id', $2, true), set_config('app.visibility_scope', $3, true)",
+          [userId, orgId, visibilityScope],
+        )
+      : client.query(
+          "SELECT set_config('app.user_id', $1, true), set_config('app.org_id', $2, true)",
+          [userId, orgId],
+        ));
 
     const result = await callback(client);
     phase = 'committing';

@@ -142,6 +142,11 @@ async function explainOnce(
         statement.tenant.userId,
         statement.tenant.orgId,
       ]);
+      if (statement.tenant.visibilityScope) {
+        await client.query("SELECT set_config('app.visibility_scope', $1, true)", [
+          statement.tenant.visibilityScope,
+        ]);
+      }
     }
     await client.query(`SET LOCAL statement_timeout = '${explainStatementTimeout}'`);
     const identity = await client.query<{ current_user: string }>('SELECT current_user AS current_user');
