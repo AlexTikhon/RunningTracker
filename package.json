@@ -22,6 +22,7 @@
     "test:migrations": "node --test scripts/*.test.mjs",
     "test:integration": "npm run test:integration --workspace=@running-tracker/api",
     "restore:reapply-deletions": "npm run restore:reapply-deletions --workspace=@running-tracker/api --",
+    "load:run": "npm run load:run --workspace=@running-tracker/api --",
     "load:seed": "npm run load:seed --workspace=@running-tracker/api --",
     "simulate:gps": "npm run simulate --workspace=@running-tracker/gps-simulator --",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",

@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-09-29.
+Last updated: 2026-09-30.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -17,7 +17,7 @@ Last updated: 2026-09-29.
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
 | P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 is PARTIAL: the restore drill and access-restriction recovery remain P12.3/P12.4 |
-| P11 | IN PROGRESS | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038) and P11.2 (deterministic ordinary/stress datasets, ADR-0039) verified; P11.3–P11.5 (load runs, EXPLAIN evidence, confirmed optimizations) remain |
+| P11 | IN PROGRESS | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038), P11.2 (deterministic ordinary/stress datasets, ADR-0039), and P11.3 (deterministic concurrent load scenario over the real HTTP/SSE/PostgreSQL/tile/summary boundaries, ADR-0040) verified; P11.4–P11.5 (EXPLAIN evidence and complete measurements, confirmed optimizations) remain; no SDD target is claimed verified |
 | P12 | TODO | Production auth and recovery |
 
 ## P00 — verified inputs
@@ -1182,3 +1182,62 @@ Limitations:
 - the load database persists in the local Docker volume (about 1.1 GB while the stress data is loaded); hosted CI does not run it.
 
 P11.2 is DONE. P11 remains IN PROGRESS. The exact next planned fragment is P11.3 — concurrent ingestion, viewers, pan/zoom, jobs, and offline batches against the seeded datasets.
+
+## P11.3 — concurrent ingestion, observers, pan/zoom, summary job, and offline catch-up scenario
+
+Implemented (ADR-0040):
+
+- `npm run load:run -- --profile smoke|ordinary|stress [--seed N] [--as-of <UTC instant>] [--results-dir <path>] [--no-cleanup | --cleanup-only]` (`apps/api/src/loadtest/load-*.ts`). It starts the real API (`src/entrypoint.ts`) as a child process on free loopback ports and drives it only over HTTP and SSE. The runner touches the database as the object owner only to verify the dataset before the run and to delete its own runs afterwards;
+- safety: the owner, runtime, and maintenance URLs (`LOAD_DATABASE_URL`, `LOAD_RUNTIME_DATABASE_URL`, `LOAD_MAINTENANCE_DATABASE_URL`) must name the same loopback host and a database ending in `_load_test`; each role's live session is asked for `current_database()`/`current_user`; the dataset instant is recovered from the seeded rows (or `--as-of`) and the whole plan is verified (run IDs and start times, members, exact point and summary totals, no active run) before anything starts, so leftovers fail closed with counts only. No flag names a URL, a database, or a reseed. The child gets a scrubbed environment (no owner or bootstrap credentials; local sessions only for the planned members; the production guard is untouched);
+- real sessions through `POST /api/session`; the cookie and CSRF token live in private fields of `LoadSession`, whose JSON, `inspect`, and string forms show the user ID only;
+- scenario: one active run per member (unique-index rule), the summary run owned first by member 0, who finishes it and then creates their active run; deterministic run and command IDs; shares created through the API from the planned policy; ten per-member SSE observers (distinct subscriptions, so the live poll reads ten times); rounds of ten concurrent 100-point offline batches (`smoke` 2, `ordinary` 3, `stress` 10; each round a barrier), then an exact retry and an overlapping retry (50 new + 50 duplicate); two overlapping tile-burst streams (eight 3×3 viewports per burst across zoom 9/11/13, pan east and back, eight regions in a fixed order starting with the antimeridian route whose viewport wraps columns 0 and 2^z−1, later cycles shifting the centre for new keys); the summary run's finish command followed by the existing worker; then fresh points every two seconds per member until the summary is visible and the archive revision has advanced (at least 30 s ordinary, 60 s stress). Fresh latency is measured from the point's creation to the first state on each expected observer whose position for that run has reached its `seq`. The first fresh point per run is a "bridge" (its predecessor is more than 10 s older, so the live state cannot show it); it is flagged and excluded from the convenience summary, and the raw samples keep it;
+- failures stop new load, abort in-flight requests, close every stream, and still return a partial report, classified as transport, timeout, sse, unexpected-response, application-rejection, or load-runner; expected rejections (tile revision change, documented load shedding) are counted, not failures; Ctrl-C takes the same path;
+- result: one JSON file per run in `.local/load-results/` (gitignored), schema `running-tracker.load-result` v1: provenance (commit, Node, PostgreSQL, PostGIS, effective non-secret API settings), phase intervals, every HTTP, tile, and fresh sample with start and end relative to the scenario origin, observer reports, the summary-publication timeline with a before/after tile comparison, full metrics before and after plus bounded snapshots, a server-log tally by level and event, and convenience percentiles. `assertSafeResult` rejects any session or CSRF value and any coordinate-, cookie-, or token-named key before anything is written;
+- README ("Concurrent load scenario (P11.3)") and `.env.example` document the variables; the README seed example now uses the default instant (see below).
+
+Verification evidence on 2026-09-30 (repository root, dedicated `running_tracker_load_test` and disposable `running_tracker_test`):
+
+- tests were written before their modules for statistics, bounded concurrency, the Prometheus parser, the HTTP client, sessions, SSE parsing and correlation, planning, target refusal, child environment, results, arguments, the dataset-instant warning, and CLI refusal (each observed failing on the missing module or missing behaviour first); the dataset-identity integration file, the fault-injecting orchestrator spec, and the whole-scenario smoke integration were written together with their code;
+- `npm run lint` and `npm run typecheck` passed; `npm run verify` exited 0: 293 API unit tests (47 files, up from 202 / 33), 82 web, 14 contracts, 14 fixtures, 3 simulator, 10 infrastructure tests, and every build;
+- `node --env-file=.env.example scripts/migrate.mjs --test` skipped all nineteen already-applied files; the complete separated-role integration suite passed 29 files / 270 tests (up from 27 / 263), including `load-dataset-check.integration.test.ts` (5) and `load-runner.integration.test.ts` (2), which runs the whole smoke scenario against the real Express app, SSE hub, tile pipeline, and summary worker on real PostgreSQL/PostGIS and asserts structure only (no timing threshold); `git diff --check` reported only LF→CRLF notices;
+- `load-orchestrator.spec.ts` runs the orchestrator against a fault-injecting fake API: an ingestion 500, a hung request, a reset connection, a dropped observer stream, and an external cancel each fail with the right class, close all ten streams, stop tile load, leave no open connection, and produce a partial report that passes the secret scan.
+
+Real runs against `running_tracker_load_test` (seed 42, dataset instant 2026-09-30T00:00:00.000Z, PostgreSQL 17.5, PostGIS 3.5, Node 24.11.1; API settings from the defaults: pool 10, query timeout 1000 ms, SSE poll 2000 ms, summary interval 60000 ms, summary concurrency 2; runner, API, and database on one Windows machine). Both finished with status `ok`; all ten observers stayed connected with no protocol errors, backpressure closes, or server error log lines; cleanup removed exactly the 11 created runs and re-verified the dataset. Figures are client-measured milliseconds and are reported without interpretation:
+
+| | ordinary (126,000 raw points) | stress (3,000,000 raw points) |
+|---|---|---|
+| catch-up requests (10 concurrent × 100 points × rounds) | 30 requests, 3,000 points: p50 103, p95 136, max 144 | 100 requests, 10,000 points: p50 149, p95 241, max 347 |
+| fresh single-point ingestion | 297 requests: p50 37, p95 58, max 169 | 539 requests: p50 94, p95 196, max 387 |
+| fresh point → observer (bridge points excluded) | 1,410 samples: p50 1,053, p95 2,015, p99 2,093, max 2,159; 0 unresolved | 2,594 samples: p50 1,148, p95 2,117, p99 2,303, max 3,347; 0 unresolved |
+| tiles (started / ok / revision changed) | 1,138 / 1,132 / 6; z9 p95 1,205, z11 p95 956, z13 p50 10, p95 882 | 1,547 / 1,541 / 6; z9 p95 2,678, z11 p95 1,211, z13 p50 13, p95 1,345 (max 3,975) |
+| server tile cache result (miss / hit / error) | 550 / 584 / 6 | 720 / 823 / 6 |
+| finish acknowledged → summary visible to the owner | 1.2 s → 61.1 s | 1.6 s → 111.6 s |
+| archive revision advanced (first metadata poll) | 60.3 s | 110.7 s |
+| summary worker cycle duration (server metric) | not retained | 50.8 s |
+| process RSS / tile cache bytes at the end | 115 MB / 2.7 MB | 143 MB / 2.5 MB |
+
+The same tile before and after publication differed in size in both runs (33,941 → 34,035 and 21,829 → 22,020 bytes), which shows the new summary reached the map source. The server's `point_ingest_points_total` matched the runner's counts exactly (ordinary: 3,647 inserted = 300 setup + 3,000 catch-up + 50 overlap + 297 fresh; 150 duplicates = 100 + 50). The result files are in `.local/load-results/` (local, not committed).
+
+Failures found and fixed on the way (none in production code):
+
+- the first real ordinary run failed with "observer stream closed unexpectedly": the HTTP client applied its 30 s request deadline to the open SSE stream. Fixed with a header-phase-only deadline and a test that failed first;
+- a dataset seeded for 2032-03-01 (the README's earlier example) lies outside the 366-day archive window that ends now, so tiles were near-empty and fast; that first "success" was discarded. The README example now uses the default instant, the runner warns when the dataset instant is far from now, and the dataset was reseeded for 2026-09-30;
+- with the default cadence, the API's own raw-purge and annual-retention jobs ran on the aging dataset during the measurement and rewrote seeded rows (the post-run verification caught it and failed the run); one annual-retention deletion cycle took 82.2 s concurrently with the tile bursts, and the summary cycle was equally long. That run was discarded and its result file removed. The child API now parks those jobs at 24 h unless `LOAD_KEEP_RETENTION_JOBS=true`;
+- the first fresh point per run cannot appear in the live state (its predecessor is more than 10 s older), which the `bridge` flag records instead of leaving a misleading latency in the summary.
+
+Observations for P11.4 (not analysed, not fixed):
+
+- summary publication took 61 s (ordinary) and 112 s (stress) from finish to visibility with the 60 s worker cadence; in the stress run one worker cycle lasted 50.8 s. A single `pg_stat_activity` sample during an ordinary run showed the summary transaction waiting on a lock held by a tile transaction. An earlier ordinary run in which lifecycle steps (a run creation and nine share changes) ran under continuous tile bursts spent 17.6 s in that step, and its summary cycle spent 17.3 s; the order was then changed so the hand-over precedes the bursts (ADR-0040). Whether tile transactions delay organization-level writers is a hypothesis, not a finding;
+- catch-up latency grows across rounds within a run (stress: request medians about 100 ms in round 1 to about 190 ms in round 7, while each run holds up to 1,000 points), and tile latency at z9 and z11 is higher than at z13 under the burst load;
+- fresh-to-observer latency ranged from 0.04 s to 3.3 s with a median close to the 2 s poll interval; the stress maximum was 3.3 s;
+- ingestion stayed in the tens to low hundreds of milliseconds while the tile bursts ran, but no starvation conclusion is drawn from two runs.
+
+Limitations:
+
+- one machine hosts the runner, the API, and PostgreSQL, so CPU competes; two real runs per profile are not a statistical basis, and no SDD target (ingestion p95 500 ms, fresh p95 5 s, summary visibility 60 s, LRU and SSE buffer stability, no tile starvation) is confirmed by them. Tile hit or miss per request is not inferred, only the server counters and a `repeatOfEarlier` flag;
+- the tile burst gesture, region order, viewer assignment, and cadence are fixed choices, not a model of real users; the tile window is 366 days ending an hour after now;
+- cleanup deletes with owner SQL and leaves no tombstone or journal row; the API's own deletion path is covered by the P10 suites;
+- retention jobs are parked by default (opt-in `LOAD_KEEP_RETENTION_JOBS`), so concurrent retention plus tile load is not part of the standard scenario;
+- the database currently holds the ordinary dataset (reseeded after the stress run; digest `decc8c2f…` for 2026-09-30).
+
+P11.3 is DONE. P11 remains IN PROGRESS. The exact next stage is P11.4 — collect EXPLAIN ANALYZE BUFFERS, relation/index sizes, response bytes, memory and complete performance measurements.

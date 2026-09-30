@@ -220,7 +220,7 @@ docker compose -f infra/compose/docker-compose.yml exec -T postgres psql -U runn
 npm run db:bootstrap:test
 npm run db:migrate:test
 $env:LOAD_DATABASE_URL = 'postgresql://running_tracker_owner:owner_local_only@127.0.0.1:5433/running_tracker_load_test'
-npm run load:seed -- --profile ordinary --as-of 2032-03-01T00:00:00.000Z
+npm run load:seed -- --profile ordinary   # the default instant is today's UTC midnight; keep it for load runs
 ```
 
 - `ordinary` is the SDD estimate: 10 members, one finished run per member per day for 365 days (3,650 runs and summaries), and 126,000 raw points (seven days of 1,800-point runs).
@@ -233,6 +233,25 @@ npm run load:seed -- --profile ordinary --as-of 2032-03-01T00:00:00.000Z
 - The seeded data does not contain `run_commands`, tombstones, or an active session, so it exercises reads, tiles, live state, summaries, and retention, not idempotent replay of the original create/finish commands.
 
 A run without `--reset` refuses a database that already holds any user, organization, or run. Seeding is one transaction and is followed by `ANALYZE`, so a failure leaves nothing behind and planner statistics match the data.
+
+## Concurrent load scenario (P11.3)
+
+`npm run load:run -- --profile ordinary|stress|smoke [--seed N] [--as-of <UTC instant>] [--results-dir <path>] [--no-cleanup | --cleanup-only]` runs the SDD workload against a **seeded** dedicated database: it starts the real API as a child process on free loopback ports and drives it only over HTTP and SSE. It needs the three role URLs of the load database (the owner URL is the seeder's; the runtime and maintenance URLs are what the API itself connects with):
+
+```powershell
+$env:LOAD_DATABASE_URL = 'postgresql://running_tracker_owner:owner_local_only@127.0.0.1:5433/running_tracker_load_test'
+$env:LOAD_RUNTIME_DATABASE_URL = 'postgresql://running_tracker_runtime:runtime_local_only@127.0.0.1:5433/running_tracker_load_test'
+$env:LOAD_MAINTENANCE_DATABASE_URL = 'postgresql://running_tracker_maintenance:maintenance_local_only@127.0.0.1:5433/running_tracker_load_test'
+npm run load:seed -- --profile ordinary --reset   # the dataset must be freshly seeded and untouched
+npm run load:run -- --profile ordinary
+```
+
+- The runner refuses anything but a loopback database whose name ends in `_load_test`, checks each role's live session (`current_database()`, `current_user`), and verifies that the database holds exactly the planned dataset (runs and start times, points, summaries, members, no active run). It never reseeds. The child API gets a scrubbed environment: no owner or bootstrap credentials, local sessions only for the ten planned members. There is no flag for a URL, a database, or a reseed.
+- Scenario: ten SSE observers (one per member, each with its own session), ten concurrent 100-point offline batches per round (`smoke` 2 rounds, `ordinary` 3, `stress` 10) followed by an exact retry and an overlapping retry, archive pan/zoom tile bursts on two overlapping streams across eight regions (including the antimeridian route), the finish of a run that the existing summary worker publishes, and fresh points every two seconds per member whose latency to each expected observer is measured. The fresh phase lasts until the summary is visible and the archive revision has advanced, so with the default 60 s worker cadence a run takes one to a few minutes.
+- The result is one JSON file in `.local/load-results/` (gitignored) with raw per-request samples, fresh-point latency samples, observer reports, tile samples and bytes, the summary-publication timeline, metrics before/after, and convenience percentiles. It never contains cookies, CSRF tokens, session tokens, or coordinates. A failed run still writes a partial result and exits non-zero.
+- Afterwards the runner deletes exactly the runs it created (deterministic IDs) and verifies the dataset again, so the next run starts from the same rows. `--cleanup-only` does that alone, for a run that was killed. `--no-cleanup` keeps the runs for inspection; the next run then refuses until `--cleanup-only`.
+- The dataset ages with the clock (seven-day raw retention, one-year run retention), so the child API parks the raw-purge, annual-retention, and tombstone jobs at their 24-hour maximum. Set `LOAD_KEEP_RETENTION_JOBS=true` to run them at their normal cadence; they will then rewrite the seeded rows and the next run needs a reseed. The summary worker keeps its normal cadence (`RUN_SUMMARY_INTERVAL_MS`).
+- Ordinary `npm test` and CI never run this: the smoke scenario runs inside the integration suite against `running_tracker_test`, and asserts structure, not performance. The SDD targets are decided from P11.4's analysis of these results, not by the runner. See ADR-0040.
 
 ## Verification
 
