@@ -172,6 +172,12 @@ const environmentSchema = z
       .positive()
       .max(24 * 60 * 60 * 1_000)
       .default(60_000),
+    RUN_TOMBSTONE_RECLAIM_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60 * 1_000)
+      .default(300_000),
     RUN_SUMMARY_INTERVAL_MS: z.coerce
       .number()
       .int()

@@ -1065,3 +1065,39 @@ Verification evidence on 2026-09-29:
 - `git diff --check` passed (only benign LF→CRLF checkout notices, no whitespace errors). No historical migration `0000`–`0015` was modified, no commit, push, or main/production database write occurred.
 
 P10.3 is DONE. P10 remains IN PROGRESS: D08 (tombstone-expiry replay contract) is intentionally still open, and P10.4 (tombstone lifetime/late-retry contract) and P10.5 (deletion export journal) remain unopened. The exact next planned fragment is P10.4.
+
+## P10.4 — tombstone lifetime and late-retry contract (D08)
+
+Implemented:
+
+- ADR-0036 fixes the contract. A tombstone row is authoritative while it exists; the request path never compares `expires_at`. For one year (`expires_at = deleted_at + 1 year`, unchanged from P10.3) a deleted ID answers `410 RUN_DELETED` to the owner's `PUT`/`GET` and `204` to a repeated owner `DELETE`. `expires_at` only marks when maintenance *may* reclaim the row; a delayed reclaim only lengthens protection. The ID is reusable only after the row is actually removed, after which `DELETE` returns `404 RUN_NOT_FOUND` and `PUT` creates a new run. Retries later than the window are explicitly outside the idempotency guarantee. No permanent used-ID registry was added;
+- forward-only migration `0017_tombstone_expiry.sql` adds `app_private.reclaim_expired_run_tombstones(effective_now, batch_limit)` (`STRICT`, `SECURITY DEFINER`, `search_path = pg_catalog`, `EXECUTE` only for `running_tracker_maintenance`; batch 1..1000, non-finite time rejected). It deletes at most one batch of `expires_at <= effective_now` rows, oldest first, via `FOR UPDATE SKIP LOCKED`, and re-checks expiry on the locked row. Neither role gained any table privilege on `run_tombstones`;
+- the same migration replaces `execute_run_deletion` so its tombstone write is an `ON CONFLICT (org_id, run_id) DO UPDATE` takeover with `expires_at = GREATEST(existing, new)`. This fixes a real P10.3 defect found during race analysis: the tombstone `SELECT` policy is owner-scoped, so another member's `PUT` can create a live run under an ID carrying someone else's marker; deleting that run (and annual retention of it) then failed on the primary key, and retention would have retried the same oldest candidate forever;
+- locking analysis: `createRun` uses advisory key `<org>:<run>` while all P10 paths use `running-tracker:run-summary:<org>:<run>`; they do not serialize, and the design does not need them to. The tombstone row is the only shared state with two writers (deletion insert/takeover, reclaim delete) and is the last lock in every path, so there is no cycle. No advisory lock is taken by reclaim. Existing lock order (ADR-0035) is unchanged;
+- `apps/api/src/maintenance/run-tombstone-reclaim.ts` (`runTombstoneReclaimOnce`, batch 500) runs on the existing `PeriodicRunner` with new `RUN_TOMBSTONE_RECLAIM_INTERVAL_MS` (default 300000, max 24 h; `.env.example`, README, config test). `run-service.ts` `isTombstoned` now documents why it ignores `expires_at`; no HTTP error carries age, owner, or expiry;
+- `docs/SDD.md`, `README.md`, `docs/implementation-plan.md`, and `docs/decision-backlog.md` updated; D08 is RESOLVED. D09 (deletion journal / restore drill) remains open for P10.5/P12.
+
+Verification evidence on 2026-09-29 (all commands run from the repository root against the disposable `running_tracker_test` database, using `--env-file=.env.example` because no `.env` exists):
+
+- `node --env-file=.env.example scripts/migrate.mjs --test` applied `0017` from unchanged `0000`–`0016`; the immediate rerun checksum-skipped all eighteen files;
+- focused integration `run-tombstone-expiry.integration.test.ts` passed 15/15 (privilege/catalog matrix and `42501` denials, argument bounds, exact `expires_at - 1 ms / = / + 1 ms` boundary with injected time, one-year expiry for owner and annual paths, full HTTP contract, delayed cleanup and non-disclosure to other members, 500-marker bounded batches with oldest-first order, retry/empty cycles, rollback, two-worker exclusivity, reclaim-vs-create ordering, and three takeover cases plus annual retention);
+- `npm run lint` and `npm run typecheck` passed with no errors; `npm run test:migrations` passed 10/10;
+- `npm run verify` exited 0: 115 API unit tests (20 files, +12: 11 in `run-tombstone-reclaim.spec.ts` and the interval bounds test), 82 web, 14 contracts, 14 fixtures, 3 simulator, 10 infrastructure tests, and every build;
+- the complete separated-role integration suite passed 24 files / 235 tests (up from 23 / 220), including every P10.3 deletion, raw-purge, summary-publication, RLS, and tenant-isolation regression;
+- `git diff --check` exited 0 (only LF→CRLF checkout notices). No historical migration was edited, and nothing was committed or pushed.
+
+Limitations: the maintenance clock is trusted like the other P10 jobs; cross-member reuse of an ID inside the window remains possible (no leak, and its deletion now works); the maintenance pool size was not changed for the extra runner.
+
+P10.4 is DONE. P10 remains IN PROGRESS. The exact next planned fragment is P10.5 — deletion export/log and recovery runbook.
+
+- forward-only migration `0018_deletion_journal.sql` adds `run_deletion_journal` (identity `journal_seq`, org, run, owner, `deleted_at`; identifiers and one timestamp only, no foreign keys, no runtime/maintenance table privilege) and replaces `execute_run_deletion` (same signature, same grants) so the single primitive behind owner deletion and annual retention inserts the journal row in the same transaction as the tombstone and cascade delete. A committed deletion always has its row; a rolled-back one never leaves one; a repeated idempotent owner delete adds none;
+- owner-only `app_private.reapply_journaled_deletion` (granted to nobody) and `npm run restore:reapply-deletions -- --journal-dir <dir>` with `RESTORE_DATABASE_URL`. The command refuses any role but `running_tracker_owner`, reads every file before touching the database, applies each entry in its own transaction, is idempotent, and prints only counts. It deletes a run that still exists and existed at the journaled instant (journaling it again on the new node), leaves a run created after the deletion (ID reuse) alone, restores or lengthens but never shortens a missing/shorter tombstone, and skips expired windows and organizations/members absent from the restored data;
+- before the migration was applied, the new integration file failed at its first fixture query (`relation "run_deletion_journal" does not exist`), the intended RED; `node scripts/migrate.mjs --test` then applied `0018` from unchanged `0000`–`0017`, and a rerun checksum-skipped all nineteen files;
+- `npm run verify` exited 0: 147 API unit tests (24 files, +32 over P10.4: journal format, sink, exporter, reapplication and command line, configuration bounds and the production requirement), 82 web, 14 contracts, 14 fixtures, 3 simulator, and every build;
+- complete separated-role integration suite: 25 files / 253 tests (up from 24 / 235), rerunning every earlier deletion, purge, summary, archive, RLS, and tenant-isolation regression;
+- the uncommitted P10.4/P10.5 work and this change are still in the working tree together; nothing has been committed.
+
+- the seeded runs have no `run_commands`, tombstones, or active runs, so replay of their original commands is not exercised; P11.3 creates live runs through the API;
+- the display geometry is analytic, not the output of the production simplifier, and the simplifier's cost on 42,857-point runs remains a P11.3/P11.4 measurement;
+- the digest is stable on one PostgreSQL/PostGIS build only;
+- the bytes-per-point figures are a first observation on a fresh load, before any bloat or WAL and without the measurement method P11.4 requires; they are not a P11.4 result;

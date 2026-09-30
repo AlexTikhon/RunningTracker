@@ -12,6 +12,6 @@ This backlog preserves the mandatory clarifications from the implementation plan
 | D05 | P05 | Terminal reconciliation for queued offline commands after server auto-finish | RESOLVED — ADR-0009: authoritative run read and atomic stale-command acknowledgement |
 | D06 | P07 | Fixed-T pagination and proof that snapshot plus changes equals a fresh snapshot | RESOLVED — P07.1–P07.5 + ADR-0017–0021 |
 | D07 | P08/P09 | Defined authorization check point for stream/cache revocation and cancellation of unsent data | PARTIAL — P08.2/ADR-0023 resolves stream revalidation and pending cancellation; P09 still owns cache invalidation |
-| D08 | P10 | Time-bounded replay guarantee after tombstone expiry, or another explicit mechanism | TODO |
 | D09 | P10/P12 | Deletion/ACL journal surviving node loss, with stated RPO and restore drill | TODO |
+| D08 | P10 | Time-bounded replay guarantee after tombstone expiry, or another explicit mechanism | RESOLVED — P10.4 + ADR-0036: one-year guaranteed window; the tombstone row is authoritative until maintenance reclaims it; ID reuse only after reclamation; retries after the window are outside the guarantee |
 | D10 | P06/P11 | Global GPS/simplification fixtures, measured error, and documented accuracy limits | TODO |

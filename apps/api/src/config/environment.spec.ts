@@ -57,6 +57,7 @@ describe('validateEnvironment', () => {
       RUN_RETENTION_DELETE_INTERVAL_MS: 60_000,
       RUN_SUMMARY_CONCURRENCY: 2,
       RUN_SUMMARY_INTERVAL_MS: 60_000,
+      RUN_TOMBSTONE_RECLAIM_INTERVAL_MS: 300_000,
       SHUTDOWN_TIMEOUT_MS: 5_000,
     });
   });
@@ -176,6 +177,23 @@ describe('validateEnvironment', () => {
         RUN_SUMMARY_CONCURRENCY: '9',
       }),
     ).toThrow('RUN_SUMMARY_CONCURRENCY');
+  });
+
+  it('bounds the tombstone reclaim interval', () => {
+    expect(
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        RUN_TOMBSTONE_RECLAIM_INTERVAL_MS: '86400000',
+      }).RUN_TOMBSTONE_RECLAIM_INTERVAL_MS,
+    ).toBe(86_400_000);
+    for (const invalid of ['0', '-1', '86400001', '1.5', 'often']) {
+      expect(() =>
+        validateEnvironment({
+          ...validApplicationEnvironment,
+          RUN_TOMBSTONE_RECLAIM_INTERVAL_MS: invalid,
+        }),
+      ).toThrow('RUN_TOMBSTONE_RECLAIM_INTERVAL_MS');
+    }
   });
 
   it('bounds live SSE connections and polling concurrency', () => {

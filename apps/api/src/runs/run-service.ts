@@ -333,6 +333,15 @@ function decodeLiveTrackChangesCursor(
   }
 }
 
+/**
+ * A tombstone is authoritative for exactly as long as its row exists. This
+ * check deliberately ignores `expires_at`: that column only says when the
+ * maintenance reclaim job may remove the row (ADR-0036). A run ID becomes
+ * reusable when the row is actually gone, never merely because a clock passed
+ * `expires_at`, so a delayed reclaim can only extend protection. Visibility is
+ * still owner-scoped by RLS, which keeps other members from learning that
+ * someone else's marker exists.
+ */
 async function isTombstoned(
   client: PoolClient,
   orgId: string,

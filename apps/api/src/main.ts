@@ -21,6 +21,7 @@ import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-f
 import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runRetentionDeleteOnce } from './maintenance/run-retention-delete.js';
 import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
+import { runTombstoneReclaimOnce } from './maintenance/run-tombstone-reclaim.js';
 
 export interface MainDependencies {
   clock?: Clock;
@@ -139,12 +140,19 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     runOnce: () => runRetentionDeleteOnce(maintenancePool, clock),
     taskName: 'Run annual retention deletion',
   });
+  const tombstoneReclaimRunner = new PeriodicRunner({
+    clock,
+    intervalMs: config.RUN_TOMBSTONE_RECLAIM_INTERVAL_MS,
+    runOnce: () => runTombstoneReclaimOnce(maintenancePool, clock),
+    taskName: 'Run tombstone reclamation',
+  });
   const runner: StoppableRunner = {
     stop: () => {
       liveSseHub.stop();
       autoFinishRunner.stop();
       rawPurgeRunner.stop();
       retentionDeleteRunner.stop();
+      tombstoneReclaimRunner.stop();
       summaryRunner.stop();
     },
   };
@@ -159,6 +167,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   autoFinishRunner.start();
   rawPurgeRunner.start();
   retentionDeleteRunner.start();
+  tombstoneReclaimRunner.start();
   summaryRunner.start();
   registerShutdown({
     clock,
