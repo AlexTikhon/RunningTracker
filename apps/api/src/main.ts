@@ -27,6 +27,10 @@ import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runRetentionDeleteOnce } from './maintenance/run-retention-delete.js';
 import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
 import { runTombstoneReclaimOnce } from './maintenance/run-tombstone-reclaim.js';
+import { createApiMetrics } from './observability/api-metrics.js';
+import { defaultLogger, describeError } from './observability/logger.js';
+import { startMetricsListener, type MetricsListener } from './observability/metrics-server.js';
+import { observePool, registerProcessMetrics } from './observability/runtime-metrics.js';
 
 export interface MainDependencies {
   clock?: Clock;
@@ -70,7 +74,7 @@ function registerShutdown(options: {
     }
 
     shutdownStarted = true;
-    console.info(`Received ${signal}; shutting down`);
+    defaultLogger.info('shutdown.started', { signal });
     void shutdownInfrastructure({
       clock,
       pools: [pool, maintenancePool],
@@ -80,14 +84,14 @@ function registerShutdown(options: {
     }).then(
       ({ forced }) => {
         if (forced) {
-          console.error(`Shutdown exceeded ${timeoutMs} ms; forcing process termination`);
+          defaultLogger.error('shutdown.forced', { timeoutMs });
           process.exit(1);
         }
 
         process.exitCode = 0;
       },
       (error: unknown) => {
-        console.error('Shutdown failed', error);
+        defaultLogger.error('shutdown.failed', describeError(error));
         process.exit(1);
       },
     );
@@ -100,30 +104,50 @@ function registerShutdown(options: {
 export async function main(dependencies: MainDependencies = {}): Promise<void> {
   const config = (dependencies.loadConfig ?? loadEnvironment)();
   const clock = dependencies.clock ?? systemClock;
+  const metrics = createApiMetrics();
+  const processMetrics = registerProcessMetrics(metrics.registry);
   const pool = (dependencies.createPool ?? createDatabasePool)(config);
   let maintenancePool: Pool;
   try {
     maintenancePool = (dependencies.createMaintenancePool ?? createMaintenanceDatabasePool)(config);
   } catch (error) {
+    processMetrics.stop();
     await pool.end();
     throw error;
   }
+  observePool(pool, { clock, metrics, name: 'runtime' });
+  observePool(maintenancePool, { clock, metrics, name: 'maintenance' });
   const sessionManager = new SessionManager({
     clock,
     store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
     ttlMs: config.SESSION_TTL_MS,
   });
-  const liveSseHub = createLiveSseHub({ clock, config, pool, sessionManager });
-  const app = createApp({ clock, config, liveConnections: liveSseHub, pool, sessionManager });
+  const liveSseHub = createLiveSseHub({
+    clock,
+    config,
+    metrics: metrics.live,
+    pool,
+    sessionManager,
+  });
+  const app = createApp({
+    clock,
+    config,
+    liveConnections: liveSseHub,
+    metrics,
+    pool,
+    sessionManager,
+  });
   const server = createServer(app);
   const autoFinishRunner = new RunAutoFinishRunner({
     clock,
     intervalMs: config.RUN_AUTO_FINISH_INTERVAL_MS,
+    metrics: metrics.maintenance,
     runOnce: () => runAutoFinishOnce(maintenancePool, clock),
   });
   const summaryRunner = new PeriodicRunner({
     clock,
     intervalMs: config.RUN_SUMMARY_INTERVAL_MS,
+    metrics: metrics.maintenance,
     runOnce: () =>
       runSummaryPublicationBatch(maintenancePool, clock, config.RUN_SUMMARY_CONCURRENCY),
     taskName: 'Run summary publication',
@@ -131,10 +155,12 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   const rawPurgeRunner = new PeriodicRunner({
     clock,
     intervalMs: config.RUN_RAW_PURGE_INTERVAL_MS,
+    metrics: metrics.maintenance,
     runOnce: async () => {
       const result = await runRawPurgeOnce(maintenancePool, clock);
       if (result.status === 'blocked') {
-        console.warn('Raw retention is overdue because a current summary is unavailable');
+        metrics.maintenance.rawPurgeBlocked.inc();
+        defaultLogger.warn('retention.raw_purge.overdue', { reason: 'summary_unavailable' });
       }
       return result;
     },
@@ -143,12 +169,14 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   const retentionDeleteRunner = new PeriodicRunner({
     clock,
     intervalMs: config.RUN_RETENTION_DELETE_INTERVAL_MS,
+    metrics: metrics.maintenance,
     runOnce: () => runRetentionDeleteOnce(maintenancePool, clock),
     taskName: 'Run annual retention deletion',
   });
   const tombstoneReclaimRunner = new PeriodicRunner({
     clock,
     intervalMs: config.RUN_TOMBSTONE_RECLAIM_INTERVAL_MS,
+    metrics: metrics.maintenance,
     runOnce: () => runTombstoneReclaimOnce(maintenancePool, clock),
     taskName: 'Run tombstone reclamation',
   });
@@ -160,11 +188,12 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     try {
       await deletionJournalSink.verify();
     } catch (error) {
+      processMetrics.stop();
       await Promise.allSettled([pool.end(), maintenancePool.end()]);
       throw new Error('The deletion journal directory is not writable', { cause: error });
     }
   } else {
-    console.warn('Deletion journal export is disabled because DELETION_JOURNAL_DIR is not set');
+    defaultLogger.warn('deletion_journal.export_disabled', { reason: 'directory_not_set' });
   }
   const sink = deletionJournalSink;
   const deletionJournalRunner =
@@ -173,11 +202,15 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
       : new PeriodicRunner({
           clock,
           intervalMs: config.RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS,
+          metrics: metrics.maintenance,
           runOnce: () => runDeletionJournalExportOnce(maintenancePool, sink, clock),
           taskName: 'Run deletion journal export',
         });
+  let metricsListener: MetricsListener | undefined;
   const runner: StoppableRunner = {
     stop: () => {
+      void metricsListener?.close();
+      processMetrics.stop();
       deletionJournalRunner?.stop();
       liveSseHub.stop();
       autoFinishRunner.stop();
@@ -190,7 +223,15 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
 
   try {
     await listen(server, config.PORT);
+    if (config.METRICS_PORT !== undefined) {
+      metricsListener = await startMetricsListener(metrics.registry, {
+        host: config.METRICS_HOST,
+        port: config.METRICS_PORT,
+      });
+    }
   } catch (error) {
+    processMetrics.stop();
+    server.close();
     await Promise.allSettled([pool.end(), maintenancePool.end()]);
     throw error;
   }
@@ -209,5 +250,8 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     server,
     timeoutMs: config.SHUTDOWN_TIMEOUT_MS,
   });
-  console.info(`API listening on http://127.0.0.1:${config.PORT}/api`);
+  defaultLogger.info('api.listening', { port: config.PORT });
+  if (config.METRICS_PORT !== undefined) {
+    defaultLogger.info('metrics.listening', { port: config.METRICS_PORT });
+  }
 }

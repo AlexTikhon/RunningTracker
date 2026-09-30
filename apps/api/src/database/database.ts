@@ -2,6 +2,7 @@ import { Pool } from 'pg';
 
 import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
+import { defaultLogger, describeError } from '../observability/logger.js';
 
 export interface DatabaseClient {
   query(text: string): Promise<unknown>;
@@ -28,7 +29,7 @@ export function createDatabasePool(config: Environment): Pool {
   });
 
   pool.on('error', (error) => {
-    console.error(`Unexpected idle PostgreSQL client error: ${error.message}`);
+    defaultLogger.error('database.pool.idle_client_error', { ...describeError(error), reason: 'runtime' });
   });
 
   return pool;
@@ -43,7 +44,7 @@ export function createMaintenanceDatabasePool(config: Environment): Pool {
   });
 
   pool.on('error', (error) => {
-    console.error(`Unexpected idle maintenance PostgreSQL client error: ${error.message}`);
+    defaultLogger.error('database.pool.idle_client_error', { ...describeError(error), reason: 'maintenance' });
   });
 
   return pool;

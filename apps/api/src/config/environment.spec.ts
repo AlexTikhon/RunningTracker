@@ -233,6 +233,34 @@ describe('validateEnvironment', () => {
     }
   });
 
+  it('keeps the metrics listener off by default and loopback-bound when enabled (P11.1)', () => {
+    const defaults = validateEnvironment(validApplicationEnvironment);
+    expect(defaults.METRICS_PORT).toBeUndefined();
+    expect(defaults.METRICS_HOST).toBe('127.0.0.1');
+
+    expect(
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        METRICS_HOST: '0.0.0.0',
+        METRICS_PORT: '9464',
+      }),
+    ).toMatchObject({ METRICS_HOST: '0.0.0.0', METRICS_PORT: 9_464 });
+
+    for (const invalid of ['0', '65536', '-1', '1.5', 'metrics', '']) {
+      expect(() =>
+        validateEnvironment({ ...validApplicationEnvironment, METRICS_PORT: invalid }),
+      ).toThrow('METRICS_PORT');
+    }
+    for (const invalid of ['', 'bad host', 'http://x']) {
+      expect(() =>
+        validateEnvironment({ ...validApplicationEnvironment, METRICS_HOST: invalid }),
+      ).toThrow('METRICS_HOST');
+    }
+    expect(() =>
+      validateEnvironment({ ...validApplicationEnvironment, METRICS_PORT: '3000', PORT: '3000' }),
+    ).toThrow('METRICS_PORT must differ from PORT');
+  });
+
   it('bounds live SSE connections and polling concurrency', () => {
     expect(
       validateEnvironment({

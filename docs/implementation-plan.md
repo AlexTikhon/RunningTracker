@@ -351,8 +351,8 @@ Checks:
 SDD reference: 13–15.
 
 Tasks:
-- P11.1 Add metrics/structured logs without coordinates and secrets.
 - P11.2 Generate the SDD's ordinary and stress datasets with a seed and a reproducible ACL/geography distribution.
+- P11.1 Add metrics/structured logs without coordinates and secrets. **Completed and verified 2026-09-29: an in-process registry (counters/gauges/histograms, bounded label cardinality) behind an optional loopback `METRICS_PORT` listener, allow-list JSON logging with error class/code only, and instrumentation of HTTP, ingestion commit latency, live SSE, archive tiles, pool checkout wait, maintenance cycles, and process memory; data age, summary lag, dead tuples, and backup age remain for P11.4/P12.3; ADR-0038.**
 - P11.3 Test ingestion + viewers + pan/zoom + jobs concurrently, including batches after offline periods.
 - P11.4 Collect EXPLAIN ANALYZE BUFFERS, real table/index sizes, response bytes, and memory.
 - P11.5 Apply only confirmed optimizations; keep a before/after report.

@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 
+import { describeError } from '../observability/logger.js';
 import { getRequestId } from './request-id.js';
 
 export class ApiError extends Error {
@@ -37,32 +38,34 @@ export const unknownApiRoute: RequestHandler = (_request, _response, next) => {
   next(new ApiError(404, 'ROUTE_NOT_FOUND', 'The requested API route does not exist'));
 };
 
-export const apiErrorHandler: ErrorRequestHandler = (error, request, response, next) => {
-  if (response.headersSent) {
-    next(error);
-    return;
-  }
+export function apiErrorHandler(): ErrorRequestHandler {
+  return (error, request, response, next) => {
+    if (response.headersSent) {
+      next(error);
+      return;
+    }
 
-  const requestId = getRequestId(request);
-  const normalized = isInvalidJson(error)
-    ? new ApiError(400, 'INVALID_REQUEST', 'The request body is not valid JSON')
-    : isPayloadTooLarge(error)
-      ? new ApiError(413, 'BATCH_TOO_LARGE', 'The request body exceeds 64 KiB')
-      : error instanceof ApiError
-        ? error
-        : new ApiError(500, 'INTERNAL_ERROR', 'An unexpected server error occurred');
+    const requestId = getRequestId(request);
+    const normalized = isInvalidJson(error)
+      ? new ApiError(400, 'INVALID_REQUEST', 'The request body is not valid JSON')
+      : isPayloadTooLarge(error)
+        ? new ApiError(413, 'BATCH_TOO_LARGE', 'The request body exceeds 64 KiB')
+        : error instanceof ApiError
+          ? error
+          : new ApiError(500, 'INTERNAL_ERROR', 'An unexpected server error occurred');
 
-  if (!(error instanceof ApiError) && !isInvalidJson(error) && !isPayloadTooLarge(error)) {
-    const errorName = error instanceof Error ? error.name : 'UnknownError';
-    console.error(`Unhandled HTTP error [${requestId}] (${errorName})`);
-  }
+    if (normalized.statusCode >= 500) {
+      // The HTTP metrics middleware emits the single failure log line and adds this.
+      response.locals.errorDescription = describeError(error);
+    }
 
-  response.status(normalized.statusCode).json({
-    error: {
-      code: normalized.code,
-      ...(normalized.details ? { details: normalized.details } : {}),
-      message: normalized.message,
-      requestId,
-    },
-  });
-};
+    response.status(normalized.statusCode).json({
+      error: {
+        code: normalized.code,
+        ...(normalized.details ? { details: normalized.details } : {}),
+        message: normalized.message,
+        requestId,
+      },
+    });
+  };
+}

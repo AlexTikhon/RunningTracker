@@ -2,7 +2,9 @@ import type { Pool } from 'pg';
 
 import type { StoredSession } from '../auth/session-store.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
+import type { Clock } from '../clock.js';
 import { ApiError } from '../http/errors.js';
+import type { ApiMetrics } from '../observability/api-metrics.js';
 import type { ArchiveTileCacheStore } from './archive-tile-cache.js';
 import type { ArchiveTileGenerationScheduler } from './archive-tile-scheduler.js';
 import {
@@ -17,6 +19,8 @@ export const ARCHIVE_TILE_MAX_UNCOMPRESSED_BYTES = 1 * 1024 * 1024;
 
 interface ArchiveTileCoordinatorDependencies {
   cache: ArchiveTileCacheStore;
+  clock?: Pick<Clock, 'monotonicNow'>;
+  metrics?: ApiMetrics['archive'];
   pipeline: ArchiveTilePipeline;
   pool: Pick<Pool, 'connect'>;
   scheduler: ArchiveTileGenerationScheduler;
@@ -31,7 +35,30 @@ export class ArchiveTileCoordinator {
     cacheKey: string,
     signal?: AbortSignal,
   ): Promise<Buffer> {
-    const { cache, pipeline, pool, scheduler } = this.dependencies;
+    const { metrics } = this.dependencies;
+    if (metrics === undefined) {
+      return this.#read(session, request, cacheKey, signal, { hit: false });
+    }
+    const outcome = { hit: false };
+    try {
+      const tile = await this.#read(session, request, cacheKey, signal, outcome);
+      metrics.requests.inc({ result: outcome.hit ? 'hit' : 'miss' });
+      metrics.tileBytes.observe({}, tile.byteLength);
+      return tile;
+    } catch (error) {
+      metrics.requests.inc({ result: signal?.aborted === true ? 'aborted' : 'error' });
+      throw error;
+    }
+  }
+
+  async #read(
+    session: Pick<StoredSession, 'userId'>,
+    request: ArchiveTileRequest,
+    cacheKey: string,
+    signal: AbortSignal | undefined,
+    outcome: { hit: boolean },
+  ): Promise<Buffer> {
+    const { cache, clock, metrics, pipeline, pool, scheduler } = this.dependencies;
     const cached = await withAuthenticatedTenantTransaction(
       pool,
       session,
@@ -46,6 +73,7 @@ export class ArchiveTileCoordinator {
       },
     );
     if (cached !== undefined) {
+      outcome.hit = true;
       return cached;
     }
 
@@ -71,8 +99,15 @@ export class ArchiveTileCoordinator {
 
                 await setArchiveTileStatementTimeout(client);
                 let tile: Buffer;
+                const renderStartedAt = clock?.monotonicNow();
                 try {
                   tile = await pipeline.render(client, request);
+                  if (renderStartedAt !== undefined && clock !== undefined) {
+                    metrics?.generationSeconds.observe(
+                      {},
+                      Math.max(0, (clock.monotonicNow() - renderStartedAt) / 1_000),
+                    );
+                  }
                 } catch (error) {
                   if (isPostgresStatementTimeout(error)) {
                     throw new ApiError(

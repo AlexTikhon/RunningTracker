@@ -1113,15 +1113,47 @@ Verification evidence on 2026-09-29 (repository root, disposable `running_tracke
 Limitations:
 
 - no backup or restore was performed: the procedure and tool are tested against a real database, but RPO/RTO are not claimed as achieved and the drill is P12.3;
+- deletions not yet exported when a node is lost are lost with it; the window is about one export interval while the exporter is healthy and unbounded while it fails. The only failure signal today is a logged cycle failure; backlog-age metrics and alerting are P11.1;
 - the application cannot verify that `DELETION_JOURNAL_DIR` is off-host or durable, does not sign or encrypt journal files, and does not prune them (the runbook gives the retention rule);
 - reapplication does not restore revoked shares or memberships; that is P12.4;
 - the sixth maintenance runner was added to the existing maintenance pool without resizing it.
 
 P10.5 is DONE and with it P10. D09 is PARTIAL. The exact next planned stage is P11 — load verification and operational limits, starting with P11.1 metrics and structured logs without coordinates or secrets.
 
+## P11.1 — metrics and structured logs without coordinates or secrets
+
+Implemented:
+
+- `apps/api/src/observability/`: a dependency-free `MetricsRegistry` (counter, gauge, fixed-bucket histogram; Prometheus text 0.0.4; label-value escaping; per-metric series cap with one `_overflow` series and `metrics_series_overflow_total`; scrape-time collectors that survive a throwing collector); code-defined instruments in `api-metrics.ts`; an allow-list JSON logger (`createLogger`, `describeError`); the HTTP middleware; pool, process, and tile-cache collectors; and the scrape server;
+- `GET /metrics` is served by its own listener only when `METRICS_PORT` is set (`METRICS_HOST` defaults to `127.0.0.1`, `METRICS_PORT` must differ from `PORT`); it serves nothing else, answers 405/404 otherwise, and a failed bind fails startup with the pools closed;
+- HTTP: count/duration/in-flight by method and route **template** (UUIDs and numbers replaced; every unmatched path collapses to `unmatched`); event streams are counted but excluded from the latency histogram; only 5xx responses are logged, once, with request ID, route template, duration, and the error class and short code left by the shared error handler;
+- ingestion: commit latency by `ok|rejected|error` (checkout through COMMIT), inserted/duplicate point counters, rejections by application code;
+- live SSE: open streams, streams opened, connection-limit rejections, backpressure closes, poll failures, and poll-cycle duration; tiles: hit/miss/error/aborted, served bytes, generation time (only for tiles that ran SQL), cache entries/bytes, scheduler queue depth and active count;
+- maintenance: per-task cycle outcome, duration, and last-success time for all six periodic jobs through the shared `PeriodicRunner`, plus `raw_purge_blocked_total` for a retention overrun;
+- pool checkout wait (including failed or timed-out checkouts) and total/idle/waiting counts for the runtime and maintenance pools; process RSS, heap, event-loop delay p99, and uptime;
+- every remaining application `console.*` call now goes through the logger (the default sink still uses the console methods). The old periodic-runner failure line passed the whole error object; the new line carries only class name and short code;
+- ADR-0038, README ("Metrics and logs (P11.1)" and configuration), `.env.example`, SDD section 15, and the implementation plan updated.
+
+Verification evidence on 2026-09-29 (repository root, disposable `running_tracker_test` database, `--env-file=.env.example`):
+
+- RED was observed for the logger, HTTP-middleware, runtime-metrics/listener, periodic-runner, live-hub, and tile-coordinator specs (missing module, or the metric absent from the output) before their implementation; the registry, ingestion-helper, and configuration specs were written in the same step as their code, so those three have no observed RED;
+- one regression found and fixed while wiring: a request that hit an unhandled error produced two log lines (the handler's and the middleware's) and broke the existing "exactly one error log" expectation in `session.spec.ts`; the handler now only records the error description and the middleware emits the single line, covered by a new spec;
+- one flaky assertion fixed in my own new test: a `not.toMatch(/abc/)` guard could match hex inside the random request ID;
 - `npm run verify` exited 0: lint, strict typecheck, 10 infrastructure tests, 183 API unit tests (31 files, up from 147 / 24 at P10.5), 82 web, 14 contract, 14 fixture, 3 simulator tests, and every build;
+- complete separated-role integration suite: 26 files / 254 tests (up from 25 / 253), including the new `observability.integration.test.ts`, which ingests through HTTP against real PostgreSQL (new points, an exact retry, a conflicting payload), scrapes a real listener, and asserts the inserted/duplicate/rejected counts, templated routes, pool and process series, and that **neither the exposition nor the captured logs contain the distinctive coordinates, run/org/user IDs, the session cookie value, or the CSRF token**;
+- built-process smoke: the API started with `PORT=3111 METRICS_PORT=9464`, `/api/health/live` returned 200, `/metrics` on the API port returned 404, and the metrics port returned the request, pool, and memory series; startup logs were JSON lines with no message text; both listeners were confirmed closed afterward;
+- `git diff --check` reported only benign LF→CRLF checkout notices. No migration was added or edited, no dependency was added, and nothing was committed or pushed.
+
+Limitations:
+
+- metrics are per process and reset on restart; there are no shipped dashboards or alert rules, and the scrape endpoint is unauthenticated by design (bind address and network are the control);
+- the SDD signals that need database reads are not exported yet: data age, summary lag, dead tuples (P11.4), and backup age (P12.3); GPS-to-browser latency is an end-to-end measurement for P11.3;
+- the tile `miss` counter includes requests that joined another request's in-flight generation;
+- `observePool` wraps the promise form of `Pool.connect` in place and leaves the callback form alone, which nothing in the codebase uses;
 - the uncommitted P10.4/P10.5 work and this change are still in the working tree together; nothing has been committed.
 
+- `npm run verify` exited 0: 202 API unit tests (33 files, +19 over P11.1), 82 web, 14 contracts, 14 fixtures, 3 simulator, and every build;
+- complete separated-role integration suite: 27 files / 263 tests (up from 26 / 254);
 - real seeding into a new `running_tracker_load_test` database (created with `CREATE DATABASE`, then the existing bootstrap and migrations `0000`–`0018`): `ordinary` produced 126,000 points, 3,650 summaries, and 21,900 shares in about 15 s with `run_points` at 45.6 MB (about 361 bytes per point including indexes) and digest `7c83dac6…`; a second seed with `--reset` gave the same digest and a run without `--reset` refused; `stress` produced 3,000,000 points in about 78 s with `run_points` at 1.09 GB (about 363 bytes per point) and a different digest; all summaries were valid geometries. The database was then reseeded with `ordinary`;
 - `git diff --check` reported only benign LF→CRLF notices. No migration or dependency was added, and nothing was committed or pushed.
 

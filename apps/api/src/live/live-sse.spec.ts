@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.js';
 import type { Clock } from '../clock.js';
 import { validateEnvironment } from '../config/environment.js';
+import { createApiMetrics } from '../observability/api-metrics.js';
+import { createLogger } from '../observability/logger.js';
 import type { DatabasePool } from '../database/database.js';
 import { ApiError } from '../http/errors.js';
 import {
@@ -445,5 +447,87 @@ describe('GET /api/orgs/:orgId/live', () => {
     const connectedSubscription = connect.mock.calls[0]?.[0];
     expect(connectedSubscription?.orgId).toBe(orgId);
     expect(connectedSubscription?.session.userId).toBe(userId);
+  });
+});
+
+describe('P11.1 LiveSseHub metrics', () => {
+  function hubWithMetrics(
+    overrides: Partial<ConstructorParameters<typeof LiveSseHub>[0]> = {},
+    clock = controlledClock(),
+  ) {
+    const metrics = createApiMetrics();
+    const hub = new LiveSseHub({
+      backpressureTimeoutMs: 10_000,
+      clock,
+      heartbeatIntervalMs: 15_000,
+      maxConnections: 1,
+      metrics: metrics.live,
+      pollConcurrency: 1,
+      pollIntervalMs: 2_000,
+      readState: () => Promise.resolve(snapshot(0)),
+      validateSession: () => true,
+      ...overrides,
+    });
+    return { clock, hub, metrics };
+  }
+
+  it('tracks open streams, limit rejections, and poll cycle duration', async () => {
+    const { clock, hub, metrics } = hubWithMetrics();
+    const response = new FakeStreamResponse();
+
+    await hub.connect(subscription(), new EventEmitter(), response);
+    await expect(
+      hub.connect(subscription('session-2'), new EventEmitter(), new FakeStreamResponse()),
+    ).rejects.toMatchObject({ code: 'LIVE_CONNECTION_LIMIT' });
+    clock.advanceBy(2_000);
+    await settle();
+
+    let output = metrics.registry.render();
+    expect(output).toContain('live_sse_streams_opened_total 1');
+    expect(output).toContain('live_sse_connections 1');
+    expect(output).toContain('live_sse_connection_limit_rejections_total 1');
+    expect(output).toContain('live_sse_poll_cycle_seconds_count 1');
+
+    response.emit('close');
+    output = metrics.registry.render();
+    expect(output).toContain('live_sse_connections 0');
+    hub.stop();
+  });
+
+  it('counts backpressure closes and per-subscription poll failures without logging details', async () => {
+    let failing = false;
+    const logged: string[] = [];
+    const { clock, hub, metrics } = hubWithMetrics({
+      logger: createLogger({
+        clock: { utcNow: () => new Date('2031-01-01T00:00:00.000Z') },
+        write: (_level, line) => void logged.push(line),
+      }),
+      readState: () =>
+        failing ? Promise.reject(new Error('boom secret')) : Promise.resolve(snapshot(0)),
+    });
+    const response = new FakeStreamResponse();
+    response.writeResults.push(true, false);
+
+    await hub.connect(subscription(), new EventEmitter(), response);
+    failing = true;
+    clock.advanceBy(2_000);
+    await settle();
+    failing = false;
+    clock.advanceBy(2_000);
+    await settle();
+    clock.advanceBy(10_000);
+
+    const output = metrics.registry.render();
+    expect(output).toContain('live_sse_poll_failures_total 1');
+    expect(output).toContain('live_sse_backpressure_closes_total 1');
+    expect(output).not.toContain('secret');
+    expect(logged).toHaveLength(1);
+    expect(JSON.parse(logged[0] ?? '')).toMatchObject({
+      errorName: 'Error',
+      event: 'live.poll.failed',
+      level: 'error',
+    });
+    expect(logged[0]).not.toContain('secret');
+    hub.stop();
   });
 });

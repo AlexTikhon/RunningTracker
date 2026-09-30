@@ -201,6 +201,14 @@ Stop the local database without deleting its named volume:
 npm run db:down
 ```
 
+`METRICS_PORT` (unset by default, so no listener) starts a separate scrape endpoint at `http://METRICS_HOST:METRICS_PORT/metrics` in Prometheus text format; `METRICS_HOST` defaults to `127.0.0.1` and `METRICS_PORT` must differ from `PORT`. The endpoint has no authentication and serves only `GET /metrics`, so exposing it beyond a trusted network is a deliberate deployment choice. See "Metrics and logs (P11.1)" below and ADR-0038.
+
+## Metrics and logs (P11.1)
+
+Start the API with `METRICS_PORT=9464` and run `curl http://127.0.0.1:9464/metrics`. The exposed signals are HTTP request count/duration/in-flight, point-ingestion commit latency and inserted/duplicate/rejected counts, live stream count/backpressure/poll-cycle time, archive tile cache result/bytes/generation time/queue depth, per-job maintenance cycle outcome/duration/last success (plus `raw_purge_blocked_total` for a retention overrun), database pool checkout time and state for the runtime and maintenance pools, and process memory/event-loop delay. Alert on the age of `maintenance_last_success_timestamp_seconds` per task to detect a stuck job such as the deletion-journal exporter. Route labels are templates (`/api/orgs/:uuid/runs/:uuid/points`), never concrete identifiers.
+
+Logs are one JSON line per event with an allow-listed set of technical fields (request ID, route template, status, duration, task, error class and short code, and a few counters). Coordinates, request bodies, cookies, tokens, and error messages are dropped by construction, and only failed (5xx) requests are logged. Data age, summary lag, dead tuples, and backup age are not exported yet (P11.4 and P12.3), and metrics are per process and reset on restart.
+
 ## Verification
 
 ```powershell

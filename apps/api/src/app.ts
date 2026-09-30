@@ -20,6 +20,10 @@ import { DatabaseProbe, type DatabasePool } from './database/database.js';
 import { createHealthRouter } from './health/health.routes.js';
 import { apiErrorHandler, unknownApiRoute } from './http/errors.js';
 import { requestIdMiddleware } from './http/request-id.js';
+import { createApiMetrics, type ApiMetrics } from './observability/api-metrics.js';
+import { createHttpMetricsMiddleware } from './observability/http-metrics.js';
+import { defaultLogger, type Logger } from './observability/logger.js';
+import { observeArchiveTiles } from './observability/runtime-metrics.js';
 import { createLiveRouter } from './live/live.routes.js';
 import {
   createLiveSseHub,
@@ -31,6 +35,8 @@ import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 export interface AppDependencies {
   clock: Clock;
   config: Environment;
+  logger?: Logger;
+  metrics?: ApiMetrics;
   pool: DatabasePool;
   sessionManager?: SessionManager;
   liveConnections?: LiveConnectionManager;
@@ -44,6 +50,8 @@ export interface AppDependencies {
 export function createApp({
   clock,
   config,
+  logger = defaultLogger,
+  metrics = createApiMetrics(),
   pool,
   sessionManager,
   liveConnections,
@@ -71,15 +79,21 @@ export function createApp({
     createLiveSseHub({
       clock,
       config,
+      logger,
+      metrics: metrics.live,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
     });
   const archiveTiles = archiveTileCache ?? new ArchiveTileCache({ clock });
   const archiveTileGenerations =
     archiveTileScheduler ?? new ArchiveTileGenerationScheduler();
+  if (archiveTiles instanceof ArchiveTileCache) {
+    observeArchiveTiles(metrics, { cache: archiveTiles, scheduler: archiveTileGenerations });
+  }
 
   app.disable('x-powered-by');
   app.use(requestIdMiddleware);
+  app.use(createHttpMetricsMiddleware({ clock, logger, metrics: metrics.http }));
   app.use('/api/health', createHealthRouter(database));
   app.use('/api/session', (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-store');
@@ -90,6 +104,8 @@ export function createApp({
   app.use(
     '/api/orgs/:orgId',
     createArchiveRouter({
+      clock,
+      metrics: metrics.archive,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
       tileCache: archiveTiles,
@@ -103,6 +119,7 @@ export function createApp({
     createRunRouter({
       clock,
       config,
+      metrics: metrics.ingestion,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
       ...(testOnlyFaultInjector ? { testOnlyFaultInjector } : {}),
@@ -112,7 +129,7 @@ export function createApp({
     app.use('/api', testOnlyRouter);
   }
   app.use('/api', unknownApiRoute);
-  app.use(apiErrorHandler);
+  app.use(apiErrorHandler());
 
   return app;
 }

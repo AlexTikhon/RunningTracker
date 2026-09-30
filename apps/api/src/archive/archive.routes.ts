@@ -15,7 +15,9 @@ import {
 } from '../auth/session-http.js';
 import type { SessionManager } from '../auth/session-manager.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
+import type { Clock } from '../clock.js';
 import { ApiError } from '../http/errors.js';
+import type { ApiMetrics } from '../observability/api-metrics.js';
 import {
   type ArchiveTileCacheStore,
   createArchiveTileCacheKey,
@@ -28,6 +30,8 @@ import {
 } from './archive-service.js';
 
 interface ArchiveRouterDependencies {
+  clock?: Pick<Clock, 'monotonicNow'>;
+  metrics?: ApiMetrics['archive'];
   tileCache: ArchiveTileCacheStore;
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
@@ -54,6 +58,8 @@ function organizationId(request: Request): string {
 }
 
 export function createArchiveRouter({
+  clock,
+  metrics,
   pool,
   sessionManager,
   tileCache,
@@ -64,6 +70,8 @@ export function createArchiveRouter({
   const authenticate = createSessionAuthentication(sessionManager);
   const tileCoordinator = new ArchiveTileCoordinator({
     cache: tileCache,
+    ...(clock ? { clock } : {}),
+    ...(metrics ? { metrics } : {}),
     pipeline: tilePipeline,
     pool,
     scheduler: tileScheduler,

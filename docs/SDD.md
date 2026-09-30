@@ -625,6 +625,8 @@ EXPLAIN (ANALYZE,BUFFERS) evaluates SQL; JSON/MVT bytes, serialization, and fron
 
 Metrics: point commit latency, duplicates/conflicts, data age, live-cycle duration, SSE reconnects/backpressure, summary lag, tile bytes/time/hit ratio, pool wait, dead tuples, backup age, purge failures. Logs contain requestId and technical identifiers, no GPS, payload, or session tokens.
 
+P11.1 implements these as an in-process registry rendered by a separate, optional scrape listener (`METRICS_PORT`, loopback by default) and as allow-listed JSON logs (ADR-0038). Exported: point commit latency, inserted/duplicate/rejected points, HTTP latency by route template, live-cycle duration, SSE open streams/limit rejections/backpressure closes, tile bytes/time/hit result/queue depth, pool checkout wait and state, per-job cycle outcome/duration/last success, and blocked raw purges (retention overrun). Not yet exported: data age, summary lag, dead tuples, and backup age (P11.4, P12.3).
+
 ## 16. Implementation order
 
 1. P02A foundation: Compose, migration owner/runtime/maintenance roles, trusted fixtures, organizations/memberships, the transaction helper, and baseline RLS.

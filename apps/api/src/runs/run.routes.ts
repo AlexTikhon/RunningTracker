@@ -27,7 +27,9 @@ import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
+import type { ApiMetrics } from '../observability/api-metrics.js';
 import type { TestOnlyFaultInjector } from '../testing/fault-injection.js';
+import { measureIngestion } from './ingestion-metrics.js';
 import { LiveTrackCursorCodec } from './live-track-cursor.js';
 import {
   applyRunCommand,
@@ -46,6 +48,7 @@ import {
 interface RunRouterDependencies {
   clock: Clock;
   config: Environment;
+  metrics?: ApiMetrics['ingestion'];
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
@@ -86,6 +89,7 @@ function shareRouteInput(request: Request): { orgId: string; runId: string; user
 export function createRunRouter({
   clock,
   config,
+  metrics,
   pool,
   sessionManager,
   testOnlyFaultInjector,
@@ -218,9 +222,11 @@ export function createRunRouter({
         }
         const body = parseContract(ingestPointsRequestSchema, request.body, 'point batch request');
         const session = getAuthenticatedSession(request);
-        const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
-          ingestRunPoints(client, session, orgId, runId, body, clock),
-        );
+        const ingest = (): ReturnType<typeof ingestRunPoints> =>
+          withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+            ingestRunPoints(client, session, orgId, runId, body, clock),
+          );
+        const result = metrics ? await measureIngestion(metrics, clock, ingest) : await ingest();
         if (
           testOnlyFaultInjector?.shouldDropPointIngestionResponseAfterCommit({
             orgId,

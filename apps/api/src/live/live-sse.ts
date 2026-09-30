@@ -12,6 +12,8 @@ import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
+import type { ApiMetrics } from '../observability/api-metrics.js';
+import { defaultLogger, describeError, type Logger } from '../observability/logger.js';
 import { readLiveState, type LiveStateSnapshot } from './live-state.js';
 
 export interface LiveSubscription {
@@ -59,7 +61,9 @@ export interface LiveSseHubOptions {
   backpressureTimeoutMs: number;
   clock: Clock;
   heartbeatIntervalMs: number;
+  logger?: Logger;
   maxConnections: number;
+  metrics?: ApiMetrics['live'];
   pollConcurrency: number;
   pollIntervalMs: number;
   readState: ReadLiveState;
@@ -80,7 +84,9 @@ export class LiveSseHub implements LiveConnectionManager {
   readonly #clock: Clock;
   readonly #connections = new Map<number, LiveConnection>();
   readonly #heartbeatIntervalMs: number;
+  readonly #logger: Logger;
   readonly #maxConnections: number;
+  readonly #metrics: ApiMetrics['live'] | undefined;
   readonly #pollConcurrency: number;
   readonly #pollIntervalMs: number;
   readonly #readState: ReadLiveState;
@@ -98,7 +104,9 @@ export class LiveSseHub implements LiveConnectionManager {
     backpressureTimeoutMs,
     clock,
     heartbeatIntervalMs,
+    logger = defaultLogger,
     maxConnections,
+    metrics,
     pollConcurrency,
     pollIntervalMs,
     readState,
@@ -108,7 +116,9 @@ export class LiveSseHub implements LiveConnectionManager {
     this.#backpressureTimeoutMs = backpressureTimeoutMs;
     this.#clock = clock;
     this.#heartbeatIntervalMs = heartbeatIntervalMs;
+    this.#logger = logger;
     this.#maxConnections = maxConnections;
+    this.#metrics = metrics;
     this.#pollConcurrency = pollConcurrency;
     this.#pollIntervalMs = pollIntervalMs;
     this.#readState = readState;
@@ -125,6 +135,7 @@ export class LiveSseHub implements LiveConnectionManager {
       throw new ApiError(503, 'LIVE_UNAVAILABLE', 'Live streaming is shutting down');
     }
     if (this.#connections.size + this.#openingConnections >= this.#maxConnections) {
+      this.#metrics?.rejected.inc();
       throw new ApiError(503, 'LIVE_CONNECTION_LIMIT', 'The live connection limit is reached');
     }
     if (!this.#validateSession(subscription.session)) {
@@ -170,6 +181,8 @@ export class LiveSseHub implements LiveConnectionManager {
 
     this.#connections.set(id, connection);
     this.#subscriptions.set(key, subscription);
+    this.#metrics?.opened.inc();
+    this.#metrics?.connections.set({}, this.#connections.size);
     const close = (): void => this.#closeConnection(connection, false);
     request.on('aborted', close);
     response.on('close', close);
@@ -205,6 +218,7 @@ export class LiveSseHub implements LiveConnectionManager {
       return;
     }
     this.#polling = true;
+    const cycleStartedAt = this.#clock.monotonicNow();
 
     const entries = [...this.#subscriptions.entries()];
     let cursor = 0;
@@ -227,8 +241,8 @@ export class LiveSseHub implements LiveConnectionManager {
             this.#closeSubscription(key);
             continue;
           }
-          const errorName = error instanceof Error ? error.name : 'UnknownError';
-          console.error(`Live state poll failed (${errorName})`);
+          this.#metrics?.pollFailures.inc();
+          this.#logger.error('live.poll.failed', describeError(error));
         }
       }
     };
@@ -237,6 +251,10 @@ export class LiveSseHub implements LiveConnectionManager {
       Array.from({ length: Math.min(this.#pollConcurrency, entries.length) }, () => worker()),
     );
     this.#polling = false;
+    this.#metrics?.pollSeconds.observe(
+      {},
+      Math.max(0, (this.#clock.monotonicNow() - cycleStartedAt) / 1_000),
+    );
     if (!this.#stopped && this.#connections.size > 0) {
       this.#pollTimer = this.#clock.setTimeout(() => void this.#poll(), this.#pollIntervalMs);
     }
@@ -271,15 +289,19 @@ export class LiveSseHub implements LiveConnectionManager {
       const writable = connection.response.write(eventFrame(state));
       connection.nextSequence += 1;
       if (!writable) {
-        connection.blocked = true;
-        connection.blockedTimeout = this.#clock.setTimeout(
-          () => this.#closeConnection(connection, true),
-          this.#backpressureTimeoutMs,
-        );
+        this.#block(connection);
       }
     } catch {
       this.#closeConnection(connection, true);
     }
+  }
+
+  #block(connection: LiveConnection): void {
+    connection.blocked = true;
+    connection.blockedTimeout = this.#clock.setTimeout(() => {
+      this.#metrics?.backpressureCloses.inc();
+      this.#closeConnection(connection, true);
+    }, this.#backpressureTimeoutMs);
   }
 
   #drain(connection: LiveConnection): void {
@@ -317,11 +339,7 @@ export class LiveSseHub implements LiveConnectionManager {
       }
       try {
         if (!connection.response.write(': heartbeat\n\n')) {
-          connection.blocked = true;
-          connection.blockedTimeout = this.#clock.setTimeout(
-            () => this.#closeConnection(connection, true),
-            this.#backpressureTimeoutMs,
-          );
+          this.#block(connection);
         }
       } catch {
         this.#closeConnection(connection, true);
@@ -387,6 +405,7 @@ export class LiveSseHub implements LiveConnectionManager {
     }
     connection.pending = undefined;
     this.#connections.delete(connection.id);
+    this.#metrics?.connections.set({}, this.#connections.size);
     if (![...this.#connections.values()].some((item) => item.subscriptionKey === connection.subscriptionKey)) {
       this.#subscriptions.delete(connection.subscriptionKey);
     }
@@ -402,15 +421,19 @@ export class LiveSseHub implements LiveConnectionManager {
 export function createLiveSseHub(options: {
   clock: Clock;
   config: Environment;
+  logger?: Logger;
+  metrics?: ApiMetrics['live'];
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
 }): LiveSseHub {
-  const { clock, config, pool, sessionManager } = options;
+  const { clock, config, logger, metrics, pool, sessionManager } = options;
   return new LiveSseHub({
     backpressureTimeoutMs: config.LIVE_SSE_BACKPRESSURE_TIMEOUT_MS,
     clock,
     heartbeatIntervalMs: config.LIVE_SSE_HEARTBEAT_INTERVAL_MS,
+    ...(logger ? { logger } : {}),
     maxConnections: config.LIVE_SSE_MAX_CONNECTIONS,
+    ...(metrics ? { metrics } : {}),
     pollConcurrency: config.LIVE_SSE_POLL_CONCURRENCY,
     pollIntervalMs: config.LIVE_SSE_POLL_INTERVAL_MS,
     readState: ({ orgId, session }) =>

@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
+import { createApiMetrics } from '../observability/api-metrics.js';
 import { ArchiveTileCache } from './archive-tile-cache.js';
 import {
   ARCHIVE_TILE_MAX_UNCOMPRESSED_BYTES,
@@ -216,5 +217,57 @@ describe('P09.6 archive tile coordinator', () => {
       Buffer.from('shared'),
     ]);
     expect(sharedRender).toHaveBeenCalledOnce();
+  });
+});
+
+describe('P11.1 archive tile metrics', () => {
+  function build(render: ArchiveTilePipeline['render']) {
+    const harness = createPoolHarness();
+    const metrics = createApiMetrics();
+    let now = 0;
+    const coordinator = new ArchiveTileCoordinator({
+      cache: createCache(),
+      clock: { monotonicNow: () => (now += 40) },
+      metrics: metrics.archive,
+      pipeline: { render },
+      pool: harness.pool,
+      scheduler: new ArchiveTileGenerationScheduler(),
+    });
+    return { coordinator, metrics };
+  }
+
+  it('counts a generated tile as a miss, then a repeat as a hit, and records bytes and SQL time once', async () => {
+    const { coordinator, metrics } = build(() => Promise.resolve(Buffer.alloc(3_000)));
+    const session = { userId };
+
+    await coordinator.read(session, request(1), 'k1');
+    await coordinator.read(session, request(1), 'k1');
+
+    const output = metrics.registry.render();
+    expect(output).toContain('archive_tile_requests_total{result="miss"} 1');
+    expect(output).toContain('archive_tile_requests_total{result="hit"} 1');
+    expect(output).toContain('archive_tile_bytes_count 2');
+    expect(output).toContain('archive_tile_bytes_bucket{le="4096"} 2');
+    expect(output).toContain('archive_tile_generation_seconds_count 1');
+  });
+
+  it('classifies over-limit tiles and busy or failing generation as errors without caching them', async () => {
+    const { coordinator, metrics } = build((_client, tileRequest) =>
+      tileRequest.path.x === 9
+        ? Promise.reject(new Error('render failed'))
+        : Promise.resolve(Buffer.alloc(ARCHIVE_TILE_MAX_UNCOMPRESSED_BYTES + 1)),
+    );
+    const session = { userId };
+
+    await expect(coordinator.read(session, request(1), 'big')).rejects.toMatchObject({
+      code: 'TILE_TOO_COMPLEX',
+    });
+    await expect(coordinator.read(session, request(9), 'bad')).rejects.toThrow('render failed');
+
+    const output = metrics.registry.render();
+    expect(output).toContain('archive_tile_requests_total{result="error"} 2');
+    expect(output).not.toContain('archive_tile_requests_total{result="hit"}');
+    expect(output).not.toContain('archive_tile_bytes_count');
+    expect(output).not.toContain('render failed');
   });
 });

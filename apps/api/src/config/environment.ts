@@ -172,6 +172,12 @@ const environmentSchema = z
       .positive()
       .max(24 * 60 * 60 * 1_000)
       .default(60_000),
+    METRICS_HOST: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9.:_-]+$/u, { message: 'must be a bare host name or IP address' })
+      .default('127.0.0.1'),
+    METRICS_PORT: z.coerce.number().int().positive().max(65_535).optional(),
     RUN_TOMBSTONE_RECLAIM_INTERVAL_MS: z.coerce
       .number()
       .int()
@@ -285,6 +291,13 @@ const environmentSchema = z
         code: 'custom',
         message: 'SESSION_COOKIE_SECURE must be true in production',
         path: ['SESSION_COOKIE_SECURE'],
+      });
+    }
+    if (environment.METRICS_PORT !== undefined && environment.METRICS_PORT === environment.PORT) {
+      context.addIssue({
+        code: 'custom',
+        message: 'METRICS_PORT must differ from PORT',
+        path: ['METRICS_PORT'],
       });
     }
     if (environment.APP_ENV === 'production' && environment.DELETION_JOURNAL_DIR === undefined) {
