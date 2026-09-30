@@ -63,12 +63,7 @@ function liveRunFromRow(row: LiveStateRow): LiveStateRun {
   });
 }
 
-export async function readLiveState(
-  client: PoolClient,
-  orgId: string,
-): Promise<LiveStateSnapshot> {
-  const result = await client.query<LiveStateRow & { algorithm_version: string; server_time: Date }>(
-    `WITH context AS MATERIALIZED (
+export const liveStateSql = `WITH context AS MATERIALIZED (
        SELECT clock_timestamp() AS server_time,
               app_private.current_track_algorithm_version() AS algorithm_version
      )
@@ -127,7 +122,14 @@ export async function readLiveState(
        latest.geom,
        latest.accuracy_m
      ) AS evaluation ON true
-     ORDER BY run.started_at, run.id`,
+     ORDER BY run.started_at, run.id`;
+
+export async function readLiveState(
+  client: PoolClient,
+  orgId: string,
+): Promise<LiveStateSnapshot> {
+  const result = await client.query<LiveStateRow & { algorithm_version: string; server_time: Date }>(
+    liveStateSql,
     [orgId],
   );
 

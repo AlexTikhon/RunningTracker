@@ -17,7 +17,7 @@ Last updated: 2026-09-30.
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
 | P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 is PARTIAL: the restore drill and access-restriction recovery remain P12.3/P12.4 |
-| P11 | IN PROGRESS | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038), P11.2 (deterministic ordinary/stress datasets, ADR-0039), and P11.3 (deterministic concurrent load scenario over the real HTTP/SSE/PostgreSQL/tile/summary boundaries, ADR-0040) verified; P11.4–P11.5 (EXPLAIN evidence and complete measurements, confirmed optimizations) remain; no SDD target is claimed verified |
+| P11 | IN PROGRESS | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038), P11.2 (deterministic ordinary/stress datasets, ADR-0039), P11.3 (deterministic concurrent load scenario over the real HTTP/SSE/PostgreSQL/tile/summary boundaries, ADR-0040), and P11.4 (EXPLAIN/BUFFERS/WAL evidence under the real roles, sizes, response bytes, lock-wait samples, a no-tile baseline, and a generated report, ADR-0041) verified; P11.5 (confirmed optimizations) remains. Ingestion p95, fresh-latency p95, and no tile starvation are met under stated rules; summary visibility, LRU footprint, and SSE buffer are not confirmed |
 | P12 | TODO | Production auth and recovery |
 
 ## P00 — verified inputs
@@ -1241,3 +1241,40 @@ Limitations:
 - the database currently holds the ordinary dataset (reseeded after the stress run; digest `decc8c2f…` for 2026-09-30).
 
 P11.3 is DONE. P11 remains IN PROGRESS. The exact next stage is P11.4 — collect EXPLAIN ANALYZE BUFFERS, relation/index sizes, response bytes, memory and complete performance measurements.
+
+## P11.4 — plans, sizes, response bytes, lock waits, and the generated report
+
+Implemented (ADR-0041):
+
+- the hot statements were moved unchanged into exported constants (`renderArchiveTileSql`, `liveStateSql`, `listRunsSql`, `rawPointsPageSql`, `liveTrackSnapshotSql`, `liveTrackChangesSql`, `insertPointsSql`, `publishCandidateSql`) so the tooling measures the production text; no SQL text was edited;
+- `npm run load:explain -- --profile … [--repetitions N] [--keep-plans]` (same `LOAD_*` guards and dataset verification as `load:run`): 40 statements (24 tiles over eight regions × zoom 9/11/13 including the antimeridian route, run list, raw history first and deep page, snapshot first and deep page, one changes page, summary claim and publication, live state, a 100-point insert, and three owner-versus-RLS count-scan pairs) run as `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON)` under `running_tracker_runtime`/`_maintenance`/`_owner` with the tenant context, always rolled back. Live state and insert need recording runs, so each member's newest run is set to `recording` and restored from its saved `finished_at` text in a finally path; a failing statement is recorded by SQLSTATE and class only. It also measures the real service call (bytes, time, JSON serialization time), relation/index sizes, tuple counters, and plan-shaping settings, and writes one sanitized JSON result (`--keep-plans` writes raw plans to a separate file);
+- `load:run` samples `pg_locks` every 250 ms (no statement text; a role without `pg_read_all_stats` cannot see another role's wait events, but it can see ungranted lock requests) and accepts `--no-tiles` for a baseline; finer-grained SDD metrics (data age, summary lag, dead tuples) are not exported to the scrape endpoint, deliberately (ADR-0041);
+- `npm run load:report` generates `docs/reports/p11-measurements.md` from the raw result files: environment, goals met / not met / not confirmed under explicit rules, pooled percentiles per group, EXPLAIN tables, sizes.
+
+Verification evidence on 2026-09-30 (repository root, `--env-file=.env.example` values, real PostgreSQL 17.5/PostGIS 3.5):
+
+- tests were written before their modules for the plan summarizer, statement planner, argument parsers, CLI refusals, lock summary, orchestrator hooks (`lockSamples`, `tileStreams`), report data, renderer, and report CLI, each observed failing on the missing module or behavior first; the collector integration file was written before the collector and failed on the missing module, then on a real bug (a text alias `seq` shadowed the column in `ORDER BY`, picking the wrong tail point), then passed; the lock-sampler integration test passed on its first run and was mutation-checked (flipping the filter made it fail; the source was restored);
+- `npm run verify` exited 0 after four lint findings in my code were fixed (a throw inside `finally`, an unused assignment, two `any` accesses): 376 API unit tests (55 files, up from 293 / 47), 82 web, 14 contracts, 14 fixtures, 3 simulator, and every build;
+- the complete separated-role integration suite passed 31 files / 279 tests (up from 29 / 270), including the collector against real roles (rollback, fixture restoration after a failure and after cancellation, executed identity per role), the real lock wait, and every existing suite that exercises the refactored SQL constants;
+- `git diff --check` reports only LF→CRLF notices. No migration or dependency was added; nothing was committed or pushed. The load database ends holding the ordinary dataset (digest `decc8c2f…`, identical to the one recorded at the end of P11.3).
+
+Measurements (`docs/reports/p11-measurements.md`; seed 42, dataset instant 2026-09-30T00:00:00Z; three runs per group, ordinary and stress, with and without tile bursts; one Windows machine, AMD Ryzen AI 7 350, 16 logical CPUs, 15 GiB RAM, NVMe SSD, Docker Desktop VM 7.4 GiB with no container limit; PostgreSQL defaults such as shared_buffers 160 MB):
+
+- 12 load runs in the report and 2 EXPLAIN collections behind it finished with zero failed runs, zero unexpected responses, zero server error log lines, and zero observer problems;
+- met under the stated rules: ingestion p95 (ordinary 89 ms, stress 218 ms, client-side over loopback), fresh point → observer p95 (ordinary 1,991 ms, stress 2,072 ms, bounded by the 2 s poll), no ingestion starvation from two overlapping tile streams (stress 218 ms with tiles, 158 ms without);
+- not confirmed: summary visibility (60.3–63.0 s from the finish command, which includes the 60 s worker cadence; publication cannot be timed from the client), LRU footprint (3.5 MiB of 32 MiB, so eviction never ran), SSE pending buffer (no such metric; no stream dropped);
+- the same count scan costs 0.3–1.8 ms as the table owner and 83–185 ms under RLS (ordinary), and 4 ms against 2,024 ms for one 42,857-point run: about 45–50 µs and 8 buffer hits per checked row, which is nearly all of the cost of the archive tile (360–510 ms, three sequential scans of `run_summaries`, GiST index unused), the run list (404 ms ordinary, 577 ms stress), and raw reads;
+- a live-track snapshot page or one changes page for a 96-byte answer takes about 2.4–2.6 s at 42,857 points (343,000 buffers) because the plan reads the whole run before it limits the page; raw history takes 57 ms for the same run;
+- summary recalculation and publication of the largest run takes 0.45 s (ordinary) to 0.84 s (stress) at the median, so it is not what made P11.3's worker cycle 50.8 s; that cycle and its 111 s visibility did not reproduce in six later stress runs, and their cause was not established;
+- a 100-point insert takes 5–14 ms and writes 66–70 KB of WAL; `run_points` is 1.09 GB at 3 M points with the revision index (359 MB) larger than the primary key (307 MB);
+- the P11.3 lock hypothesis: with tile bursts the maintenance backend waited for a lock in 8–14 of about 750 samples per group (2–3.5 s) and no API backend waited; without tiles 0–1 samples. Tile transactions delay summary publication by seconds and do not block ingestion in this workload;
+- resident memory 86–113 MiB, pool acquire p95 upper bound 5 ms, tile queue observed at most 4, no tile shed.
+
+Limitations:
+
+- one machine hosts the runner, the API, and PostgreSQL; three runs per group are a sample of that machine, not a capacity claim; histogram percentiles are bucket upper bounds; metric snapshots are every 15 s and lock samples every 250 ms;
+- "first execution" in EXPLAIN is not a cold-cache figure (the working set fits in memory; shared reads were near zero); statements inside PL/pgSQL functions appear as one node;
+- no browser was driven: frame time, rendering, and the web application's own polling are unmeasured; the published EXPLAIN numbers are database execution time only;
+- the earlier P11.3 result files were excluded from the report by `--since`, because they predate lock sampling and the first stress run followed a fresh seed; they remain in `.local/load-results/` and in the P11.3 section above.
+
+P11.4 is DONE. P11 remains IN PROGRESS. The exact next stage is P11.5 — apply only the optimizations these measurements confirm (candidates: the RLS predicate cost on `run_summaries`/`runs`/`run_points`, page-limited snapshot and changes reads, a tile query shape that can use the spatial index, the revision index size) and keep a before/after report produced by the same commands.

@@ -10,6 +10,8 @@
     "lint": "eslint src test *.ts",
     "start": "node dist/entrypoint.js",
     "restore:reapply-deletions": "node --import tsx src/restore/reapply-deletions-main.ts",
+    "load:explain": "node --import tsx src/loadtest/explain-run-main.ts",
+    "load:report": "node --import tsx src/loadtest/load-report-main.ts",
     "load:run": "node --import tsx src/loadtest/load-run-main.ts",
     "load:seed": "node --import tsx src/loadtest/seed-dataset-main.ts",
     "pretest": "npm run build --workspace=@running-tracker/contracts",

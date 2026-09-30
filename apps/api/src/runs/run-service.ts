@@ -421,15 +421,7 @@ async function ensureOwnedRun(
   }
 }
 
-export async function listRuns(
-  client: PoolClient,
-  orgId: string,
-  query: RunListQuery,
-): Promise<RunListResponse> {
-  const cursor = query.cursor ? decodeRunListCursor(query.cursor) : undefined;
-  const limit = query.limit ?? 100;
-  const result = await client.query<RunRow>(
-    `SELECT ${runViewProjection}
+export const listRunsSql = `SELECT ${runViewProjection}
      ${runViewJoin}
      WHERE run.org_id = $1
        AND run.started_at >= $2::timestamptz
@@ -439,7 +431,17 @@ export async function listRuns(
          OR (run.started_at, run.id) < ($4::timestamptz, $5::uuid)
        )
      ORDER BY run.started_at DESC, run.id DESC
-     LIMIT $6`,
+     LIMIT $6`;
+
+export async function listRuns(
+  client: PoolClient,
+  orgId: string,
+  query: RunListQuery,
+): Promise<RunListResponse> {
+  const cursor = query.cursor ? decodeRunListCursor(query.cursor) : undefined;
+  const limit = query.limit ?? 100;
+  const result = await client.query<RunRow>(
+    listRunsSql,
     [orgId, query.from, query.to, cursor?.startedAt ?? null, cursor?.runId ?? null, limit + 1],
   );
   const pageRows = result.rows.slice(0, limit);
@@ -474,16 +476,7 @@ export async function readRun(
   return mapRunView(row);
 }
 
-export async function readRunPoints(
-  client: PoolClient,
-  orgId: string,
-  runId: string,
-  query: PointsQuery,
-): Promise<PointsResponse> {
-  const cursor = query.cursor ? decodeRawPointCursor(query.cursor, orgId, runId) : undefined;
-  const limit = query.limit ?? 1_000;
-  const result = await client.query<RawPointPageRow>(
-    `SELECT run.data_revision,
+export const rawPointsPageSql = `SELECT run.data_revision,
             run.raw_state,
             point.seq,
             point.segment_id,
@@ -514,7 +507,18 @@ export async function readRunPoints(
      WHERE run.org_id = $1
        AND run.id = $2
        AND app_private.can_read_run_history(run.org_id, run.id)
-     ORDER BY point.seq NULLS LAST`,
+     ORDER BY point.seq NULLS LAST`;
+
+export async function readRunPoints(
+  client: PoolClient,
+  orgId: string,
+  runId: string,
+  query: PointsQuery,
+): Promise<PointsResponse> {
+  const cursor = query.cursor ? decodeRawPointCursor(query.cursor, orgId, runId) : undefined;
+  const limit = query.limit ?? 1_000;
+  const result = await client.query<RawPointPageRow>(
+    rawPointsPageSql,
     [orgId, runId, cursor?.dataRevision ?? null, cursor?.lastSeq ?? null, limit + 1],
   );
   const run = result.rows[0];
@@ -566,20 +570,7 @@ export async function readRunPoints(
   });
 }
 
-export async function readLiveTrackSnapshot(
-  client: PoolClient,
-  session: Pick<StoredSession, 'userId'>,
-  orgId: string,
-  runId: string,
-  query: LiveTrackQuery,
-  cursorCodec: LiveTrackCursorCodec,
-): Promise<LiveTrackResponse> {
-  const cursor = query.cursor
-    ? decodeLiveTrackSnapshotCursor(cursorCodec, query.cursor, session.userId, orgId, runId)
-    : undefined;
-  const limit = query.limit ?? 1_000;
-  const result = await client.query<LiveTrackSnapshotPageRow>(
-    `SELECT run.data_revision AS current_revision,
+export const liveTrackSnapshotSql = `SELECT run.data_revision AS current_revision,
             run.raw_state,
             app_private.current_track_algorithm_version() AS algorithm_version,
             point.seq,
@@ -642,7 +633,22 @@ export async function readLiveTrackSnapshot(
      WHERE run.org_id = $1
        AND run.id = $2
        AND app_private.can_read_run(run.org_id, run.id)
-     ORDER BY point.seq NULLS LAST`,
+     ORDER BY point.seq NULLS LAST`;
+
+export async function readLiveTrackSnapshot(
+  client: PoolClient,
+  session: Pick<StoredSession, 'userId'>,
+  orgId: string,
+  runId: string,
+  query: LiveTrackQuery,
+  cursorCodec: LiveTrackCursorCodec,
+): Promise<LiveTrackResponse> {
+  const cursor = query.cursor
+    ? decodeLiveTrackSnapshotCursor(cursorCodec, query.cursor, session.userId, orgId, runId)
+    : undefined;
+  const limit = query.limit ?? 1_000;
+  const result = await client.query<LiveTrackSnapshotPageRow>(
+    liveTrackSnapshotSql,
     [orgId, runId, cursor?.toRevision ?? null, cursor?.lastSeq ?? null, limit + 1],
   );
   const run = result.rows[0];
@@ -702,31 +708,7 @@ export async function readLiveTrackSnapshot(
   });
 }
 
-export async function readLiveTrackChanges(
-  client: PoolClient,
-  session: Pick<StoredSession, 'userId'>,
-  orgId: string,
-  runId: string,
-  query: LiveTrackChangesQuery,
-  cursorCodec: LiveTrackCursorCodec,
-): Promise<LiveTrackResponse> {
-  let cursor: LiveTrackChangesCursor | undefined;
-  let fromRevision: string;
-  if ('cursor' in query) {
-    cursor = decodeLiveTrackChangesCursor(
-      cursorCodec,
-      query.cursor,
-      session.userId,
-      orgId,
-      runId,
-    );
-    fromRevision = cursor.fromRevision;
-  } else {
-    fromRevision = query.afterRevision;
-  }
-  const limit = query.limit ?? 1_000;
-  const result = await client.query<LiveTrackChangesPageRow>(
-    `SELECT run.data_revision AS current_revision,
+export const liveTrackChangesSql = `SELECT run.data_revision AS current_revision,
             run.raw_state,
             app_private.current_track_algorithm_version() AS algorithm_version,
             point.seq,
@@ -810,7 +792,33 @@ export async function readLiveTrackChanges(
      WHERE run.org_id = $1
        AND run.id = $2
        AND app_private.can_read_run(run.org_id, run.id)
-     ORDER BY point.seq NULLS LAST`,
+     ORDER BY point.seq NULLS LAST`;
+
+export async function readLiveTrackChanges(
+  client: PoolClient,
+  session: Pick<StoredSession, 'userId'>,
+  orgId: string,
+  runId: string,
+  query: LiveTrackChangesQuery,
+  cursorCodec: LiveTrackCursorCodec,
+): Promise<LiveTrackResponse> {
+  let cursor: LiveTrackChangesCursor | undefined;
+  let fromRevision: string;
+  if ('cursor' in query) {
+    cursor = decodeLiveTrackChangesCursor(
+      cursorCodec,
+      query.cursor,
+      session.userId,
+      orgId,
+      runId,
+    );
+    fromRevision = cursor.fromRevision;
+  } else {
+    fromRevision = query.afterRevision;
+  }
+  const limit = query.limit ?? 1_000;
+  const result = await client.query<LiveTrackChangesPageRow>(
+    liveTrackChangesSql,
     [
       orgId,
       runId,
@@ -982,6 +990,24 @@ function uniqueCanonicalPoints(points: PointInput[]): {
   return { duplicateCount, points: [...unique.values()] };
 }
 
+export const insertPointsSql = `INSERT INTO run_points (
+       org_id, run_id, seq, segment_id, recorded_at, received_at,
+       geom, accuracy_m, ingested_revision
+     )
+     SELECT $1,
+            $2,
+            input.seq,
+            input.segment_id,
+            input.recorded_at,
+            $9::timestamptz,
+            ST_SetSRID(ST_MakePoint(input.longitude, input.latitude), 4326),
+            input.accuracy_m,
+            $10::bigint
+     FROM unnest(
+       $3::bigint[], $4::integer[], $5::timestamptz[],
+       $6::double precision[], $7::double precision[], $8::double precision[]
+     ) AS input(seq, segment_id, recorded_at, longitude, latitude, accuracy_m)`;
+
 export async function ingestRunPoints(
   client: PoolClient,
   session: Pick<StoredSession, 'userId'>,
@@ -1067,23 +1093,7 @@ export async function ingestRunPoints(
   }
 
   await client.query(
-    `INSERT INTO run_points (
-       org_id, run_id, seq, segment_id, recorded_at, received_at,
-       geom, accuracy_m, ingested_revision
-     )
-     SELECT $1,
-            $2,
-            input.seq,
-            input.segment_id,
-            input.recorded_at,
-            $9::timestamptz,
-            ST_SetSRID(ST_MakePoint(input.longitude, input.latitude), 4326),
-            input.accuracy_m,
-            $10::bigint
-     FROM unnest(
-       $3::bigint[], $4::integer[], $5::timestamptz[],
-       $6::double precision[], $7::double precision[], $8::double precision[]
-     ) AS input(seq, segment_id, recorded_at, longitude, latitude, accuracy_m)`,
+    insertPointsSql,
     [
       orgId,
       runId,

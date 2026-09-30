@@ -33,7 +33,7 @@ export interface SummaryPublicationBatchResult {
 
 const candidateScanLimit = 1_000;
 
-const publishCandidateSql = `
+export const publishCandidateSql = `
   WITH calculation AS MATERIALIZED (
     SELECT
       calculated.distance_m,

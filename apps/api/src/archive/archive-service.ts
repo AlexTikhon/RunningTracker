@@ -65,7 +65,7 @@ const WEB_MERCATOR_MAX_LATITUDE = 85.0511287798066;
 // one WGS84 search envelope. Edge tiles add the opposite antimeridian copy and
 // shift it only after projection because PROJ normalizes longitudes outside
 // [-180, 180] during EPSG:4326 -> EPSG:3857 transformation.
-const renderArchiveTileSql = `
+export const renderArchiveTileSql = `
 WITH tile AS (
   SELECT public.ST_TileEnvelope($2::integer, $3::integer, $4::integer) AS bounds_3857
 ),

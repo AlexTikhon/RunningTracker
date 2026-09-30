@@ -253,6 +253,21 @@ npm run load:run -- --profile ordinary
 - The dataset ages with the clock (seven-day raw retention, one-year run retention), so the child API parks the raw-purge, annual-retention, and tombstone jobs at their 24-hour maximum. Set `LOAD_KEEP_RETENTION_JOBS=true` to run them at their normal cadence; they will then rewrite the seeded rows and the next run needs a reseed. The summary worker keeps its normal cadence (`RUN_SUMMARY_INTERVAL_MS`).
 - Ordinary `npm test` and CI never run this: the smoke scenario runs inside the integration suite against `running_tracker_test`, and asserts structure, not performance. The SDD targets are decided from P11.4's analysis of these results, not by the runner. See ADR-0040.
 
+## Measurements and report (P11.4)
+
+Same three `LOAD_*` variables and the same `*_load_test` guards as the runner; the dataset must be the planned, untouched one.
+
+```powershell
+npm run load:explain -- --profile ordinary|stress|smoke [--repetitions 5] [--keep-plans]
+npm run load:run -- --profile ordinary --no-tiles          # baseline without tile bursts, for the starvation comparison
+npm run load:report -- --since <UTC instant> --out <absolute path>   # relative paths resolve from apps/api
+```
+
+- `load:explain` runs a fixed catalogue of the production SQL (the exported statement constants, never copies): 24 archive tiles (8 regions × zoom 9/11/13, including the antimeridian route), the run list, raw history, live-track snapshot and changes pages, the live-state poll, a 100-point insert, the summary claim and publication, and paired count scans as the table owner (no RLS) and as a coach (RLS). Each runs as `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON)` under its real role and tenant context, several times, always inside a transaction that is rolled back. The live-state and insert statements need recording runs, so each member's newest run is switched to `recording` for the duration and restored to its exact `finished_at` afterwards (also on failure or Ctrl-C); the dataset is verified again at the end. It also measures the real service call's response bytes and time, and records relation/index sizes, tuple counts, and the plan-shaping PostgreSQL settings.
+- The result is `.local/load-results/explain-<profile>-<start>.json` (summaries only). `--keep-plans` additionally writes the raw first plan of each statement to a separate `explain-plans-…` file, because plans can quote literal values; it is never included in the summary and never committed.
+- `load:run` now also samples which API and maintenance backends wait for a lock (`pg_locks`, every 250 ms, no statement text) and accepts `--no-tiles`.
+- `load:report` turns the result files into `docs/reports/p11-measurements.md`: environment, goals met / not met / not confirmed under explicit rules, per-profile pooled percentiles, EXPLAIN tables, and sizes. Everything in it is computed from the result files. See ADR-0041.
+
 ## Verification
 
 ```powershell
