@@ -41,6 +41,7 @@ describe('health endpoints', () => {
     'rejects test-only fault injection in %s before infrastructure access',
     (appEnvironment) => {
       const guardedConfig = validateEnvironment({
+        ALLOWED_ORIGINS: 'https://tracker.example',
         APP_ENV: appEnvironment,
         DELETION_JOURNAL_DIR: resolve('/var/lib/running-tracker/deletion-journal'),
         DATABASE_URL:

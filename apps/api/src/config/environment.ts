@@ -3,6 +3,8 @@ import { isAbsolute, join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 
+import { resolveSecretFiles } from './secret-files.js';
+
 const canonicalUuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
@@ -318,6 +320,22 @@ const environmentSchema = z
         path: ['LIVE_TRACK_CURSOR_SIGNING_KEY'],
       });
     }
+    if (environment.APP_ENV === 'production') {
+      if (environment.ALLOWED_ORIGINS.length === 0) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'ALLOWED_ORIGINS must contain at least one origin in production: every state-changing request is checked against it',
+          path: ['ALLOWED_ORIGINS'],
+        });
+      } else if (environment.ALLOWED_ORIGINS.some((origin) => !origin.startsWith('https://'))) {
+        context.addIssue({
+          code: 'custom',
+          message: 'ALLOWED_ORIGINS must contain only https origins in production',
+          path: ['ALLOWED_ORIGINS'],
+        });
+      }
+    }
     if (environment.LOCAL_AUTH_ENABLED && environment.LOCAL_AUTH_USER_IDS.length === 0) {
       context.addIssue({
         code: 'custom',
@@ -394,6 +412,13 @@ function environmentSource(options: LoadEnvironmentOptions): Record<string, stri
   };
 }
 
+// Only credentials and key material may come from a mounted secret file.
+const secretFileVariables = [
+  'DATABASE_URL',
+  'MAINTENANCE_DATABASE_URL',
+  'LIVE_TRACK_CURSOR_SIGNING_KEY',
+] as const;
+
 type ParsedIntegrationDatabaseConnection = ParsedDatabaseConnection;
 
 function integrationConfigurationError(message: string): Error {
@@ -438,7 +463,7 @@ function assertSameIntegrationDatabase(
 }
 
 export function loadEnvironment(options: LoadEnvironmentOptions = {}): Environment {
-  return validateEnvironment(environmentSource(options));
+  return validateEnvironment(resolveSecretFiles(environmentSource(options), secretFileVariables));
 }
 
 export function loadIntegrationTestConfiguration(

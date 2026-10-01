@@ -105,6 +105,39 @@ describe('validateEnvironment', () => {
     ).toThrow('LIVE_TRACK_CURSOR_SIGNING_KEY must be replaced in production');
   });
 
+  it('requires explicit HTTPS origins in production', () => {
+    const production = {
+      ...validApplicationEnvironment,
+      APP_ENV: 'production',
+      DELETION_JOURNAL_DIR: resolve('/var/lib/running-tracker/deletion-journal'),
+      LIVE_TRACK_CURSOR_SIGNING_KEY: Buffer.from(
+        'deployment-specific-live-track-key-material',
+        'utf8',
+      ).toString('base64url'),
+    };
+
+    expect(() => validateEnvironment(production)).toThrow(
+      'ALLOWED_ORIGINS must contain at least one origin in production',
+    );
+    expect(() =>
+      validateEnvironment({ ...production, ALLOWED_ORIGINS: 'http://tracker.example' }),
+    ).toThrow('ALLOWED_ORIGINS must contain only https origins in production');
+    expect(() =>
+      validateEnvironment({
+        ...production,
+        ALLOWED_ORIGINS: 'https://tracker.example,http://127.0.0.1:5173',
+      }),
+    ).toThrow('ALLOWED_ORIGINS must contain only https origins in production');
+    expect(
+      validateEnvironment({ ...production, ALLOWED_ORIGINS: 'https://tracker.example' })
+        .ALLOWED_ORIGINS,
+    ).toEqual(['https://tracker.example']);
+    expect(
+      validateEnvironment({ ...validApplicationEnvironment, ALLOWED_ORIGINS: 'http://127.0.0.1:5173' })
+        .ALLOWED_ORIGINS,
+    ).toEqual(['http://127.0.0.1:5173']);
+  });
+
   it('requires a canonical base64url cursor key with at least 256 bits', () => {
     for (const signingKey of ['short', 'not+base64url', 'c2hvcnQ=']) {
       expect(() =>
@@ -122,6 +155,7 @@ describe('validateEnvironment', () => {
     expect(
       validateEnvironment({
         ...validApplicationEnvironment,
+        ALLOWED_ORIGINS: 'https://tracker.example',
         APP_ENV: 'production',
         DELETION_JOURNAL_DIR: resolve('/var/lib/running-tracker/deletion-journal'),
         LIVE_TRACK_CURSOR_SIGNING_KEY: productionKey,
