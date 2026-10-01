@@ -272,6 +272,12 @@ npm run load:report -- --since <UTC instant> --out <absolute path>   # relative 
 
 The SELECT policies on `runs`, `run_points`, and `run_summaries` no longer call a definer function per row. Migration `0019` adds `app_private.readable_run_keys()` and `app_private.history_readable_run_keys()`, which return the readable `(org_id, run_id)` pairs once per statement; the policies probe that set. The per-row functions remain the specification, and `test/rls-set-policies.integration.test.ts` compares the sets with them for every fixture identity. A caller that reads only a few live rows (the live SSE poll) may declare `visibilityScope: 'live'` on `withTenantTransaction`; it can only narrow the result. The before/after numbers, produced by the same `load:explain`, `load:run`, and `load:report` commands, are in `docs/reports/p11-measurements.md` (before) and `docs/reports/p11-5-measurements-after.md` (after); see ADR-0042. To re-measure, apply the migration to the load database with the existing scripts pointed at it and rerun the commands above.
 
+## Deployment profile (P12.2)
+
+`infra/compose/docker-compose.production.yml` is a standalone single-host profile: PostgreSQL/PostGIS on an internal-only network, a one-shot `db-init` job (role bootstrap plus migrations), the API, and an nginx edge with an operator-supplied certificate, HTTP-to-HTTPS redirect, security headers, and the verified SSE policy. Secrets are files, not environment values: `npm run deploy:secrets -- --dir <dir>` generates them, and the API reads `DATABASE_URL_FILE`, `MAINTENANCE_DATABASE_URL_FILE`, and `LIVE_TRACK_CURSOR_SIGNING_KEY_FILE`. Production startup also requires `ALLOWED_ORIGINS` to be non-empty and HTTPS-only.
+
+`npm run deploy:verify` builds the images, starts the stack on ports 19080/19443 with throwaway secrets and a self-signed certificate, asserts transport, headers, exposure, resource limits, secret handling, database roles, restart, idempotent re-migration, certificate reload, and credential rotation, then removes everything. It needs Docker and about five minutes. **Production sign-in does not exist until P12.1**, so this profile is deployable and verifiable but not launchable. Setup, update, rotation, and the list of what is not done are in `docs/runbooks/deployment.md`; the design is ADR-0043.
+
 ## Verification
 
 ```powershell

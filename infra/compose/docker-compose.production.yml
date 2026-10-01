@@ -1,0 +1,214 @@
+# Single-host, single-region deployment profile (P12.2). Standalone: do not layer it on the
+# development compose files. Required inputs come from the environment or an --env-file; see
+# docs/runbooks/deployment.md. Nothing here is a credential: secrets are mounted from files.
+name: ${COMPOSE_PROJECT_NAME:-running-tracker}
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgis/postgis:17-3.5@sha256:8dfee83d8bd4c2873dc4a233c13ba2799a44f2edb16a0552d58715917fac32ba
+    environment:
+      POSTGRES_DB: running_tracker
+      POSTGRES_USER: running_tracker_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    # max_connections covers the runtime pool (10), the maintenance pool (4), one migration
+    # session, and operator sessions; shared_buffers is a quarter of the default memory limit.
+    command:
+      - postgres
+      - -c
+      - max_connections=40
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - password_encryption=scram-sha-256
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U running_tracker_admin -d running_tracker"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    networks: [data]
+    secrets: [postgres_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    shm_size: 256m
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 60s
+    logging: *bounded-logging
+    mem_limit: ${POSTGRES_MEM_LIMIT:-2g}
+    memswap_limit: ${POSTGRES_MEM_LIMIT:-2g}
+    cpus: ${POSTGRES_CPUS:-4}
+    pids_limit: 512
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+
+  # One-shot: create/update the four logins and PostGIS, then apply pending migrations. Both
+  # steps are idempotent; running it again on every deploy also re-applies the role passwords.
+  db-init:
+    image: running-tracker-tools:${IMAGE_TAG:-production}
+    build:
+      context: ../..
+      dockerfile: infra/api/Dockerfile
+      target: tools
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        export BOOTSTRAP_DATABASE_URL="$$(cat /run/secrets/bootstrap_database_url)"
+        MIGRATION_DATABASE_URL="$$(cat /run/secrets/migration_database_url)"
+        DATABASE_URL="$$(cat /run/secrets/runtime_database_url)"
+        MAINTENANCE_DATABASE_URL="$$(cat /run/secrets/maintenance_database_url)"
+        && node scripts/bootstrap-database.mjs && node scripts/migrate.mjs
+    networks: [data]
+    secrets:
+      - bootstrap_database_url
+      - migration_database_url
+      - runtime_database_url
+      - maintenance_database_url
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    logging: *bounded-logging
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  api:
+    image: running-tracker-api:${IMAGE_TAG:-production}
+    build:
+      context: ../..
+      dockerfile: infra/api/Dockerfile
+      target: runtime
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: production
+      PORT: 3000
+      DATABASE_URL_FILE: /run/secrets/runtime_database_url
+      MAINTENANCE_DATABASE_URL_FILE: /run/secrets/maintenance_database_url
+      LIVE_TRACK_CURSOR_SIGNING_KEY_FILE: /run/secrets/cursor_signing_key
+      ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required, e.g. https://tracker.example}
+      LOCAL_AUTH_ENABLED: "false"
+      SESSION_COOKIE_SECURE: "true"
+      DELETION_JOURNAL_DIR: /var/lib/running-tracker/deletion-journal
+      # Unauthenticated scrape listener. It is bound inside the container and never published;
+      # only containers on the edge network (the proxy, which does not route it) can reach it.
+      METRICS_HOST: 0.0.0.0
+      METRICS_PORT: 9464
+      DB_POOL_MAX: 10
+      RUN_SUMMARY_CONCURRENCY: 2
+      # Heap ceiling under the 512 MiB container limit; the P11 loads peaked near 217 MiB RSS.
+      NODE_OPTIONS: --max-old-space-size=320
+    expose:
+      - "3000"
+      - "9464"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks: [data, edge]
+    secrets: [runtime_database_url, maintenance_database_url, cursor_signing_key]
+    volumes:
+      # Must be storage outside the database host (see the runbook); writable by uid 1000.
+      - type: bind
+        source: ${DELETION_JOURNAL_HOST_DIR:?DELETION_JOURNAL_HOST_DIR is required}
+        target: /var/lib/running-tracker/deletion-journal
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    read_only: true
+    tmpfs: [/tmp]
+    logging: *bounded-logging
+    mem_limit: ${API_MEM_LIMIT:-512m}
+    memswap_limit: ${API_MEM_LIMIT:-512m}
+    cpus: ${API_CPUS:-2}
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  proxy:
+    image: running-tracker-proxy:${IMAGE_TAG:-production}
+    build:
+      context: ../..
+      dockerfile: infra/proxy/Dockerfile
+      target: production
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?PUBLIC_HOSTNAME is required, e.g. tracker.example}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required, e.g. https://tracker.example}
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${BIND_ADDRESS:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:80/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    networks: [edge]
+    volumes:
+      - type: bind
+        source: ${TLS_DIR:?TLS_DIR is required, a directory holding fullchain.pem and privkey.pem}
+        target: /etc/nginx/tls
+        read_only: true
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/cache/nginx
+      - /etc/nginx/conf.d
+    logging: *bounded-logging
+    mem_limit: ${PROXY_MEM_LIMIT:-128m}
+    memswap_limit: ${PROXY_MEM_LIMIT:-128m}
+    cpus: ${PROXY_CPUS:-1}
+    pids_limit: 128
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  # No route out of the host: PostgreSQL is unreachable from outside and cannot dial out.
+  data:
+    internal: true
+  edge: {}
+
+secrets:
+  postgres_password:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/postgres-password
+  bootstrap_database_url:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/bootstrap-database-url
+  migration_database_url:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/migration-database-url
+  runtime_database_url:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/runtime-database-url
+  maintenance_database_url:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/maintenance-database-url
+  cursor_signing_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/cursor-signing-key
+
+volumes:
+  postgres_data:

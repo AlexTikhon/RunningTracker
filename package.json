@@ -38,7 +38,9 @@
     "transport:tls": "node scripts/generate-local-tls.mjs",
     "transport:up": "docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.transport.yml up -d --build --wait",
     "transport:down": "docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.transport.yml rm --stop --force proxy api",
-    "transport:verify": "node scripts/verify-transport-profile.mjs"
+    "transport:verify": "node scripts/verify-transport-profile.mjs",
+    "deploy:secrets": "node scripts/generate-production-secrets.mjs",
+    "deploy:verify": "node scripts/verify-production-profile.mjs"
   },
   "dependencies": {
     "pg": "8.23.0"

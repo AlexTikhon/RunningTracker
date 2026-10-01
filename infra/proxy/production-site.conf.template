@@ -1,0 +1,107 @@
+# Variables substituted at container start: PUBLIC_HOSTNAME (server_name, no port) and
+# PUBLIC_ORIGIN (scheme://host[:port], as browsers see it). Both are required; the container
+# entrypoint substitutes only variables that exist in its environment, and compose marks them required.
+
+upstream running_tracker_api {
+  server api:3000;
+  keepalive 16;
+}
+
+# Plain HTTP only redirects, always to the configured origin: the Host header is never echoed.
+server {
+  listen 80 default_server;
+  server_name _;
+
+  # Liveness for the container health check only: no data, no upstream.
+  location = /healthz {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok";
+  }
+
+  location / {
+    return 301 ${PUBLIC_ORIGIN}$request_uri;
+  }
+}
+
+# A TLS client asking for any other name is refused during the handshake.
+server {
+  listen 443 ssl default_server;
+  http2 on;
+  ssl_reject_handshake on;
+}
+
+server {
+  listen 443 ssl;
+  http2 on;
+  server_name ${PUBLIC_HOSTNAME};
+
+  ssl_certificate /etc/nginx/tls/fullchain.pem;
+  ssl_certificate_key /etc/nginx/tls/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers off;
+  ssl_session_timeout 10m;
+  ssl_session_cache shared:TLS:1m;
+  ssl_session_tickets off;
+
+  root /usr/share/nginx/html;
+  index index.html;
+  client_max_body_size 128k;
+
+  include /etc/nginx/snippets/security-headers.conf;
+
+  # Live SSE: same no-buffer / no-cache / no-compression / no-retry policy as the verified
+  # transport profile (ADR-0026).
+  location ~ ^/api/orgs/[^/]+/live/?$ {
+    include /etc/nginx/snippets/security-headers.conf;
+    proxy_pass http://running_tracker_api;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Accept-Encoding "";
+
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 75s;
+    send_timeout 30s;
+
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_next_upstream off;
+    gzip off;
+    proxy_pass_header X-Accel-Buffering;
+  }
+
+  location /api/ {
+    include /etc/nginx/snippets/security-headers.conf;
+    proxy_pass http://running_tracker_api;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 30s;
+    proxy_next_upstream off;
+    proxy_cache off;
+  }
+
+  # Vite emits content-hashed file names under /assets/.
+  location /assets/ {
+    include /etc/nginx/snippets/security-headers.conf;
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+    try_files $uri =404;
+  }
+
+  location / {
+    include /etc/nginx/snippets/security-headers.conf;
+    add_header Cache-Control "no-cache" always;
+    try_files $uri $uri/ /index.html;
+  }
+}

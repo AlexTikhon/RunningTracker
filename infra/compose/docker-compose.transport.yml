@@ -6,6 +6,7 @@ services:
     build:
       context: ../..
       dockerfile: infra/api/Dockerfile
+      target: runtime
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,6 +57,7 @@ services:
     build:
       context: ../..
       dockerfile: infra/proxy/Dockerfile
+      target: transport
     depends_on:
       api:
         condition: service_healthy
