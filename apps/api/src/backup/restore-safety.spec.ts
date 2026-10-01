@@ -249,7 +249,7 @@ describe('drill configuration', () => {
 });
 
 describe('recovery gating', () => {
-  it('lists the recovery sequence in the SDD order, with permission recovery last', () => {
+  it('lists the recovery sequence in the SDD order: deletions, then access restrictions, then readiness, permission recovery last', () => {
     expect(recoverySteps).toEqual([
       'application_offline',
       'database_created',
@@ -260,6 +260,8 @@ describe('recovery gating', () => {
       'journal_copy_readonly',
       'deletions_reapplied',
       'deletion_outcomes_verified',
+      'access_restrictions_reapplied',
+      'access_outcomes_verified',
       'readiness_verified',
       'current_permissions_restored',
     ]);
@@ -281,7 +283,7 @@ describe('recovery gating', () => {
     expect(() => assertRecoveryComplete(tracker)).toThrow('current_permissions_restored');
   });
 
-  it('opens only after the final step, which this tool never completes by itself', () => {
+  it('opens only after the final step', () => {
     const tracker = createRecoveryTracker();
     for (const step of recoverySteps) tracker.complete(step);
     expect(() => assertRecoveryComplete(tracker)).not.toThrow();

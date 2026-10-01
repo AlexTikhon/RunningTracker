@@ -201,9 +201,11 @@ export function deriveDrillDatabases(configuration: DrillConfiguration, suffix: 
 }
 
 /**
- * The SDD requires a fixed order before a restored database may be returned to the application. This
- * tool performs the first ten steps; the last (restoring current memberships, shares and credentials,
- * P12.4) is deliberately never completed here, so the drill cannot declare the database open.
+ * The SDD requires a fixed order before a restored database may be returned to the application:
+ * deletions first, then access restrictions (revoked shares, deactivated memberships, P12.4), then the
+ * readiness checks. The last step is only complete once the previous ones are, and completing it still
+ * does not open the database: the drill never grants the application logins access again, that is an
+ * explicit operator step in the runbook.
  */
 export const recoverySteps = [
   'application_offline',
@@ -215,6 +217,8 @@ export const recoverySteps = [
   'journal_copy_readonly',
   'deletions_reapplied',
   'deletion_outcomes_verified',
+  'access_restrictions_reapplied',
+  'access_outcomes_verified',
   'readiness_verified',
   'current_permissions_restored',
 ] as const;

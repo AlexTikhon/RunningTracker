@@ -106,6 +106,8 @@ semantics are unchanged.
     target database has `CONNECT` revoked from the runtime and maintenance logins (checked, and checked
     again by a test that tries to connect), so even a misconfigured application cannot open it, and the
     report says "application access: closed". P12.4 must implement and complete that step.
+    (Update, ADR-0045: P12.4 implemented the access-restriction journal and the drill now completes
+    `current_permissions_restored` after two new steps; the database is still left closed.)
 11. **Measurement methodology.** Timestamps come from the clock (`backup_created_at`,
     `simulated_loss_at`, `restore_*`, `migration_completed_at`, `journal_reapply_*`,
     `verification_completed_at`); durations from a monotonic clock. Drill RPO exposure =

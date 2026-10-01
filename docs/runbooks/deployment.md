@@ -152,7 +152,7 @@ current permissions, open) and the local drill are in the same runbook.
 |---|---|
 | Production sign-in (identity provider, sessions, logout, expiry) | P12.1; needs a provider decision and credentials |
 | A scheduled daily backup on this host, off-host backup storage, key custody, and a backup-age alert (the commands and a local restore drill exist, P12.3; production RPO/RTO is not established) | operator |
-| Restoring current shares and memberships from an old backup | P12.4 |
+| Credentials and sessions after a restore (sessions are in process memory; no identity provider exists yet). Revoked shares and deactivated memberships are restored by the access-restriction journal (P12.4, ADR-0045) | P12.1 for sign-in |
 | Full Content-Security-Policy (only `frame-ancestors` is set; a script/style/connect policy must be validated against the Mapbox map in a browser) | before public launch |
 | Request rate limiting at the proxy (no measured per-client traffic model to size it) | before public launch |
 | Encryption of database traffic inside the Docker network (single host; unencrypted by design here) and of the data volume at rest (a host/disk concern) | operator |

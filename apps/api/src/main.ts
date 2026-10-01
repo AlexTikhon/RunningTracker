@@ -22,6 +22,7 @@ import {
 } from './maintenance/deletion-journal-sink.js';
 import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
+import { runAccessJournalExportOnce } from './maintenance/run-access-journal-export.js';
 import { runDeletionJournalExportOnce } from './maintenance/run-deletion-journal-export.js';
 import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runRetentionDeleteOnce } from './maintenance/run-retention-delete.js';
@@ -206,12 +207,25 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
           runOnce: () => runDeletionJournalExportOnce(maintenancePool, sink, clock),
           taskName: 'Run deletion journal export',
         });
+  // The access-restriction journal (P12.4) goes to the same off-host directory, so it
+  // shares the sink, the enabling variable and the export interval.
+  const accessJournalRunner =
+    sink === undefined
+      ? undefined
+      : new PeriodicRunner({
+          clock,
+          intervalMs: config.RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS,
+          metrics: metrics.maintenance,
+          runOnce: () => runAccessJournalExportOnce(maintenancePool, sink, clock),
+          taskName: 'Run access journal export',
+        });
   let metricsListener: MetricsListener | undefined;
   const runner: StoppableRunner = {
     stop: () => {
       void metricsListener?.close();
       processMetrics.stop();
       deletionJournalRunner?.stop();
+      accessJournalRunner?.stop();
       liveSseHub.stop();
       autoFinishRunner.stop();
       rawPurgeRunner.stop();
@@ -241,6 +255,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   retentionDeleteRunner.start();
   tombstoneReclaimRunner.start();
   deletionJournalRunner?.start();
+  accessJournalRunner?.start();
   summaryRunner.start();
   registerShutdown({
     clock,

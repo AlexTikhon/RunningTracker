@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateRecovery,
   runRestoreDrill,
+  type AccessSnapshot,
+  type AccessState,
   type DatabaseState,
   type DrillOperations,
+  type ReapplyAccessRun,
   type ReapplyRun,
   type RunLabelState,
 } from './restore-drill.js';
@@ -59,6 +62,43 @@ const outcomes = (overrides: Partial<ReapplyRun['outcomes']>): ReapplyRun['outco
 });
 const firstRun: ReapplyRun = { entries: 3, files: 1, outcomes: outcomes({ deleted: 2, marker_restored: 1 }) };
 const secondRun: ReapplyRun = { entries: 3, files: 1, outcomes: outcomes({ marker_present: 3 }) };
+
+const staleAccess: AccessState = {
+  memberships: { grantee: true, granteeTwo: true, keeper: true, leaver: true, owner: true },
+  readsSurvivor: { grantee: true, granteeTwo: true, keeper: true, leaver: true, owner: true },
+  shares: {
+    grantee: { history: true, live: false },
+    granteeTwo: { history: true, live: true },
+    keeper: { history: true, live: false },
+    leaver: { history: true, live: false },
+    owner: null,
+  },
+};
+const currentAccess: AccessState = {
+  memberships: { grantee: true, granteeTwo: true, keeper: true, leaver: false, owner: true },
+  readsSurvivor: { grantee: false, granteeTwo: false, keeper: true, leaver: false, owner: true },
+  shares: {
+    grantee: null,
+    granteeTwo: { history: false, live: true },
+    keeper: { history: true, live: false },
+    leaver: { history: true, live: false },
+    owner: null,
+  },
+};
+const accessSnapshots = {
+  afterDeletions: { outboxRows: 2, state: staleAccess } satisfies AccessSnapshot,
+  afterFirst: { outboxRows: 5, state: currentAccess } satisfies AccessSnapshot,
+  restored: { outboxRows: 0, state: staleAccess } satisfies AccessSnapshot,
+  source: { outboxRows: 0, state: currentAccess } satisfies AccessSnapshot,
+};
+const accessOutcomes = (overrides: Partial<ReapplyAccessRun['outcomes']>): ReapplyAccessRun['outcomes'] => ({
+  already_applied: 0,
+  applied: 0,
+  skipped_unknown_organization: 0,
+  ...overrides,
+});
+const firstAccessRun: ReapplyAccessRun = { entries: 5, files: 1, outcomes: accessOutcomes({ already_applied: 2, applied: 3 }) };
+const secondAccessRun: ReapplyAccessRun = { entries: 5, files: 1, outcomes: accessOutcomes({ already_applied: 5 }) };
 
 function evaluate(overrides: Partial<Parameters<typeof evaluateRecovery>[0]> = {}) {
   return evaluateRecovery({
@@ -183,11 +223,33 @@ function harness(fail?: { at: keyof DrillOperations; error?: Error }): Harness {
     assertApplicationOffline: step('assertApplicationOffline', undefined),
     bootstrapTarget: step('bootstrapTarget', undefined),
     cleanup: step('cleanup', undefined),
-    copyJournalReadOnly: step('copyJournalReadOnly', { entries: 3, files: 1, manifestDigest: 'm1', readOnlyEnforced: true }),
+    copyJournalReadOnly: step('copyJournalReadOnly', {
+      accessEntries: 5,
+      entries: 3,
+      files: 2,
+      manifestDigest: 'm1',
+      readOnlyEnforced: true,
+    }),
     createSourceDatabase: step('createSourceDatabase', { migrationsBehind: 1 }),
     createTargetDatabase: step('createTargetDatabase', undefined),
     deleteAfterBackup: step('deleteAfterBackup', { deletedAt: ['2026-10-01T10:05:00.000Z'] }),
-    exportJournal: step('exportJournal', { entries: 3, files: 1, manifestDigest: 'm1' }),
+    exportJournal: step('exportJournal', { accessEntries: 5, entries: 3, files: 2, manifestDigest: 'm1' }),
+    inspectAccess: (() => {
+      const targetStates = [
+        accessSnapshots.restored,
+        accessSnapshots.afterDeletions,
+        accessSnapshots.afterFirst,
+        accessSnapshots.afterFirst,
+      ];
+      let index = 0;
+      return (side: 'source' | 'target') => {
+        calls.push(`inspectAccess:${side}`);
+        if (fail?.at === 'inspectAccess') return Promise.reject(new Error('inspectAccess failed'));
+        return Promise.resolve(
+          structuredClone(side === 'source' ? accessSnapshots.source : targetStates[Math.min(index++, 3)]!),
+        );
+      };
+    })(),
     inspectSource: step('inspectSource', { databaseBytes: 1000, state: atBackup }),
     inspectTarget: (() => {
       const states = [restored, afterFirst, afterFirst];
@@ -222,7 +284,17 @@ function harness(fail?: { at: keyof DrillOperations; error?: Error }): Harness {
         return Promise.resolve(runs[Math.min(index++, 1)]!);
       };
     })(),
+    reapplyAccess: (() => {
+      const runs = [firstAccessRun, secondAccessRun];
+      let index = 0;
+      return () => {
+        calls.push('reapplyAccess');
+        if (fail?.at === 'reapplyAccess') return Promise.reject(fail.error ?? new Error('reapplyAccess failed'));
+        return Promise.resolve(runs[Math.min(index++, 1)]!);
+      };
+    })(),
     restoreBackup: step('restoreBackup', undefined),
+    restrictAccessAfterBackup: step('restrictAccessAfterBackup', undefined),
     seedScenario: step('seedScenario', undefined),
     simulateSourceLoss: step('simulateSourceLoss', undefined),
     takeBackup: step('takeBackup', {
@@ -231,6 +303,7 @@ function harness(fail?: { at: keyof DrillOperations; error?: Error }): Harness {
       durationMs: 1500,
       plaintextBytes: 4000,
     }),
+    upgradeSourceSchema: step('upgradeSourceSchema', { applied: 1, skipped: 19 }),
     verifyBackupArtifact: step('verifyBackupArtifact', undefined),
     verifyJournalCopy: step('verifyJournalCopy', { manifestDigest: 'm1' }),
     verifyReadiness: step('verifyReadiness', {
@@ -253,7 +326,7 @@ function fakeClock(startIso = '2026-10-01T10:30:00.000Z') {
 describe('restore drill orchestration', () => {
   const options = { commands: [], commit: 'abc1234', keep: false };
 
-  it('performs the SDD order and only then reports the database as still closed to the application', async () => {
+  it('performs the SDD order, deletions before access restrictions, and still leaves the database closed to the application', async () => {
     const { calls, operations } = harness();
     const result = await runRestoreDrill({ clock: fakeClock(), operations, options });
 
@@ -265,9 +338,12 @@ describe('restore drill orchestration', () => {
       'seedScenario',
       'inspectSource',
       'takeBackup',
+      'upgradeSourceSchema',
       'deleteAfterBackup',
+      'restrictAccessAfterBackup',
       'exportJournal',
       'copyJournalReadOnly',
+      'inspectAccess:source',
       'simulateSourceLoss',
       'assertApplicationOffline',
       'createTargetDatabase',
@@ -278,16 +354,33 @@ describe('restore drill orchestration', () => {
       'migrate',
       'verifyJournalCopy',
       'inspectTarget',
+      'inspectAccess:target',
       'reapplyDeletions',
       'inspectTarget',
       'reapplyDeletions',
       'inspectTarget',
+      'inspectAccess:target',
+      'reapplyAccess',
+      'inspectAccess:target',
+      'reapplyAccess',
+      'inspectAccess:target',
       'verifyReadiness',
       'cleanup',
     ]);
-    expect(result.report.recovery.completedSteps).toEqual(recoverySteps.slice(0, -1));
-    expect(result.report.recovery.pendingSteps).toEqual(['current_permissions_restored']);
+    expect(result.report.recovery.completedSteps).toEqual(recoverySteps);
+    expect(result.report.recovery.pendingSteps).toEqual([]);
+    // Recovery is complete, yet the drill never reopens the database: that is an explicit operator step.
     expect(result.report.recovery.applicationAccess).toBe('closed');
+    expect(result.report.access.firstPass).toEqual(firstAccessRun);
+    expect(result.report.access.secondPass).toEqual(secondAccessRun);
+    expect(result.report.access.effectiveAccess).toEqual({
+      recovered: currentAccess.readsSurvivor,
+      restored: staleAccess.readsSurvivor,
+      source: currentAccess.readsSurvivor,
+    });
+    expect(result.report.checks.map((check) => check.id)).toEqual(
+      expect.arrayContaining(['recovered-access-matches-source', 'no-access-added', 'roles']),
+    );
   });
 
   it('computes the drill recovery point and recovery time from the recorded instants', async () => {
@@ -339,6 +432,10 @@ describe('restore drill orchestration', () => {
     ['verifyBackupArtifact', 'decryption'],
     ['restoreBackup', 'pg_restore'],
     ['reapplyDeletions', 'journal'],
+    ['reapplyAccess', 'access journal'],
+    ['inspectAccess', 'access verification'],
+    ['upgradeSourceSchema', 'source schema'],
+    ['restrictAccessAfterBackup', 'restrictions'],
     ['verifyReadiness', 'role'],
     ['inspectTarget', 'verification'],
   ] as const)('fails closed with a non-zero exit code and keeps both databases when %s fails (%s)', async (...[at]) => {
@@ -366,6 +463,66 @@ describe('restore drill orchestration', () => {
     expect(calls).not.toContain('verifyReadiness');
     expect(calls).not.toContain('cleanup');
     expect(result.report.recovery.completedSteps).toEqual(recoverySteps.slice(0, 4));
+  });
+
+  it('fails without completing the permission step when recovered access differs from the lost source', async () => {
+    const { calls, operations } = harness();
+    const widerThanSource = structuredClone(accessSnapshots.afterFirst);
+    widerThanSource.state.shares.grantee = { history: true, live: false };
+    widerThanSource.state.readsSurvivor.grantee = true;
+    const states = [
+      accessSnapshots.restored,
+      accessSnapshots.afterDeletions,
+      widerThanSource,
+      widerThanSource,
+    ];
+    let index = 0;
+    operations.inspectAccess = (side) => {
+      calls.push(`inspectAccess:${side}`);
+      return Promise.resolve(
+        structuredClone(side === 'source' ? accessSnapshots.source : states[Math.min(index++, 3)]!),
+      );
+    };
+
+    const result = await runRestoreDrill({ clock: fakeClock(), operations, options });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.report.failure?.message).toContain('recovered-access-matches-source');
+    expect(result.report.failure?.message).toContain('restrictions-applied');
+    expect(calls).not.toContain('verifyReadiness');
+    expect(calls).not.toContain('cleanup');
+    expect(result.report.recovery.completedSteps).toContain('deletion_outcomes_verified');
+    expect(result.report.recovery.completedSteps).not.toContain('access_outcomes_verified');
+    expect(result.report.recovery.pendingSteps).toContain('current_permissions_restored');
+  });
+
+  it('never reapplies access restrictions when the deletion outcomes were wrong', async () => {
+    const { calls, operations } = harness();
+    const resurrected = structuredClone(afterFirst);
+    resurrected.runs.A.run = true;
+    let inspections = 0;
+    operations.inspectTarget = () => {
+      calls.push('inspectTarget');
+      inspections += 1;
+      return Promise.resolve(structuredClone(inspections === 1 ? restored : resurrected));
+    };
+
+    const result = await runRestoreDrill({ clock: fakeClock(), operations, options });
+
+    expect(result.exitCode).toBe(1);
+    expect(calls).not.toContain('reapplyAccess');
+  });
+
+  it('aborts when the recovery copy holds a different number of access entries than were exported', async () => {
+    const { calls, operations } = harness();
+    operations.copyJournalReadOnly = () =>
+      Promise.resolve({ accessEntries: 4, entries: 3, files: 2, manifestDigest: 'm1', readOnlyEnforced: true });
+
+    const result = await runRestoreDrill({ clock: fakeClock(), operations, options });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.report.failure?.message).toContain('journal');
+    expect(calls).not.toContain('reapplyAccess');
   });
 
   it('aborts when the second migration run is not a no-op', async () => {

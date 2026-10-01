@@ -1,5 +1,3 @@
-      // The extra replay left the evaluation's expectation of a second-pass no-op intact, so the drill
-      // fails only on the first-pass check if the extra replay had changed anything (it must not).
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,7 +22,7 @@ const drillTimeout = 180_000;
 
 const options = { commands: [] as string[], commit: 'integration-test', keep: false };
 
-describe.skipIf(!configured)('P12.3 backup, restore, and deletion reapplication against real PostgreSQL', () => {
+describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access reapplication against real PostgreSQL', () => {
   const cleanups: (() => Promise<void>)[] = [];
   const directories: string[] = [];
 
@@ -93,7 +91,7 @@ describe.skipIf(!configured)('P12.3 backup, restore, and deletion reapplication 
   }
 
   it(
-    'backs up, simulates loss, restores an older backup into a fresh database, migrates, and reapplies deletions twice without resurrecting anything',
+    'backs up, simulates loss, restores an older backup into a fresh database, migrates, and reapplies deletions and access restrictions twice without resurrecting or re-granting anything',
     async () => {
       const { databases, operations } = await harness('previous');
 
@@ -110,7 +108,26 @@ describe.skipIf(!configured)('P12.3 backup, restore, and deletion reapplication 
       expect(report.journal.exported?.entries).toBe(3);
       expect(report.journal.firstPass?.outcomes).toMatchObject({ deleted: 2, marker_restored: 1 });
       expect(report.journal.secondPass?.outcomes).toMatchObject({ deleted: 0, marker_present: 3 });
-      expect(report.recovery.pendingSteps).toEqual(['current_permissions_restored']);
+      expect(report.access.exportedEntries).toBe(5);
+      expect(report.access.firstPass?.outcomes).toEqual({
+        already_applied: 2,
+        applied: 3,
+        skipped_unknown_organization: 0,
+      });
+      expect(report.access.secondPass?.outcomes).toEqual({
+        already_applied: 5,
+        applied: 0,
+        skipped_unknown_organization: 0,
+      });
+      // Stale access really was in the backup, and recovery removed it again as the runtime role sees it.
+      expect(report.access.effectiveAccess).toEqual({
+        recovered: { grantee: false, granteeTwo: false, keeper: true, leaver: false, owner: true },
+        restored: { grantee: true, granteeTwo: true, keeper: true, leaver: true, owner: true },
+        source: { grantee: false, granteeTwo: false, keeper: true, leaver: false, owner: true },
+      });
+      expect(report.recovery.pendingSteps).toEqual([]);
+      expect(report.recovery.completedSteps.at(-1)).toBe('current_permissions_restored');
+      // Complete recovery still does not reopen the database to the application.
       expect(report.recovery.applicationAccess).toBe('closed');
       expect(report.rpo.withinTarget).toBe(true);
       expect(report.rto.withinTarget).toBe(true);
@@ -247,6 +264,73 @@ describe.skipIf(!configured)('P12.3 backup, restore, and deletion reapplication 
       expect(calls).not.toContain('createTargetDatabase');
       expect(calls).not.toContain('restoreBackup');
       expect(await databaseExists(databases.adminMaintenanceUrl, databases.target.database)).toBe(false);
+    },
+    drillTimeout,
+  );
+
+  it(
+    'refuses an access journal file that tries to grant access before any restore starts',
+    async () => {
+      const { databases, drillDirectory, operations } = await harness('current');
+      const calls: string[] = [];
+      const forged = wrap(
+        operations,
+        {
+          async copyJournalReadOnly() {
+            await writeFile(
+              join(drillDirectory, 'journal', 'access-journal-20300101T000000000Z-1-1-deadbeef.ndjson'),
+              `${JSON.stringify({
+                canReadHistory: true,
+                canReadLive: true,
+                changedAt: '2030-01-01T00:00:00.000Z',
+                kind: 'share_granted',
+                orgId: 'd1200000-0000-4000-8000-0000000000a0',
+                runId: 'd1200000-0000-4000-8000-0000000000c3',
+                seq: '1',
+                userId: 'd1200000-0000-4000-8000-0000000000b2',
+                v: 1,
+              })}\n`,
+            );
+            return operations.copyJournalReadOnly();
+          },
+        },
+        calls,
+      );
+
+      const { exitCode, report } = await runRestoreDrill({ clock: systemClock, operations: forged, options });
+
+      expect(exitCode).toBe(1);
+      expect(report.failure?.step).toBe('copy-journal');
+      expect(calls).not.toContain('createTargetDatabase');
+      expect(calls).not.toContain('reapplyAccess');
+      expect(await databaseExists(databases.adminMaintenanceUrl, databases.target.database)).toBe(false);
+    },
+    drillTimeout,
+  );
+
+  it(
+    'an extra replay of the access journal by an impatient operator changes nothing',
+    async () => {
+      const { operations } = await harness('previous');
+      const calls: string[] = [];
+      let secondRunOutcomes: unknown;
+      const replaying = wrap(
+        operations,
+        {
+          async reapplyAccess() {
+            const first = await operations.reapplyAccess();
+            // Every further replay must be a no-op.
+            secondRunOutcomes = (await operations.reapplyAccess()).outcomes;
+            return first;
+          },
+        },
+        calls,
+      );
+
+      const { report } = await runRestoreDrill({ clock: systemClock, operations: replaying, options });
+
+      expect(secondRunOutcomes).toEqual({ already_applied: 5, applied: 0, skipped_unknown_organization: 0 });
+      expect(report.checks.filter((check) => !check.passed)).toEqual([]);
     },
     drillTimeout,
   );

@@ -9,23 +9,31 @@ import { Client, Pool } from 'pg';
 import { systemClock, type Clock } from '../clock.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { createFileDeletionJournalSink } from '../maintenance/deletion-journal-sink.js';
+import { runAccessJournalExportOnce } from '../maintenance/run-access-journal-export.js';
 import { runDeletionJournalExportOnce } from '../maintenance/run-deletion-journal-export.js';
 import { runRetentionDeleteOnce } from '../maintenance/run-retention-delete.js';
+import { runReapplyAccessCli } from '../restore/reapply-access-cli.js';
+import { loadAccessJournal, reapplyAccessOutcomes, type ReapplyAccessOutcome } from '../restore/reapply-access.js';
 import { runReapplyCli } from '../restore/reapply-deletions-cli.js';
 import { loadDeletionJournal, reapplyOutcomes, type ReapplyOutcome } from '../restore/reapply-deletions.js';
-import { deleteRun } from '../runs/run-service.js';
+import { deleteRun, revokeRunShare, upsertRunShare } from '../runs/run-service.js';
 import { createBackup, readSourceFacts } from './backup-create.js';
 import { createBackupDecryptor, verifyBackupFile } from './backup-envelope.js';
 import { loadBackupKey } from './backup-key.js';
 import { createPgToolRunner, parsePgConnection, type PgToolRunner } from './pg-tools.js';
 import {
   countedTables,
+  userLabels,
+  type AccessSnapshot,
+  type AccessState,
   type Check,
   type DatabaseState,
   type DrillOperations,
   type JournalFacts,
   type MigrationRun,
+  type ReapplyAccessRun,
   type ReapplyRun,
+  type UserLabel,
   type RoleFacts,
   type RunLabel,
   type RunLabelState,
@@ -49,6 +57,9 @@ const ids = {
   org: 'd1200000-0000-4000-8000-0000000000a0',
   ownerUser: 'd1200000-0000-4000-8000-0000000000b1',
   granteeUser: 'd1200000-0000-4000-8000-0000000000b2',
+  granteeTwoUser: 'd1200000-0000-4000-8000-0000000000b3',
+  leaverUser: 'd1200000-0000-4000-8000-0000000000b4',
+  keeperUser: 'd1200000-0000-4000-8000-0000000000b5',
   runs: {
     A: 'd1200000-0000-4000-8000-0000000000c1',
     B: 'd1200000-0000-4000-8000-0000000000c2',
@@ -58,6 +69,14 @@ const ids = {
 };
 
 const labels = ['A', 'B', 'C', 'D'] as const;
+
+const userIds: Record<UserLabel, string> = {
+  grantee: ids.granteeUser,
+  granteeTwo: ids.granteeTwoUser,
+  keeper: ids.keeperUser,
+  leaver: ids.leaverUser,
+  owner: ids.ownerUser,
+};
 const dayMs = 24 * 60 * 60 * 1000;
 
 function quoteIdentifier(identifier: string): string {
@@ -136,6 +155,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
   let exportedDigest = '';
   let sourcePools: Pool[] = [];
   let sourceMaintenancePool: Pool | undefined;
+  let sourceRuntimePool: Pool | undefined;
 
   function requireKey(): Buffer {
     if (!key) throw new Error('The backup encryption key is not loaded');
@@ -365,8 +385,10 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
         }
       }
       const journal = await loadDeletionJournal(recoveryJournalDirectory);
+      const accessJournal = await loadAccessJournal(recoveryJournalDirectory);
       const manifest = await manifestOf(recoveryJournalDirectory);
       return {
+        accessEntries: accessJournal.entries.length,
         entries: journal.entries.length,
         files: manifest.files,
         manifestDigest: manifest.digest,
@@ -402,6 +424,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       const maintenancePool = new Pool({ application_name: 'running-tracker-restore-drill-maintenance', connectionString: source.maintenanceUrl, max: 2 });
       sourcePools.push(runtimePool, maintenancePool);
       sourceMaintenancePool = maintenancePool;
+      sourceRuntimePool = runtimePool;
       // Separate the backup instant from every deletion instant, whatever the clock resolution.
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
 
@@ -452,16 +475,84 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       if (exportedBatches === 0) {
         throw new Error('The deletion journal exporter exported nothing');
       }
+      let accessBatches = 0;
+      for (;;) {
+        const result = await runAccessJournalExportOnce(maintenancePool, sink, clock);
+        if (result.status === 'idle') break;
+        accessBatches += 1;
+      }
+      if (accessBatches === 0) {
+        throw new Error('The access journal exporter exported nothing');
+      }
       const pending = await withClient(source.ownerUrl, (client) =>
-        client.query<{ count: string }>('SELECT count(*)::text AS count FROM run_deletion_journal'),
+        client.query<{ access: string; deletion: string }>(
+          `SELECT (SELECT count(*) FROM run_deletion_journal)::text AS deletion,
+                  (SELECT count(*) FROM access_restriction_journal)::text AS access`,
+        ),
       );
-      if (pending.rows[0]!.count !== '0') {
+      if (pending.rows[0]!.deletion !== '0') {
         throw new Error('The deletion journal outbox still holds rows after export');
       }
+      if (pending.rows[0]!.access !== '0') {
+        throw new Error('The access journal outbox still holds rows after export');
+      }
       const journal = await loadDeletionJournal(journalDirectory);
+      const accessJournal = await loadAccessJournal(journalDirectory);
       const manifest = await manifestOf(journalDirectory);
       exportedDigest = manifest.digest;
-      return { entries: journal.entries.length, files: manifest.files, manifestDigest: manifest.digest } satisfies JournalFacts;
+      return {
+        accessEntries: accessJournal.entries.length,
+        entries: journal.entries.length,
+        files: manifest.files,
+        manifestDigest: manifest.digest,
+      } satisfies JournalFacts;
+    },
+
+    async inspectAccess(sideName) {
+      const side = sideName === 'source' ? source : target;
+      const rows = await withClient(side.ownerUrl, async (client) => {
+        const memberships = await client.query<{ active: boolean; user_id: string }>(
+          'SELECT user_id, active FROM memberships WHERE org_id = $1',
+          [ids.org],
+        );
+        const shares = await client.query<{ can_read_history: boolean; can_read_live: boolean; grantee_user_id: string }>(
+          'SELECT grantee_user_id, can_read_history, can_read_live FROM run_shares WHERE org_id = $1 AND run_id = $2',
+          [ids.org, ids.runs.C],
+        );
+        const outbox = await client.query<{ count: string }>('SELECT count(*)::text AS count FROM access_restriction_journal');
+        return { memberships: memberships.rows, outbox: Number(outbox.rows[0]!.count), shares: shares.rows };
+      });
+      // Who can really read run C: the application's runtime role under row-level security, as each
+      // person. SET ROLE needs no CONNECT privilege, so this also works on the closed restored database.
+      const readsSurvivor = {} as Record<UserLabel, boolean>;
+      await withClient(side.adminUrl, async (client) => {
+        for (const label of userLabels) {
+          await client.query('BEGIN');
+          try {
+            await client.query('SET LOCAL ROLE running_tracker_runtime');
+            await client.query("SELECT set_config('app.user_id', $1, true), set_config('app.org_id', $2, true)", [
+              userIds[label],
+              ids.org,
+            ]);
+            const visible = await client.query<{ visible: boolean }>(
+              'SELECT EXISTS (SELECT 1 FROM runs WHERE org_id = $1 AND id = $2) AS visible',
+              [ids.org, ids.runs.C],
+            );
+            readsSurvivor[label] = visible.rows[0]!.visible;
+          } finally {
+            await client.query('ROLLBACK');
+          }
+        }
+      });
+      const memberships = {} as AccessState['memberships'];
+      const shares = {} as AccessState['shares'];
+      for (const label of userLabels) {
+        const membership = rows.memberships.find((row) => row.user_id === userIds[label]);
+        memberships[label] = membership ? membership.active : null;
+        const share = rows.shares.find((row) => row.grantee_user_id === userIds[label]);
+        shares[label] = share ? { history: share.can_read_history, live: share.can_read_live } : null;
+      }
+      return { outboxRows: rows.outbox, state: { memberships, readsSurvivor, shares } } satisfies AccessSnapshot;
     },
 
     async inspectSource() {
@@ -542,6 +633,26 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       return { entries: value('journal entries'), files: value('journal files'), outcomes } satisfies ReapplyRun;
     },
 
+    async reapplyAccess() {
+      onCommand(`restore:reapply-access --journal-dir <recovery copy>  (RESTORE_DATABASE_URL = owner of ${target.database})`);
+      const lines: string[] = [];
+      await runReapplyAccessCli({
+        argv: ['--journal-dir', recoveryJournalDirectory],
+        env: { RESTORE_DATABASE_URL: target.ownerUrl },
+        log: (line) => lines.push(line),
+      });
+      const value = (name: string): number => {
+        const line = lines.find((entry) => entry.startsWith(`${name}: `));
+        if (!line) throw new Error('The access reapplication report is incomplete');
+        return Number(line.slice(name.length + 2));
+      };
+      const outcomes = Object.fromEntries(reapplyAccessOutcomes.map((name) => [name, value(name)])) as Record<
+        ReapplyAccessOutcome,
+        number
+      >;
+      return { entries: value('journal entries'), files: value('journal files'), outcomes } satisfies ReapplyAccessRun;
+    },
+
     async restoreBackup() {
       // GCM authenticates only at the end of the stream, after pg_restore could already have committed.
       // Authenticate the whole file first so that no byte of an unverified dump ever reaches pg_restore.
@@ -550,17 +661,42 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       await runner.restore(parsePgConnection(target.adminUrl), stream);
     },
 
+    async restrictAccessAfterBackup() {
+      const runtimePool = sourceRuntimePool;
+      if (!runtimePool) throw new Error('The runtime connection of the source is not open');
+      const session = { userId: ids.ownerUser };
+      // The share API's own paths, as the run's owner under the runtime role.
+      await withAuthenticatedTenantTransaction(runtimePool, session, ids.org, (client) =>
+        revokeRunShare(client, session, ids.org, ids.runs.C, ids.granteeUser),
+      );
+      await withAuthenticatedTenantTransaction(runtimePool, session, ids.org, (client) =>
+        upsertRunShare(client, session, ids.org, ids.runs.C, ids.granteeTwoUser, {
+          canReadHistory: false,
+          canReadLive: true,
+        }),
+      );
+      // Memberships have no application path yet (the identity provider is P12.1): an administrator's SQL.
+      await withClient(source.ownerUrl, (client) =>
+        client.query('UPDATE memberships SET active = false WHERE org_id = $1 AND user_id = $2', [
+          ids.org,
+          ids.leaverUser,
+        ]),
+      );
+    },
+
     async seedScenario() {
       await withClient(source.ownerUrl, async (client) => {
         await client.query(
-          `INSERT INTO users (id, external_identity) VALUES ($1, 'drill-owner'), ($2, 'drill-grantee')`,
-          [ids.ownerUser, ids.granteeUser],
+          `INSERT INTO users (id, external_identity)
+           VALUES ($1, 'drill-owner'), ($2, 'drill-grantee'), ($3, 'drill-grantee-two'), ($4, 'drill-leaver'), ($5, 'drill-keeper')`,
+          [ids.ownerUser, ids.granteeUser, ids.granteeTwoUser, ids.leaverUser, ids.keeperUser],
         );
         await client.query('INSERT INTO organizations (id) VALUES ($1)', [ids.org]);
         await client.query(
           `INSERT INTO memberships (org_id, user_id, role, active)
-           VALUES ($1, $2, 'runner', true), ($1, $3, 'coach', true)`,
-          [ids.org, ids.ownerUser, ids.granteeUser],
+           VALUES ($1, $2, 'runner', true), ($1, $3, 'coach', true),
+                  ($1, $4, 'runner', true), ($1, $5, 'runner', true), ($1, $6, 'runner', true)`,
+          [ids.org, ids.ownerUser, ids.granteeUser, ids.granteeTwoUser, ids.leaverUser, ids.keeperUser],
         );
         const now = clock.utcNow().getTime();
         const timing = (finishedDaysAgo: number) => {
@@ -571,6 +707,12 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
         await seedRun(client, 'A', timing(2), true);
         await seedRun(client, 'B', timing(400), true);
         await seedRun(client, 'C', timing(1), true);
+        // Run C also carries the shares of the access scenario (the grantee's was seeded with the run).
+        await client.query(
+          `INSERT INTO run_shares (org_id, run_id, grantee_user_id, can_read_live, can_read_history)
+           VALUES ($1, $2, $3, true, true), ($1, $2, $4, false, true), ($1, $2, $5, false, true)`,
+          [ids.org, ids.runs.C, ids.granteeTwoUser, ids.leaverUser, ids.keeperUser],
+        );
       });
     },
 
@@ -603,6 +745,15 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
         durationMs: created.durationMs,
         plaintextBytes: created.plaintextBytes,
       };
+    },
+
+    async upgradeSourceSchema() {
+      const output = await runScript('migrate.mjs', source);
+      const lines = output.split(/\r?\n/u);
+      return {
+        applied: lines.filter((line) => line.startsWith('apply ')).length,
+        skipped: lines.filter((line) => line.startsWith('skip ')).length,
+      } satisfies MigrationRun;
     },
 
     async verifyBackupArtifact() {
@@ -649,17 +800,29 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
           'The three application roles are not superuser, have no BYPASSRLS, CREATEDB, CREATEROLE or REPLICATION',
           result.rows.every((row) => !row.rolsuper && !row.rolbypassrls && !row.rolcreatedb && !row.rolcreaterole && !row.rolreplication),
         );
-        const privileges = await client.query<{ journal: boolean; reapply: boolean; connect: boolean }>(
+        const privileges = await client.query<{
+          access_journal: boolean;
+          access_reapply: boolean;
+          connect: boolean;
+          journal: boolean;
+          reapply: boolean;
+        }>(
           `SELECT bool_or(has_table_privilege(role, 'public.run_deletion_journal', 'SELECT')
                           OR has_table_privilege(role, 'public.run_deletion_journal', 'INSERT')
                           OR has_table_privilege(role, 'public.run_deletion_journal', 'DELETE')) AS journal,
+                  bool_or(has_table_privilege(role, 'public.access_restriction_journal', 'SELECT')
+                          OR has_table_privilege(role, 'public.access_restriction_journal', 'INSERT')
+                          OR has_table_privilege(role, 'public.access_restriction_journal', 'DELETE')) AS access_journal,
+                  bool_or(has_function_privilege(role,
+                    'app_private.reapply_access_restriction(text, uuid, uuid, uuid, boolean, boolean)', 'EXECUTE')) AS access_reapply,
                   bool_or(has_function_privilege(role,
                     'app_private.reapply_journaled_deletion(uuid, uuid, uuid, timestamptz, timestamptz)', 'EXECUTE')) AS reapply,
                   bool_or(has_database_privilege(role, current_database(), 'CONNECT')) AS connect
            FROM unnest(ARRAY['running_tracker_runtime', 'running_tracker_maintenance']) AS role`,
         );
         add('journal-denied-to-application', 'The runtime and maintenance roles have no access to the deletion journal table or the reapplication function', privileges.rows[0]!.journal === false && privileges.rows[0]!.reapply === false);
-        add('application-cannot-connect', 'The runtime and maintenance roles cannot connect to the restored database: it stays closed until current permissions are restored (P12.4)', privileges.rows[0]!.connect === false);
+        add('access-journal-denied-to-application', 'The runtime and maintenance roles have no access to the access-restriction journal table or its reapplication function', privileges.rows[0]!.access_journal === false && privileges.rows[0]!.access_reapply === false);
+        add('application-cannot-connect', 'The runtime and maintenance roles cannot connect to the restored database: the drill leaves it closed, and opening it is an explicit operator step', privileges.rows[0]!.connect === false);
         const sessions = await client.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM pg_stat_activity
            WHERE datname = current_database() AND usename IN ('running_tracker_runtime', 'running_tracker_maintenance')`,

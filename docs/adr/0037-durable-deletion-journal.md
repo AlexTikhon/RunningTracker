@@ -3,7 +3,7 @@
 - Status: accepted; P10.5 implemented and locally verified
 - Date: 2026-09-29
 - Scope: P10.5; closes the mechanism half of D09. The restore drill and the
-  recovery of access restrictions stay in P12.3/P12.4.
+  recovery of access restrictions stay in P12.3/P12.4 (done: ADR-0044, ADR-0045).
 
 ## Context
 
@@ -129,7 +129,7 @@ the plan explicitly rules out a system-wide queue for this.
   signing is deferred.
 - The directory is not pruned by the application.
 - Restoring access restrictions (revoked grants, deactivated memberships) is not
-  handled here; an old backup may still contain them as they were. That is P12.4.
+  handled here; an old backup may still contain them as they were. That is P12.4 (ADR-0045).
 - Deletion instants come from the trusted maintenance/application clock.
 - The exporter does not detect a mount that accepts writes but is not actually
   durable or off-host.

@@ -16,9 +16,9 @@ Last updated: 2026-10-01.
 | P07 | DONE | Fixed snapshots, successor changes, edge annotations, signed identity-bound cursors, and atomic browser application verified |
 | P08 | DONE | Authorization-safe SSE, coach UI, selected-track recovery, and the HTTPS/HTTP/2 reverse-proxy profile verified |
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
-| P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 is PARTIAL: the restore drill and access-restriction recovery remain P12.3/P12.4 |
+| P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 was PARTIAL here; it is RESOLVED for the mechanism and the local drill after P12.3 and P12.4 |
 | P11 | DONE | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038), P11.2 (deterministic ordinary/stress datasets, ADR-0039), P11.3 (deterministic concurrent load scenario over the real HTTP/SSE/PostgreSQL/tile/summary boundaries, ADR-0040), P11.4 (EXPLAIN/BUFFERS/WAL evidence under the real roles, sizes, response bytes, lock-wait samples, a no-tile baseline, and a generated report, ADR-0041), and P11.5 (set-based run visibility policies with a narrowing live scope, migration 0019, ADR-0042, and a before/after report from the same commands) verified. Ingestion p95, fresh-latency p95, and no tile starvation are met under stated rules; summary visibility, LRU footprint, and SSE buffer are not confirmed |
-| P12 | IN PROGRESS | P12.2 (single-host deployment profile) and P12.3 (encrypted backups, retention, and an executed local restore drill with deletion reapplication) are done. P12.1 (production identity provider) is TODO and blocked on an external decision; P12.4 (current permissions after a restore) and P12.5 (final documentation/demo) are TODO. D09 stays PARTIAL until P12.4 |
+| P12 | IN PROGRESS | P12.2 (single-host deployment profile) and P12.3 (encrypted backups, retention, and an executed local restore drill with deletion reapplication) are done. P12.1 (production identity provider) is TODO and blocked on an external decision; P12.4 (an access-restriction journal and a drill that proves recovered permissions equal the lost source's) is done and D09 is RESOLVED for the mechanism and the local drill. P12.5 (final documentation/demo) is TODO |
 
 ## P00 — verified inputs
 
@@ -1409,3 +1409,60 @@ What remains unverified (also stated in the report):
 - the case "a newer run reused a deleted run's ID" is covered by the existing P10.5 integration tests and was not repeated in the drill.
 
 P12.1 (blocked on an external identity provider decision), P12.4 (current permissions after a restore) and P12.5 (final documentation/demo) were NOT implemented. D09 remains PARTIAL: the mechanism, the journal and now the restore drill with deletion reapplication exist, but restoring current access restrictions (P12.4) does not, and the restored database is deliberately left closed to the application. P12 stays IN PROGRESS. The next stages are P12.1 (when a provider is chosen), P12.4, and P12.5.
+
+## P12.4 — access-restriction journal, current permissions after a restore
+
+P12.1 stays blocked (no identity provider, issuer, client credentials or redirect URLs were chosen; nothing external was created) and P12.5 was not started. P12.3 ended with a restored database that revoked shares and deactivated memberships could still reach: a backup is a snapshot of the past for access just as it is for deletions. P12.4 closes that, with the same idea as the deletion journal (ADR-0045, migration `0020_access_restriction_journal.sql`).
+
+Implemented:
+
+- the sources of current permissions are `memberships.active` and `run_shares`. Shares change through the API (`PUT`/`DELETE /runs/{runId}/shares/{userId}`) and through the cascade of a run deletion; memberships have no application path yet (identity provider, P12.1), so an administrator's SQL changes them. Sessions are in process memory and no credential exists, so there is nothing else to restore;
+- row triggers on both tables write `access_restriction_journal` in the changing transaction, for exactly three kinds: `membership_deactivated`, `share_revoked`, `share_narrowed` (with the new two booleans). A grant, a re-activation, a widening and a role change are never journaled; a rolled-back change leaves no row. The application roles hold no privilege on the table; maintenance may only claim and acknowledge batches;
+- the export transaction of the deletion journal was extracted (`journal-export.ts`) and both exporters are thin wrappers (the deletion exporter's tests are unchanged and green). `runAccessJournalExportOnce` writes `access-journal-*.ndjson` to the same `DELETION_JOURNAL_DIR` sink on the same interval via one more periodic runner; no new setting;
+- `access-journal-format.ts` is a strict discriminated-union reader: there is no kind for a grant, so a forged or stale file cannot express one (tested, and tested again by a real drill that plants a `share_granted` file);
+- `app_private.reapply_access_restriction` (owner-only) deactivates, deletes a share, or ANDs a share's booleans with the journaled ones; absent rows are `already_applied`; the existing archive-revision triggers advance the organization's revision and the journal triggers record each change again. `npm run restore:reapply-access -- --journal-dir <copy>` validates all files first, applies each entry in its own transaction, prints counts only, requires the owner login;
+- replay is unconditional and order-free (no filtering by the backup's age), so recovery fails closed: a grant made after the backup is not reconstructed, and a share revoked then granted again before the loss is removed again. This is recorded in ADR-0045, the runbook, the report and the README;
+- the drill (`restore-drill*.ts`): the source is upgraded to the repository's schema after the backup (a release deployed before the loss; the restored backup then lacks the journal table and function and the unchanged migration runner provides them); after the backup it revokes a share with `revokeRunShare`, narrows one with `upsertRunShare` (both as the owner under the runtime role) and deactivates a member by SQL; it exports both journals, restores, migrates, reapplies deletions, then access, each twice, and probes who can read the surviving run as `running_tracker_runtime` under row-level security (`SET LOCAL ROLE`, no `CONNECT` needed) on the source before the loss, on the restored backup, and on the recovered database. `recoverySteps` gained `access_restrictions_reapplied` and `access_outcomes_verified`; `current_permissions_restored` is now completed by the drill. The database is still left with `CONNECT` revoked and the report says "application access: closed": opening it is an explicit `GRANT CONNECT` in the runbook, never done by a tool;
+- docs: ADR-0045, `docs/runbooks/backup-and-restore.md` (steps 8-10, drill description, limits), the deletion-journal and deployment runbooks, README, SDD section 12, the plan, the backlog (D09 RESOLVED for the mechanism and the local drill) and `docs/reports/p12-4-restore-drill.md` and `.json` (the P12.3 report is kept as history). Not changed: `deploy:verify`/compose (no profile or image changed), `.env.example` (no new variable).
+
+Measured results of the final clean-state run (commit 17bbce2 plus the uncommitted P12.3/P12.4 work; `docs/reports/p12-4-restore-drill.md`):
+
+| Item | Value |
+|---|---|
+| backup artifact / source database | 151 KiB / 15.9 MiB |
+| backup duration | 516 ms |
+| restore duration (decrypt + `pg_restore` through `docker exec`) | 320 ms |
+| migration duration (1 applied, 20 skipped; second run 0 applied, 21 skipped) | 697 ms |
+| deletion journal | 3 entries; first pass deleted 2, marker_restored 1; second pass marker_present 3 |
+| access journal | 5 entries; first pass applied 3, already_applied 2 (cascade removals of deleted runs' shares); second pass already_applied 5, state and outbox identical |
+| who could read the surviving run (source / restored backup / recovered) | grantee, granteeTwo, leaver: no / yes / no; owner, keeper: yes / yes / yes |
+| total recovery duration (loss to verification complete) = measured drill RTO | 3.4 s (SDD target <= 4 hours) |
+| measured drill RPO exposure (loss minus backup) | 1.5 s (SDD target <= 24 hours) |
+| checks | 30 of 30 pass |
+
+These are timings of a workstation rehearsal on a tiny database whose backup was taken seconds before the simulated loss. **They are not a production RPO or RTO, and no production claim is made.**
+
+Verification evidence (final code, repository root, 2026-10-01):
+
+- RED observed first for the 15 new database integration tests (the table did not exist; they passed once migration 0020 was applied), for the format spec (confirmed by moving the module away), and for the sink, exporter, reapplication, evaluation, report and orchestration specs (each failed on the missing module or behavior). Two changes were made together with their spec and were not watched failing first: the `restore-safety` step list and the extraction of the shared export function (the latter is covered by the unchanged deletion exporter spec, which stayed green);
+- `npm run verify` exits 0: lint, typecheck, `test:migrations` (25 of 25), unit tests API 574 (71 files), then 82, 14, 14 and 3 in the other workspaces, and the production build;
+- `npm run test:integration`: 34 files, 312 tests pass (17 more than before: 15 in `access-restriction-journal.integration.test.ts` and 2 in `backup-restore.integration.test.ts`: a forged grant file stops the drill before any restore, and an extra replay is a no-op), including the full drill at the older and at the current schema;
+- mutation check: making `reapplyAccessRestrictions` skip `share_revoked` entries made the real drill fail with `access-first-pass-outcomes, restrictions-applied, recovered-access-matches-source`; the change was reverted;
+- `npm run restore:drill -- --cleanup` found no leftover drill database before the final run, and the final run dropped its own;
+- `git diff --check` has no whitespace findings (only the existing CRLF notices).
+
+Failures and mistakes during development, all fixed:
+
+- three of my own spec expectations were wrong when first written (the evaluation was right): one asserted "reads added" with a state that did not add a read, one asserted a reactivation against a backup where the member was already active, and the report test assumed a column order the report did not use;
+- a `sed` replacement with `\|` in a basic regular expression (alternation) mangled a spec file; I reconstructed it from the known original text and re-ran it (11 of 11). Later edits used script files instead;
+- shell heredocs mangled backslashes and quotes in a few patch scripts, so those edits were redone with files written directly.
+
+What remains unverified (also stated in the report):
+
+- any production RPO or RTO; a real daily schedule, off-host storage and its durability, key custody and loss, restore time for a realistic size; the drill runs on the local Docker server only and CI does not run its tests;
+- restrictions committed but not yet exported when a node is lost (one export interval while healthy, unbounded while the exporter fails); `TRUNCATE` and a superuser disabling triggers are not journaled;
+- credentials and sessions after a restore: none exist yet, and there is no identity provider (P12.1), so no sign-in was exercised;
+- membership changes have no application path, so only SQL-driven deactivation was exercised; if P12.1 adds one, the triggers already cover any path through the table;
+- the journal rows written for the cascade removal of a deleted run's shares are noise bounded by shares per run; exporter load was not measured.
+
+P12.1 (blocked on an external identity provider decision) and P12.5 (final documentation/demo) were NOT implemented. D09 is RESOLVED for the mechanism and the local drill; no production RPO or RTO is claimed. P12 stays IN PROGRESS. The next stages are P12.1 (when a provider is chosen) and P12.5.

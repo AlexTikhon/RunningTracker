@@ -3,8 +3,9 @@
 Audience: the operator who runs the service and performs restores.
 Design: ADR-0037 (journal) and ADR-0044 (backups and the drill). Status: tested against a real
 database in P10.5, and rehearsed end to end by the P12.3 restore drill on a developer workstation
-(`npm run restore:drill`, `docs/reports/p12-3-restore-drill.md`). **That drill is not a production
-recovery: no production RPO or RTO is claimed, and restoring current access is P12.4.** Backups,
+(`npm run restore:drill`, `docs/reports/p12-4-restore-drill.md`). **That drill is not a production
+recovery: no production RPO or RTO is claimed.** Revoked shares and deactivated memberships are restored
+by the access-restriction journal (ADR-0045), which this runbook references. Backups,
 encryption, retention, and the rest of the restore are in `docs/runbooks/backup-and-restore.md`.
 
 ## What this protects, and what it does not
@@ -14,9 +15,9 @@ as is, those runs and their raw points come back. Every deletion is therefore al
 written to a journal that leaves the database host. After a restore, and before the
 application can reach the database, the journal is reapplied.
 
-It does **not** restore access restrictions. A backup may still contain shares or
-memberships that were revoked afterwards. Reapplying deletions does not undo that;
-recovering current permissions is P12.4 and must be done before opening access.
+Reapplying deletions does **not** restore access restrictions. A backup may still contain
+shares or memberships that were revoked afterwards. That is the access-restriction journal's job
+(`npm run restore:reapply-access`, step 7 below and ADR-0045), and it must run before access is opened.
 
 ## Configuration
 
@@ -104,12 +105,16 @@ Nothing may connect as the runtime or maintenance role in the meantime.
    happened after the backup and whose runs the backup still held. For a sample of
    known deleted run IDs, confirm as the owner role that `runs` has no row and
    `run_tombstones` has one.
-7. **Restore current access restrictions** (revoked shares, deactivated
-   memberships, credentials). *Not implemented here; P12.4.* Do not open access
-   until it is done.
-8. **Start the application** with `DELETION_JOURNAL_DIR` pointing at the same
-   storage. Deletions reapplied in step 5 were journaled again on the new database
-   and will be exported as new files, so history stays continuous.
+7. **Reapply access restrictions** (revoked shares, narrowed shares, deactivated
+   memberships) from the same journal copy with `npm run restore:reapply-access --
+   --journal-dir <copy>`, exactly as in step 5 (owner login, run it twice; the second run
+   must report only `already_applied`). It only removes access and never reconstructs a
+   grant. Procedure, outcomes and limits: `docs/runbooks/backup-and-restore.md` step 8
+   and ADR-0045. Do not open access until it is done and verified.
+8. **Open the database and start the application** with `DELETION_JOURNAL_DIR` pointing
+   at the same storage (opening is an explicit `GRANT CONNECT`, see the backup runbook,
+   step 10). Deletions and restrictions reapplied above were journaled again on the new
+   database and will be exported as new files, so history stays continuous.
 
 ## Failure modes and honest limits
 
@@ -124,22 +129,26 @@ Nothing may connect as the runtime or maintenance role in the meantime.
   set up and again during the P12.3 drill.
 - Reapplication acts on identifiers alone. It never changes runs created after the
   journaled deletion instant.
+- Access restrictions follow the same export, the same directory (`access-journal-*.ndjson`)
+  and the same recovery point; a restriction not yet exported when the node is lost comes
+  back with an old backup. Recovery fails closed: grants are not reconstructed.
 
 ## Drill (P12.3)
 
 `npm run restore:drill` automates the checklist below on the local development server and writes a
-report with the measured numbers (`docs/reports/p12-3-restore-drill.md`): backup, owner and annual
-retention deletions after it, journal export, simulated loss, restore into a fresh isolated database,
-migrations, two reapplication passes, and verification that deleted runs stay deleted. Its recovery
-point and recovery time describe the drill on one small database, not production, and it deliberately
-stops with the application still closed because step 7 (current permissions) is P12.4. For a real
-environment, perform the same checklist by hand and record actual numbers; do not reuse the targets.
+report with the measured numbers (`docs/reports/p12-4-restore-drill.md`): backup, owner and annual
+retention deletions and access restrictions after it, journal export, simulated loss, restore into a
+fresh isolated database, migrations, two reapplication passes of each journal, and verification that
+deleted runs stay deleted and revoked access stays revoked. Its recovery point and recovery time
+describe the drill on one small database, not production, and it deliberately stops with the
+application still closed (step 8 is an explicit operator step). For a real environment, perform the
+same checklist by hand and record actual numbers; do not reuse the targets.
 
 1. Take a backup; record its time.
 2. Delete several runs (owner deletion and annual retention) after it; wait for the
    journal files; note the time of the last deletion and the last file.
 3. Simulate node loss and restore per the procedure. Measure elapsed time.
 4. Confirm the outcome counts, that deleted runs are absent and `PUT` on their IDs
-   returns 410, and that a revoked share is not silently back (P12.4).
+   returns 410, and that a revoked share is not silently back (step 7).
 5. Record the achieved journal recovery point and total recovery time next to the
    SDD targets (RPO 24 h, RTO 4 h) and state whether each was met.

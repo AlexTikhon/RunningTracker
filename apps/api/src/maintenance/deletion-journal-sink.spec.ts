@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   createFileDeletionJournalSink,
+  listAccessJournalFiles,
   listDeletionJournalFiles,
   readDeletionJournalFile,
 } from './deletion-journal-sink.js';
@@ -32,8 +33,8 @@ describe('file deletion journal sink', () => {
 
   it('rejects names outside the journal pattern before touching the disk', async () => {
     const sink = createFileDeletionJournalSink(directory);
-    await expect(sink.write('../escape.ndjson', 'x')).rejects.toThrow('Invalid deletion journal file name');
-    await expect(sink.write('notes.txt', 'x')).rejects.toThrow('Invalid deletion journal file name');
+    await expect(sink.write('../escape.ndjson', 'x')).rejects.toThrow('Invalid journal file name');
+    await expect(sink.write('notes.txt', 'x')).rejects.toThrow('Invalid journal file name');
     expect(await readdir(directory)).toEqual([]);
   });
 
@@ -61,5 +62,15 @@ describe('file deletion journal sink', () => {
       'deletion-journal-b.ndjson',
     ]);
     expect(await readDeletionJournalFile(directory, 'deletion-journal-a.ndjson')).toBe('x\n');
+  });
+
+  it('also writes access journal files and keeps the two journals apart when listing', async () => {
+    const sink = createFileDeletionJournalSink(directory);
+    await sink.write('access-journal-a-1-1-aaaaaaaa.ndjson', 'x\n');
+    await sink.write('deletion-journal-a-1-1-aaaaaaaa.ndjson', 'y\n');
+
+    expect(await listAccessJournalFiles(directory)).toEqual(['access-journal-a-1-1-aaaaaaaa.ndjson']);
+    expect(await listDeletionJournalFiles(directory)).toEqual(['deletion-journal-a-1-1-aaaaaaaa.ndjson']);
+    expect(await readDeletionJournalFile(directory, 'access-journal-a-1-1-aaaaaaaa.ndjson')).toBe('x\n');
   });
 });

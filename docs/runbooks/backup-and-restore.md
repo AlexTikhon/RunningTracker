@@ -1,11 +1,11 @@
 # Runbook: encrypted backups, retention, and restore
 
 Audience: the operator who runs the service and performs restores.
-Design: ADR-0044 (with ADR-0037 for the deletion journal). Status: the commands exist and a restore
-drill passed on a developer workstation. **No production backup schedule, off-host storage, or real
-recovery has been verified, so no production RPO or RTO is claimed.** Restoring current access
-(memberships, shares, credentials, revoked grants) is P12.4 and is not implemented: a restored database
-must not be opened to the application until it is.
+Design: ADR-0044 (with ADR-0037 for the deletion journal and ADR-0045 for the access-restriction
+journal). Status: the commands exist and a restore drill, including deletion and access-restriction
+reapplication, passed on a developer workstation. **No production backup schedule, off-host storage, or
+real recovery has been verified, so no production RPO or RTO is claimed.** A restored database stays
+closed to the application until you open it deliberately (step 10 below).
 
 ## What is automated and what is yours
 
@@ -16,8 +16,8 @@ must not be opened to the application until it is.
 | Key file generation and validation (`backup:keygen`) | Storing the key **away from the backups**, backing it up, controlling who can read it |
 | `backup:verify`, `backup:decrypt` | Copying backups **off the host** to storage with its own failure domain, and proving it is durable |
 | Backup-age metric file for the node_exporter textfile collector | Scraping it and alerting when the age exceeds your target |
-| A drill that rehearses steps 1-3 of the SDD restore order and measures it (`restore:drill`) | Performing and timing a real restore on real hardware with real data |
-| The deletion journal export and reapplication (ADR-0037) | Keeping the journal directory off-host and for at least as long as the oldest restorable backup |
+| A drill that rehearses the SDD restore order, restore through access reapplication, and measures it (`restore:drill`) | Performing and timing a real restore on real hardware with real data |
+| The deletion journal and the access-restriction journal: export and reapplication (ADR-0037, ADR-0045) | Keeping the journal directory off-host and for at least as long as the oldest restorable backup |
 
 ## Settings
 
@@ -146,7 +146,8 @@ runtime or maintenance role in the meantime.
    ```
 
    `decrypt` authenticates the whole file before writing a byte and refuses to overwrite. The restored
-   database is a snapshot of the past: runs deleted after the backup are back, and so are revoked shares.
+   database is a snapshot of the past: runs deleted after the backup are back, and so are revoked shares
+   and deactivated members.
 4. **Run the current migrations** (`npm run db:migrate`, `MIGRATION_DATABASE_URL` as the owner). A
    mismatching checksum stops the restore; do not edit historical migrations. A second run must report
    only `skip`.
@@ -161,29 +162,60 @@ runtime or maintenance role in the meantime.
 
    Run it twice; the second run must report only `marker_present`.
 7. **Verify** a sample as the owner role: deleted runs have no `runs` row and have a `run_tombstones` row.
-8. **Restore current access restrictions: P12.4, not implemented.** Do not open access. Until that exists
-   the application logins should not be able to connect to the restored database (the drill revokes
-   `CONNECT` for exactly this reason).
-9. Only then start the application.
+8. **Reapply access restrictions** (revoked shares, narrowed shares, deactivated memberships) from the same
+   journal copy, as the owner role:
+
+   ```sh
+   RESTORE_DATABASE_URL=postgresql://running_tracker_owner:<secret>@<host>:5432/<fresh database> \
+     npm run restore:reapply-access -- --journal-dir /path/to/journal-copy
+   ```
+
+   It validates every `access-journal-*.ndjson` file first, then applies each entry in its own
+   transaction. It only ever removes access: it never activates a member, creates a share or widens one,
+   and the file format cannot express a grant. Outcomes: `applied` (the restored data held more access and
+   no longer does), `already_applied` (nothing to remove, or the share or member does not exist here),
+   `skipped_unknown_organization`. Run it twice; the second run must report only `already_applied`. Every
+   entry is replayed regardless of the backup's age, so a share that was revoked and granted again before
+   the loss is removed again: grants are never reconstructed, they are made again by their owners.
+9. **Verify access** as the owner role and as the runtime role under row-level security. For people you know
+   were restricted after the backup: the membership is inactive, the share is gone or narrowed, and a
+   `SET LOCAL ROLE running_tracker_runtime` query with `app.user_id` and `app.org_id` set to them no
+   longer returns the run (the drill does exactly this).
+10. **Open the database deliberately.** The drill and the bootstrap leave the application logins without
+    `CONNECT` on the restored database. Only after steps 4 to 9 succeeded and the application version is
+    the one the migrations belong to:
+
+    ```sql
+    GRANT CONNECT ON DATABASE <fresh database> TO running_tracker_runtime, running_tracker_maintenance;
+    ```
+
+    Then start the application with `DELETION_JOURNAL_DIR` pointing at the same storage. Deletions and
+    restrictions reapplied above were journaled again on the new node and will be exported as new files,
+    so history stays continuous. Nothing in this repository performs this step for you.
 
 ## The restore drill
 
-`npm run restore:drill` performs and measures steps 1-3 of the SDD order on the local development
-server, with real PostgreSQL/PostGIS. It needs Docker, the local database (`npm run db:up`), a key file,
+`npm run restore:drill` performs and measures the SDD order up to, but not including, opening the
+database (steps 1-9) on the local development server, with real PostgreSQL/PostGIS. It needs Docker, the local database (`npm run db:up`), a key file,
 and the `RESTORE_DRILL_*` variables from `.env.example` (an administrator on a **loopback** server, plus
 the three application-role URLs; their database names are templates only). One run takes about fifteen
 seconds.
 
 ```sh
 npm run backup:keygen -- --out "$PWD/.local/backup-keys/restore-drill.key"
-npm run restore:drill -- --report-md docs/reports/p12-3-restore-drill.md --report-json docs/reports/p12-3-restore-drill.json
+npm run restore:drill -- --report-md docs/reports/p12-4-restore-drill.md --report-json docs/reports/p12-4-restore-drill.json
 ```
 
 It creates `running_tracker_restore_drill_<suffix>_source` and `..._target`, never touches
 `running_tracker`, `running_tracker_test` or `running_tracker_load_test`, and refuses any other name,
 any non-loopback host, and any wrong login. The source is migrated one migration short of the
-repository, so the restore proves the catch-up. Scenario: runs A (owner-deleted after the backup), B
-(annual-retention-deleted after the backup), C (survivor), and D (created and deleted after the backup).
+repository, so the restore proves the catch-up; after the backup it is upgraded to the repository's
+schema, like a release deployed between the backup and the loss, so the access journal exists on it.
+Scenario: runs A (owner-deleted after the backup), B (annual-retention-deleted after the backup), C
+(survivor), and D (created and deleted after the backup). On C, after the backup: one share revoked and
+one narrowed through the share API's own functions, and one member deactivated by SQL; two more people
+are left untouched. The report states who could read C on the lost source, in the restored backup and
+after recovery, as the runtime role under row-level security.
 It exits 0 only if every check passes; otherwise it exits 1, keeps both databases, and the report says
 which step failed. Flags: `--current-schema` (source at the repository's latest migration), `--keep`
 (keep the databases after success), `--suffix`, `--work-dir`. `npm run restore:drill -- --cleanup`
@@ -192,7 +224,8 @@ drops every leftover drill database (and only those).
 Opt-in integration tests (`apps/api/test/backup-restore.integration.test.ts`) run the same machinery
 and also prove the failure paths against the real database: a damaged ciphertext, a damaged tag (no
 `pg_restore` is even started), truncation and a wrong key; a migration checksum mismatch; a malformed
-journal file; and an application session still connected. They are skipped when `RESTORE_DRILL_ADMIN_URL`
+journal file; an access journal file that tries to grant access (rejected before any restore); an extra
+replay of the access journal; and an application session still connected. They are skipped when `RESTORE_DRILL_ADMIN_URL`
 is unset, which includes the repository's CI.
 
 ### Reading a drill report
@@ -211,8 +244,11 @@ take for one tiny database on one workstation. They are not the production RPO o
   design, whatever the commands report.
 - A restore of a large database is a single `pg_restore` stream (no parallelism with a pipe); its time
   scales with data and has not been measured beyond the drill's tiny database.
-- Backups contain data deleted after them until reapplication; reapplication does not restore revoked
-  shares or memberships.
+- Backups contain data deleted after them, and access revoked after them, until reapplication.
+- Recovery fails closed: access granted after the backup is not reconstructed and has to be granted again,
+  and a share revoked and then granted again before the loss is removed again.
+- Deletions and restrictions committed but not yet exported when a node is lost are lost with it (one
+  export interval while the exporter is healthy, unbounded while it is failing).
 - Deletions committed but not yet exported when the node is lost are lost with it (journal recovery
   point, ADR-0037).
 - Retention trusts the timestamp in the file name and does not check that a kept backup restores.

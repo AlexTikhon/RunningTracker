@@ -1,5 +1,6 @@
+import { reapplyAccessOutcomes } from '../restore/reapply-access.js';
 import { reapplyOutcomes } from '../restore/reapply-deletions.js';
-import type { DrillReport } from './restore-drill.js';
+import { userLabels, type DrillReport } from './restore-drill.js';
 
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)} ms`;
@@ -27,6 +28,12 @@ function outcomeRows(run: NonNullable<DrillReport['journal']['firstPass']>): str
   return reapplyOutcomes.map((name) => `${name}: ${run.outcomes[name]}`).join(', ');
 }
 
+function accessOutcomeRows(run: NonNullable<DrillReport['access']['firstPass']>): string {
+  return reapplyAccessOutcomes.map((name) => `${name}: ${run.outcomes[name]}`).join(', ');
+}
+
+const yesNo = (value: boolean): string => (value ? 'yes' : 'no');
+
 /**
  * Human-readable drill report. Every number comes from the drill's own measurements. The wording keeps
  * local drill evidence apart from any production claim, and a failed drill never reads as a success.
@@ -36,7 +43,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
   const environment = report.environment;
   const out: string[] = [];
 
-  out.push('# P12.3 — Backup / restore drill report', '');
+  out.push('# P12.4 — Backup / restore drill report with access recovery', '');
   out.push(
     `Generated: ${report.generatedAt}. Application commit: ${report.application.commit}. Result: **${passed ? 'passed' : 'failed'}**.`,
     '',
@@ -147,6 +154,33 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '',
   );
 
+  out.push('## Access restriction reapplication', '');
+  out.push(
+    table([
+      ['access journal entries', report.access.exportedEntries === null ? 'not reached' : String(report.access.exportedEntries)],
+      ['first pass outcomes', report.access.firstPass ? accessOutcomeRows(report.access.firstPass) : 'not reached'],
+      ['second pass outcomes (idempotency)', report.access.secondPass ? accessOutcomeRows(report.access.secondPass) : 'not reached'],
+    ]),
+    '',
+  );
+  out.push(
+    'Fixture people: owner (owns every run), grantee, granteeTwo, leaver and keeper. After the backup, through the application\'s own paths: the share of grantee on run C was revoked (the API\'s revocation, as the runtime role), the share of granteeTwo was narrowed so that its history grant is gone, and the membership of leaver was deactivated. Owner and keeper were not touched. Deleting runs A and B also removed their shares, which the journal records as well, so two of the five entries were already in effect once the deletions had been reapplied.',
+    '',
+  );
+  if (report.access.effectiveAccess) {
+    const access = report.access.effectiveAccess;
+    out.push('Who can read the surviving run C, queried as the application runtime role under row-level security:', '');
+    out.push('| Person | lost source (truth) | restored backup, before reapplication | recovered |', '|---|---|---|---|');
+    for (const label of userLabels) {
+      out.push(`| ${label} | ${yesNo(access.source[label])} | ${yesNo(access.restored[label])} | ${yesNo(access.recovered[label])} |`);
+    }
+    out.push('');
+  }
+  out.push(
+    'The journal can only express removals (a deactivated membership, a revoked share, a narrowed share), and the reapplication function only removes access: it never reconstructs a grant, so a forged or stale journal file cannot add access. The price is that recovery fails closed. A grant made after the backup is lost with the node and has to be made again, and a share that was revoked and then granted again before the loss is removed again.',
+    '',
+  );
+
   out.push('## Roles and security', '');
   if (report.roles.length === 0) {
     out.push('Not reached.', '');
@@ -161,10 +195,17 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
   out.push('## Recovery sequence and application access', '');
   out.push(`Completed in order: ${report.recovery.completedSteps.join(', ') || 'none'}.`, '');
   out.push(`Pending: ${report.recovery.pendingSteps.join(', ') || 'none'}.`, '');
-  out.push(
-    'Application access: closed. The restored database revokes CONNECT from the runtime and maintenance logins and no application process was started against it. Restoring current memberships, shares, credentials and revoked grants is P12.4; until it exists and has run, the database must not be opened to the application, so this drill never declares it safe for access.',
-    '',
-  );
+  if (report.recovery.pendingSteps.length === 0) {
+    out.push(
+      'Application access: closed. Every recovery step completed, including restoring current permissions (revoked shares and deactivated memberships, verified against the permissions of the lost source). Even so, the restored database still has CONNECT revoked from the runtime and maintenance logins and no application process was started against it: opening it is an explicit operator step described in docs/runbooks/backup-and-restore.md, and this drill never performs it.',
+      '',
+    );
+  } else {
+    out.push(
+      'Application access: closed. The restored database revokes CONNECT from the runtime and maintenance logins and no application process was started against it. A recovery step is still pending, so the database must not be opened to the application and this drill never declares it safe for access.',
+      '',
+    );
+  }
 
   if (passed) {
     out.push('## VERIFIED IN LOCAL DRILL', '');
@@ -174,6 +215,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
       '- Runs A and B existed in the backup with their points, summary and share. Their deletions (an owner deletion and an annual retention deletion) happened after the backup and were exported by the existing journal exporter.',
       '- After `restore:reapply-deletions` from a read-only copy of the journal, A and B had no run, point, summary or share rows, every deleted run had a tombstone of at least one year, and the archive revision advanced exactly once per deleted run. D received its tombstone. The surviving run C was unchanged.',
       '- A second reapplication was idempotent: only marker_present outcomes, and an identical database state.',
+      '- Access that was revoked after the backup (a share revoked, a share narrowed, a member deactivated) was still present in the restored backup, and was removed again by `restore:reapply-access` from the exported journal: the recovered permissions equal those of the lost source, and the people concerned can no longer read the surviving run as the runtime role under row-level security. Nobody gained access, the second pass changed nothing, and the changes were journaled again on the recovered node.',
       '- The three application roles are not superuser and have no BYPASSRLS, CREATEDB or CREATEROLE.',
       '- Failure paths fail closed: wrong key, corrupted or truncated backup, malformed journal, migration checksum mismatch, and an out-of-order recovery step are covered by automated tests.',
       '',
@@ -186,7 +228,9 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '- Production RTO. The measured time is one small database on one workstation with the database tools in a local container. It says nothing about the size, hardware, network or staffing of a real recovery.',
     '- That backups and the deletion journal are really off-host, durable, and in a different failure domain than the database. Here both are local directories.',
     '- Encryption key custody. The key was a local file. Storing it separately from the backups, backing it up, rotating it and recovering it are operator decisions that this repository does not solve.',
-    '- Restoring current memberships, shares, credentials and revoked grants (P12.4). A restored backup can still contain access that was revoked after it was taken.',
+    '- Access restrictions that were committed but not yet exported when a node is lost (the same recovery point as the deletion journal): a revoked share or deactivated membership in that window comes back with an old backup, and the exporter\'s health decides how large the window is.',
+    '- Access granted after the backup, and shares that were revoked and granted again: by design these are not reconstructed from the journal, so they have to be granted again.',
+    '- Credentials and sessions. Sessions are held in process memory and are gone after a restart, and no identity provider exists yet (P12.1), so no credential was restored or exercised.',
     '- Production sign-in (P12.1): no identity provider is selected, so no end-to-end login was exercised.',
     '- Deletions that were committed but not yet exported when a node is lost (journal recovery point, ADR-0037), and a mount that accepts writes but is not durable.',
     '- Daily scheduling and 7-day retention running unattended on a host: the commands exist and are tested; nothing here ran on a schedule.',

@@ -5,6 +5,16 @@ import { formatDuration, renderDrillReportMarkdown } from './restore-drill-repor
 
 function passedReport(): DrillReport {
   return {
+    access: {
+      effectiveAccess: {
+        recovered: { grantee: false, granteeTwo: false, keeper: true, leaver: false, owner: true },
+        restored: { grantee: true, granteeTwo: true, keeper: true, leaver: true, owner: true },
+        source: { grantee: false, granteeTwo: false, keeper: true, leaver: false, owner: true },
+      },
+      exportedEntries: 5,
+      firstPass: { entries: 5, files: 1, outcomes: { already_applied: 2, applied: 3, skipped_unknown_organization: 0 } },
+      secondPass: { entries: 5, files: 1, outcomes: { already_applied: 5, applied: 0, skipped_unknown_organization: 0 } },
+    },
     application: { commit: 'abc1234 (with uncommitted changes)' },
     backup: {
       algorithm: 'aes-256-gcm',
@@ -33,7 +43,7 @@ function passedReport(): DrillReport {
     },
     generatedAt: '2026-10-01T10:05:00.000Z',
     journal: {
-      exported: { entries: 3, files: 1, manifestDigest: 'abc' },
+      exported: { accessEntries: 5, entries: 3, files: 2, manifestDigest: 'abc' },
       firstPass: { entries: 3, files: 1, outcomes: { deleted: 2, expired: 0, marker_present: 0, marker_restored: 1, skipped_newer_run: 0, skipped_unknown_membership: 0, skipped_unknown_organization: 0 } },
       recoveryCopyReadOnlyEnforced: true,
       secondPass: { entries: 3, files: 1, outcomes: { deleted: 0, expired: 0, marker_present: 3, marker_restored: 0, skipped_newer_run: 0, skipped_unknown_membership: 0, skipped_unknown_organization: 0 } },
@@ -51,9 +61,12 @@ function passedReport(): DrillReport {
         'journal_copy_readonly',
         'deletions_reapplied',
         'deletion_outcomes_verified',
+        'access_restrictions_reapplied',
+        'access_outcomes_verified',
         'readiness_verified',
+        'current_permissions_restored',
       ],
-      pendingSteps: ['current_permissions_restored'],
+      pendingSteps: [],
     },
     roles: [
       { bypassRls: false, canCreateDatabase: false, canCreateRole: false, name: 'running_tracker_owner', superuser: false },
@@ -111,7 +124,7 @@ describe('drill report', () => {
     expect(verified).toBeGreaterThan(0);
     expect(notVerified).toBeGreaterThan(verified);
     const limits = text.slice(notVerified);
-    for (const phrase of ['off-host', 'production RPO', 'production RTO', 'P12.4', 'key', 'P12.1']) {
+    for (const phrase of ['off-host', 'production RPO', 'production RTO', 'access restrictions', 'key', 'P12.1']) {
       expect(limits.toLowerCase(), phrase).toContain(phrase.toLowerCase());
     }
   });
@@ -152,12 +165,40 @@ describe('drill report', () => {
     expect(text).toContain('a checksum-only no-op (0 applied, 20 skipped)');
   });
 
-  it('says plainly that the application was not opened and that P12.4 is pending', () => {
+  it('says plainly that permissions were recovered and that the application was still not opened', () => {
     const text = renderDrillReportMarkdown(passedReport());
     expect(text).toContain('Application access: closed');
     expect(text).toContain('current_permissions_restored');
-    expect(text).toMatch(/P12\.4/u);
+    expect(text).toContain('Pending: none.');
+    expect(text).toMatch(/explicit operator step/u);
     expect(text).not.toMatch(/safe for application access/iu);
+  });
+
+  it('keeps the old warning when the permission step is still pending', () => {
+    const report = passedReport();
+    report.recovery.completedSteps = report.recovery.completedSteps.slice(0, -1);
+    report.recovery.pendingSteps = ['current_permissions_restored'];
+    const text = renderDrillReportMarkdown(report);
+    expect(text).toContain('Pending: current_permissions_restored.');
+    expect(text).toMatch(/must not be opened to the application/u);
+  });
+
+  it('reports the access reapplication with outcomes and who could read the surviving run before and after', () => {
+    const text = renderDrillReportMarkdown(passedReport());
+    expect(text).toContain('Access restriction reapplication');
+    expect(text).toContain('applied: 3, already_applied: 2, skipped_unknown_organization: 0');
+    expect(text).toContain('applied: 0, already_applied: 5, skipped_unknown_organization: 0');
+    for (const person of ['owner', 'grantee', 'granteeTwo', 'leaver', 'keeper']) {
+      expect(text, person).toContain(`| ${person} |`);
+    }
+    expect(text).toMatch(/\| grantee \| no \| yes \| no \|/u);
+    expect(text).toMatch(/\| keeper \| yes \| yes \| yes \|/u);
+  });
+
+  it('states what the access recovery deliberately does not do', () => {
+    const text = renderDrillReportMarkdown(passedReport());
+    expect(text).toMatch(/never reconstructs a grant/iu);
+    expect(text).toMatch(/fails closed/iu);
   });
 
   it('renders a failed drill as failed, with the step and message, and no success claim', () => {

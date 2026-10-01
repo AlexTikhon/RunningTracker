@@ -1,4 +1,5 @@
 import type { Clock } from '../clock.js';
+import type { ReapplyAccessOutcome } from '../restore/reapply-access.js';
 import type { ReapplyOutcome } from '../restore/reapply-deletions.js';
 import { createRecoveryTracker, recoverySteps, type RecoveryStep } from './restore-safety.js';
 
@@ -48,6 +49,38 @@ export interface Check {
   description: string;
   id: string;
   passed: boolean;
+}
+
+/** The fixture people of the access scenario. Reports use these labels, never identifiers. */
+export const userLabels = ['owner', 'grantee', 'granteeTwo', 'leaver', 'keeper'] as const;
+export type UserLabel = (typeof userLabels)[number];
+
+export interface ShareState {
+  history: boolean;
+  live: boolean;
+}
+
+/**
+ * The access facts of the scenario: whether each person's membership is active (null: no membership
+ * row), the share each holds on the surviving run C (null: none), and whether each can actually read run C
+ * when queried as the application's runtime role under row-level security.
+ */
+export interface AccessState {
+  memberships: Record<UserLabel, boolean | null>;
+  readsSurvivor: Record<UserLabel, boolean>;
+  shares: Record<UserLabel, ShareState | null>;
+}
+
+export interface AccessSnapshot {
+  /** Rows waiting in the database's own access-restriction outbox. */
+  outboxRows: number;
+  state: AccessState;
+}
+
+export interface ReapplyAccessRun {
+  entries: number;
+  files: number;
+  outcomes: Record<ReapplyAccessOutcome, number>;
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {
@@ -166,6 +199,140 @@ export function evaluateRecovery(input: RecoveryEvaluationInput): Check[] {
   return checks;
 }
 
+function ordered(state: AccessState): unknown {
+  return userLabels.map((label) => {
+    const held = state.shares[label];
+    return [label, state.memberships[label], held === null ? null : [held.history, held.live], state.readsSurvivor[label]];
+  });
+}
+
+const share = (history: boolean, live: boolean): ShareState => ({ history, live });
+
+/** What the backup holds in the scenario: everyone still has the access they were given. */
+const staleAccess: AccessState = {
+  memberships: { grantee: true, granteeTwo: true, keeper: true, leaver: true, owner: true },
+  readsSurvivor: { grantee: true, granteeTwo: true, keeper: true, leaver: true, owner: true },
+  shares: {
+    grantee: share(true, false),
+    granteeTwo: share(true, true),
+    keeper: share(true, false),
+    leaver: share(true, false),
+    owner: null,
+  },
+};
+
+/**
+ * What the source held when it was lost, and what recovery must reproduce: one share revoked, one
+ * narrowed so that the history grant is gone, one member deactivated, one person left untouched.
+ */
+const currentAccess: AccessState = {
+  memberships: { grantee: true, granteeTwo: true, keeper: true, leaver: false, owner: true },
+  readsSurvivor: { grantee: false, granteeTwo: false, keeper: true, leaver: false, owner: true },
+  shares: {
+    grantee: null,
+    granteeTwo: share(false, true),
+    keeper: share(true, false),
+    leaver: share(true, false),
+    owner: null,
+  },
+};
+
+/** The journal of the scenario: two cascade revocations of deleted runs' shares and the three restrictions. */
+const expectedAccessEntries = 5;
+const expectedAccessApplied = 3;
+const expectedAccessAlreadyApplied = 2;
+
+export interface AccessEvaluationInput {
+  afterDeletions: AccessSnapshot;
+  afterFirst: AccessSnapshot;
+  afterSecond: AccessSnapshot;
+  first: ReapplyAccessRun;
+  restored: AccessSnapshot;
+  second: ReapplyAccessRun;
+  source: AccessSnapshot;
+}
+
+function noMorePermissive(after: AccessState, before: AccessState): boolean {
+  return userLabels.every((label) => {
+    const afterShare = after.shares[label];
+    const beforeShare = before.shares[label];
+    const shareOk =
+      afterShare === null ||
+      (beforeShare !== null &&
+        (!afterShare.history || beforeShare.history) &&
+        (!afterShare.live || beforeShare.live));
+    const membershipOk = after.memberships[label] !== true || before.memberships[label] === true;
+    const readOk = !after.readsSurvivor[label] || before.readsSurvivor[label];
+    return shareOk && membershipOk && readOk;
+  });
+}
+
+/**
+ * Pure comparison of the permissions at the lost source, in the restored backup, and after each access
+ * reapplication pass. Fixed descriptions only: no identifier can enter the result.
+ */
+export function evaluateAccessRecovery(input: AccessEvaluationInput): Check[] {
+  const { afterDeletions, afterFirst, afterSecond, first, restored, second, source } = input;
+  const checks: Check[] = [];
+  const add = (id: string, description: string, passed: boolean): void => {
+    checks.push({ description, id, passed });
+  };
+  const same = (left: AccessState, right: AccessState): boolean => deepEqual(ordered(left), ordered(right));
+
+  add(
+    'source-access-restricted',
+    'Just before the loss, the source had one share revoked, one narrowed to no history grant and one member deactivated, and those three people could no longer read the surviving run',
+    same(source.state, currentAccess),
+  );
+  add(
+    'stale-access-in-backup',
+    'The restored backup still holds all of that access: every membership active, every share present and wide, and everyone able to read the surviving run',
+    same(restored.state, staleAccess),
+  );
+  add(
+    'access-first-pass-outcomes',
+    "The first access reapplication processed the five journaled restrictions: three changed the restored data, two (cascade removals of deleted runs' shares) were already in effect, and nothing was skipped",
+    first.entries === expectedAccessEntries &&
+      first.outcomes.applied === expectedAccessApplied &&
+      first.outcomes.already_applied === expectedAccessAlreadyApplied &&
+      first.outcomes.skipped_unknown_organization === 0,
+  );
+  add(
+    'restrictions-applied',
+    'After reapplication the revoked share is gone, the narrowed share has no history grant, the deactivated member is inactive, and those people cannot read the surviving run, while the owner and the untouched reader still can',
+    same(afterFirst.state, currentAccess),
+  );
+  add(
+    'recovered-access-matches-source',
+    'The permissions of the recovered database equal the permissions the lost source held',
+    same(afterFirst.state, source.state),
+  );
+  add(
+    'no-access-added',
+    'Recovery added no access: no membership was activated, no share created or widened, and nobody can read what they could not read in the restored backup',
+    noMorePermissive(afterFirst.state, restored.state),
+  );
+  add(
+    'applied-restrictions-journaled-again',
+    "Each restriction that reapplication changed was recorded again in the recovered database's own outbox, so the history stays continuous",
+    afterFirst.outboxRows - afterDeletions.outboxRows === first.outcomes.applied,
+  );
+  add(
+    'access-second-pass-idempotent',
+    'The second access reapplication changed nothing: every entry reported already_applied',
+    second.entries === first.entries &&
+      second.outcomes.already_applied === second.entries &&
+      second.outcomes.applied === 0 &&
+      second.outcomes.skipped_unknown_organization === 0,
+  );
+  add(
+    'access-second-pass-changes-nothing',
+    'The permissions and the outbox after the second pass are identical to those after the first',
+    same(afterSecond.state, afterFirst.state) && afterSecond.outboxRows === afterFirst.outboxRows,
+  );
+  return checks;
+}
+
 export interface EnvironmentFacts {
   node: string;
   pgDump: string;
@@ -183,6 +350,8 @@ export interface BackupFacts {
 }
 
 export interface JournalFacts {
+  /** Entries of the access-restriction journal files (the deletion journal's are `entries`). */
+  accessEntries: number;
   entries: number;
   files: number;
   manifestDigest: string;
@@ -212,21 +381,33 @@ export interface DrillOperations {
   createTargetDatabase(): Promise<void>;
   deleteAfterBackup(): Promise<{ deletedAt: string[] }>;
   exportJournal(): Promise<JournalFacts>;
+  inspectAccess(side: 'source' | 'target'): Promise<AccessSnapshot>;
   inspectSource(): Promise<{ databaseBytes: number; state: DatabaseState }>;
   inspectTarget(): Promise<DatabaseState>;
   migrate(): Promise<MigrationRun>;
   prepare(): Promise<EnvironmentFacts>;
+  reapplyAccess(): Promise<ReapplyAccessRun>;
   reapplyDeletions(): Promise<ReapplyRun>;
   restoreBackup(): Promise<void>;
+  /** Revokes, narrows and deactivates access after the backup, through the application's own paths. */
+  restrictAccessAfterBackup(): Promise<void>;
   seedScenario(): Promise<void>;
   simulateSourceLoss(): Promise<void>;
   takeBackup(): Promise<BackupFacts>;
+  /** Migrates the source to the repository's schema: a release deployed between the backup and the loss. */
+  upgradeSourceSchema(): Promise<MigrationRun>;
   verifyBackupArtifact(): Promise<void>;
   verifyJournalCopy(): Promise<{ manifestDigest: string }>;
   verifyReadiness(): Promise<{ checks: Check[]; roles: RoleFacts[] }>;
 }
 
 export interface DrillReport {
+  access: {
+    effectiveAccess: Record<'recovered' | 'restored' | 'source', Record<UserLabel, boolean>> | null;
+    exportedEntries: number | null;
+    firstPass: ReapplyAccessRun | null;
+    secondPass: ReapplyAccessRun | null;
+  };
   application: { commit: string };
   backup: BackupFacts & { algorithm: 'aes-256-gcm'; dumpFormat: 'pg_dump-custom'; envelopeVersion: 1; sourceDatabaseBytes: number };
   checks: Check[];
@@ -285,11 +466,12 @@ function scrubMessage(error: unknown): string {
 }
 
 /**
- * Runs the drill in the SDD order: backup, deletions after it, journal export, simulated loss, restore
+ * Runs the drill in the SDD order: backup, deletions and access restrictions after it, journal export, simulated loss, restore
  * into a fresh isolated database, migrations, deletion reapplication, verification. Any failure stops the
- * drill, keeps every database for diagnosis, and returns a failed report with exit code 1. The final SDD
- * step (restoring current permissions, P12.4) is never completed here, so the report always says the
- * application is still closed.
+ * drill, keeps every database for diagnosis, and returns a failed report with exit code 1. The last SDD
+ * step (current permissions restored, P12.4) completes only after the access restrictions were reapplied
+ * and verified against the permissions of the lost source. Even then the drill never reopens the
+ * restored database to the application, so the report always says it is still closed.
  */
 export async function runRestoreDrill(input: {
   clock: Pick<Clock, 'monotonicNow' | 'utcNow'>;
@@ -314,6 +496,9 @@ export async function runRestoreDrill(input: {
   let secondMigration: MigrationRun | null = null;
   let firstPass: ReapplyRun | null = null;
   let secondPass: ReapplyRun | null = null;
+  let firstAccessPass: ReapplyAccessRun | null = null;
+  let secondAccessPass: ReapplyAccessRun | null = null;
+  let effectiveAccess: DrillReport['access']['effectiveAccess'] = null;
   let roles: RoleFacts[] = [];
   let checks: Check[] = [];
   let cleanup: DrillReport['cleanup'];
@@ -358,6 +543,9 @@ export async function runRestoreDrill(input: {
     backup = await operations.takeBackup();
     timeline.backupCreatedAt = backup.createdAt;
 
+    step = 'upgrade-source-schema';
+    await operations.upgradeSourceSchema();
+
     step = 'delete-after-backup';
     const deletions = await operations.deleteAfterBackup();
     timeline.deletionsCompletedAt = clock.utcNow().toISOString();
@@ -368,15 +556,25 @@ export async function runRestoreDrill(input: {
       throw new Error('Every deletion must happen after the backup instant, and none was recorded');
     }
 
+    step = 'restrict-access-after-backup';
+    await operations.restrictAccessAfterBackup();
+
     step = 'export-journal';
     exported = await operations.exportJournal();
     timeline.journalExportedAt = clock.utcNow().toISOString();
     step = 'copy-journal';
     const copy = await operations.copyJournalReadOnly();
     copyReadOnly = copy.readOnlyEnforced;
-    if (copy.manifestDigest !== exported.manifestDigest || copy.entries !== exported.entries) {
+    if (
+      copy.manifestDigest !== exported.manifestDigest ||
+      copy.entries !== exported.entries ||
+      copy.accessEntries !== exported.accessEntries
+    ) {
       throw new Error('The recovery copy of the journal differs from the exported journal');
     }
+
+    step = 'inspect-source-access';
+    const sourceAccess = await operations.inspectAccess('source');
 
     step = 'simulate-loss';
     await operations.simulateSourceLoss();
@@ -435,6 +633,8 @@ export async function runRestoreDrill(input: {
 
     step = 'inspect-restored';
     const restored = await operations.inspectTarget();
+    step = 'inspect-restored-access';
+    const restoredAccess = await operations.inspectAccess('target');
 
     step = 'reapply-deletions';
     const reapplyStart = mark();
@@ -468,6 +668,40 @@ export async function runRestoreDrill(input: {
     }
     tracker.complete('deletion_outcomes_verified');
 
+    step = 'inspect-access-after-deletions';
+    const accessAfterDeletions = await operations.inspectAccess('target');
+    step = 'reapply-access';
+    firstAccessPass = await operations.reapplyAccess();
+    tracker.complete('access_restrictions_reapplied');
+    step = 'inspect-access-after-first-reapply';
+    const accessAfterFirst = await operations.inspectAccess('target');
+    step = 'reapply-access-second-pass';
+    secondAccessPass = await operations.reapplyAccess();
+    step = 'inspect-access-after-second-reapply';
+    const accessAfterSecond = await operations.inspectAccess('target');
+
+    step = 'verify-access-outcomes';
+    const accessChecks = evaluateAccessRecovery({
+      afterDeletions: accessAfterDeletions,
+      afterFirst: accessAfterFirst,
+      afterSecond: accessAfterSecond,
+      first: firstAccessPass,
+      restored: restoredAccess,
+      second: secondAccessPass,
+      source: sourceAccess,
+    });
+    checks = [...checks, ...accessChecks];
+    effectiveAccess = {
+      recovered: accessAfterFirst.state.readsSurvivor,
+      restored: restoredAccess.state.readsSurvivor,
+      source: sourceAccess.state.readsSurvivor,
+    };
+    const accessFailed = accessChecks.filter((check) => !check.passed);
+    if (accessFailed.length > 0) {
+      throw new Error(`Access recovery verification failed: ${accessFailed.map((check) => check.id).join(', ')}`);
+    }
+    tracker.complete('access_outcomes_verified');
+
     step = 'verify-readiness';
     const readiness = await operations.verifyReadiness();
     roles = readiness.roles;
@@ -477,6 +711,7 @@ export async function runRestoreDrill(input: {
       throw new Error(`Readiness verification failed: ${readinessFailed.map((check) => check.id).join(', ')}`);
     }
     tracker.complete('readiness_verified');
+    tracker.complete('current_permissions_restored');
     const verified = mark();
     timeline.verificationCompletedAt = verified.at;
     monotonic.verificationCompleted = verified.t;
@@ -518,6 +753,12 @@ export async function runRestoreDrill(input: {
   const diff = (end: number, start: number): number => (end > 0 && start > 0 ? end - start : 0);
 
   const report: DrillReport = {
+    access: {
+      effectiveAccess,
+      exportedEntries: exported?.accessEntries ?? null,
+      firstPass: firstAccessPass,
+      secondPass: secondAccessPass,
+    },
     application: { commit: options.commit },
     backup: {
       algorithm: 'aes-256-gcm',

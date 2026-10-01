@@ -3,10 +3,12 @@ import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import process from 'node:process';
 
+import { accessJournalFileNamePattern } from './access-journal-format.js';
 import { deletionJournalFileNamePattern } from './deletion-journal-format.js';
 
 /**
- * Where exported deletion journal files go. `write` resolves only once the
+ * Where exported journal files go (the deletion journal and the access-restriction
+ * journal share one directory and one sink). `write` resolves only once the
  * file is durable and visible under its final name: the exporter removes the
  * database rows only after that, so a resolved write is the durability boundary.
  */
@@ -57,8 +59,8 @@ export function createFileDeletionJournalSink(directory: string): DeletionJourna
       }
     },
     async write(fileName, contents) {
-      if (!deletionJournalFileNamePattern.test(fileName)) {
-        throw new Error('Invalid deletion journal file name');
+      if (!deletionJournalFileNamePattern.test(fileName) && !accessJournalFileNamePattern.test(fileName)) {
+        throw new Error('Invalid journal file name');
       }
       const finalPath = join(directory, fileName);
       const temporaryPath = join(directory, `.tmp-${randomUUID()}`);
@@ -80,12 +82,22 @@ export function createFileDeletionJournalSink(directory: string): DeletionJourna
   };
 }
 
-/** Journal files in name order, which is export order. */
-export async function listDeletionJournalFiles(directory: string): Promise<string[]> {
+async function listJournalFiles(directory: string, pattern: RegExp): Promise<string[]> {
   const names = await readdir(directory);
-  return names.filter((name) => deletionJournalFileNamePattern.test(name)).sort();
+  return names.filter((name) => pattern.test(name)).sort();
 }
 
+/** Deletion journal files in name order, which is export order. */
+export function listDeletionJournalFiles(directory: string): Promise<string[]> {
+  return listJournalFiles(directory, deletionJournalFileNamePattern);
+}
+
+/** Access-restriction journal files in name order, which is export order. */
+export function listAccessJournalFiles(directory: string): Promise<string[]> {
+  return listJournalFiles(directory, accessJournalFileNamePattern);
+}
+
+/** Reads one file of either journal; callers pass names returned by the list functions. */
 export async function readDeletionJournalFile(
   directory: string,
   fileName: string,

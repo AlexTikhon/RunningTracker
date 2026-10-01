@@ -159,7 +159,8 @@ function summarize(report: DrillReport, log: (line: string) => void): void {
     log('- SDD target: <= 4 hours');
     log('- production RTO status: not established by this workstation drill');
     log(`- measured drill RPO exposure: ${(report.rpo.backupRecoveryPointMs / 1000).toFixed(1)} s (SDD target: <= 24 hours)`);
-    log('- application access: closed (current permissions are not restored; P12.4)');
+    log('- current permissions: restored and verified against the lost source (revoked shares and deactivated memberships)');
+    log('- application access: closed (the drill never reopens the database; see docs/runbooks/backup-and-restore.md)');
   } else {
     log(`DRILL FAILED at ${report.failure?.step ?? 'unknown'}: ${report.failure?.message ?? ''}`);
     log('Both drill databases were kept. Drop them with: npm run restore:drill -- --cleanup');

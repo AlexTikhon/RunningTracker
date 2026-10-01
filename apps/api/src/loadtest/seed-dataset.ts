@@ -15,6 +15,7 @@ import {
 export const loadDatabaseSuffix = '_load_test';
 
 const seededTables = [
+  'access_restriction_journal',
   'run_deletion_journal',
   'run_shares',
   'run_summaries',
