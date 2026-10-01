@@ -9,6 +9,8 @@
     "dev": "node --watch --import tsx src/entrypoint.ts",
     "lint": "eslint src test *.ts",
     "start": "node dist/entrypoint.js",
+    "backup": "node --import tsx src/backup/backup-main.ts",
+    "restore:drill": "node --import tsx src/backup/restore-drill-main.ts",
     "restore:reapply-deletions": "node --import tsx src/restore/reapply-deletions-main.ts",
     "load:explain": "node --import tsx src/loadtest/explain-run-main.ts",
     "load:report": "node --import tsx src/loadtest/load-report-main.ts",

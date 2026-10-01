@@ -1,9 +1,11 @@
 # Runbook: deletion journal and restoring without resurrecting deleted runs
 
 Audience: the operator who runs the service and performs restores.
-Design: ADR-0037. Status: prepared and tested against a real database in P10.5.
-**The end-to-end backup/restore drill has not been performed (P12.3), so no RPO
-or RTO is claimed as achieved.**
+Design: ADR-0037 (journal) and ADR-0044 (backups and the drill). Status: tested against a real
+database in P10.5, and rehearsed end to end by the P12.3 restore drill on a developer workstation
+(`npm run restore:drill`, `docs/reports/p12-3-restore-drill.md`). **That drill is not a production
+recovery: no production RPO or RTO is claimed, and restoring current access is P12.4.** Backups,
+encryption, retention, and the rest of the restore are in `docs/runbooks/backup-and-restore.md`.
 
 ## What this protects, and what it does not
 
@@ -65,7 +67,9 @@ Nothing may connect as the runtime or maintenance role in the meantime.
 
 1. **Keep the application offline.** No API process, no maintenance runners.
 2. **Restore the backup** into a fresh PostgreSQL/PostGIS instance on an isolated
-   network. Recreate the roles (`npm run db:bootstrap`) if the instance is new.
+   network. Recreate the roles (`npm run db:bootstrap`) if the instance is new. Backups are
+   encrypted `pg_dump` archives: authenticate and decrypt with `npm run backup:decrypt` and restore
+   with `pg_restore` as in `docs/runbooks/backup-and-restore.md`.
 3. **Run migrations** (`npm run db:migrate`). This must come before reapplication:
    a backup older than migration `0018` does not yet contain the reapplication
    function. Migration checksums are verified; any mismatch stops the restore.
@@ -121,9 +125,15 @@ Nothing may connect as the runtime or maintenance role in the meantime.
 - Reapplication acts on identifiers alone. It never changes runs created after the
   journaled deletion instant.
 
-## Drill checklist for P12.3
+## Drill (P12.3)
 
-Record actual numbers; do not reuse the targets.
+`npm run restore:drill` automates the checklist below on the local development server and writes a
+report with the measured numbers (`docs/reports/p12-3-restore-drill.md`): backup, owner and annual
+retention deletions after it, journal export, simulated loss, restore into a fresh isolated database,
+migrations, two reapplication passes, and verification that deleted runs stay deleted. Its recovery
+point and recovery time describe the drill on one small database, not production, and it deliberately
+stops with the application still closed because step 7 (current permissions) is P12.4. For a real
+environment, perform the same checklist by hand and record actual numbers; do not reuse the targets.
 
 1. Take a backup; record its time.
 2. Delete several runs (owner deletion and annual retention) after it; wait for the

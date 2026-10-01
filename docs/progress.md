@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-09-30.
+Last updated: 2026-10-01.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -18,7 +18,7 @@ Last updated: 2026-09-30.
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
 | P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 is PARTIAL: the restore drill and access-restriction recovery remain P12.3/P12.4 |
 | P11 | DONE | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038), P11.2 (deterministic ordinary/stress datasets, ADR-0039), P11.3 (deterministic concurrent load scenario over the real HTTP/SSE/PostgreSQL/tile/summary boundaries, ADR-0040), P11.4 (EXPLAIN/BUFFERS/WAL evidence under the real roles, sizes, response bytes, lock-wait samples, a no-tile baseline, and a generated report, ADR-0041), and P11.5 (set-based run visibility policies with a narrowing live scope, migration 0019, ADR-0042, and a before/after report from the same commands) verified. Ingestion p95, fresh-latency p95, and no tile starvation are met under stated rules; summary visibility, LRU footprint, and SSE buffer are not confirmed |
-| P12 | TODO | Production auth and recovery |
+| P12 | IN PROGRESS | P12.2 (single-host deployment profile) and P12.3 (encrypted backups, retention, and an executed local restore drill with deletion reapplication) are done. P12.1 (production identity provider) is TODO and blocked on an external decision; P12.4 (current permissions after a restore) and P12.5 (final documentation/demo) are TODO. D09 stays PARTIAL until P12.4 |
 
 ## P00 — verified inputs
 
@@ -1339,3 +1339,73 @@ Limits and unverified claims:
 - a README edit through a shell one-liner let the shell interpret backticks and run a few nonexistent commands, all of which failed harmlessly; the README was repaired by hand.
 
 P12.2 is DONE. P12 remains IN PROGRESS. The next stage is P12.1 (blocked on an external decision: which identity provider and protocol, its issuer, client credentials, and redirect URLs) or P12.3 (a backup/restore drill that can be built and timed locally in an isolated environment: encrypted dump to off-host storage, restore into a scratch database, `restore:reapply-deletions`; real-environment RPO/RTO figures still need a target environment).
+
+## P12.3 — encrypted backups, retention, an executed restore drill, and deletion reapplication
+
+P12.1 stays blocked (no identity provider, issuer, client credentials or redirect URLs were chosen; nothing external was created), P12.4 and P12.5 were not started. P12.3 makes steps 1-3 of the SDD restore order (restore, migrate, reapply the deletion journal) executable and rehearses them against real PostgreSQL/PostGIS on this workstation.
+
+Implemented (ADR-0044, `apps/api/src/backup/`):
+
+- `backup:create`: `pg_dump --format=custom` (as an administrator, so row-level security cannot hide rows) -> AES-256-GCM with Node's built-in crypto -> a versioned envelope (magic, header length, strict-schema JSON header authenticated as GCM AAD, ciphertext, tag) -> `running-tracker-backup-<UTC>-<random>.rtbak`, written to a `0600` temp file, fsynced, published with a hard link so an existing file is never replaced, directory fsynced, then read back and authenticated. A failed or empty dump leaves nothing under a backup name. Header fields: format version, algorithm, nonce, creation instant, source database name, PostgreSQL/PostGIS and `pg_dump` versions, migration count and last id; no credentials, tokens, coordinates or run data.
+- key handling: `BACKUP_ENCRYPTION_KEY_FILE` (64 hex characters, at most one trailing newline, absolute path, errors never echo contents); `backup:keygen` creates a `0600` file and never overwrites; `backup:create` refuses a key inside the backup directory. The key is intentionally not in `deploy:secrets` or the production env example.
+- `backup:prune`: only this tool's file-name pattern and regular files, strictly older than 7 days by the name's timestamp (configurable), never anything newer, keeps the newest backup unless `--allow-remove-last`, prints what it removed. `backup:verify` authenticates a backup and prints only technical metadata; `backup:decrypt` authenticates then writes the archive for `pg_restore` (new file only).
+- backup age: `--metrics-file` atomically writes a node_exporter textfile after a successful backup. The API does not read backups and the scrape endpoint is unchanged (a design choice recorded in ADR-0044 and the runbook); wiring Prometheus and an alert is the operator's.
+- tool access: real `pg_dump`/`pg_restore`, locally or inside the database container via `docker exec` (`BACKUP_PG_DOCKER_CONTAINER`), password only in the environment, a clear failure if the tool is missing and no fallback.
+- `restore:drill`: see ADR-0044 section 7. Fixture runs A (owner-deleted after the backup), B (annual-retention-deleted after the backup), C (survivor) and D (created and deleted after the backup); source migrated one migration short using the unchanged runner; deletions through `deleteRun` (runtime role, tenant context) and `runRetentionDeleteOnce` (maintenance role); the real exporter and sink; a read-only recovery copy of the journal; simulated loss; restore into a fresh isolated database; `migrate.mjs` twice; `runReapplyCli` twice; verification through the owner role. It exits 1, keeps both databases and prints the failed step on any failure.
+- safety: drill databases must match `running_tracker_restore_drill[_suffix]`; every drop repeats the check; all URLs must be loopback with the expected logins and no identity-overriding parameters; an ordered `recoverySteps` tracker ends with `current_permissions_restored`, which nothing completes, so the report always says "application access: closed", and the runtime and maintenance logins have `CONNECT` revoked on the restored database.
+- one small production-code change: `syncDirectory` in `deletion-journal-sink.ts` is now exported and reused. Nothing in the running API changed.
+- docs: ADR-0044, `docs/runbooks/backup-and-restore.md` (new), the deployment and deletion-journal runbooks, README, SDD section 12, `.env.example`, `docs/reports/p12-3-restore-drill.md` and `.json`.
+
+Exact drill commands (repository root, Docker Desktop on Windows, the PostgreSQL 17.5/PostGIS 3.5.2 image already running via `npm run db:up`):
+
+```
+npm run backup:keygen -- --out C:/ForMe/Learning/Running_Tracker/.local/backup-keys/restore-drill.key
+npm run restore:drill -- --cleanup
+npm run restore:drill -- --report-md docs/reports/p12-3-restore-drill.md --report-json docs/reports/p12-3-restore-drill.json
+```
+
+Measured results of the final clean-state run (commit 17bbce2 plus the uncommitted P12.3 work; `docs/reports/p12-3-restore-drill.md`):
+
+| Item | Value |
+|---|---|
+| backup artifact / source database | 146 KiB / 15.9 MiB (the PostGIS extension dominates; a few dozen fixture rows) |
+| backup duration | 667 ms |
+| restore duration (decrypt + `pg_restore` through `docker exec`) | 281 ms |
+| migration duration (1 applied, 19 skipped; second run 0 applied, 20 skipped) | 758 ms |
+| journal entries / reapplication duration | 3 / 62 ms |
+| first pass | deleted 2, marker_restored 1 |
+| second pass | marker_present 3, state identical |
+| total recovery duration (loss to verification complete) = measured drill RTO | 3.4 s (SDD target <= 4 hours) |
+| measured drill RPO exposure (loss minus backup) | 902 ms (SDD target <= 24 hours) |
+| checks | 20 of 20 pass |
+
+These are timings of a workstation rehearsal on a tiny database whose backup was taken seconds before the simulated loss. **They are not a production RPO or RTO, and no production claim is made.**
+
+Verification evidence (final code, repository root, 2026-10-01):
+
+- RED observed first for each module: every new `*.spec.ts` failed on the missing module before its implementation (key, envelope, store/retention, `pg-tools`, safety, orchestration/evaluation, report, CLIs, operator paths); the key test for a missing parent directory failed before the `mkdir`; the CLI decrypt tests failed on the unknown command; the two older-schema orchestration tests failed before the `migrationsBehind` logic.
+- `npm run lint`, `npm run typecheck`, `npm run test:migrations` (25 of 25) and `npm run verify` exit 0. Unit tests: API 515 (67 files; about 130 are new, in `src/backup/`), then 82, 14, 14 and 3 in the other workspaces; the production build passes.
+- `npm run test:integration`: 33 files, 295 tests pass, including 7 new tests in `test/backup-restore.integration.test.ts` that run the real drill and the real failure paths: a full drill at an older schema; a full drill at the current schema; a damaged ciphertext, a damaged authentication tag, a truncated file and a wrong key (each rejected; for the tag case no `pg_restore` is started and no table appears); a migration checksum mismatch (the drill stops at `migrate`, never reapplies deletions, keeps the databases); a malformed journal file (the drill stops before any restore); an application login still connected (refused); and the runtime login unable to connect to the restored database. They skip when `RESTORE_DRILL_ADMIN_URL` is unset, which includes CI.
+- mutation check: removing the "authenticate before streaming" line from the restore operation made the damaged-tag integration test fail (`pg_restore` was spawned); the line was restored. The pure evaluation has a unit test per failure (resurrected row, missing or short tombstone, wrong archive revision, changed survivor, wrong outcomes, non-idempotent second pass).
+- the drill leaves the other databases alone: before and after the final run, `running_tracker`, `running_tracker_test` and `running_tracker_load_test` had identical migration counts, table counts and cumulative row-write counters, and the database list was unchanged; no drill database was left after the run.
+- `git diff --check` exits 0 (only the existing CRLF notices); no trailing whitespace in the new files.
+
+Failures during development, all fixed:
+
+- the first real drill failed at `delete-after-backup`: fixture run D had `finished_at` before `created_at`, which `runs_finished_state_consistent` forbids (a fixture bug found only by the real database; the failure path correctly exited 1 and kept the databases);
+- `backup:keygen` failed when the parent directory did not exist (now created, with a test);
+- a test hung because a file-handle write stream with `autoClose: false` never signals completion to `pipeline` (replaced by a path-based stream plus an explicit fsync);
+- relative `--report-md` / `--out-dir` paths landed under `apps/api` because npm runs workspace scripts there (now resolved against npm's `INIT_CWD`, with a test); the stray report was removed;
+- a GCM tag can fail only after every plaintext byte has streamed to `pg_restore`, which could already have committed; the restore operation now authenticates the whole file first (see the mutation check);
+- several of my own shell edits mangled string escapes in a spec (fixed with direct edits), and lint findings (`preserve-caught-error`, unused variables, async generators without `await`) were fixed;
+- `.env` did not exist in this checkout, so the integration tests could not have run as they were: a local, gitignored `.env` was created from `.env.example` (development fixtures only) and the drill variables were added to both.
+
+What remains unverified (also stated in the report):
+
+- any production RPO or RTO; a real daily schedule, off-host storage and its durability, backup-age alerting, key custody and loss; restore time for a database of realistic size and on real hardware (a single `pg_restore` stream is used);
+- that a retained backup restores (retention trusts file names; use `backup:verify` and the drill);
+- the drill runs on the local Docker server only, and CI does not run the drill tests;
+- `deploy:verify` was not re-run: no compose profile or image changed (only a comment in `production.env.example`);
+- the case "a newer run reused a deleted run's ID" is covered by the existing P10.5 integration tests and was not repeated in the drill.
+
+P12.1 (blocked on an external identity provider decision), P12.4 (current permissions after a restore) and P12.5 (final documentation/demo) were NOT implemented. D09 remains PARTIAL: the mechanism, the journal and now the restore drill with deletion reapplication exist, but restoring current access restrictions (P12.4) does not, and the restored database is deliberately left closed to the application. P12 stays IN PROGRESS. The next stages are P12.1 (when a provider is chosen), P12.4, and P12.5.

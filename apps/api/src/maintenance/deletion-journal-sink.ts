@@ -16,7 +16,7 @@ export interface DeletionJournalSink {
 }
 
 /** Portable "sync a directory" that tolerates platforms where it is not possible. */
-async function syncDirectory(directory: string): Promise<void> {
+export async function syncDirectory(directory: string): Promise<void> {
   let handle;
   try {
     handle = await open(directory, 'r');

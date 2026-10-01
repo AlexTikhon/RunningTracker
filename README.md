@@ -117,7 +117,7 @@ A backup restored after a deletion would bring the deleted run back, and tombsto
 
 After restoring a backup, and before the application can reach the database, run `npm run restore:reapply-deletions -- --journal-dir <copy of the journal directory>` with `RESTORE_DATABASE_URL` set to the object-owner role. It validates every file first, then reapplies each deletion idempotently in its own transaction; it never touches a run created after the journaled deletion and prints counts only. The ordered procedure, retention rule for journal files, failure modes, and the P12.3 drill checklist are in [docs/runbooks/deletion-journal-and-recovery.md](docs/runbooks/deletion-journal-and-recovery.md); the design is ADR-0037.
 
-While the exporter is healthy a deletion is off-host within about one export interval (default 30 s); deletions not yet exported when a node is lost are lost with it. No RPO or RTO is claimed as achieved: no backup or restore has been performed, and restoring current access restrictions is P12.4.
+While the exporter is healthy a deletion is off-host within about one export interval (default 30 s); deletions not yet exported when a node is lost are lost with it. The P12.3 restore drill (see "Backups and the restore drill (P12.3)" below) has exercised this on a workstation; it does not establish a production RPO or RTO, and restoring current access restrictions is P12.4.
 
 ## Versioned live-track reads
 
@@ -207,7 +207,7 @@ npm run db:down
 
 Start the API with `METRICS_PORT=9464` and run `curl http://127.0.0.1:9464/metrics`. The exposed signals are HTTP request count/duration/in-flight, point-ingestion commit latency and inserted/duplicate/rejected counts, live stream count/backpressure/poll-cycle time, archive tile cache result/bytes/generation time/queue depth, per-job maintenance cycle outcome/duration/last success (plus `raw_purge_blocked_total` for a retention overrun), database pool checkout time and state for the runtime and maintenance pools, and process memory/event-loop delay. Alert on the age of `maintenance_last_success_timestamp_seconds` per task to detect a stuck job such as the deletion-journal exporter. Route labels are templates (`/api/orgs/:uuid/runs/:uuid/points`), never concrete identifiers.
 
-Logs are one JSON line per event with an allow-listed set of technical fields (request ID, route template, status, duration, task, error class and short code, and a few counters). Coordinates, request bodies, cookies, tokens, and error messages are dropped by construction, and only failed (5xx) requests are logged. Data age, summary lag, dead tuples, and backup age are not exported yet (P11.4 and P12.3), and metrics are per process and reset on restart.
+Logs are one JSON line per event with an allow-listed set of technical fields (request ID, route template, status, duration, task, error class and short code, and a few counters). Coordinates, request bodies, cookies, tokens, and error messages are dropped by construction, and only failed (5xx) requests are logged. Data age, summary lag, and dead tuples are not exported by the API. Backup age is deliberately not an API metric either: the backup job writes it to a node_exporter textfile (P12.3, `docs/runbooks/backup-and-restore.md`), so the scrape endpoint never touches backups. Metrics are per process and reset on restart.
 
 ## Load datasets (P11.2)
 
@@ -278,6 +278,12 @@ The SELECT policies on `runs`, `run_points`, and `run_summaries` no longer call 
 
 `npm run deploy:verify` builds the images, starts the stack on ports 19080/19443 with throwaway secrets and a self-signed certificate, asserts transport, headers, exposure, resource limits, secret handling, database roles, restart, idempotent re-migration, certificate reload, and credential rotation, then removes everything. It needs Docker and about five minutes. **Production sign-in does not exist until P12.1**, so this profile is deployable and verifiable but not launchable. Setup, update, rotation, and the list of what is not done are in `docs/runbooks/deployment.md`; the design is ADR-0043.
 
+## Backups and the restore drill (P12.3)
+
+`npm run backup:create` takes a `pg_dump --format=custom` archive of a database, encrypts it with AES-256-GCM (Node's built-in crypto; key from `BACKUP_ENCRYPTION_KEY_FILE`, 64 hex characters, never stored with the backup), writes it atomically under a unique name (`running-tracker-backup-<UTC>-<random>.rtbak`, never overwriting), and reads it back to authenticate it. `backup:prune` removes only this tool's files strictly older than 7 days and keeps the newest backup unless forced; `backup:verify` authenticates a backup and prints its technical metadata; `backup:decrypt` writes the archive for `pg_restore`; `backup:keygen` creates a key file. Scheduling, off-host copying, key custody and the backup-age alert are the operator's; examples and the full restore order are in [docs/runbooks/backup-and-restore.md](docs/runbooks/backup-and-restore.md), and the design is ADR-0044.
+
+`npm run restore:drill` (Docker, the local database, `RESTORE_DRILL_*` and `BACKUP_ENCRYPTION_KEY_FILE` from `.env.example`) rehearses steps 1-3 of the SDD recovery order against real PostgreSQL/PostGIS in fresh `running_tracker_restore_drill_*` databases: backup an older-schema database, delete runs afterwards through the real owner-deletion and annual-retention paths, export the journal, simulate loss, restore, migrate, reapply the deletions twice, and verify that deleted runs stay deleted with tombstones and exactly one archive revision each. It fails closed with exit code 1, never touches the development, test or load-test databases, and leaves the restored database **closed to the application** because restoring current permissions is P12.4. The report (`docs/reports/p12-3-restore-drill.md`) separates what the local drill verified from what needs a real environment. **It does not establish a production RPO or RTO.**
+
 ## Verification
 
 ```powershell
@@ -334,6 +340,8 @@ Configuration is loaded and validated before the API app and pools are created. 
 `RUN_RETENTION_DELETE_INTERVAL_MS` also defaults to 60 seconds. Each settled cycle claims and whole-run-deletes at most one finished run whose `finished_at` is at least one year old, oldest first; a claimed run's eligibility is independently reconfirmed after its locks are acquired. This is the same maintenance-only annual retention path documented in "Run deletion and annual retention" above, sharing the deletion primitive and per-run advisory lock with owner `DELETE`, raw purge, and summary publication.
 
 `RUN_TOMBSTONE_RECLAIM_INTERVAL_MS` defaults to 300000 (five minutes; validated as a positive integer up to 24 hours). Each settled cycle reclaims at most 500 tombstones whose `expires_at` has passed (oldest first, through the maintenance-only `app_private.reclaim_expired_run_tombstones`, hard cap 1,000). Cleanup is restart-safe and skips rows another worker holds; a delayed or stopped cleanup only extends tombstone protection, it can never free a run ID early. See "Tombstone lifetime and late retries (P10.4)" above.
+
+`BACKUP_ENCRYPTION_KEY_FILE`, `BACKUP_DATABASE_URL`, `BACKUP_PG_DOCKER_CONTAINER` and the `RESTORE_DRILL_*` URLs configure the backup commands and the local restore drill (see "Backups and the restore drill (P12.3)"); the API never reads them, and they are intentionally absent from the production secret set.
 
 `DELETION_JOURNAL_DIR` is an absolute directory for exported deletion journal files; it is required when `APP_ENV=production` and optional otherwise (unset keeps deletions in the database outbox and logs a startup warning). When set, startup proves it is writable before the listener binds. `RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS` defaults to 30000 (positive integer up to 24 hours); each settled cycle exports at most 500 rows. See "Deletion journal and restore (P10.5)" above.
 

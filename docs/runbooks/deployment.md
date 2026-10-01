@@ -13,8 +13,9 @@ certificate authority, or with a production identity provider.
 **This deployment cannot sign anyone in.** Local login is forbidden in production and the identity
 provider integration (P12.1) does not exist yet, so the application starts, serves the web app and
 answers health checks, but `POST /api/session` returns 404. Do not publish it as a service until
-P12.1 is done. The backup/restore drill (P12.3) has not been performed either, so no RPO/RTO is
-claimed.
+P12.1 is done. A backup/restore drill (P12.3) has been performed on a workstation (see
+`docs/runbooks/backup-and-restore.md`), but no backup schedule, off-host storage, or restore has been
+verified on a real host, so no production RPO/RTO is claimed.
 
 ## Prerequisites
 
@@ -133,12 +134,24 @@ docker compose -f infra/compose/docker-compose.production.yml --env-file <env fi
 `deploy:verify` confirms the reload succeeds in the read-only, capability-dropped proxy and traffic
 continues. It cannot exercise a real renewal.
 
+## Backups and restore
+
+The production profile does **not** back up the database by itself, and it deliberately has no backup
+encryption key among its secrets: the key must live apart from the host that stores the encrypted
+backups. The operator runs `npm run backup:create` / `backup:prune` from a scheduled job (systemd timer
+or cron examples in `docs/runbooks/backup-and-restore.md`) with an administrator database login and a
+key file kept elsewhere, copies or mounts the backup directory **off this host**, and monitors backup
+age through the node_exporter textfile that `--metrics-file` writes. The scheduler, the off-host
+storage, the key custody, and the alert are not provided by the profile and have not been exercised on
+a real host. The restore order (offline, restore, migrate, reapply the deletion journal, restore
+current permissions, open) and the local drill are in the same runbook.
+
 ## Not done here, and why it matters
 
 | Gap | Owner |
 |---|---|
 | Production sign-in (identity provider, sessions, logout, expiry) | P12.1; needs a provider decision and credentials |
-| Backup, restore drill, RPO/RTO, reapplying deletions | P12.3 |
+| A scheduled daily backup on this host, off-host backup storage, key custody, and a backup-age alert (the commands and a local restore drill exist, P12.3; production RPO/RTO is not established) | operator |
 | Restoring current shares and memberships from an old backup | P12.4 |
 | Full Content-Security-Policy (only `frame-ancestors` is set; a script/style/connect policy must be validated against the Mapbox map in a browser) | before public launch |
 | Request rate limiting at the proxy (no measured per-client traffic model to size it) | before public launch |

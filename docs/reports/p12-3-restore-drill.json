@@ -1,0 +1,259 @@
+{
+  "application": {
+    "commit": "17bbce2 (with uncommitted changes)"
+  },
+  "backup": {
+    "algorithm": "aes-256-gcm",
+    "artifactBytes": 149500,
+    "createdAt": "2026-10-01T09:51:40.861Z",
+    "dumpFormat": "pg_dump-custom",
+    "durationMs": 667,
+    "envelopeVersion": 1,
+    "plaintextBytes": 149021,
+    "sourceDatabaseBytes": 16682131
+  },
+  "checks": [
+    {
+      "description": "The restored database (after migrations, before reapplication) has the same row counts, archive revision and surviving-run data as the database at backup time",
+      "id": "restored-matches-backup",
+      "passed": true
+    },
+    {
+      "description": "Runs A and B exist in the restored backup with their points, summary and share, and have no tombstone: the backup really contains data deleted later",
+      "id": "deleted-runs-existed-in-backup",
+      "passed": true
+    },
+    {
+      "description": "The first reapplication deleted the two resurrected runs, restored the marker of the run that never reached the backup, and reported no other outcome",
+      "id": "first-pass-outcomes",
+      "passed": true
+    },
+    {
+      "description": "After reapplication, deleted runs have no runs, run_points, run_summaries or run_shares rows",
+      "id": "deleted-runs-absent-everywhere",
+      "passed": true
+    },
+    {
+      "description": "After reapplication, every deleted run has a tombstone",
+      "id": "tombstones-present",
+      "passed": true
+    },
+    {
+      "description": "No tombstone expires earlier than one year after its deletion instant",
+      "id": "tombstone-expiry-at-least-one-year",
+      "passed": true
+    },
+    {
+      "description": "The archive revision advanced exactly once per run that was actually deleted, and not for a restored marker",
+      "id": "archive-revision-advanced-per-deletion",
+      "passed": true
+    },
+    {
+      "description": "The surviving run is unchanged and the table counts moved only by the deleted runs",
+      "id": "survivor-untouched",
+      "passed": true
+    },
+    {
+      "description": "The second reapplication changed nothing: every entry reported marker_present and none was deleted again",
+      "id": "second-pass-idempotent",
+      "passed": true
+    },
+    {
+      "description": "The database state after the second reapplication is identical to the state after the first: same rows, tombstone expiry, archive revision and journal",
+      "id": "second-pass-changes-nothing",
+      "passed": true
+    },
+    {
+      "description": "The owner, runtime and maintenance roles exist and can log in",
+      "id": "roles-present",
+      "passed": true
+    },
+    {
+      "description": "The three application roles are not superuser, have no BYPASSRLS, CREATEDB, CREATEROLE or REPLICATION",
+      "id": "roles-unprivileged",
+      "passed": true
+    },
+    {
+      "description": "The runtime and maintenance roles have no access to the deletion journal table or the reapplication function",
+      "id": "journal-denied-to-application",
+      "passed": true
+    },
+    {
+      "description": "The runtime and maintenance roles cannot connect to the restored database: it stays closed until current permissions are restored (P12.4)",
+      "id": "application-cannot-connect",
+      "passed": true
+    },
+    {
+      "description": "No application login has a session on the restored database",
+      "id": "no-application-sessions",
+      "passed": true
+    },
+    {
+      "description": "PostGIS is installed and callable in the restored database",
+      "id": "postgis-available",
+      "passed": true
+    },
+    {
+      "description": "Every migration file of this repository is recorded as applied",
+      "id": "all-migrations-applied",
+      "passed": true
+    },
+    {
+      "description": "The original journal directory is byte-identical to what the exporter wrote",
+      "id": "journal-original-unchanged",
+      "passed": true
+    },
+    {
+      "description": "The read-only recovery copy of the journal was not modified by reapplication",
+      "id": "journal-recovery-unchanged",
+      "passed": true
+    },
+    {
+      "description": "The source database was not used after the simulated loss",
+      "id": "source-stays-lost",
+      "passed": true
+    }
+  ],
+  "cleanup": "dropped",
+  "commands": [
+    "npm run restore:drill -- --report-md docs/reports/p12-3-restore-drill.md --report-json docs/reports/p12-3-restore-drill.json",
+    "docker exec -i running-tracker-postgres-1 pg_dump --version",
+    "docker exec -i running-tracker-postgres-1 pg_restore --version",
+    "node scripts/bootstrap-database.mjs  (BOOTSTRAP_DATABASE_URL, MIGRATION_DATABASE_URL, DATABASE_URL and MAINTENANCE_DATABASE_URL set to running_tracker_restore_drill_20261001t095137_source)",
+    "node scripts/migrate.mjs  (BOOTSTRAP_DATABASE_URL, MIGRATION_DATABASE_URL, DATABASE_URL and MAINTENANCE_DATABASE_URL set to running_tracker_restore_drill_20261001t095137_source)",
+    "docker exec -i running-tracker-postgres-1 pg_dump --version",
+    "docker exec -i -e PGPASSWORD running-tracker-postgres-1 pg_dump --format=custom --no-password --host 127.0.0.1 --port 5432 --username running_tracker --dbname running_tracker_restore_drill_20261001t095137_source",
+    "node scripts/bootstrap-database.mjs  (BOOTSTRAP_DATABASE_URL, MIGRATION_DATABASE_URL, DATABASE_URL and MAINTENANCE_DATABASE_URL set to running_tracker_restore_drill_20261001t095137_target)",
+    "docker exec -i -e PGPASSWORD running-tracker-postgres-1 pg_restore --format=custom --single-transaction --exit-on-error --no-password --host 127.0.0.1 --port 5432 --username running_tracker --dbname running_tracker_restore_drill_20261001t095137_target",
+    "node scripts/migrate.mjs  (BOOTSTRAP_DATABASE_URL, MIGRATION_DATABASE_URL, DATABASE_URL and MAINTENANCE_DATABASE_URL set to running_tracker_restore_drill_20261001t095137_target)",
+    "node scripts/migrate.mjs  (BOOTSTRAP_DATABASE_URL, MIGRATION_DATABASE_URL, DATABASE_URL and MAINTENANCE_DATABASE_URL set to running_tracker_restore_drill_20261001t095137_target)",
+    "restore:reapply-deletions --journal-dir <recovery copy>  (RESTORE_DATABASE_URL = owner of running_tracker_restore_drill_20261001t095137_target)",
+    "restore:reapply-deletions --journal-dir <recovery copy>  (RESTORE_DATABASE_URL = owner of running_tracker_restore_drill_20261001t095137_target)"
+  ],
+  "durations": {
+    "journalReapplyMs": 61.67280000000028,
+    "migrationMs": 757.8962000000001,
+    "restoreMs": 281.2467999999999,
+    "totalRecoveryMs": 3428.5473
+  },
+  "environment": {
+    "node": "v24.11.1",
+    "pgDump": "pg_dump (PostgreSQL) 17.5 (Debian 17.5-1.pgdg110+1)",
+    "pgRestore": "pg_restore (PostgreSQL) 17.5 (Debian 17.5-1.pgdg110+1)",
+    "postgis": "3.5.2",
+    "postgres": "17.5 (Debian 17.5-1.pgdg110+1)",
+    "runnerMode": "docker-exec"
+  },
+  "generatedAt": "2026-10-01T09:51:45.506Z",
+  "journal": {
+    "exported": {
+      "entries": 3,
+      "files": 1,
+      "manifestDigest": "8747fd6f49ee3942fe0278b86a73603d24b79e36dcfd912d663e02bc63582d0c"
+    },
+    "firstPass": {
+      "entries": 3,
+      "files": 1,
+      "outcomes": {
+        "deleted": 2,
+        "expired": 0,
+        "marker_present": 0,
+        "marker_restored": 1,
+        "skipped_newer_run": 0,
+        "skipped_unknown_membership": 0,
+        "skipped_unknown_organization": 0
+      }
+    },
+    "recoveryCopyReadOnlyEnforced": true,
+    "secondPass": {
+      "entries": 3,
+      "files": 1,
+      "outcomes": {
+        "deleted": 0,
+        "expired": 0,
+        "marker_present": 3,
+        "marker_restored": 0,
+        "skipped_newer_run": 0,
+        "skipped_unknown_membership": 0,
+        "skipped_unknown_organization": 0
+      }
+    }
+  },
+  "migration": {
+    "backupBehindBy": 1,
+    "firstRun": {
+      "applied": 1,
+      "skipped": 19
+    },
+    "secondRun": {
+      "applied": 0,
+      "skipped": 20
+    }
+  },
+  "recovery": {
+    "applicationAccess": "closed",
+    "completedSteps": [
+      "application_offline",
+      "database_created",
+      "roles_and_postgis_bootstrapped",
+      "backup_restored",
+      "migrations_applied",
+      "migration_checksums_verified",
+      "journal_copy_readonly",
+      "deletions_reapplied",
+      "deletion_outcomes_verified",
+      "readiness_verified"
+    ],
+    "pendingSteps": [
+      "current_permissions_restored"
+    ]
+  },
+  "roles": [
+    {
+      "bypassRls": false,
+      "canCreateDatabase": false,
+      "canCreateRole": false,
+      "name": "running_tracker_maintenance",
+      "superuser": false
+    },
+    {
+      "bypassRls": false,
+      "canCreateDatabase": false,
+      "canCreateRole": false,
+      "name": "running_tracker_owner",
+      "superuser": false
+    },
+    {
+      "bypassRls": false,
+      "canCreateDatabase": false,
+      "canCreateRole": false,
+      "name": "running_tracker_runtime",
+      "superuser": false
+    }
+  ],
+  "rpo": {
+    "backupRecoveryPointMs": 902,
+    "targetMs": 86400000,
+    "withinTarget": true
+  },
+  "rto": {
+    "measuredMs": 3428.5473,
+    "targetMs": 14400000,
+    "withinTarget": true
+  },
+  "schemaVersion": 1,
+  "status": "passed",
+  "timeline": {
+    "backupCreatedAt": "2026-10-01T09:51:40.861Z",
+    "deletionsCompletedAt": "2026-10-01T09:51:41.695Z",
+    "journalExportedAt": "2026-10-01T09:51:41.724Z",
+    "journalReapplyCompletedAt": "2026-10-01T09:51:45.048Z",
+    "journalReapplyStartedAt": "2026-10-01T09:51:44.987Z",
+    "migrationCompletedAt": "2026-10-01T09:51:44.182Z",
+    "recoveryStartedAt": "2026-10-01T09:51:41.763Z",
+    "restoreCompletedAt": "2026-10-01T09:51:43.424Z",
+    "restoreStartedAt": "2026-10-01T09:51:43.143Z",
+    "simulatedLossAt": "2026-10-01T09:51:41.763Z",
+    "verificationCompletedAt": "2026-10-01T09:51:45.192Z"
+  }
+}
