@@ -54,6 +54,10 @@ const errorResponse = { $ref: '#/components/responses/ApiError' };
 const noContentResponse = { description: 'The operation completed successfully.' };
 const defaultErrors = { default: errorResponse };
 const orgRunParameters = [parameterRef('OrgId'), parameterRef('RunId')];
+// Specified in SDD section 11 but never built; the answer today is 404 ROUTE_NOT_FOUND. A test in the
+// API package keeps this flag and the mounted routes consistent in both directions.
+const notImplemented =
+  'NOT IMPLEMENTED. Specified in SDD section 11 but not mounted by the service; the request is answered 404 ROUTE_NOT_FOUND. Archive display uses /archive/metadata and the revision-bound /tiles instead; live positions come from the /live stream.';
 const csrfParameters = [parameterRef('Origin'), parameterRef('CsrfToken')];
 
 export const openApiDocument = {
@@ -97,6 +101,54 @@ export const openApiDocument = {
         summary: 'Revoke the current session',
         parameters: csrfParameters,
         responses: { '204': noContentResponse, ...defaultErrors },
+      },
+    },
+    '/api/auth/login': {
+      get: {
+        tags: ['Session'],
+        summary: 'Start OpenID Connect sign-in (browser navigation)',
+        description:
+          'Mounted only when OIDC is configured; otherwise 404. Meant to be followed by a browser, not called with fetch: it answers a redirect to the identity provider (authorization code, PKCE S256, state, nonce) and sets the short-lived HttpOnly login cookie scoped to /api/auth.',
+        security: [],
+        responses: {
+          '302': {
+            description: 'Redirect to the identity provider.',
+            headers: {
+              Location: { description: 'The provider authorization URL.', schema: { type: 'string', format: 'uri' } },
+              'Set-Cookie': {
+                description: 'running_tracker_login: HttpOnly, SameSite=Lax, Path=/api/auth, bounded lifetime.',
+                schema: { type: 'string' },
+              },
+            },
+          },
+          '503': jsonResponse(
+            'IDENTITY_PROVIDER_UNAVAILABLE, or LOGIN_TEMPORARILY_UNAVAILABLE when too many sign-ins are pending.',
+            'ApiErrorResponse',
+          ),
+        },
+      },
+    },
+    '/api/auth/callback': {
+      get: {
+        tags: ['Session'],
+        summary: 'Complete OpenID Connect sign-in (provider redirect target)',
+        description:
+          'Mounted only when OIDC is configured; otherwise 404. The identity provider sends the browser here. The pending login is single use and its cookie is always cleared. Only an identity already provisioned as <issuer>|<subject> signs in; nobody is created.',
+        security: [],
+        responses: {
+          '200': {
+            description:
+              'Signed in. The session cookie (HttpOnly, SameSite=Strict) is set and the page navigates to the application. A 200 page rather than a redirect, because a redirect chain started from the provider would not carry the Strict cookie.',
+            content: { 'text/html': { schema: { type: 'string' } } },
+          },
+          '302': {
+            description:
+              'Not signed in. Redirect to the application with sign_in_error set to exactly one of denied, login_expired, not_provisioned or unavailable.',
+            headers: {
+              Location: { description: 'The post-login path with ?sign_in_error=<code>.', schema: { type: 'string' } },
+            },
+          },
+        },
       },
     },
     '/api/health/live': {
@@ -239,6 +291,8 @@ export const openApiDocument = {
       get: {
         tags: ['Archive'],
         summary: 'Read published archive geometry',
+        description: notImplemented,
+        'x-implemented': false,
         parameters: [...orgRunParameters, parameterRef('ArchiveMode')],
         responses: {
           '200': jsonResponse('GeoJSON Feature with published geometry metadata.', 'ArchiveTrackResponse'),
@@ -250,6 +304,8 @@ export const openApiDocument = {
       get: {
         tags: ['Archive'],
         summary: 'List visible archive runs intersecting a WGS84 bbox',
+        description: notImplemented,
+        'x-implemented': false,
         parameters: [
           parameterRef('OrgId'),
           parameterRef('Bbox'),
@@ -265,6 +321,8 @@ export const openApiDocument = {
       get: {
         tags: ['Live reads'],
         summary: 'Read confirmed fresh nearby run positions',
+        description: notImplemented,
+        'x-implemented': false,
         parameters: [
           parameterRef('OrgId'),
           parameterRef('Longitude'),

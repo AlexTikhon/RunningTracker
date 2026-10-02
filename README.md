@@ -1,6 +1,17 @@
 # Running Tracker
 
-P00–P02 establish a reproducible React/Express 5/PostGIS workspace and the complete database schema/ACL boundary. P03–P08 add the session/API lifecycle, durable runner capture, versioned summaries, revision-fixed live-track reads, authorized SSE/coach recovery, and a verified HTTPS/HTTP/2 transport profile. P09 provides the revisioned archive HTTP boundary, RLS-filtered PostGIS MVT generation, bounded process cache, atomic invalidation, the archive React/Mapbox source lifecycle, and bounded tile generation resources; retention and production identity remain later stages.
+A learning project: record a run in the browser (or from a simulator), let a coach with explicit permission watch it live, and keep an archive of finished runs drawn on a map. A React web app and an Express 5 API sit on PostgreSQL/PostGIS, with row-level security as the tenant and sharing boundary.
+
+What exists, stage by stage (the evidence for each is in [docs/progress.md](docs/progress.md), the design in [docs/SDD.md](docs/SDD.md) and the ADRs in [docs/adr/](docs/adr/)):
+
+- P00–P02: the reproducible workspace and the complete database schema and ACL boundary.
+- P03–P08: the session/API lifecycle, durable runner capture with an offline buffer, versioned summaries, revision-fixed live-track reads, authorized SSE with coach recovery, and a verified HTTPS/HTTP/2 transport profile.
+- P09: the revisioned archive HTTP boundary, RLS-filtered PostGIS vector tiles, a bounded cache with atomic invalidation, and the archive map source lifecycle.
+- P10: raw-point retention, owner and annual run deletion with tombstones, and the off-host deletion journal.
+- P11: metrics and logs, reproducible load datasets, a concurrent load scenario, plan and size measurements, and one confirmed optimization.
+- P12: OpenID Connect sign-in with invite-only identities, a single-host production profile, encrypted backups with an executed restore drill, and recovery of current permissions.
+
+**What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider and no real browser), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. No production RPO or RTO is claimed. Three read endpoints named in the SDD (`/runs/{runId}/track`, `/archive/runs`, `/live/nearby`) were never built. To see it working locally, follow [docs/runbooks/demo.md](docs/runbooks/demo.md).
 
 ## Prerequisites
 
@@ -69,7 +80,7 @@ P05.5 connects device Geolocation and the seeded `normal` simulator through one 
 
 `packages/contracts` is transport-only and has no Express or PostgreSQL dependency. It exports strict Zod schemas and inferred types for session/error responses, runs, commands, shares, points, track pages, archive/nearby reads, and the `live.state` SSE payload. PostgreSQL `bigint` revisions and point sequences cross HTTP as bounded decimal strings; URL numeric query inputs are parsed and range-checked by their query schemas.
 
-The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. P08.1 implements framing, polling, heartbeat, and bounded transport; P08.2 adds open-stream authorization revalidation; P08.3 consumes the strict events in the coach screen; P08.4 binds selected runs to atomic snapshot/change synchronization.
+The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. It documents the browser sign-in routes `GET /api/auth/login` and `GET /api/auth/callback` as redirects (they exist only when OpenID Connect is configured), and flags three operations the SDD specified but no stage built (`/runs/{runId}/track`, `/archive/runs`, `/live/nearby`) with `x-implemented: false`. `apps/api/test/openapi-routes.spec.ts` requests every documented operation from the real app and fails if one is missing or a flagged one has appeared. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. P08.1 implements framing, polling, heartbeat, and bounded transport; P08.2 adds open-stream authorization revalidation; P08.3 consumes the strict events in the coach screen; P08.4 binds selected runs to atomic snapshot/change synchronization.
 
 ## Archive tiles
 
@@ -178,7 +189,7 @@ volume with `npm run transport:down`; `npm run db:down` retains the named volume
 The certificate and private key are generated under gitignored `.local/tls` and
 must never be reused outside local verification. The overlay deliberately uses
 the existing development identity fixture and tracked local database credentials;
-managed certificates, external secrets, and production identity remain P12.
+managed certificates and external secrets are the production profile (P12.2, below) and production sign-in is OpenID Connect (P12.1, below).
 
 ## Deterministic GPS simulator
 
@@ -347,7 +358,7 @@ The P02A runtime matrix is intentionally narrow:
 
 Missing/malformed context, absent membership, and inactive membership expose no rows. Setting these GUCs is not a security boundary against arbitrary SQL run with runtime credentials; the trusted application/session boundary supplies them, while real HTTP authentication remains P03.
 
-P03.1 now resolves that HTTP boundary for local development/test: `userId` is accepted only from a verified server-side session. A route may select `orgId`, but `withAuthenticatedTenantTransaction` validates it, opens `withTenantTransaction` under `running_tracker_runtime`, rechecks active membership inside that same transaction, and runs subsequent SQL on the same client. External production authentication remains P12.
+P03.1 now resolves that HTTP boundary for local development/test: `userId` is accepted only from a verified server-side session. A route may select `orgId`, but `withAuthenticatedTenantTransaction` validates it, opens `withTenantTransaction` under `running_tracker_runtime`, rechecks active membership inside that same transaction, and runs subsequent SQL on the same client. Production authentication is OpenID Connect (P12.1, "Sign-in with OpenID Connect" below); it ends in the same verified server-side session.
 
 ## Configuration
 

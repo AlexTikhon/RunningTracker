@@ -336,6 +336,34 @@ describe('SSE and API specification', () => {
     ).toBe(false);
   });
 
+  it('documents the browser sign-in routes as unauthenticated redirects, not JSON endpoints', () => {
+    const login = openApiDocument.paths['/api/auth/login'];
+    const callback = openApiDocument.paths['/api/auth/callback'];
+    expect(Object.keys(login)).toEqual(['get']);
+    expect(Object.keys(callback)).toEqual(['get']);
+    expect(login.get.security).toEqual([]);
+    expect(callback.get.security).toEqual([]);
+
+    // Login answers a redirect to the provider and never a JSON body on success.
+    expect(Object.keys(login.get.responses)).toEqual(expect.arrayContaining(['302', '503']));
+    expect('content' in login.get.responses['302']).toBe(false);
+    expect(login.get.responses['302'].headers.Location).toBeDefined();
+    expect(login.get.responses['302'].headers['Set-Cookie']).toBeDefined();
+
+    // The callback's success is a 200 page (a redirect would not carry the Strict session cookie),
+    // and every failure is a redirect carrying a closed set of codes, not an error envelope.
+    expect(Object.keys(callback.get.responses)).toEqual(expect.arrayContaining(['200', '302']));
+    expect(Object.keys(callback.get.responses['200'].content)).toEqual(['text/html']);
+    expect(callback.get.responses['302'].description).toContain('sign_in_error');
+    for (const code of ['denied', 'login_expired', 'not_provisioned', 'unavailable']) {
+      expect(callback.get.responses['302'].description).toContain(code);
+    }
+
+    // The routes exist only when OpenID Connect is configured; the document says so.
+    expect(login.get.description).toContain('OIDC');
+    expect(callback.get.description).toContain('OIDC');
+  });
+
   it('publishes a generated OpenAPI 3.1 document for ordinary HTTP only', () => {
     expect(openApiDocument.openapi).toBe('3.1.0');
     expect(openApiDocument.paths['/api/orgs/{orgId}/runs/{runId}']).toBeDefined();

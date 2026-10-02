@@ -35,6 +35,8 @@
     "load:seed": "npm run load:seed --workspace=@running-tracker/api --",
     "simulate:gps": "npm run simulate --workspace=@running-tracker/gps-simulator --",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
+    "demo:seed": "node scripts/demo-seed.mjs",
+    "demo:run": "node scripts/demo-run.mjs",
     "db:up": "docker compose -f infra/compose/docker-compose.yml up -d --wait",
     "db:down": "docker compose -f infra/compose/docker-compose.yml down",
     "db:logs": "docker compose -f infra/compose/docker-compose.yml logs -f postgres",
