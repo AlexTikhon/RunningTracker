@@ -1542,3 +1542,8 @@ What remains unverified or not done:
 - D10 is open; no production RPO or RTO is claimed.
 
 P12.5 is DONE. P12 is DONE as a workstation-verified stage; its production claims remain limited as above. There is no further stage in the plan.
+
+## Browser E2E findings
+
+- The simulator capture source could not run in a real browser. `SimulatorCaptureSource` (`apps/web/src/capture-source.ts`) stored the global `setTimeout` and `clearTimeout` in private fields and called them as `this.#setTimer(...)`, so the native function received the source object as `this` and Chromium threw `TypeError: Illegal invocation`. The Runner showed "Capture stopped: Illegal invocation" and the Capture card went to `error` on the first start with the simulator. The unit tests inject fake timers and never saw it.
+- Found by the first browser scenario, `tests/e2e/record.spec.ts`, and confirmed in isolation in Chromium. Fixed in a separate commit, 1e0e011 (`fix(web): call the default timers without the capture source as receiver`): the defaults are bound to `globalThis`. Its unit test stubs the global timers with receiver-checking functions and fails without the fix. The e2e scenario is the end-to-end regression proof.
