@@ -72,8 +72,19 @@ export class RunnerPage {
     await expect(this.card('Upload').detail).toHaveText('No buffered points', { timeout: uploadTimeoutMs });
   }
 
-  // Reloads the page and waits until this tab owns the writer lease again; the run itself is restored from
-  // the browser's local storage and the server, so the caller asserts on the recording state afterwards.
+  // The number of points the current capture session has taken, from the Capture card ("segment 1 · 6 buffered").
+  // It counts every point of the session, including those already uploaded, and starts again after a reload.
+  async capturedCount(): Promise<number> {
+    const text = (await this.card('Capture').detail.textContent()) ?? '';
+    const match = /· (\d+) buffered$/.exec(text);
+    if (match?.[1] === undefined) {
+      throw new Error(`The Capture card does not show a captured count: "${text}"`);
+    }
+    return Number(match[1]);
+  }
+
+  // Reloads the page and waits until this tab owns the writer lease again. Whether the recording state comes
+  // back is for the caller to assert afterwards; this method only waits for the lease.
   async reload(): Promise<void> {
     await this.page.reload();
     await expect(this.card('Writer').value).toHaveText('owned', { timeout: uploadTimeoutMs });

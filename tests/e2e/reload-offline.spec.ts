@@ -8,8 +8,10 @@ function sortedSeqs(points: ReadonlyArray<{ seq: string }>): bigint[] {
   return points.map((point) => BigInt(point.seq)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
+// Sorted seqs equal to one consecutive range prove both that none repeats and that none is missing in between.
 function expectUniqueAndGapFree(points: ReadonlyArray<{ seq: string }>): void {
   const seqs = sortedSeqs(points);
+  expect(seqs.length).toBeGreaterThan(0);
   const first = seqs[0] ?? 0n;
   expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, index) => first + BigInt(index)));
 }
@@ -20,6 +22,26 @@ async function pointCount(api: AuthedApi, orgId: string, runId: string): Promise
 
 function maxSeq(points: ReadonlyArray<{ seq: string }>): bigint {
   return sortedSeqs(points).at(-1) ?? 0n;
+}
+
+// Drains the buffer, finishes the run and checks the server: finished, at least `minimumCount` points, and every
+// seq unique and gap-free. Returns the points for further checks.
+async function drainFinishAndVerify(
+  runner: RunnerPage,
+  api: AuthedApi,
+  orgId: string,
+  runId: string,
+  minimumCount: number,
+): Promise<Array<{ seq: string }>> {
+  await runner.waitForEmptyBuffer();
+  await runner.finish();
+  await expect(runner.card('Recording').value).toHaveText('finished');
+  expect((await api.getRun(orgId, runId)).status).toBe('finished');
+
+  const points = await api.getAllPoints(orgId, runId);
+  expect(points.length).toBeGreaterThanOrEqual(minimumCount);
+  expectUniqueAndGapFree(points);
+  return points;
 }
 
 // The spec'd behaviour, disabled until the maintainer decides the two findings under "Browser E2E findings" in
@@ -51,18 +73,7 @@ test.fixme('reload (needs lease auto-recovery and a persisted capture source, se
   await expect(runner.card('Writer').value).toHaveText('owned');
 
   await runner.waitForCaptureComplete();
-  await runner.waitForEmptyBuffer();
-
-  await runner.finish();
-  await expect(runner.card('Recording').value).toHaveText('finished');
-
-  const run = await api.getRun(scenario.orgId, runId);
-  expect(run.status).toBe('finished');
-
-  const points = await api.getAllPoints(scenario.orgId, runId);
-  expect(points.length).toBeGreaterThanOrEqual(acknowledgedBeforeReload);
-  expect(new Set(points.map((point) => point.seq)).size).toBe(points.length);
-  expectUniqueAndGapFree(points);
+  await drainFinishAndVerify(runner, api, scenario.orgId, runId, acknowledgedBeforeReload);
 });
 
 test('reload: after re-claiming ownership the run continues without losing or reusing a sequence', async ({
@@ -87,30 +98,30 @@ test('reload: after re-claiming ownership the run continues without losing or re
   await runner.start();
   await expect(runner.card('Recording').value).toHaveText('recording');
 
+  // Let the Simulator finish its capture and drain the buffer before the reload. The old session then cannot add
+  // a point, so the server holds exactly what it captured and every later point must come from the reloaded tab.
   const runId = await runner.runId(api, scenario.orgId);
-  await expect.poll(() => pointCount(api, scenario.orgId, runId), { timeout: 30_000 }).toBeGreaterThanOrEqual(1);
+  await runner.waitForCaptureComplete();
+  await runner.waitForEmptyBuffer();
+  const capturedBeforeReload = await runner.capturedCount();
   const beforeReload = await api.getAllPoints(scenario.orgId, runId);
+  expect(beforeReload).toHaveLength(capturedBeforeReload);
   const maxSeqBeforeReload = maxSeq(beforeReload);
 
   await runner.reloadWithoutOwnership();
   await runner.reclaimOwnership();
   await expect(runner.card('Recording').value).toHaveText('recording');
+  // The reloaded tab is capturing again, from Device GPS.
+  await expect(runner.card('Capture').value).toHaveText('capturing');
 
-  // A point beyond everything acknowledged before the reload: the sequence continued, it was not reused.
+  // A point the old session could not have produced, with a seq above everything from before the reload.
   await expect
     .poll(async () => maxSeq(await api.getAllPoints(scenario.orgId, runId)), { timeout: 30_000 })
     .toBeGreaterThan(maxSeqBeforeReload);
 
-  await runner.waitForEmptyBuffer();
-  await runner.finish();
-  await expect(runner.card('Recording').value).toHaveText('finished');
-  expect((await api.getRun(scenario.orgId, runId)).status).toBe('finished');
-
-  const points = await api.getAllPoints(scenario.orgId, runId);
-  expect(points.length).toBeGreaterThanOrEqual(beforeReload.length);
-  expect(new Set(points.map((point) => point.seq)).size).toBe(points.length);
-  expectUniqueAndGapFree(points);
-  expect(maxSeq(points)).toBeGreaterThan(maxSeqBeforeReload);
+  const points = await drainFinishAndVerify(runner, api, scenario.orgId, runId, beforeReload.length + 1);
+  // Nothing from before the reload was lost or rewritten: the earlier range is intact at the start.
+  expect(sortedSeqs(points).slice(0, beforeReload.length)).toEqual(sortedSeqs(beforeReload));
 });
 
 test('offline: points buffered while offline are delivered exactly once after reconnection', async ({
@@ -151,16 +162,24 @@ test('offline: points buffered while offline are delivered exactly once after re
     await runner.waitForPendingAtLeast(3);
     expect(await pointCount(observerApi, scenario.orgId, runId)).toBe(baseline);
 
+    // The capture finishes while still offline, so the number of points it took is final. The Capture card counts
+    // every point of the session, uploaded or not.
     await runner.waitForCaptureComplete();
+    const captured = await runner.capturedCount();
     expect(await pointCount(observerApi, scenario.orgId, runId)).toBe(baseline);
 
     await context.setOffline(false);
     await runner.waitForEmptyBuffer();
 
+    // Exactly the captured set, once each: a dropped head or tail point changes the count or the ends. The
+    // server numbers a run's points from 1.
     const points = await observerApi.getAllPoints(scenario.orgId, runId);
-    expect(points.length).toBeGreaterThan(baseline);
-    expect(new Set(points.map((point) => point.seq)).size).toBe(points.length);
+    expect(baseline).toBeLessThan(captured);
+    expect(points).toHaveLength(captured);
     expectUniqueAndGapFree(points);
+    const seqs = sortedSeqs(points);
+    expect(seqs[0]).toBe(1n);
+    expect(seqs.at(-1)).toBe(BigInt(captured));
   } finally {
     await observer.close();
   }
