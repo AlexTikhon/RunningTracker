@@ -49,6 +49,10 @@ describe('health endpoints', () => {
         MAINTENANCE_DATABASE_URL:
           'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker',
         LIVE_TRACK_CURSOR_SIGNING_KEY: productionCursorSigningKey,
+        OIDC_CLIENT_ID: 'running-tracker',
+        OIDC_CLIENT_SECRET: 'client-secret-value',
+        OIDC_ISSUER_URL: 'https://idp.example/realm',
+        OIDC_REDIRECT_URI: 'https://tracker.example/api/auth/callback',
       });
       const { connect, pool } = poolWithQuery(vi.fn());
 

@@ -11,6 +11,10 @@ import {
   type ArchiveTilePipeline,
   postgisArchiveTilePipeline,
 } from './archive/archive-service.js';
+import { createDatabaseIdentityResolver } from './auth/identity-resolver.js';
+import { createOidcClient } from './auth/oidc-client.js';
+import { createOidcRouter } from './auth/oidc-http.js';
+import { OidcLoginStore } from './auth/oidc-login-store.js';
 import { SessionManager } from './auth/session-manager.js';
 import { createSessionRouter } from './auth/session-http.js';
 import { InMemorySessionStore } from './auth/session-store.js';
@@ -101,6 +105,23 @@ export function createApp({
   });
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
+  if (config.OIDC) {
+    app.use(
+      '/api/auth',
+      createOidcRouter({
+        client: createOidcClient(config.OIDC, clock),
+        config,
+        logger,
+        loginStore: new OidcLoginStore({
+          clock,
+          maxEntries: config.OIDC.storeMaxEntries,
+          ttlMs: config.OIDC.loginTtlMs,
+        }),
+        resolveIdentity: createDatabaseIdentityResolver(pool as Pick<Pool, 'connect'>),
+        sessionManager: sessions,
+      }),
+    );
+  }
   app.use(
     '/api/orgs/:orgId',
     createArchiveRouter({

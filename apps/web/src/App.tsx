@@ -16,6 +16,7 @@ import {
   uploadPointBatch,
 } from './runner-api.js';
 import { getBrowserRunnerStorage } from './runner-storage.js';
+import { SignInNotice, signInFailureMessage } from './sign-in.js';
 import {
   availableCommands,
   createInitialRunnerState,
@@ -72,6 +73,9 @@ export function App() {
   const [health, setHealth] = useState<HealthState>(initialHealth);
   const [session, setSession] = useState<SessionState>({ status: 'loading' });
   const [orgId, setOrgId] = useState('');
+  const [signInFailure] = useState(() =>
+    typeof window === 'undefined' ? undefined : signInFailureMessage(window.location.search),
+  );
   const [now, setNow] = useState(() => Date.now());
   const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
   const [writer, setWriter] = useState<WriterOwnershipState>({ status: 'unclaimed' });
@@ -107,10 +111,19 @@ export function App() {
     } catch (error) {
       if (!isAbortError(error)) {
         setSession({
-          message: 'Create the development session first, then retry. Production identity arrives in P12.',
+          message: 'A session is required: sign in, or create the local development session.',
           status: 'required',
         });
       }
+    }
+  }, []);
+
+  useEffect(() => {
+    // The failure is shown once; a reload must not repeat it.
+    if (new URLSearchParams(window.location.search).has('sign_in_error')) {
+      const cleaned = new URL(window.location.href);
+      cleaned.searchParams.delete('sign_in_error');
+      window.history.replaceState(null, '', `${cleaned.pathname}${cleaned.search}${cleaned.hash}`);
     }
   }, []);
 
@@ -590,6 +603,8 @@ export function App() {
           <span>Lifecycle requests can be saved locally and retried after reconnection.</span>
         </section>
       )}
+
+      {session.status === 'required' && <SignInNotice failure={signInFailure} />}
 
       {storage.status === 'error' && (
         <section className="notice notice--error" role="alert">

@@ -19,7 +19,7 @@ type AuthenticatedRequest = Request & {
   [sessionTokenKey]?: string;
 };
 
-function parseCookie(header: string | undefined, name: string): string | undefined {
+export function parseCookie(header: string | undefined, name: string): string | undefined {
   if (!header) {
     return undefined;
   }
@@ -31,7 +31,7 @@ function parseCookie(header: string | undefined, name: string): string | undefin
   return values.length === 1 ? values[0] : undefined;
 }
 
-function sessionCookie(token: string, config: Environment): string {
+export function sessionCookie(token: string, config: Environment): string {
   const maxAgeSeconds = Math.max(1, Math.floor(config.SESSION_TTL_MS / 1_000));
   return [
     `${sessionCookieName}=${token}`,

@@ -19,6 +19,13 @@ const validIntegrationEnvironment = {
     'postgresql://running_tracker_owner:owner-secret@localhost/running_tracker_test',
 };
 
+const productionOidcEnvironment = {
+  OIDC_CLIENT_ID: 'running-tracker',
+  OIDC_CLIENT_SECRET: 'client-secret-value',
+  OIDC_ISSUER_URL: 'https://idp.example/realm',
+  OIDC_REDIRECT_URI: 'https://tracker.example/api/auth/callback',
+};
+
 const validApplicationEnvironment = {
   DATABASE_URL:
     'postgresql://running_tracker_runtime:runtime-secret@127.0.0.1:5433/running_tracker',
@@ -108,6 +115,7 @@ describe('validateEnvironment', () => {
   it('requires explicit HTTPS origins in production', () => {
     const production = {
       ...validApplicationEnvironment,
+      ...productionOidcEnvironment,
       APP_ENV: 'production',
       DELETION_JOURNAL_DIR: resolve('/var/lib/running-tracker/deletion-journal'),
       LIVE_TRACK_CURSOR_SIGNING_KEY: Buffer.from(
@@ -155,6 +163,7 @@ describe('validateEnvironment', () => {
     expect(
       validateEnvironment({
         ...validApplicationEnvironment,
+        ...productionOidcEnvironment,
         ALLOWED_ORIGINS: 'https://tracker.example',
         APP_ENV: 'production',
         DELETION_JOURNAL_DIR: resolve('/var/lib/running-tracker/deletion-journal'),

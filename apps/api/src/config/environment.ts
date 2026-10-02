@@ -3,6 +3,12 @@ import { isAbsolute, join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 
+import {
+  buildOidcConfig,
+  checkOidcEnvironment,
+  oidcEnvironmentFields,
+  withoutOidcFields,
+} from './oidc-config.js';
 import { resolveSecretFiles } from './secret-files.js';
 
 const canonicalUuidPattern =
@@ -240,6 +246,7 @@ const environmentSchema = z
       .max(24 * 60 * 60 * 1_000)
       .default(8 * 60 * 60 * 1_000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
+    ...oidcEnvironmentFields,
   })
   .superRefine((environment, context) => {
     let runtime: ParsedDatabaseConnection | undefined;
@@ -350,6 +357,13 @@ const environmentSchema = z
         path: ['ALLOWED_ORIGINS'],
       });
     }
+    checkOidcEnvironment(environment, environment, context);
+  })
+  // The raw OIDC_* variables (including the client secret) are replaced by one structured value.
+  .transform((environment) => {
+    const application = withoutOidcFields(environment);
+    const oidc = buildOidcConfig(environment);
+    return { ...application, ...(oidc ? { OIDC: oidc } : {}) };
   });
 
 export type Environment = z.infer<typeof environmentSchema>;
@@ -417,6 +431,7 @@ const secretFileVariables = [
   'DATABASE_URL',
   'MAINTENANCE_DATABASE_URL',
   'LIVE_TRACK_CURSOR_SIGNING_KEY',
+  'OIDC_CLIENT_SECRET',
 ] as const;
 
 type ParsedIntegrationDatabaseConnection = ParsedDatabaseConnection;
