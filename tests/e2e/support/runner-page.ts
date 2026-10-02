@@ -126,16 +126,19 @@ export class RunnerPage {
       .toBe('owned');
   }
 
-  // A tab that opened while another tab owns the writer lease: the lease is in conflict, the alert says so, and
-  // none of the lifecycle controls is usable (absent or disabled). Used for a tab that must not record.
+  // A tab that opened while another tab owns the writer lease: the lease is in conflict, the alert says so, the
+  // run is restored and its Pause and Finish buttons are shown but disabled. Used for a tab that must not record.
   async expectReadOnly(): Promise<void> {
     await expect(this.card('Writer').value).toHaveText('conflict', { timeout: uploadTimeoutMs });
     await expect(this.page.getByRole('alert').filter({ hasText: 'Another tab may own recording' })).toBeVisible();
+    // The writer claim and the restore of the run are independent async paths, so the lease can read conflict while
+    // the run is not yet rendered. Wait for the restored run (its short id) before judging the controls, which the
+    // markup always renders for a recording run.
+    await expect(this.page.getByText(/^#[0-9a-f]{8}$/)).toBeVisible({ timeout: uploadTimeoutMs });
     for (const name of ['Pause', 'Finish']) {
       const button = this.page.getByRole('button', { exact: true, name });
-      await expect
-        .poll(async () => (await button.count()) === 0 || (await button.isDisabled()), { timeout: uploadTimeoutMs })
-        .toBe(true);
+      await expect(button).toBeVisible();
+      await expect(button).toBeDisabled();
     }
   }
 
