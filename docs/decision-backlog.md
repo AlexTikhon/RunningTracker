@@ -7,7 +7,7 @@ This backlog preserves the mandatory clarifications from the implementation plan
 | D01 | P02B/P04 | Strict six-field `PointInput`; seq normalized to bigint decimal, `-0` to `0`, UTC timestamps to nearest millisecond, canonical field equality for retries; verified through contracts and real PostgreSQL ingestion | RESOLVED — P04.1 |
 | D02 | P02A/P02B | Complete identity/run/share/child direct/JOIN ACL matrix, including commands/tombstones, verified under the real runtime role; guarantee assumes trusted transaction-local tenant/user context and does not prove the P03 HTTP session boundary | RESOLVED |
 | D03a | P03 | Explicit session endpoint, safe local identity allowlist, CSRF/Origin boundary, request identity, and production startup guard | RESOLVED — ADR-0007 |
-| D03b | P12 | Production identity/session provider integration with no local or anonymous fallback | TODO |
+| D03b | P12 | Production identity/session provider integration with no local or anonymous fallback | RESOLVED for the mechanism — ADR-0046: OpenID Connect, invite-only, test provider only; no real provider verified |
 | D04 | P05 | Concrete single-writer lease/ownership mechanism across tabs, devices, and reloads | RESOLVED — ADR-0010: fenced same-origin tab lease; cross-device conflicts use server invariants because offline global exclusivity is impossible |
 | D05 | P05 | Terminal reconciliation for queued offline commands after server auto-finish | RESOLVED — ADR-0009: authoritative run read and atomic stale-command acknowledgement |
 | D06 | P07 | Fixed-T pagination and proof that snapshot plus changes equals a fresh snapshot | RESOLVED — P07.1–P07.5 + ADR-0017–0021 |

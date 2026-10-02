@@ -562,7 +562,7 @@ Locally: Docker Compose, PostgreSQL/PostGIS, Express 5, React, the GPS simulator
 
 Initial limits: a DB pool of 10 connections per backend, at most 2 concurrent tile queries, at most 2 summary jobs. Long-lived SSE connections do not occupy pool slots. Requests and background jobs have timeouts. Limits are refined by measurement, not by user count alone.
 
-Production authentication is wired in during P12 via a verified identity provider; registration/password recovery are not implemented as a custom cryptographic protocol. P03.1 provides only an explicitly enabled development/test identity/session fixture with an opaque token and a bounded process-local store; production startup with it is forbidden, and a restart loses local sessions.
+Production authentication is OpenID Connect (authorization code with PKCE) against a configured provider (P12.1, ADR-0046): identities are invite-only and mapped through `users.external_identity` as `<issuer>|<subject>`, the session record, cookie and CSRF boundary are those of the development fixture, and registration, password handling and account recovery are not implemented in this application. It is verified against a test provider only. P03.1 provides only an explicitly enabled development/test identity/session fixture with an opaque token and a bounded process-local store; production startup with it is forbidden, and a restart loses local sessions.
 
 Graceful shutdown stops accepting new HTTP connections, waits a bounded time for active requests and pool closure, and forcibly closes HTTP connections and exits with an error if the overall deadline is exceeded. After startup, jobs discover unfinished work in the DB.
 

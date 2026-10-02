@@ -49,7 +49,7 @@ The bootstrap flow is:
 3. Send the token in `x-csrf-token` plus the exact configured `Origin` on authenticated mutations.
 4. `GET /api/session` refreshes identity/expiry/CSRF data; `DELETE /api/session` revokes the server record and clears the cookie.
 
-`SESSION_COOKIE_SECURE=false` is an explicit local HTTP exception allowed only in development/test. Deployed HTTPS uses `Secure`. The local store is process-memory-only, bounded by `SESSION_STORE_MAX_ENTRIES`, and loses all sessions on restart; the production identity/provider integration remains P12.
+`SESSION_COOKIE_SECURE=false` is an explicit local HTTP exception allowed only in development/test. Deployed HTTPS uses `Secure`. The local store is process-memory-only, bounded by `SESSION_STORE_MAX_ENTRIES`, and loses all sessions on restart. Production sign-in is OpenID Connect, below.
 
 ## Runner control screen
 
@@ -278,11 +278,27 @@ npm run load:report -- --since <UTC instant> --out <absolute path>   # relative 
 
 The SELECT policies on `runs`, `run_points`, and `run_summaries` no longer call a definer function per row. Migration `0019` adds `app_private.readable_run_keys()` and `app_private.history_readable_run_keys()`, which return the readable `(org_id, run_id)` pairs once per statement; the policies probe that set. The per-row functions remain the specification, and `test/rls-set-policies.integration.test.ts` compares the sets with them for every fixture identity. A caller that reads only a few live rows (the live SSE poll) may declare `visibilityScope: 'live'` on `withTenantTransaction`; it can only narrow the result. The before/after numbers, produced by the same `load:explain`, `load:run`, and `load:report` commands, are in `docs/reports/p11-measurements.md` (before) and `docs/reports/p11-5-measurements-after.md` (after); see ADR-0042. To re-measure, apply the migration to the load database with the existing scripts pointed at it and rerun the commands above.
 
+## Sign-in with OpenID Connect (P12.1)
+
+Production sign-in is the OpenID Connect authorization code flow with PKCE (S256), `state` and `nonce`, through `openid-client`, against any compliant provider you configure. `GET /api/auth/login` sends the browser to the provider; `GET /api/auth/callback` validates the response, finds the person, and creates the same session record, `HttpOnly` cookie, and CSRF token as the development fixture, so `GET`/`DELETE /api/session` and every authorization rule are unchanged. The routes exist only when OIDC is configured; `LOCAL_AUTH_ENABLED` stays forbidden in production, so production has no development login.
+
+| Variable | Meaning |
+|---|---|
+| `OIDC_ISSUER_URL` | The provider's issuer. `https` in production; `http` only for a loopback issuer in development/test |
+| `OIDC_CLIENT_ID` | The client registered for this deployment |
+| `OIDC_CLIENT_SECRET` / `OIDC_CLIENT_SECRET_FILE` | The client secret; production uses the file |
+| `OIDC_REDIRECT_URI` | Exactly `<origin>/api/auth/callback`, on an origin in `ALLOWED_ORIGINS` |
+| `OIDC_SCOPES`, `OIDC_LOGIN_TTL_MS`, `OIDC_POST_LOGIN_PATH`, `OIDC_STORE_MAX_ENTRIES` | Optional: `openid`, 10 minutes, `/`, 100 pending logins |
+
+The first four are all required together, and in production they are required. The service is **invite-only**: a person signs in only if `users.external_identity` already holds `<issuer>|<subject>` (the ID token's `iss` and `sub`); an unknown identity is refused and nothing is created. Registering the client, provisioning and removing people, rotating the secret, and troubleshooting are in [docs/runbooks/identity-provider.md](docs/runbooks/identity-provider.md); the design and its limits are ADR-0046. When sign-in fails the app shows one of four fixed messages (`sign_in_error`).
+
+Tests: the unit suites cover the configuration, the pending-login store and the routes; `npm run test:integration` runs the whole flow against a real in-process OpenID provider (`oidc-provider`, test only) and PostgreSQL, and `npm run deploy:verify` checks the production surface (no development login, a 503 for an unreachable provider, the secret as a file). **This does not establish that sign-in works with any particular real provider, in a real browser, or that provider-side account changes end sessions**: a disabled provider account keeps its application session until it expires (`SESSION_TTL_MS`) or the API restarts, so also deactivate the membership.
+
 ## Deployment profile (P12.2)
 
-`infra/compose/docker-compose.production.yml` is a standalone single-host profile: PostgreSQL/PostGIS on an internal-only network, a one-shot `db-init` job (role bootstrap plus migrations), the API, and an nginx edge with an operator-supplied certificate, HTTP-to-HTTPS redirect, security headers, and the verified SSE policy. Secrets are files, not environment values: `npm run deploy:secrets -- --dir <dir>` generates them, and the API reads `DATABASE_URL_FILE`, `MAINTENANCE_DATABASE_URL_FILE`, and `LIVE_TRACK_CURSOR_SIGNING_KEY_FILE`. Production startup also requires `ALLOWED_ORIGINS` to be non-empty and HTTPS-only.
+`infra/compose/docker-compose.production.yml` is a standalone single-host profile: PostgreSQL/PostGIS on an internal-only network, a one-shot `db-init` job (role bootstrap plus migrations), the API, and an nginx edge with an operator-supplied certificate, HTTP-to-HTTPS redirect, security headers, and the verified SSE policy. Secrets are files, not environment values: `npm run deploy:secrets -- --dir <dir>` generates them, and the API reads `DATABASE_URL_FILE`, `MAINTENANCE_DATABASE_URL_FILE`, `LIVE_TRACK_CURSOR_SIGNING_KEY_FILE`, and `OIDC_CLIENT_SECRET_FILE` (the one secret the provider issues, so `deploy:secrets` does not create it). Production startup also requires `ALLOWED_ORIGINS` to be non-empty and HTTPS-only.
 
-`npm run deploy:verify` builds the images, starts the stack on ports 19080/19443 with throwaway secrets and a self-signed certificate, asserts transport, headers, exposure, resource limits, secret handling, database roles, restart, idempotent re-migration, certificate reload, and credential rotation, then removes everything. It needs Docker and about five minutes. **Production sign-in does not exist until P12.1**, so this profile is deployable and verifiable but not launchable. Setup, update, rotation, and the list of what is not done are in `docs/runbooks/deployment.md`; the design is ADR-0043.
+`npm run deploy:verify` builds the images, starts the stack on ports 19080/19443 with throwaway secrets and a self-signed certificate, asserts transport, headers, exposure, resource limits, secret handling, database roles, restart, idempotent re-migration, certificate reload, and credential rotation, then removes everything. It needs Docker and about five minutes. Sign-in is OpenID Connect (P12.1, below) and was verified only against a test provider, so this profile has not been run against a real identity provider. Setup, update, rotation, and the list of what is not done are in `docs/runbooks/deployment.md`; the design is ADR-0043.
 
 ## Backups and the restore drill (P12.3)
 

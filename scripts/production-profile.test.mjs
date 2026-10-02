@@ -50,6 +50,28 @@ test('P12.2 profile: the API is production-mode, has no dev login, and takes sec
   assert.match(api, /depends_on:\s+db-init:\s+condition: service_completed_successfully/u);
 });
 
+test('P12.1 profile: the API signs people in through OIDC with a file-based client secret', () => {
+  const api = serviceBlock('api');
+  assert.match(api, /OIDC_CLIENT_SECRET_FILE: \/run\/secrets\/oidc_client_secret/u);
+  assert.doesNotMatch(api, /\n {6}OIDC_CLIENT_SECRET:/u, 'the client secret must not be inline');
+  assert.match(api, /OIDC_ISSUER_URL: \$\{OIDC_ISSUER_URL:\?/u, 'the issuer must be required');
+  assert.match(api, /OIDC_CLIENT_ID: \$\{OIDC_CLIENT_ID:\?/u, 'the client id must be required');
+  assert.match(
+    api,
+    /OIDC_REDIRECT_URI: \$\{PUBLIC_ORIGIN:\?[^}]*\}\/api\/auth\/callback/u,
+    'the redirect URI must be the public origin plus the callback route',
+  );
+  assert.match(api, /secrets: \[[^\]]*oidc_client_secret[^\]]*\]/u);
+  assert.match(compose, /\n {2}oidc_client_secret:\n {4}file: \$\{SECRETS_DIR:\?[^}]*\}\/oidc-client-secret/u);
+});
+
+test('P12.1 profile: the example inputs name the provider settings and no secret', () => {
+  const example = read('infra/compose/production.env.example');
+  assert.match(example, /^OIDC_ISSUER_URL=https:\/\//mu);
+  assert.match(example, /^OIDC_CLIENT_ID=\S+/mu);
+  assert.doesNotMatch(example, /^OIDC_CLIENT_SECRET=/mu);
+});
+
 test('P12.2 profile: no credential value is written in the compose file', () => {
   assert.doesNotMatch(compose, /local_only|running_tracker_local|POSTGRES_PASSWORD:\s*\S/u);
   assert.doesNotMatch(compose, /postgres(?:ql)?:\/\/\w+:\w+@/u);

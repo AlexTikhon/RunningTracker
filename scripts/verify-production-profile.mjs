@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { connect as connectHttp2, constants as http2Constants } from 'node:http2';
 import { resolve } from 'node:path';
@@ -39,6 +39,10 @@ const composeEnvironment = {
   HTTPS_PORT: String(httpsPort),
   HTTP_PORT: String(httpPort),
   IMAGE_TAG: 'prodverify',
+  // P12.1: a throwaway client and an issuer nothing listens on. Discovery is lazy, so the API must still
+  // start, and sign-in must then fail closed with 503 instead of the API failing to come up.
+  OIDC_CLIENT_ID: 'running-tracker-verify',
+  OIDC_ISSUER_URL: 'https://127.0.0.1:1',
   POSTGRES_CPUS: '2',
   POSTGRES_MEM_LIMIT: '1536m',
   PROXY_CPUS: '0.5',
@@ -165,6 +169,8 @@ try {
   // The API runs as uid 1000 and must write the journal; on Linux hosts the runbook chowns it.
   if (process.platform !== 'win32') execFileSync('chmod', ['0777', journalDirectory]);
   writeProductionSecrets(secretsDirectory, { randomBytes });
+  // Issued by the identity provider in a real deployment, so it is not part of the generated set.
+  writeFileSync(resolve(secretsDirectory, 'oidc-client-secret'), randomBytes(32).toString('hex'), { mode: 0o444 });
   generateCertificate();
 
   compose(['up', '-d', '--build', '--wait', '--wait-timeout', '240']);
@@ -298,6 +304,25 @@ try {
   assert.match(metrics, /process_resident_memory_bytes/u);
   const scrape = spawnSync('curl', ['--silent', '--max-time', '2', `http://127.0.0.1:9464/metrics`]);
   assert.notEqual(scrape.status, 0, 'metrics answered on the host');
+
+  // 9b. Sign-in surface (P12.1): OIDC routes exist behind the proxy, there is no development login, and an
+  // unreachable provider fails closed with 503 while the rest of the API stays healthy.
+  const devLogin = await http2Request(
+    '/api/session',
+    { 'content-type': 'application/json', origin },
+    { body: JSON.stringify({ userId: '11111111-1111-4111-8111-111111111111' }), method: 'POST' },
+  );
+  assert.equal(devLogin.status, 404, 'a development login exists in production');
+  const oidcLogin = await http2Request('/api/auth/login');
+  assert.equal(oidcLogin.status, 503, oidcLogin.body);
+  assert.equal(JSON.parse(oidcLogin.body).error.code, 'IDENTITY_PROVIDER_UNAVAILABLE');
+  assert.equal(oidcLogin.headers['cache-control'], 'no-store');
+  assert.equal((await http2Request('/api/session')).status, 401);
+  assert.equal((await http2Request('/api/health/ready')).status, 200);
+  assert.ok(apiEnvironment.includes('OIDC_REDIRECT_URI=' + origin + '/api/auth/callback'));
+  assert.ok(apiEnvironment.some((entry) => entry.startsWith('OIDC_CLIENT_SECRET_FILE=/run/secrets/')));
+  assert.ok(!apiEnvironment.some((entry) => entry.startsWith('OIDC_CLIENT_SECRET=')), 'client secret is an environment value');
+  results.signIn = 'no dev login (404); /api/auth/login answers 503 for an unreachable provider; API stays ready';
 
   // 10. Restart and redeploy behaviour: the API returns, the one-shot job is idempotent.
   compose(['restart', 'api']);

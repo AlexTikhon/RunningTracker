@@ -10,10 +10,10 @@ self-signed certificate, and `npm run deploy:verify` asserted its properties (li
 "Verify a deployment"). It has **not** been run on a real host, behind real DNS, with a real
 certificate authority, or with a production identity provider.
 
-**This deployment cannot sign anyone in.** Local login is forbidden in production and the identity
-provider integration (P12.1) does not exist yet, so the application starts, serves the web app and
-answers health checks, but `POST /api/session` returns 404. Do not publish it as a service until
-P12.1 is done. A backup/restore drill (P12.3) has been performed on a workstation (see
+**Sign-in is OpenID Connect (P12.1, ADR-0046) and has been verified only against a test provider,
+never a real one** (see `docs/runbooks/identity-provider.md`). Local login is forbidden in
+production, so until a client is registered at a provider and people are provisioned, nobody can sign
+in. A backup/restore drill (P12.3) has been performed on a workstation (see
 `docs/runbooks/backup-and-restore.md`), but no backup schedule, off-host storage, or restore has been
 verified on a real host, so no production RPO/RTO is claimed.
 
@@ -32,8 +32,9 @@ verified on a real host, so no production RPO/RTO is claimed.
 ## One-time setup
 
 1. Copy `infra/compose/production.env.example` to a private path and set `PUBLIC_HOSTNAME`,
-   `PUBLIC_ORIGIN` (`https://` plus the name, plus `:port` if not 443), `SECRETS_DIR`, `TLS_DIR`
-   and `DELETION_JOURNAL_HOST_DIR`. The file contains no secrets.
+   `PUBLIC_ORIGIN` (`https://` plus the name, plus `:port` if not 443), `OIDC_ISSUER_URL`,
+   `OIDC_CLIENT_ID`, `SECRETS_DIR`, `TLS_DIR` and `DELETION_JOURNAL_HOST_DIR`. The file contains no
+   secrets.
 2. Generate the secrets:
 
    ```sh
@@ -45,8 +46,12 @@ verified on a real host, so no production RPO/RTO is claimed.
    key. The directory is created `0700` and the files `0444`: containers run as unrelated uids and
    must read a bind-mounted file, so the directory is the access boundary. Keep it out of version
    control, images, and application-host backups. The command refuses to overwrite an existing set.
-3. Put the certificate in `TLS_DIR`.
-4. Make the journal directory writable by uid 1000 (`chown 1000:1000 <dir>`); the API refuses to
+3. Register a client at your identity provider with the redirect URI
+   `<PUBLIC_ORIGIN>/api/auth/callback` and place its secret in `<SECRETS_DIR>/oidc-client-secret`
+   (`docs/runbooks/identity-provider.md`). The provider issues it, so step 2 does not create it, and
+   Compose refuses to start the API without the file.
+4. Put the certificate in `TLS_DIR`.
+5. Make the journal directory writable by uid 1000 (`chown 1000:1000 <dir>`); the API refuses to
    start if it cannot write there.
 
 ## Deploy and update
@@ -60,8 +65,8 @@ updates the four logins and PostGIS, applies pending migrations, exits), then th
 proxy. `db-init` is idempotent, so an update is the same command: it migrates first, then replaces
 the API. It holds the administrator credential; no other service mounts it.
 
-An API restart ends every open live stream and, until P12.1, every session (the store is
-in-memory). Clients reconnect and recover from stored data.
+An API restart ends every open live stream and every session (the store is
+in-memory; people sign in again). Clients reconnect and recover from stored data.
 
 ## Verify a deployment
 
@@ -76,6 +81,8 @@ Against a real host, check the same things by hand:
   limits, dropped capabilities, and a read-only root file system on API and proxy.
 - Secret values do not appear in `docker inspect` output or `docker compose logs`.
 - The three application logins are not superuser, not `BYPASSRLS`, cannot create databases or roles.
+- `POST /api/session` answers 404 (there is no development login) and `GET /api/auth/login` answers 302 to
+  the provider, or 503 `IDENTITY_PROVIDER_UNAVAILABLE` when the provider cannot be reached.
 
 ## Resource limits
 
@@ -150,9 +157,9 @@ current permissions, open) and the local drill are in the same runbook.
 
 | Gap | Owner |
 |---|---|
-| Production sign-in (identity provider, sessions, logout, expiry) | P12.1; needs a provider decision and credentials |
+| Sign-in against a real identity provider (the mechanism is verified against a test provider only, ADR-0046), provider-side logout, a shared session store, provisioning through the application | operator / later |
 | A scheduled daily backup on this host, off-host backup storage, key custody, and a backup-age alert (the commands and a local restore drill exist, P12.3; production RPO/RTO is not established) | operator |
-| Credentials and sessions after a restore (sessions are in process memory; no identity provider exists yet). Revoked shares and deactivated memberships are restored by the access-restriction journal (P12.4, ADR-0045) | P12.1 for sign-in |
+| Sessions after a restore (process memory: everyone signs in again). Revoked shares and deactivated memberships are restored by the access-restriction journal (P12.4, ADR-0045) | none |
 | Full Content-Security-Policy (only `frame-ancestors` is set; a script/style/connect policy must be validated against the Mapbox map in a browser) | before public launch |
 | Request rate limiting at the proxy (no measured per-client traffic model to size it) | before public launch |
 | Encryption of database traffic inside the Docker network (single host; unencrypted by design here) and of the data volume at rest (a host/disk concern) | operator |

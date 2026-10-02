@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-10-01.
+Last updated: 2026-10-02.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -18,7 +18,7 @@ Last updated: 2026-10-01.
 | P09 | DONE | Archive HTTP/RLS, PostGIS MVT, bounded cache/invalidation, React source lifecycle, and bounded tile resource usage verified |
 | P10 | DONE | Bounded raw purge, eligibility, summary serialization, restart-first scheduling, owner/annual deletion with atomic tombstone/archive revision, the tombstone lifetime/late-retry contract with bounded reclamation (D08), and the durable off-host deletion journal with owner-only idempotent reapplication and recovery runbook (P10.5) verified. D09 was PARTIAL here; it is RESOLVED for the mechanism and the local drill after P12.3 and P12.4 |
 | P11 | DONE | P11.1 (in-process metrics with a separate scrape listener and allow-list structured logs, ADR-0038), P11.2 (deterministic ordinary/stress datasets, ADR-0039), P11.3 (deterministic concurrent load scenario over the real HTTP/SSE/PostgreSQL/tile/summary boundaries, ADR-0040), P11.4 (EXPLAIN/BUFFERS/WAL evidence under the real roles, sizes, response bytes, lock-wait samples, a no-tile baseline, and a generated report, ADR-0041), and P11.5 (set-based run visibility policies with a narrowing live scope, migration 0019, ADR-0042, and a before/after report from the same commands) verified. Ingestion p95, fresh-latency p95, and no tile starvation are met under stated rules; summary visibility, LRU footprint, and SSE buffer are not confirmed |
-| P12 | IN PROGRESS | P12.2 (single-host deployment profile) and P12.3 (encrypted backups, retention, and an executed local restore drill with deletion reapplication) are done. P12.1 (production identity provider) is TODO and blocked on an external decision; P12.4 (an access-restriction journal and a drill that proves recovered permissions equal the lost source's) is done and D09 is RESOLVED for the mechanism and the local drill. P12.5 (final documentation/demo) is TODO |
+| P12 | IN PROGRESS | P12.2 (single-host deployment profile) and P12.3 (encrypted backups, retention, and an executed local restore drill with deletion reapplication) are done. P12.1 (OpenID Connect sign-in with invite-only identities and the existing session, ADR-0046, verified against a test provider only) is done; P12.4 (an access-restriction journal and a drill that proves recovered permissions equal the lost source's) is done and D09 is RESOLVED for the mechanism and the local drill. P12.5 (final documentation/demo) is TODO |
 
 ## P00 — verified inputs
 
@@ -1466,3 +1466,42 @@ What remains unverified (also stated in the report):
 - the journal rows written for the cascade removal of a deleted run's shares are noise bounded by shares per run; exporter load was not measured.
 
 P12.1 (blocked on an external identity provider decision) and P12.5 (final documentation/demo) were NOT implemented. D09 is RESOLVED for the mechanism and the local drill; no production RPO or RTO is claimed. P12 stays IN PROGRESS. The next stages are P12.1 (when a provider is chosen) and P12.5.
+
+## P12.1 — OpenID Connect sign-in, invite-only identities, the existing session
+
+The provider decision that blocked this stage was made on 2026-10-02: a generic OpenID Connect provider chosen by configuration, not a specific product. No real provider was available, so everything below was verified against an in-process test provider (`oidc-provider`, a test-only dependency) and the production profile with an unreachable issuer. P12.5 was not started.
+
+Implemented:
+
+- configuration (`oidc-config.ts`, wired into `validateEnvironment`): `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` (file-capable) and `OIDC_REDIRECT_URI` are required together; in production they are required, `https` only, and the redirect must be exactly `<origin>/api/auth/callback` on an origin in `ALLOWED_ORIGINS`; plain `http` only for a loopback issuer outside production. The raw variables are stripped from the configuration object, which exposes one `OIDC` value;
+- `oidc-client.ts`: authorization code, PKCE S256, `state` and `nonce` through `openid-client` 6.8.8, client_secret_basic, lazy cached discovery (so a provider outage never stops startup), fail closed when the provider does not advertise S256, and a split of failures into rejected (validation, OAuth errors) and provider-unavailable (network, timeout, 5xx, non-conforming responses);
+- `oidc-login-store.ts`: a bounded, TTL'd, single-use, digest-keyed in-memory record of pending logins; `oidc-http.ts`: `GET /api/auth/login` and `GET /api/auth/callback` (callback URL rebuilt from configuration, 4,096-character query limit, fixed failure codes, success as a 200 meta-refresh page because the session cookie is `SameSite=Strict`, `no-store` and `no-referrer`, a `Lax` login cookie, outcome-only logs). Mounted only when OIDC is configured; the session manager, cookie, CSRF token and logout are the unchanged ones;
+- migration `0021_login_identity_resolution.sql`: `app_private.resolve_login_user(text)`, read-only `SECURITY DEFINER`, returns only a user id, executable by the runtime role only; `identity-resolver.ts` maps `<issuer>|<subject>` to a provisioned user. Nobody is created by signing in;
+- web: `sign-in.tsx` (a Sign in link as a real navigation, four fixed failure messages, never reflecting URL text), shown when the session is required, and the failure code is removed from the URL after it is read;
+- deployment profile: Compose passes `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` and the derived redirect URI, takes the secret from `<SECRETS_DIR>/oidc-client-secret` (not generated: the provider issues it), structural guards in `production-profile.test.mjs`, and `deploy:verify` asserts the production sign-in surface;
+- ADR-0046, `docs/runbooks/identity-provider.md` (registering the client, provisioning, removing access, troubleshooting), README, `.env.example`, SDD, plan and backlog (D03b).
+
+Verification evidence (final code, repository root, 2026-10-02):
+
+- RED observed first for: the six configuration specs (all failed because `OIDC` did not exist), the login store (module missing), the routes (module missing; after implementation two tests failed only because my test app lacked the request-id and error middleware the real app has, so the harness was fixed), the identity function (module missing), the end-to-end suite (seven route tests returned 404 before the routes were mounted; the two that used the real client directly already passed), the web notice (module missing), and the two compose guards. Two cases were **not** watched failing first: the PKCE-advertisement test was written after the code and instead checked by mutation (disabling the check made it fail; restored), and `oidc-production.spec.ts` passed on its first corrected run;
+- `npm run verify` exits 0: lint, typecheck, `test:migrations` 27 of 27 (two new compose guards), API unit tests 601 in 75 files (27 more than before), web 86 (4 more), contracts 14, fixtures 14, simulator 3, and the production build;
+- `npm run test:integration`: 36 files, 326 tests pass (14 more: 4 for the identity function, 10 for the full flow against a real provider: login, tenant read under row-level security, logout, unprovisioned identity, altered state, no cookie, callback replay, nonce/PKCE/state mismatch rejected by the real client, wrong client secret, a provider without S256, an unreachable provider);
+- `npm run deploy:verify` exits 0 with the new assertions: the API starts and stays ready with an unreachable issuer, `POST /api/session` is 404, `/api/auth/login` answers 503 `IDENTITY_PROVIDER_UNAVAILABLE`, the client secret is a file and appears in neither container configuration nor logs;
+- the runbook's provisioning SQL was executed against the test database inside a rolled-back transaction: the identity resolved to the inserted user and the deactivation was journaled.
+
+Failures and mistakes during development, all fixed:
+
+- one full-suite integration run failed `archive-resource-limits` (`allows normal, empty, and exactly 1 MiB raw MVT buffers`, a 10 s timeout); it passed twice alone and in the next full run. I did not establish why it timed out once and do not claim it is understood;
+- a `.invalid` issuer in the first production test did not fail at once on this machine (name resolution took longer than the 5 s provider timeout), so the test uses a closed loopback port;
+- `oidc-provider` 9 cannot be configured to offer `plain` PKCE, so the PKCE-advertisement test serves a minimal discovery document instead of a real provider;
+- `openid-client`'s declaration file does not compile under this repository's `exactOptionalPropertyTypes`; `apps/api/tsconfig.json` now sets `skipLibCheck: true` for the API package only (the base stays false), which relaxes declaration checking for all of that package's dependencies;
+- a Bash heredoc with an apostrophe failed to parse (the known shell gotcha), I added a duplicate identifier to `verify-production-profile.mjs` (caught by `node --check`; I had started `deploy:verify` in the same batch, so that first run failed immediately and was rerun), lint rejected unbound-method and unused-variable patterns I had written, and two existing tests that build a valid production configuration needed the new required settings.
+
+What remains unverified (also stated in ADR-0046 and the runbook):
+
+- any real identity provider (Keycloak, Google, Auth0 or another), real TLS to a provider, provider key rotation, clock skew, and issuer-spelling differences; a real browser (the `SameSite` and meta-refresh reasoning was not exercised in one); load;
+- a person disabled at the provider keeps an existing application session until `SESSION_TTL_MS` (8 hours by default) or an API restart; deactivating the membership applies at the next request. No provider-side re-validation, no RP-initiated logout, no shared session store;
+- a flood of `GET /api/auth/login` can fill the 100-entry pending store for ten minutes (503 until it drains); request-rate limiting is not built, and the proxy is where it belongs;
+- provisioning people is manual SQL by design for now; the SDD status header was not rewritten (P12.5).
+
+P12.1 is DONE. D03b is RESOLVED for the mechanism, not for any real provider. P12 stays IN PROGRESS. The next stage is P12.5 — update the README, SDD, API specification and progress to match what is implemented, and prepare the final demo.
