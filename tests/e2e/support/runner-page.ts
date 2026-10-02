@@ -69,4 +69,26 @@ export class RunnerPage {
   async waitForEmptyBuffer(): Promise<void> {
     await expect(this.card('Upload').detail).toHaveText('No buffered points', { timeout: uploadTimeoutMs });
   }
+
+  // Reloads the page and waits until this tab owns the writer lease again; the run itself is restored from
+  // the browser's local storage and the server, so the caller asserts on the recording state afterwards.
+  async reload(): Promise<void> {
+    await this.page.reload();
+    await expect(this.card('Writer').value).toHaveText('owned', { timeout: uploadTimeoutMs });
+  }
+
+  // The Upload card reads "N pending" while points wait for delivery; waits until N is at least the bound.
+  async waitForPendingAtLeast(count: number): Promise<void> {
+    const detail = this.card('Upload').detail;
+    await expect
+      .poll(
+        async () => {
+          const text = (await detail.textContent()) ?? '';
+          const match = /^(\d+) pending$/.exec(text);
+          return match?.[1] === undefined ? 0 : Number(match[1]);
+        },
+        { timeout: captureTimeoutMs },
+      )
+      .toBeGreaterThanOrEqual(count);
+  }
 }
