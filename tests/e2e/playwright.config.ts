@@ -18,6 +18,7 @@ const liveTrackCursorSigningKey = 'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktd
 export default defineConfig({
   expect: { timeout: 15_000 },
   fullyParallel: false,
+  globalTeardown: './global-teardown.ts',
   outputDir: 'test-results',
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   reporter: 'list',
