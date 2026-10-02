@@ -66,9 +66,12 @@ A small helper in `tests/e2e/support/` connects as the object owner (`TEST_MIGRA
 the integration fixtures use; it refuses a database whose name does not end in `_test`) and, per test, creates an
 organization with fresh random UUIDs, a runner (active `runner` membership) and a coach (active `coach` membership).
 It deletes its own rows in `afterEach`, in dependency order (commands, points, summaries, shares, runs, tombstones,
-memberships, organizations, users), touching only IDs it created. Because `LOCAL_AUTH_USER_IDS` is read at API
-startup, the runner and coach are **two fixed IDs generated once per suite run and handed to the API process
-through its environment**; organizations and runs stay per-test.
+memberships, organizations), touching only IDs it created. Because `LOCAL_AUTH_USER_IDS` is read at API
+startup, the runner and coach are **two fixed IDs** (`eeeeeeee-eeee-4eee-8eee-eeeeeeee0001` and `...0002`, constants in
+`support/environment.ts`) handed to the API process through its environment; organizations and runs stay per-test.
+They are not generated per run: `playwright.config.ts` is imported again in every Playwright worker, so a random ID
+created there would differ between the API process and the tests. The two users are inserted idempotently
+(`ON CONFLICT DO NOTHING`) and are only removed by the suite's global teardown.
 
 Sign-in: the browser has no development sign-in control. Each browser context signs in with
 `context.request.post('/api/session', { data: { userId }, headers: { origin } })`; the cookie lands in the context's
