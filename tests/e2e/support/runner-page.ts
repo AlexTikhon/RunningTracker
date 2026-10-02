@@ -14,6 +14,8 @@ export interface StateCard {
 // observable page state; nothing sleeps for a fixed time.
 const captureTimeoutMs = 30_000;
 const uploadTimeoutMs = 20_000;
+// The writer lease lasts 15 s and the observed wait after a reload is about 17 s.
+const leaseExpiryTimeoutMs = 30_000;
 
 // Page object for the Runner view. Every locator uses roles, labels or visible text only.
 export class RunnerPage {
@@ -75,6 +77,32 @@ export class RunnerPage {
   async reload(): Promise<void> {
     await this.page.reload();
     await expect(this.card('Writer').value).toHaveText('owned', { timeout: uploadTimeoutMs });
+  }
+
+  // Reloads without waiting for the lease: the reloaded page conflicts with its own unreleased lease until
+  // that lease expires, which the caller then waits out with reclaimOwnership.
+  async reloadWithoutOwnership(): Promise<void> {
+    await this.page.reload();
+    await expect(this.card('Writer').value).toHaveText('conflict', { timeout: uploadTimeoutMs });
+  }
+
+  // Clicks "Retry ownership" until the Writer card shows owned. The previous lease lasts up to 15 s after its
+  // last renewal and nothing in the app retries on its own, so a click made too early only returns to conflict.
+  async reclaimOwnership(): Promise<void> {
+    const retry = this.page.getByRole('button', { name: 'Retry ownership' });
+    await expect
+      .poll(
+        async () => {
+          const state = await this.card('Writer').value.textContent();
+          if (state !== 'owned' && (await retry.isVisible())) {
+            // The notice disappears while a claim is in flight, so a click can lose that race; poll again.
+            await retry.click({ timeout: 2_000 }).catch(() => undefined);
+          }
+          return state;
+        },
+        { intervals: [500, 1_000], timeout: leaseExpiryTimeoutMs },
+      )
+      .toBe('owned');
   }
 
   // The Upload card reads "N pending" while points wait for delivery; waits until N is at least the bound.

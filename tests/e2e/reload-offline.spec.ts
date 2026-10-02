@@ -18,10 +18,16 @@ async function pointCount(api: AuthedApi, orgId: string, runId: string): Promise
   return (await api.getAllPoints(orgId, runId)).length;
 }
 
-// Disabled until the product findings under 'Browser E2E findings' in docs/progress.md are decided: after a reload
-// the writer lease conflicts with the tab's own unreleased lease for about 17 s and the Simulator cannot be
-// selected again, so the expectations below do not hold today. The assertions are the intended behaviour.
-test.fixme('reload: the run and its sequence survive a page reload', async ({
+function maxSeq(points: ReadonlyArray<{ seq: string }>): bigint {
+  return sortedSeqs(points).at(-1) ?? 0n;
+}
+
+// The spec'd behaviour, disabled until the maintainer decides the two findings under "Browser E2E findings" in
+// docs/progress.md. Today a reload leaves the writer lease in conflict with the tab's own unreleased lease for
+// about 17 s with no automatic retry, and the capture source is not persisted, so the Simulator is not restored
+// and cannot be re-selected while recording. The assertions below are the intended behaviour; the passing
+// sibling test after it covers what is true today.
+test.fixme('reload (needs lease auto-recovery and a persisted capture source, see docs/progress.md): the run and its sequence survive a page reload', async ({
   context,
   environment,
   page,
@@ -57,6 +63,54 @@ test.fixme('reload: the run and its sequence survive a page reload', async ({
   expect(points.length).toBeGreaterThanOrEqual(acknowledgedBeforeReload);
   expect(new Set(points.map((point) => point.seq)).size).toBe(points.length);
   expectUniqueAndGapFree(points);
+});
+
+test('reload: after re-claiming ownership the run continues without losing or reusing a sequence', async ({
+  context,
+  environment,
+  page,
+  scenario,
+}) => {
+  // Lease expiry (about 17 s observed) plus a simulated start and a drain do not fit the 60 s default with margin.
+  test.setTimeout(90_000);
+
+  // After a reload the capture source is back to Device GPS and cannot be changed while recording, so give the
+  // browser a fixed position to capture from.
+  await context.grantPermissions(['geolocation']);
+  await context.setGeolocation({ latitude: 10, longitude: 10 });
+  await signIn(context, environment, scenario.runnerUserId);
+  const api = await authedApi(context, environment);
+  const runner = new RunnerPage(page);
+
+  await runner.open(scenario.orgId);
+  await runner.useSimulator();
+  await runner.start();
+  await expect(runner.card('Recording').value).toHaveText('recording');
+
+  const runId = await runner.runId(api, scenario.orgId);
+  await expect.poll(() => pointCount(api, scenario.orgId, runId), { timeout: 30_000 }).toBeGreaterThanOrEqual(1);
+  const beforeReload = await api.getAllPoints(scenario.orgId, runId);
+  const maxSeqBeforeReload = maxSeq(beforeReload);
+
+  await runner.reloadWithoutOwnership();
+  await runner.reclaimOwnership();
+  await expect(runner.card('Recording').value).toHaveText('recording');
+
+  // A point beyond everything acknowledged before the reload: the sequence continued, it was not reused.
+  await expect
+    .poll(async () => maxSeq(await api.getAllPoints(scenario.orgId, runId)), { timeout: 30_000 })
+    .toBeGreaterThan(maxSeqBeforeReload);
+
+  await runner.waitForEmptyBuffer();
+  await runner.finish();
+  await expect(runner.card('Recording').value).toHaveText('finished');
+  expect((await api.getRun(scenario.orgId, runId)).status).toBe('finished');
+
+  const points = await api.getAllPoints(scenario.orgId, runId);
+  expect(points.length).toBeGreaterThanOrEqual(beforeReload.length);
+  expect(new Set(points.map((point) => point.seq)).size).toBe(points.length);
+  expectUniqueAndGapFree(points);
+  expect(maxSeq(points)).toBeGreaterThan(maxSeqBeforeReload);
 });
 
 test('offline: points buffered while offline are delivered exactly once after reconnection', async ({
