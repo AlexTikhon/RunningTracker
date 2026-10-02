@@ -1,20 +1,8 @@
 import { signIn, authedApi } from './support/api.js';
 import type { AuthedApi } from './support/api.js';
 import { expect, test } from './support/fixtures.js';
+import { expectUniqueAndGapFree, sortedSeqs } from './support/points.js';
 import { RunnerPage } from './support/runner-page.js';
-
-// The server returns seq as a decimal string, so compare as bigint after sorting.
-function sortedSeqs(points: ReadonlyArray<{ seq: string }>): bigint[] {
-  return points.map((point) => BigInt(point.seq)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-}
-
-// Sorted seqs equal to one consecutive range prove both that none repeats and that none is missing in between.
-function expectUniqueAndGapFree(points: ReadonlyArray<{ seq: string }>): void {
-  const seqs = sortedSeqs(points);
-  expect(seqs.length).toBeGreaterThan(0);
-  const first = seqs[0] ?? 0n;
-  expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, index) => first + BigInt(index)));
-}
 
 async function pointCount(api: AuthedApi, orgId: string, runId: string): Promise<number> {
   return (await api.getAllPoints(orgId, runId)).length;

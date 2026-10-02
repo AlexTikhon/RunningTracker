@@ -22,9 +22,19 @@ export class RunnerPage {
   constructor(private readonly page: Page) {}
 
   async open(orgId: string): Promise<void> {
+    await this.openRunnerView();
+    await this.page.getByLabel('Organization ID').fill(orgId);
+  }
+
+  // Opens the Runner view of a tab that finds the user's run already active: the run is restored on load, so
+  // there is no Organization ID field to fill.
+  async openRestoredRun(): Promise<void> {
+    await this.openRunnerView();
+  }
+
+  private async openRunnerView(): Promise<void> {
     await this.page.goto('/');
     await this.page.getByRole('navigation', { name: 'Application view' }).getByRole('button', { name: 'Runner' }).click();
-    await this.page.getByLabel('Organization ID').fill(orgId);
   }
 
   async useSimulator(): Promise<void> {
@@ -114,6 +124,19 @@ export class RunnerPage {
         { intervals: [500, 1_000], timeout: leaseExpiryTimeoutMs },
       )
       .toBe('owned');
+  }
+
+  // A tab that opened while another tab owns the writer lease: the lease is in conflict, the alert says so, and
+  // none of the lifecycle controls is usable (absent or disabled). Used for a tab that must not record.
+  async expectReadOnly(): Promise<void> {
+    await expect(this.card('Writer').value).toHaveText('conflict', { timeout: uploadTimeoutMs });
+    await expect(this.page.getByRole('alert').filter({ hasText: 'Another tab may own recording' })).toBeVisible();
+    for (const name of ['Pause', 'Finish']) {
+      const button = this.page.getByRole('button', { exact: true, name });
+      await expect
+        .poll(async () => (await button.count()) === 0 || (await button.isDisabled()), { timeout: uploadTimeoutMs })
+        .toBe(true);
+    }
   }
 
   // The Upload card reads "N pending" while points wait for delivery; waits until N is at least the bound.
