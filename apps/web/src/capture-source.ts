@@ -107,8 +107,9 @@ export class SimulatorCaptureSource implements CaptureSource {
     this.#name = options.name ?? 'normal';
     this.#seed = options.seed ?? 1;
     this.#now = options.now ?? (() => new Date());
-    this.#setTimer = options.setTimer ?? setTimeout;
-    this.#clearTimer = options.clearTimer ?? clearTimeout;
+    // Bound to the global object: a browser rejects the native timers when they run with this source as receiver.
+    this.#setTimer = options.setTimer ?? setTimeout.bind(globalThis);
+    this.#clearTimer = options.clearTimer ?? clearTimeout.bind(globalThis);
     this.label = `Simulator · ${this.#name} · seed ${this.#seed}`;
   }
 
