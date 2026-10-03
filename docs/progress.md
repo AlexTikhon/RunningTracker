@@ -1606,7 +1606,7 @@ The server filters live runs with row-level security inside the query, so mutati
 - Chrome's "Duplicate tab" cannot be driven by Playwright; the test models inherited `sessionStorage` only.
 - A genuine second tab shows Writer `acquiring` for up to 3 s before `conflict`.
 - A tab on an older build holds no lock and is treated as gone by a newer tab; it is fenced at its next renew or append.
-- No real OpenID provider, no real GPS, no Mapbox rendering; the suite is not part of `npm run verify`. A separate `browser` job was added to `.github/workflows/ci.yml` afterwards (own PostGIS service, `npm run build`, `playwright install --with-deps chromium`, `npm run test:e2e`, test-results uploaded on failure). It has never run on a GitHub runner: I could only reproduce its commands locally from a checkout without `dist/` (build, then `smoke` and `record` passed), so CI browser coverage is not claimed.
+- No real OpenID provider, no real GPS, no Mapbox rendering; the suite is not part of `npm run verify`. A separate `browser` job was added to `.github/workflows/ci.yml` afterwards (own PostGIS service, `npm run build`, `playwright install --with-deps chromium`, `npm run test:e2e`, test-results uploaded on failure). When this was written it had never run on a GitHub runner; see "Browser CI on a GitHub-hosted runner (2026-10-03)" below for what happened when it did.
 - The sequence of the Simulator restarts after a reload (a new segment with six more points), by design of the source.
 
 ## D10 — measured GPS tolerances on synthetic worldwide tracks (2026-10-03)
@@ -1623,3 +1623,28 @@ D10 asked for global GPS/simplification fixtures, measured error and documented 
 Verification (2026-10-03, local `running_tracker_test`): the new test passes (8 tests, including guards that the full matrix was measured, so they cannot pass vacuously); lint and the API typecheck are clean. One of my own mistakes was caught by those guards: the speed run first re-measured 3 m/s and duplicated a row. RED-first does not apply to a measurement; the assertions encode the measured limits with margin and are meant to fail when the algorithm version changes them.
 
 What remains open for D10: recorded real-device traces (walking, running, cycling, under trees and between buildings), tunnel and signal-loss patterns, other sampling intervals and device classes, and the decision whether speeds above 12 m/s are supported. D10 is therefore **PARTIAL**, not resolved. Any change to findings 3 and 4 would be a new algorithm version and should wait for real traces.
+
+## Browser CI on a GitHub-hosted runner (2026-10-03)
+
+The `browser` job of `.github/workflows/ci.yml` had only been reproduced locally. This increment ran the workflow on GitHub-hosted runners for the first time and fixed what that exposed. No application code and no GPS algorithm was changed.
+
+**What the history showed before any change.** After PR #1 was merged, `origin/main` held the browser tests but neither the `browser` job nor the reload fix; those commits were only on `feat/browser-e2e`, and a push to that branch starts nothing (the workflow listened to `pull_request` and pushes to `main`). More importantly, 26 of the 30 earlier workflow runs had failed, every one in the `verify` job: 24 at `npm run lint`, one at `npm run typecheck` and one at `npm run test:integration` (the last two were not examined). The only four green runs date from 2026-09-19 to 2026-09-21.
+
+**Finding 1 (class B, build ordering).** Type-aware ESLint resolves `@running-tracker/contracts` and `fixtures` through their built `dist/`, which is not committed. On a clean checkout `npm run lint` reported 1632 unresolved-type errors (reproduced locally after removing only `dist/`, `tsconfig.tsbuildinfo` and `test-results/`, then `npm ci`). `typecheck`, `test` and `build` already build their dependencies through `pre*` hooks; `lint` did not. The earlier green runs predate the `dist`-based packages. Fix: a root `prelint` hook that builds `@running-tracker/fixtures` (which builds `contracts` first). This also repairs `npm run verify` on a fresh clone.
+
+**Finding 2 (workflow trigger).** A branch without an open pull request could not run the workflow at all. Fix: a `workflow_dispatch` trigger. The workflow's jobs, services and steps are unchanged.
+
+**Local check from a clean build state** (Node 24.11.1, npm 11.6.2): `npm ci`, `npm run build` (33 s, the `prebuild` hooks make the order work), `npm run test:e2e` (27 passed, 1.8 min), and, after the `prelint` fix, `npm run verify` from deleted `dist/` (exit 0; 626 API, 111 web, 15 contracts, 14 fixtures and 3 simulator tests, plus the migration tests).
+
+**GitHub Actions** (workflow `CI`, dispatched on `feat/browser-e2e` at `71e6cf5`):
+
+| Run | verify | browser | Browser suite |
+| --- | --- | --- | --- |
+| 37121538709 | passed, 3 min 40 s | passed, 3 min 23 s | 27 passed (1.5 min) |
+| 37121907866 | passed, 3 min 30 s | passed, 3 min 25 s | 27 passed (1.5 min) |
+
+Both runs passed on the first attempt with no retry and no change to a test or timeout. Of the browser job, `npm run build` took about 49 s, installing Chromium with its system packages about 24 s and the suite about 93 s. The `verify` job ran 325 integration tests and skipped 9: the backup/restore file skips itself when its backup variables are not set, as before. These are two runs, not a measure of stability.
+
+**Isolation as it ran.** The two jobs have no `needs` between them and each starts its own PostGIS container, bootstrapped and migrated inside the job, so they never share `running_tracker_test`. All four database variables name that one database (the log mentions no other database name apart from the sentinel `running_tracker_main_must_not_be_used` given to `DATABASE_URL`), and the `_test` guard in `tests/e2e/support/environment.ts` is unchanged. Nothing is committed under `dist/`; the job builds it. Chromium is installed inside the job.
+
+**Not exercised.** The `if: failure()` upload of `tests/e2e/test-results` (traces and failure screenshots, 7 days) was skipped because both runs passed, so it has not been seen working. The suite has no HTML report; the Playwright reporter is `list`.
