@@ -328,7 +328,7 @@ A real Chromium drives the Vite web app against the real API and PostgreSQL/Post
 
 It uses the dedicated `running_tracker_test` database, shared with `npm run test:integration`, so the two must not run at the same time. The guard in `tests/e2e/support/environment.ts` refuses to start unless `TEST_DATABASE_URL`, `TEST_MAINTENANCE_DATABASE_URL` and `TEST_MIGRATION_DATABASE_URL` all name the same database and that name ends in `_test`.
 
-**What it does not establish.** Chromium only: nothing is verified for Safari, Firefox or mobile devices. The Simulator stands in for GPS, so real device location, permission prompts and background behaviour are not covered. Sign-in is the development session, not a real OpenID provider. The archive map needs a public Mapbox token and is not part of this suite. Playwright is not run by CI (`.github/workflows/ci.yml`) and is not part of `npm run verify`; results and mutation checks are in [docs/progress.md](docs/progress.md).
+**What it does not establish.** Chromium only: nothing is verified for Safari, Firefox or mobile devices. The Simulator stands in for GPS, so real device location, permission prompts and background behaviour are not covered. Sign-in is the development session, not a real OpenID provider. The archive map needs a public Mapbox token and is not part of this suite. It is not part of `npm run verify`. `.github/workflows/ci.yml` has a separate `browser` job that runs it, but that job has been written and checked only locally (clean `dist`, same commands), not yet executed on a GitHub runner, so CI browser coverage is not established; results and mutation checks are in [docs/progress.md](docs/progress.md).
 
 ## Verification
 

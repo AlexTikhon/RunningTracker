@@ -1606,5 +1606,5 @@ The server filters live runs with row-level security inside the query, so mutati
 - Chrome's "Duplicate tab" cannot be driven by Playwright; the test models inherited `sessionStorage` only.
 - A genuine second tab shows Writer `acquiring` for up to 3 s before `conflict`.
 - A tab on an older build holds no lock and is treated as gone by a newer tab; it is fenced at its next renew or append.
-- No real OpenID provider, no real GPS, no Mapbox rendering; the suite is not run by CI (`.github/workflows/ci.yml` has no Playwright step) and is not part of `npm run verify`.
+- No real OpenID provider, no real GPS, no Mapbox rendering; the suite is not part of `npm run verify`. A separate `browser` job was added to `.github/workflows/ci.yml` afterwards (own PostGIS service, `npm run build`, `playwright install --with-deps chromium`, `npm run test:e2e`, test-results uploaded on failure). It has never run on a GitHub runner: I could only reproduce its commands locally from a checkout without `dist/` (build, then `smoke` and `record` passed), so CI browser coverage is not claimed.
 - The sequence of the Simulator restarts after a reload (a new segment with six more points), by design of the source.
