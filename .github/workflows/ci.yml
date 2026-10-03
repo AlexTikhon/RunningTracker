@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Lets a branch without an open pull request run the workflow on a GitHub-hosted runner.
+  workflow_dispatch:
 
 jobs:
   verify:
