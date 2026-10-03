@@ -121,6 +121,7 @@ describe('IndexedDbRunnerStorage', () => {
 
     await reopened.acknowledgeStart(userId, startRequest, recordingRun);
     await expect(reopened.loadRecovery(userId)).resolves.toEqual({
+      captureSource: 'geolocation',
       orgId,
       pendingPointCount: 0,
       request: null,
@@ -199,11 +200,123 @@ describe('IndexedDbRunnerStorage', () => {
     await storage.clearActiveRun(userId);
 
     await expect(storage.loadRecovery(userId)).resolves.toEqual({
+      captureSource: 'geolocation',
       orgId: null,
       pendingPointCount: 0,
       request: null,
       run: null,
     });
     await expect(storage.readPointBatch(scope)).resolves.toHaveLength(1);
+  });
+
+  describe('capture source', () => {
+    async function putRawProfile(factory: IDBFactory, databaseName: string, profile: unknown) {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = factory.open(databaseName);
+        request.addEventListener('success', () => resolve(request.result), { once: true });
+        request.addEventListener('error', () => reject(request.error ?? new Error('open failed')), { once: true });
+      });
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction('profiles', 'readwrite');
+        transaction.objectStore('profiles').put(profile);
+        transaction.addEventListener('complete', () => resolve(), { once: true });
+        transaction.addEventListener(
+          'error',
+          () => reject(transaction.error ?? new Error('profile write failed')),
+          { once: true },
+        );
+      });
+      database.close();
+    }
+
+    it('defaults to the device GPS when nothing was ever chosen', async () => {
+      const storage = createStorage(new IDBFactory(), crypto.randomUUID());
+
+      await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ captureSource: 'geolocation' });
+    });
+
+    it('restores the chosen source with the active recording run after the storage is closed and reopened', async () => {
+      const factory = new IDBFactory();
+      const databaseName = crypto.randomUUID();
+      const before = createStorage(factory, databaseName);
+      await before.saveCaptureSource(userId, 'simulator');
+      await before.queueRequest(userId, startRequest, null);
+      await before.acknowledgeStart(userId, startRequest, recordingRun);
+      await before.close();
+
+      const after = createStorage(factory, databaseName);
+      await expect(after.loadRecovery(userId)).resolves.toMatchObject({
+        captureSource: 'simulator',
+        run: { runId, status: 'recording' },
+      });
+    });
+
+    it('keeps the source when later run snapshots rewrite the profile', async () => {
+      const storage = createStorage(new IDBFactory(), crypto.randomUUID());
+      await storage.queueRequest(userId, startRequest, null);
+      await storage.acknowledgeStart(userId, startRequest, recordingRun);
+      await storage.saveCaptureSource(userId, 'simulator');
+
+      await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', status: 'paused' });
+
+      await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
+        captureSource: 'simulator',
+        run: { status: 'paused' },
+      });
+    });
+
+    it('keeps the choice as a preference, with no active run, after a finished run is cleared', async () => {
+      const storage = createStorage(new IDBFactory(), crypto.randomUUID());
+      await storage.saveCaptureSource(userId, 'simulator');
+      await storage.queueRequest(userId, startRequest, null);
+      await storage.acknowledgeStart(userId, startRequest, recordingRun);
+
+      await storage.clearActiveRun(userId);
+
+      await expect(storage.loadRecovery(userId)).resolves.toEqual({
+        captureSource: 'simulator',
+        orgId: null,
+        pendingPointCount: 0,
+        request: null,
+        run: null,
+      });
+    });
+
+    it('treats a profile written before the field existed as the default', async () => {
+      const factory = new IDBFactory();
+      const databaseName = crypto.randomUUID();
+      const storage = createStorage(factory, databaseName);
+      await storage.queueRequest(userId, startRequest, null);
+      await storage.acknowledgeStart(userId, startRequest, recordingRun);
+      await putRawProfile(factory, databaseName, { activeOrgId: orgId, activeRunId: runId, userId });
+
+      await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
+        captureSource: 'geolocation',
+        run: { runId },
+      });
+    });
+
+    it('never lets an unknown stored value reach the caller', async () => {
+      const factory = new IDBFactory();
+      const databaseName = crypto.randomUUID();
+      const storage = createStorage(factory, databaseName);
+      await storage.queueRequest(userId, startRequest, null);
+      await storage.acknowledgeStart(userId, startRequest, recordingRun);
+      await putRawProfile(factory, databaseName, {
+        activeOrgId: orgId,
+        activeRunId: runId,
+        captureSource: 'carrier-pigeon',
+        userId,
+      });
+
+      await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ captureSource: 'geolocation' });
+    });
+
+    it('refuses to store a value that is not a known source', async () => {
+      const storage = createStorage(new IDBFactory(), crypto.randomUUID());
+
+      await expect(storage.saveCaptureSource(userId, 'carrier-pigeon' as never)).rejects.toThrow();
+      await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ captureSource: 'geolocation' });
+    });
   });
 });

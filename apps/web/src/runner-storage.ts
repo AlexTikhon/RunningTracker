@@ -10,6 +10,7 @@ import {
   type RunView,
 } from '@running-tracker/contracts';
 
+import { parseCaptureSourceKind, type CaptureSourceKind } from './capture-source-kind.js';
 import type { CommandRequest, RunnerRequest, StartRequest } from './runner-state.js';
 
 const DATABASE_VERSION = 2;
@@ -33,6 +34,8 @@ interface WriterLeaseRecord extends WriterLease {
 interface ProfileRecord {
   activeOrgId: string | null;
   activeRunId: string | null;
+  // Absent in profiles written before the capture source was persisted; read it only through parseCaptureSourceKind.
+  captureSource?: CaptureSourceKind;
   userId: string;
 }
 
@@ -89,6 +92,7 @@ export type WriterLeaseAcquisition =
   | { acquired: false; lease: WriterLease };
 
 export interface RunnerRecovery {
+  captureSource: CaptureSourceKind;
   orgId: string | null;
   pendingPointCount: number;
   request: RunnerRequest | null;
@@ -149,6 +153,12 @@ function requestIdentity(request: RunnerRequest): string {
 
 function requestStorageKey(userId: string, request: RunnerRequest): string {
   return `${userId}:${requestIdentity(request)}`;
+}
+
+function captureSourceField(profile: ProfileRecord | undefined): Pick<ProfileRecord, 'captureSource'> {
+  return profile?.captureSource === undefined
+    ? {}
+    : { captureSource: parseCaptureSourceKind(profile.captureSource) };
 }
 
 function seqKey(seq: string): string {
@@ -261,10 +271,15 @@ export class IndexedDbRunnerStorage {
     userIdInput: string,
     ownerIdInput: string,
     leaseDurationMsInput: number,
+    // Owners the caller has proven are no longer running (see writer-presence.ts): a live lease held by one of
+    // them is replaced, with a new fencing token, inside the same transaction that checks it. A lease held by
+    // anyone else stays a conflict, so two claimants racing for a dead owner's lease still produce one winner.
+    replaceableOwnerIdsInput: readonly string[] = [],
   ): Promise<WriterLeaseAcquisition> {
     const userId = uuidSchema.parse(userIdInput);
     const ownerId = uuidSchema.parse(ownerIdInput);
     const leaseDurationMs = validateLeaseDuration(leaseDurationMsInput);
+    const replaceableOwnerIds = replaceableOwnerIdsInput.map((id) => uuidSchema.parse(id));
     const now = this.#now();
     const database = await this.#open();
     const transaction = database.transaction(STORES.leases, 'readwrite');
@@ -275,6 +290,7 @@ export class IndexedDbRunnerStorage {
       if (
         existing !== undefined
         && existing.ownerId !== ownerId
+        && !replaceableOwnerIds.includes(existing.ownerId)
         && Date.parse(existing.expiresAt) > now.getTime()
       ) {
         await done;
@@ -722,6 +738,7 @@ export class IndexedDbRunnerStorage {
     }
     await done;
     return {
+      captureSource: parseCaptureSourceKind(profile?.captureSource),
       orgId: request?.orgId ?? profile?.activeOrgId ?? null,
       pendingPointCount,
       request,
@@ -734,9 +751,44 @@ export class IndexedDbRunnerStorage {
     const database = await this.#open();
     const transaction = database.transaction(STORES.profiles, 'readwrite');
     const done = transactionDone(transaction);
-    const profile: ProfileRecord = { activeOrgId: null, activeRunId: null, userId };
-    transaction.objectStore(STORES.profiles).put(profile);
+    const store = transaction.objectStore(STORES.profiles);
+    const existing = (await requestResult(store.get(userId))) as ProfileRecord | undefined;
+    const profile: ProfileRecord = {
+      activeOrgId: null,
+      activeRunId: null,
+      ...captureSourceField(existing),
+      userId,
+    };
+    store.put(profile);
     await done;
+  }
+
+  // The source is a per-user selection that outlives any one run, so it lives in the profile next to the active
+  // run pointer and every rewrite of the profile carries it forward.
+  public async saveCaptureSource(userIdInput: string, captureSource: CaptureSourceKind): Promise<void> {
+    const userId = uuidSchema.parse(userIdInput);
+    if (parseCaptureSourceKind(captureSource) !== captureSource) {
+      throw new Error('Unknown capture source');
+    }
+    const database = await this.#open();
+    const transaction = database.transaction(STORES.profiles, 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      const store = transaction.objectStore(STORES.profiles);
+      const existing = (await requestResult(store.get(userId))) as ProfileRecord | undefined;
+      const profile: ProfileRecord = {
+        activeOrgId: existing?.activeOrgId ?? null,
+        activeRunId: existing?.activeRunId ?? null,
+        captureSource,
+        userId,
+      };
+      store.put(profile);
+      await done;
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   public async close(): Promise<void> {
@@ -768,12 +820,15 @@ export class IndexedDbRunnerStorage {
       userId: scope.userId,
     };
     store.put(record);
+    const profiles = transaction.objectStore(STORES.profiles);
+    const existingProfile = (await requestResult(profiles.get(scope.userId))) as ProfileRecord | undefined;
     const profile: ProfileRecord = {
       activeOrgId: scope.orgId,
       activeRunId: scope.runId,
+      ...captureSourceField(existingProfile),
       userId: scope.userId,
     };
-    transaction.objectStore(STORES.profiles).put(profile);
+    profiles.put(profile);
   }
 
   #open(): Promise<IDBDatabase> {
