@@ -381,6 +381,8 @@ If credentials/a provider/a target environment are unavailable: complete the ind
 
 The stage's outcome is verified deployment readiness. Publication happens only as a separate assignment.
 
+Post-plan note (2026-10-03, not a new stage): after P12 a Playwright/Chromium suite (`tests/e2e`, `npm run test:e2e`) was added to cover the browser scenarios of §7, and it found two reload defects in P05 (a reload conflicting with its own writer lease until expiry; the capture source lost on reload). Both were fixed (ADR-0047, which amends ADR-0010 decision 6) and verified in that suite; D04 stands, with reload recovery now automatic. Details, mutation checks and limits (Chromium only, not run by CI) are in `docs/progress.md`.
+
 ## 6. Required clarifications the agent must close
 
 | ID | Question | Owner | Expected outcome |

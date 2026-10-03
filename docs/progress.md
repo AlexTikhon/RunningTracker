@@ -1545,10 +1545,66 @@ P12.5 is DONE. P12 is DONE as a workstation-verified stage; its production claim
 
 ## Browser E2E findings
 
+> **Update 2026-10-03:** both reload findings below were ruled defects and are fixed; see "Browser reload resilience and E2E completion" at the end of this file. The text below is kept as the record of what was observed before the fix, including the workaround test that has since been deleted.
+
 - The simulator capture source could not run in a real browser. `SimulatorCaptureSource` (`apps/web/src/capture-source.ts`) stored the global `setTimeout` and `clearTimeout` in private fields and called them as `this.#setTimer(...)`, so the native function received the source object as `this` and Chromium threw `TypeError: Illegal invocation`. The Runner showed "Capture stopped: Illegal invocation" and the Capture card went to `error` on the first start with the simulator. The unit tests inject fake timers and never saw it.
 - Found by the first browser scenario, `tests/e2e/record.spec.ts`, and confirmed in isolation in Chromium. Fixed in a separate commit, 1e0e011 (`fix(web): call the default timers without the capture source as receiver`): the defaults are bound to `globalThis`. Its unit test stubs the global timers with receiver-checking functions and fails without the fix. The e2e scenario is the end-to-end regression proof.
-- Reload mid-run (spec scenario 2) shows two web-app behaviours for the maintainer to rule on as defects or accepted limits. Both were measured in Chromium against the real app by `tests/e2e/reload-offline.spec.ts`, with 1 point acknowledged before the reload.
+- Reload mid-run (spec scenario 2) showed two web-app defects (first thought to be for the maintainer to rule on as defects or accepted limits; ruled defects and fixed on 2026-10-03). Both were measured in Chromium against the real app by `tests/e2e/reload-offline.spec.ts`, with 1 point acknowledged before the reload.
   - **The tab conflicts with its own lease after a reload, and nothing retries.** `WriterLeaseCoordinator` (`apps/web/src/writer-lease.ts`) releases its lease only when the React effect is disposed, which a reload does not run. The lease (15 s, renewed every 5 s) stays live in IndexedDB, so the reloaded page shows Writer `conflict` ("Another tab may own recording") and Capture `idle`. Observed: `conflict` from 0.3 s to 16.0 s after the reload, `owned` at about 17.6 s when "Retry ownership" was clicked every 1.5 s. The claim effect reruns only when the run or an error changes, so without a click it stays in `conflict`.
   - **The capture source is not persisted, so the Simulator is not restored.** `captureSourceKind` is React state that starts as `geolocation` (`apps/web/src/App.tsx`), and the "Capture source" select is disabled while the run is `recording`. After a reload and a re-claim the app captures from Device GPS. With no geolocation permission (the default in the e2e browser) the Capture card goes to `error` ("Location permission was denied. Choose the simulator or allow location access.") and no more points arrive. With permission and a fixed position, capture resumes.
   - What holds today: after the re-claim the run is still `recording`, the pre-reload point is kept, new points continue the sequence (seq 1 then 2: no reuse, no gap) and the buffer drains. This is the passing test `reload: after re-claiming ownership the run continues without losing or reusing a sequence` (lets the Simulator finish and the buffer drain, grants geolocation, reloads, waits for the conflict, clicks "Retry ownership" until `owned`, then needs a Device GPS point above the earlier max seq; about 32 s).
-  - The spec'd test `reload (needs lease auto-recovery and a persisted capture source ...)` stays `test.fixme` with its assertions unchanged (Writer `owned` right after the reload, a Simulator run that completes). Once decided: if both are defects, fix the product and remove the `fixme`; if they are accepted limits, rewrite the spec text and delete the `fixme` test, keeping the passing sibling.
+  - The spec'd test `reload (needs lease auto-recovery and a persisted capture source ...)` stays `test.fixme` with its assertions unchanged (Writer `owned` right after the reload, a Simulator run that completes). Decided on 2026-10-03: both are defects. The product was fixed, the `fixme` test is now an ordinary passing test and the passing sibling (the Retry ownership workaround) was deleted.
+
+## Browser reload resilience and E2E completion (2026-10-03)
+
+Both reload findings under "Browser E2E findings" were ruled defects and fixed. The browser suite from the previous plan was also brought to its planned end (mutation checks, README, status of the plan). ADR-0047 records the design.
+
+**The two defects and their root causes**
+
+1. *A reload conflicted with its own lease for about 17 s.* The lease lives in IndexedDB for 15 s after its last renewal and was released only by React cleanup, which a reload never runs. The new page has a new random owner id, so `acquireWriterLease` correctly saw a live lease of "another tab", and nothing retried.
+2. *The Simulator was not restored.* `captureSourceKind` was React state starting at `geolocation`; the select is disabled while recording; the resumed run therefore started Device GPS, which fails without permission.
+
+**Design (details and invariants in ADR-0047)**
+
+- *Writer reload recovery.* Each coordinator holds a Web Lock named after its random owner id for the life of its document (`writer-presence.ts`); the browser drops it when the document is destroyed, with no cleanup involved. A claimant that meets a live lease waits, bounded to 3 s and event-driven (no polling), for that owner's lock. If it frees, `acquireWriterLease(..., [holder])` replaces exactly that owner inside the same IndexedDB transaction with a higher fencing token. Fencing checks in renew, release, segment allocation and point append are unchanged.
+- *Second-tab protection.* A live second tab, or a copy of one, never frees the lock, so it reports `conflict` after the bound and stays read-only. No identity is reused: a per-tab id in `sessionStorage` was rejected because "Duplicate tab" copies `sessionStorage`, which would give two live documents the same owner id and, through the existing same-owner branch, the same fencing token. Without Web Locks the behaviour is the previous one (wait for expiry).
+- *Capture source.* An optional `captureSource` in the existing `profiles` record (no schema bump), preserved by every profile rewrite, validated on read with a Device GPS default for old or invalid records. In `App` the source is `null` until restored and capture requires it, set in the same batch as `storage-restored`, so Device GPS cannot start first.
+
+**Measured:** from the start of a reload to Writer `owned`: 199, 197 and 232 ms (three reloads, one run); before, about 17 s plus a manual click.
+
+**Tests**
+
+- RED observed first. Unit: the new specs failed on missing modules and methods (`capture-source-kind`, `writer-presence`, `saveCaptureSource`, the replaceable-owner argument and the coordinator `presence` option). Browser: the rewritten reload test, run against the original `App.tsx`, `writer-lease.ts` and `runner-storage.ts` (stashed), failed with Writer stuck at `conflict` for the 10 s bound; run with only the source restore neutered, it failed at `expectSimulatorSelected` (select showed `geolocation`).
+- Not red first: the copied-`sessionStorage` second-tab test (the app never used `sessionStorage`, so it passes by construction and is a regression guard), and the upload-failure test (written after mutation A showed the gap; it passed on clean code and failed under the mutation).
+- Unit: web 111 tests (24 new), all passing; `npm run verify` exit 0 (lint, typecheck, `test:migrations` 36, API 626, web 111, contracts 15, fixtures 14, simulator 3, production build); `npm ci --dry-run` exit 0.
+- Browser, Chromium, Node 24.11.1 / npm 11.6.2, dedicated `running_tracker_test` database through the unchanged environment guard: `npm run test:e2e` 27 passed in 1.7 min (about 1 m 45 s wall; the deliberate `test.fail()` in the harness suite is one of the 27). The clean-code result for every file (`record` 1, `reload-offline` 3, `second-tab` 2, `coach-live` 2, `environment`, `harness`, `smoke`) is that one full run; `record`, `reload-offline` and `second-tab` were also run on their own during development, and `coach-live` on its own only under mutation C.
+- Replaced: `test.fixme` reload test is now the ordinary `reload: a recording Simulator run recovers on its own and keeps its sequence` (reload, Writer owned within 10 s, no Retry ownership button, Simulator selected, Device GPS never used (a spy on the Geolocation API over the whole context), capture completes, buffer drains, run finishes, server sequences unique and gap-free and the acknowledged prefix intact). The 90 s workaround test that clicked Retry ownership was deleted; it only documented the defect.
+- Added: `upload failure: points of a failed send are kept and delivered exactly once...` (503 on the points endpoint while the browser is online) and a second-tab variant whose page inherits the first page's `sessionStorage`.
+
+**Mutation checks** (each applied to clean committed code, run, observed, reverted; `git status` clean after each)
+
+| Mutation | Test run | Result |
+|---|---|---|
+| A. `point-upload-worker.ts` acknowledges (deletes) the batch before awaiting `send` | `reload-offline.spec.ts` as it was | **Not detected**: both tests passed. The offline test never fails a send (the uploader stops while the browser is offline). This was a real gap in the previous suite. |
+| A, after adding the upload-failure test | `reload-offline.spec.ts` | Upload-failure test FAILED in `expectUniqueAndGapFree`: server sequences `[1, 4, 5, 6]`, seq 2 and 3 missing. The other two tests still passed. |
+| B. `writer-lease.ts`: a competing claimant is made to succeed | `second-tab.spec.ts` | Both tests FAILED at `expectReadOnly`: Writer expected `conflict`, received `owned`. |
+| C. `live-state.ts`: an org's last non-empty live state is served when the current one is empty (a revoked run stays in the stream) | `coach-live.spec.ts` | Revoke test FAILED at `coach.markers()` `toHaveCount(0)`: 1 marker; the "appears live" test passed. |
+| D (extra). `App.tsx` ignores the stored capture source | reload test | FAILED at `expectSimulatorSelected`: `geolocation`. |
+
+The server filters live runs with row-level security inside the query, so mutation C wraps `readLiveState` instead of changing the SQL.
+
+**Mistakes and deviations**
+
+- My first duplicate-tab test called `runId` before the start was acknowledged and failed; fixed by waiting for `recording`.
+- The first `geolocation-spy` typed its loop generically and failed typecheck and lint; rewritten explicitly with a scoped `unbound-method` exemption.
+- The updated expectations of two existing exact-shape `loadRecovery` assertions (they now include `captureSource`).
+- `docs/superpowers/plans/2026-10-02-browser-e2e.md`: checkboxes were all unchecked although tasks 1 to 6 were committed. They are now reconciled with the commits and the runs above; RED-first steps of tasks 1 to 6 that cannot be evidenced from the repository stay unchecked with a note, not claimed.
+
+**Remaining browser limitations**
+
+- Chromium only. Firefox, WebKit, mobile and device behaviour (background throttling, real GPS and permission prompts) are not verified; Web Lock release timing on navigation was observed only in Chromium, and a back/forward cache is not covered.
+- Chrome's "Duplicate tab" cannot be driven by Playwright; the test models inherited `sessionStorage` only.
+- A genuine second tab shows Writer `acquiring` for up to 3 s before `conflict`.
+- A tab on an older build holds no lock and is treated as gone by a newer tab; it is fenced at its next renew or append.
+- No real OpenID provider, no real GPS, no Mapbox rendering; the suite is not run by CI (`.github/workflows/ci.yml` has no Playwright step) and is not part of `npm run verify`.
+- The sequence of the Simulator restarts after a reload (a new segment with six more points), by design of the source.
