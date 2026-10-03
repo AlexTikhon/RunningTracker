@@ -61,3 +61,61 @@ test('second tab: a competing tab cannot record', async ({ context, environment,
   expect(secondRequests.filter((request) => /\/runs\/[^/]+\/points$/.test(request))).toEqual([]);
   expect(secondRequests.filter((request) => !request.startsWith('GET '))).toEqual([]);
 });
+
+// Chrome's "Duplicate tab" starts the copy with the original's sessionStorage. Playwright cannot press that menu
+// item, so this models its one relevant effect: the second page starts with a copy of the first page's
+// sessionStorage. Writer ownership does not rest on anything a tab can copy (it rests on a lock only the live
+// document holds), so the copy must be as read-only as any other tab. This does not prove the browser feature
+// itself, only that nothing the copy inherits gives it the lease.
+test('second tab: a copy that inherits the first tab session storage still cannot record', async ({
+  context,
+  environment,
+  page,
+  scenario,
+}) => {
+  await signIn(context, environment, scenario.runnerUserId);
+  const api = await authedApi(context, environment);
+  const first = new RunnerPage(page);
+
+  await first.open(scenario.orgId);
+  await first.useSimulator();
+  await first.start();
+  await expect(first.card('Recording').value).toHaveText('recording');
+  await expect(first.card('Writer').value).toHaveText('owned');
+  const runId = await first.runId(api, scenario.orgId);
+  await expect
+    .poll(async () => (await api.getAllPoints(scenario.orgId, runId)).length, { timeout: 30_000 })
+    .toBeGreaterThanOrEqual(1);
+
+  const inherited = await page.evaluate(() => JSON.stringify(Object.entries(sessionStorage)));
+  const copyPage = await context.newPage();
+  await copyPage.addInitScript((entries: string) => {
+    for (const [key, value] of JSON.parse(entries) as Array<[string, string]>) {
+      sessionStorage.setItem(key, value);
+    }
+  }, inherited);
+  const copyRequests: string[] = [];
+  copyPage.on('request', (request) => {
+    copyRequests.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  });
+  const copy = new RunnerPage(copyPage);
+  await copy.openRestoredRun();
+  await copy.expectReadOnly();
+  await expect(copy.card('Capture').value).toHaveText('idle');
+  await expect(first.card('Writer').value).toHaveText('owned');
+
+  await first.waitForCaptureComplete();
+  await first.waitForEmptyBuffer();
+  const captured = await first.capturedCount();
+  await first.finish();
+  await expect(first.card('Recording').value).toHaveText('finished');
+
+  await expect(copy.card('Writer').value).toHaveText('conflict');
+  await expect(copy.card('Capture').value).toHaveText('idle');
+  const points = await api.getAllPoints(scenario.orgId, runId);
+  expect(points).toHaveLength(captured);
+  expectUniqueAndGapFree(points);
+  expect(await api.listRunIds(scenario.orgId)).toEqual([runId]);
+  expect(copyRequests.filter((request) => /\/runs\/[^/]+\/points$/.test(request))).toEqual([]);
+  expect(copyRequests.filter((request) => !request.startsWith('GET '))).toEqual([]);
+});

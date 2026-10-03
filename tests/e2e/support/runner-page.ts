@@ -14,8 +14,9 @@ export interface StateCard {
 // observable page state; nothing sleeps for a fixed time.
 const captureTimeoutMs = 30_000;
 const uploadTimeoutMs = 20_000;
-// The writer lease lasts 15 s and the observed wait after a reload is about 17 s.
-const leaseExpiryTimeoutMs = 30_000;
+// The writer lease lasts 15 s. A reloaded tab must own it again well inside that, so the old lease expiring on its
+// own can never be what satisfies the wait.
+const reloadOwnershipTimeoutMs = 10_000;
 
 // Page object for the Runner view. Every locator uses roles, labels or visible text only.
 export class RunnerPage {
@@ -93,37 +94,22 @@ export class RunnerPage {
     return Number(match[1]);
   }
 
-  // Reloads the page and waits until this tab owns the writer lease again. Whether the recording state comes
-  // back is for the caller to assert afterwards; this method only waits for the lease.
+  // Reloads the page and waits until this tab owns the writer lease again, without any user action and well
+  // before its previous lease could have expired. Whether the recording state comes back is for the caller to
+  // assert afterwards; this method only waits for the lease.
   async reload(): Promise<void> {
     await this.page.reload();
-    await expect(this.card('Writer').value).toHaveText('owned', { timeout: uploadTimeoutMs });
+    await expect(this.card('Writer').value).toHaveText('owned', { timeout: reloadOwnershipTimeoutMs });
   }
 
-  // Reloads without waiting for the lease: the reloaded page conflicts with its own unreleased lease until
-  // that lease expires, which the caller then waits out with reclaimOwnership.
-  async reloadWithoutOwnership(): Promise<void> {
-    await this.page.reload();
-    await expect(this.card('Writer').value).toHaveText('conflict', { timeout: uploadTimeoutMs });
+  // The capture source the select currently shows, which after a reload is the restored choice.
+  async expectSimulatorSelected(): Promise<void> {
+    await expect(this.page.getByLabel('Capture source')).toHaveValue('simulator');
   }
 
-  // Clicks "Retry ownership" until the Writer card shows owned. The previous lease lasts up to 15 s after its
-  // last renewal and nothing in the app retries on its own, so a click made too early only returns to conflict.
-  async reclaimOwnership(): Promise<void> {
-    const retry = this.page.getByRole('button', { name: 'Retry ownership' });
-    await expect
-      .poll(
-        async () => {
-          const state = await this.card('Writer').value.textContent();
-          if (state !== 'owned' && (await retry.isVisible())) {
-            // The notice disappears while a claim is in flight, so a click can lose that race; poll again.
-            await retry.click({ timeout: 2_000 }).catch(() => undefined);
-          }
-          return state;
-        },
-        { intervals: [500, 1_000], timeout: leaseExpiryTimeoutMs },
-      )
-      .toBe('owned');
+  // The read-only notice, with its manual "Retry ownership" button, is not on screen.
+  async expectNoOwnershipRetryOffered(): Promise<void> {
+    await expect(this.page.getByRole('button', { name: 'Retry ownership' })).toHaveCount(0);
   }
 
   // A tab that opened while another tab owns the writer lease: the lease is in conflict, the alert says so, the
