@@ -2,7 +2,24 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import process from 'node:process';
 
+// The OpenID Connect stack: a provider, an API that has only OIDC sign-in (no local session endpoint, like
+// production) and its own Vite server. The provider is on `localhost` and the application on `127.0.0.1`.
+// Those are different sites, so the redirect from the provider back to the application is a cross-site
+// navigation, which is what the Strict session cookie and the meta-refresh page in oidc-http.ts exist for.
+export interface OidcE2eEnvironment {
+  readonly apiOrigin: string;
+  readonly clientId: string;
+  // Fixed, local-only, not valid for any deployment (same idea as the cursor signing key in the config).
+  readonly clientSecret: string;
+  readonly providerOrigin: string;
+  readonly redirectUri: string;
+  // Short on purpose: the expiry scenario waits for it. Every other scenario finishes well inside it.
+  readonly sessionTtlMs: number;
+  readonly webOrigin: string;
+}
+
 export interface E2eEnvironment {
+  readonly oidc: OidcE2eEnvironment;
   readonly apiOrigin: string;
   readonly webOrigin: string;
   readonly runtimeDatabaseUrl: string;
@@ -77,6 +94,15 @@ export function resolveE2eEnvironment(source: Record<string, string | undefined>
     apiOrigin: 'http://127.0.0.1:3100',
     coachUserId,
     maintenanceDatabaseUrl: maintenance.url,
+    oidc: {
+      apiOrigin: 'http://127.0.0.1:3101',
+      clientId: 'running-tracker-e2e',
+      clientSecret: 'e2e-only-oidc-client-secret',
+      providerOrigin: 'http://localhost:9100',
+      redirectUri: 'http://127.0.0.1:5274/api/auth/callback',
+      sessionTtlMs: 20_000,
+      webOrigin: 'http://127.0.0.1:5274',
+    },
     ownerDatabaseUrl: owner.url,
     runnerUserId,
     runtimeDatabaseUrl: runtime.url,
