@@ -134,3 +134,46 @@ test('offline: points buffered while offline are delivered exactly once after re
     await observer.close();
   }
 });
+
+test('upload failure: points of a failed send are kept and delivered exactly once when the server answers again', async ({
+  context,
+  environment,
+  page,
+  scenario,
+}) => {
+  await signIn(context, environment, scenario.runnerUserId);
+  const api = await authedApi(context, environment);
+  const runner = new RunnerPage(page);
+
+  await runner.open(scenario.orgId);
+  await runner.useSimulator();
+  await runner.start();
+  await expect(runner.card('Recording').value).toHaveText('recording');
+
+  const runId = await runner.runId(api, scenario.orgId);
+  await expect.poll(() => pointCount(api, scenario.orgId, runId), { timeout: 30_000 }).toBeGreaterThanOrEqual(1);
+
+  // The browser still reports itself online, so the uploader sends and every send fails: this is the path that
+  // must keep a batch until the server has acknowledged it. (Going offline stops the uploader instead and never
+  // fails a send.) The page's own requests are answered here; the API helper uses the context and is not affected.
+  const pointsEndpoint = /\/runs\/[^/]+\/points$/;
+  let failedSends = 0;
+  await page.route(pointsEndpoint, async (route) => {
+    failedSends += 1;
+    await route.fulfill({ body: '{}', contentType: 'application/json', status: 503 });
+  });
+  await expect(runner.card('Upload').value).toHaveText('retrying');
+  const baseline = await pointCount(api, scenario.orgId, runId);
+  expect(failedSends).toBeGreaterThanOrEqual(1);
+
+  await page.unroute(pointsEndpoint);
+  await runner.waitForCaptureComplete();
+  await runner.waitForEmptyBuffer();
+  const captured = await runner.capturedCount();
+
+  // Exactly the captured set, once each: a batch dropped by a failed send leaves a hole or a short count.
+  const points = await drainFinishAndVerify(runner, api, scenario.orgId, runId, baseline + 1);
+  expect(points).toHaveLength(captured);
+  expect(sortedSeqs(points)[0]).toBe(1n);
+  expect(sortedSeqs(points).at(-1)).toBe(BigInt(captured));
+});
