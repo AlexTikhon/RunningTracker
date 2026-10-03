@@ -1608,3 +1608,18 @@ The server filters live runs with row-level security inside the query, so mutati
 - A tab on an older build holds no lock and is treated as gone by a newer tab; it is fenced at its next renew or append.
 - No real OpenID provider, no real GPS, no Mapbox rendering; the suite is not part of `npm run verify`. A separate `browser` job was added to `.github/workflows/ci.yml` afterwards (own PostGIS service, `npm run build`, `playwright install --with-deps chromium`, `npm run test:e2e`, test-results uploaded on failure). It has never run on a GitHub runner: I could only reproduce its commands locally from a checkout without `dist/` (build, then `smoke` and `record` passed), so CI browser coverage is not claimed.
 - The sequence of the Simulator restarts after a reload (a new segment with six more points), by design of the source.
+
+## D10 — measured GPS tolerances on synthetic worldwide tracks (2026-10-03)
+
+D10 asked for global GPS/simplification fixtures, measured error and documented accuracy limits. This increment measures the real SQL (`evaluate_track_edge`, `simplify_display_geometry`, algorithm `v1`) on **synthetic** runs; it does not touch any algorithm. The full results, the method and the caveats are in `docs/reports/d10-gps-tolerances.md`; the test is `apps/api/test/gps-tolerance.integration.test.ts`.
+
+- Method: a runner on a 150 m loop at 3 m/s, a fix every 2 s, seeded white Gaussian noise of 0, 3, 8, 15, 20 and 25 m, at 11 sites (equator, 70N, 78N, 89.5N, 78S, the prime meridian, two antimeridian crossings and others); two extra speeds (11 and 13 m/s) on a noiseless loop. Noise is white, which is harsher than real correlated error in some respects and blind to drift in others.
+- Result 1: the 5 m display tolerance holds worldwide; the worst distance from a recorded point to the simplified line was 4.998 m, at every latitude and across the antimeridian.
+- Result 2: the display line does not remove noise above that tolerance; against the true loop it is up to about 10 m off at 3 m of noise and 18 to 30 m at 8 m.
+- Result 3: edges fail the 12 m/s rule long before the 30 m accuracy cutoff: 10 to 17% rejected at 8 m of noise (12 m reported), 45 to 62% at 15 m (22.5 m reported), 64 to 80% at 20 m, and everything at 25 m (37.5 m reported, `poor_accuracy`).
+- Result 4: the run distance (a sum of unsimplified accepted edges) is 120 to 134% of the truth at 3 m of white noise and 174 to 202% at 8 m, and falls to 51 to 97% at 20 m because rejected edges count for nothing.
+- Result 5: 11 m/s is accepted and 13 m/s is rejected on every edge.
+
+Verification (2026-10-03, local `running_tracker_test`): the new test passes (8 tests, including guards that the full matrix was measured, so they cannot pass vacuously); lint and the API typecheck are clean. One of my own mistakes was caught by those guards: the speed run first re-measured 3 m/s and duplicated a row. RED-first does not apply to a measurement; the assertions encode the measured limits with margin and are meant to fail when the algorithm version changes them.
+
+What remains open for D10: recorded real-device traces (walking, running, cycling, under trees and between buildings), tunnel and signal-loss patterns, other sampling intervals and device classes, and the decision whether speeds above 12 m/s are supported. D10 is therefore **PARTIAL**, not resolved. Any change to findings 3 and 4 would be a new algorithm version and should wait for real traces.
