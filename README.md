@@ -11,7 +11,7 @@ What exists, stage by stage (the evidence for each is in [docs/progress.md](docs
 - P11: metrics and logs, reproducible load datasets, a concurrent load scenario, plan and size measurements, and one confirmed optimization.
 - P12: OpenID Connect sign-in with invite-only identities, a single-host production profile, encrypted backups with an executed restore drill, and recovery of current permissions.
 
-**What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider and no real browser), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. No production RPO or RTO is claimed. Three read endpoints named in the SDD (`/runs/{runId}/track`, `/archive/runs`, `/live/nearby`) were never built. To see it working locally, follow [docs/runbooks/demo.md](docs/runbooks/demo.md).
+**What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider, and the sign-in flow itself never in a browser; the runner and coach flows were exercised in Chromium only), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. No production RPO or RTO is claimed. Three read endpoints named in the SDD (`/runs/{runId}/track`, `/archive/runs`, `/live/nearby`) were never built. To see it working locally, follow [docs/runbooks/demo.md](docs/runbooks/demo.md).
 
 ## Prerequisites
 
