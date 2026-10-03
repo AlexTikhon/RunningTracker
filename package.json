@@ -11,7 +11,8 @@
   "workspaces": [
     "apps/*",
     "packages/*",
-    "tools/*"
+    "tools/*",
+    "tests/*"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
@@ -21,6 +22,7 @@
     "test": "npm run test:migrations && npm run test --workspaces --if-present",
     "test:migrations": "node --test scripts/*.test.mjs",
     "test:integration": "npm run test:integration --workspace=@running-tracker/api",
+    "test:e2e": "npm run e2e --workspace=@running-tracker/e2e",
     "backup:create": "npm run backup --workspace=@running-tracker/api -- create",
     "backup:verify": "npm run backup --workspace=@running-tracker/api -- verify",
     "backup:decrypt": "npm run backup --workspace=@running-tracker/api -- decrypt",
