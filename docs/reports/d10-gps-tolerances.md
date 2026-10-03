@@ -59,7 +59,7 @@ The test asserts these limits with margin (see `documented limits` in the file),
 
 ## Still open for D10
 
-- Recorded traces from real devices (walking, running, cycling), under trees and between buildings, with their reported accuracy.
+- Recorded traces from real devices (walking, running, cycling), under trees and between buildings, with their reported accuracy. The privacy-safe workflow to sanitize and replay them through the same SQL now exists (`docs/runbooks/gps-traces.md`; results will appear in `docs/reports/d10-real-traces.md`); as of this writing no real trace has been collected, so this item is still open.
 - Tunnel and signal-loss behaviour: gaps longer than 10 s are rejected by rule (`excessive_time_gap`), but no realistic gap pattern was measured.
 - Other device classes: wearables report different accuracy and rate (1 s, 5 s intervals); only a 2 s interval was measured.
 - A decision whether runs faster than 12 m/s are a supported use case.

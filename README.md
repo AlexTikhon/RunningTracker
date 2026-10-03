@@ -204,6 +204,18 @@ npm run simulate:gps -- --list
 
 `dropped-response` marks an upload attempt as `drop-after-commit` and emits an exact retry. The P04.5 API hook is a separately injected test-only dependency: `createApp` rejects it unless `APP_ENV=test`, there is no environment/header/endpoint activation path, and the points route evaluates it only after PostgreSQL confirms `COMMIT` and before sending the HTTP result. The integration proof observes a transport-level `ECONNRESET`, verifies the committed rows and revision through SQL, retries the exact batch, reads raw history, and finishes the run.
 
+## Real GPS traces (D10)
+
+Tooling to replay recorded device traces through the current v1 evaluator without committing anything private. Raw GPX exports stay in `.local/gps-traces/raw/` (gitignored); only sanitized fixtures (relative time and local metric offsets, no coordinates, no dates, no device data) are committed under `apps/api/test/fixtures/gps-traces/`.
+
+```powershell
+npm run gps:sanitize -- .local/gps-traces/raw/<export>.gpx --scenario steady_run --output apps/api/test/fixtures/gps-traces/steady_run_01.trace.json
+npm run gps:analyze -- apps/api/test/fixtures/gps-traces/steady_run_01.trace.json
+npm run gps:report          # all committed fixtures -> docs/reports/d10-real-traces.md (needs the _test database)
+```
+
+Analysis replays the production point contract, insert statement and SQL (`evaluate_track_edge`, `calculate_run_summary`, `simplify_display_geometry`) on the `_test` database inside a rolled-back transaction; it changes no algorithm. Only GPX is read (export FIT to GPX first). The privacy model and its limits (this removes the location and the clock, not the shape of the route), how to record the first traces, and what the numbers can and cannot support are in [docs/runbooks/gps-traces.md](docs/runbooks/gps-traces.md). Status: the tooling exists; **no real-device trace has been analysed yet**, so D10 stays PARTIAL.
+
 ## Summary calculation
 
 `app_private.evaluate_track_edge(...)` is the single versioned PostGIS rule used by summary processing and live-track reads. P06.2 builds on it with the maintenance-only `app_private.calculate_run_summary(...)` capability: points are fixed by `ingested_revision <= sourceRevision`, ordered by bigint `seq`, and reduced to accepted-edge distance/duration, exact `QualityStats`, and unsimplified accepted `MultiLineString` chains. Rejected edges terminate a chain, isolated points never become synthetic lines, and `received_at` does not affect continuity.
