@@ -667,6 +667,6 @@ We do not start with microservices or Redis. The first demonstrable result is a 
 - Exact runtime/PostGIS/Mapbox SDK versions: pin lockfiles/images after a smoke test.
 - The Mapbox and hosting provider and pricing; the budget is a design target for now.
 - Rendering rules for very dense tiles, after measurement.
-- Sign-in against a real identity provider in a real browser (the mechanism is built and verified only against a test provider, ADR-0046), and a recovery process verified on the target environment with real storage and key custody (the mechanism and a workstation drill exist, ADR-0044 and ADR-0045).
+- Sign-in against a real identity provider (the mechanism is built and verified only against a test provider, ADR-0046; since 2026-10-03 also in Chromium against that provider, `tests/e2e/oidc/`), and a recovery process verified on the target environment with real storage and key custody (the mechanism and a workstation drill exist, ADR-0044 and ADR-0045).
 
 These items do not block implementing the vertical scenario, but must not be presented as already-verified properties of the system.
