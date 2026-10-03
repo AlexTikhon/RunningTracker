@@ -1,1 +1,4 @@
 *.sql text eol=lf
+# Sanitized GPS fixtures and the generated D10 trace report are LF on every platform so their hashes are stable.
+apps/api/test/fixtures/gps-traces/*.trace.json text eol=lf
+docs/reports/d10-real-traces.md text eol=lf

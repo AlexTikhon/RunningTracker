@@ -12,3 +12,12 @@ coverage/
 .local/
 test-results/
 playwright-report/
+
+# Raw GPS exports carry location and time and are private (see docs/runbooks/gps-traces.md).
+# Only sanitized *.trace.json fixtures are committed; raw files belong in .local/gps-traces/raw/.
+# Bracket patterns match upper-case extensions on case-sensitive file systems too.
+*.[gG][pP][xX]
+*.[tT][cC][xX]
+*.[fF][iI][tT]
+*.[kK][mM][lL]
+*.[kK][mM][zZ]
