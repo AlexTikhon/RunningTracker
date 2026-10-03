@@ -17,6 +17,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "dev": "concurrently --kill-others-on-fail --names api,web \"npm run dev --workspace=@running-tracker/api\" \"npm run dev --workspace=@running-tracker/web\"",
+    "prelint": "npm run build --workspace=@running-tracker/fixtures",
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test:migrations && npm run test --workspaces --if-present",
@@ -35,6 +36,9 @@
     "load:report": "npm run load:report --workspace=@running-tracker/api --",
     "load:run": "npm run load:run --workspace=@running-tracker/api --",
     "load:seed": "npm run load:seed --workspace=@running-tracker/api --",
+    "gps:analyze": "npm run gps:analyze --workspace=@running-tracker/api --",
+    "gps:report": "npm run gps:report --workspace=@running-tracker/api --",
+    "gps:sanitize": "npm run gps:sanitize --workspace=@running-tracker/api --",
     "simulate:gps": "npm run simulate --workspace=@running-tracker/gps-simulator --",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
     "demo:seed": "node scripts/demo-seed.mjs",

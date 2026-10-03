@@ -8,5 +8,5 @@
     "target": "ES2023",
     "types": ["node"]
   },
-  "include": ["*.ts", "support/**/*.ts"]
+  "include": ["*.ts", "oidc/**/*.ts", "support/**/*.ts"]
 }

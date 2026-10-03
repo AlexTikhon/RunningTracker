@@ -4,6 +4,6 @@
     "rootDir": "src"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.spec.ts"]
+  "exclude": ["src/**/*.spec.ts", "src/gps-traces/test-traces.ts"]
 }
 

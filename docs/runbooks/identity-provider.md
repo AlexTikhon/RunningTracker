@@ -7,7 +7,7 @@ Design: ADR-0046. Related: `docs/runbooks/deployment.md`.
 
 Sign-in is OpenID Connect (authorization code with PKCE) against any compliant provider. It has been verified
 against an in-process test provider and the production profile with an unreachable issuer, **not** against a real
-provider such as Keycloak, Google or Auth0. Expect to find provider-specific details on first contact (claim
+provider such as Keycloak, Google or Auth0. (Chromium has also driven the whole sign-in against the same test provider, with the provider on a different site from the application: `npm run test:e2e`, the `chromium-oidc` project. Other browsers have not.) Expect to find provider-specific details on first contact (claim
 shapes, issuer spelling, secret formats) and treat the first real sign-in as a test.
 
 Nobody can sign in merely by having a provider account: the service is **invite-only**. A person must first be

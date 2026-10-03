@@ -1545,10 +1545,176 @@ P12.5 is DONE. P12 is DONE as a workstation-verified stage; its production claim
 
 ## Browser E2E findings
 
+> **Update 2026-10-03:** both reload findings below were ruled defects and are fixed; see "Browser reload resilience and E2E completion" at the end of this file. The text below is kept as the record of what was observed before the fix, including the workaround test that has since been deleted.
+
 - The simulator capture source could not run in a real browser. `SimulatorCaptureSource` (`apps/web/src/capture-source.ts`) stored the global `setTimeout` and `clearTimeout` in private fields and called them as `this.#setTimer(...)`, so the native function received the source object as `this` and Chromium threw `TypeError: Illegal invocation`. The Runner showed "Capture stopped: Illegal invocation" and the Capture card went to `error` on the first start with the simulator. The unit tests inject fake timers and never saw it.
 - Found by the first browser scenario, `tests/e2e/record.spec.ts`, and confirmed in isolation in Chromium. Fixed in a separate commit, 1e0e011 (`fix(web): call the default timers without the capture source as receiver`): the defaults are bound to `globalThis`. Its unit test stubs the global timers with receiver-checking functions and fails without the fix. The e2e scenario is the end-to-end regression proof.
-- Reload mid-run (spec scenario 2) shows two web-app behaviours for the maintainer to rule on as defects or accepted limits. Both were measured in Chromium against the real app by `tests/e2e/reload-offline.spec.ts`, with 1 point acknowledged before the reload.
+- Reload mid-run (spec scenario 2) showed two web-app defects (first thought to be for the maintainer to rule on as defects or accepted limits; ruled defects and fixed on 2026-10-03). Both were measured in Chromium against the real app by `tests/e2e/reload-offline.spec.ts`, with 1 point acknowledged before the reload.
   - **The tab conflicts with its own lease after a reload, and nothing retries.** `WriterLeaseCoordinator` (`apps/web/src/writer-lease.ts`) releases its lease only when the React effect is disposed, which a reload does not run. The lease (15 s, renewed every 5 s) stays live in IndexedDB, so the reloaded page shows Writer `conflict` ("Another tab may own recording") and Capture `idle`. Observed: `conflict` from 0.3 s to 16.0 s after the reload, `owned` at about 17.6 s when "Retry ownership" was clicked every 1.5 s. The claim effect reruns only when the run or an error changes, so without a click it stays in `conflict`.
   - **The capture source is not persisted, so the Simulator is not restored.** `captureSourceKind` is React state that starts as `geolocation` (`apps/web/src/App.tsx`), and the "Capture source" select is disabled while the run is `recording`. After a reload and a re-claim the app captures from Device GPS. With no geolocation permission (the default in the e2e browser) the Capture card goes to `error` ("Location permission was denied. Choose the simulator or allow location access.") and no more points arrive. With permission and a fixed position, capture resumes.
   - What holds today: after the re-claim the run is still `recording`, the pre-reload point is kept, new points continue the sequence (seq 1 then 2: no reuse, no gap) and the buffer drains. This is the passing test `reload: after re-claiming ownership the run continues without losing or reusing a sequence` (lets the Simulator finish and the buffer drain, grants geolocation, reloads, waits for the conflict, clicks "Retry ownership" until `owned`, then needs a Device GPS point above the earlier max seq; about 32 s).
-  - The spec'd test `reload (needs lease auto-recovery and a persisted capture source ...)` stays `test.fixme` with its assertions unchanged (Writer `owned` right after the reload, a Simulator run that completes). Once decided: if both are defects, fix the product and remove the `fixme`; if they are accepted limits, rewrite the spec text and delete the `fixme` test, keeping the passing sibling.
+  - The spec'd test `reload (needs lease auto-recovery and a persisted capture source ...)` stays `test.fixme` with its assertions unchanged (Writer `owned` right after the reload, a Simulator run that completes). Decided on 2026-10-03: both are defects. The product was fixed, the `fixme` test is now an ordinary passing test and the passing sibling (the Retry ownership workaround) was deleted.
+
+## Browser reload resilience and E2E completion (2026-10-03)
+
+Both reload findings under "Browser E2E findings" were ruled defects and fixed. The browser suite from the previous plan was also brought to its planned end (mutation checks, README, status of the plan). ADR-0047 records the design.
+
+**The two defects and their root causes**
+
+1. *A reload conflicted with its own lease for about 17 s.* The lease lives in IndexedDB for 15 s after its last renewal and was released only by React cleanup, which a reload never runs. The new page has a new random owner id, so `acquireWriterLease` correctly saw a live lease of "another tab", and nothing retried.
+2. *The Simulator was not restored.* `captureSourceKind` was React state starting at `geolocation`; the select is disabled while recording; the resumed run therefore started Device GPS, which fails without permission.
+
+**Design (details and invariants in ADR-0047)**
+
+- *Writer reload recovery.* Each coordinator holds a Web Lock named after its random owner id for the life of its document (`writer-presence.ts`); the browser drops it when the document is destroyed, with no cleanup involved. A claimant that meets a live lease waits, bounded to 3 s and event-driven (no polling), for that owner's lock. If it frees, `acquireWriterLease(..., [holder])` replaces exactly that owner inside the same IndexedDB transaction with a higher fencing token. Fencing checks in renew, release, segment allocation and point append are unchanged.
+- *Second-tab protection.* A live second tab, or a copy of one, never frees the lock, so it reports `conflict` after the bound and stays read-only. No identity is reused: a per-tab id in `sessionStorage` was rejected because "Duplicate tab" copies `sessionStorage`, which would give two live documents the same owner id and, through the existing same-owner branch, the same fencing token. Without Web Locks the behaviour is the previous one (wait for expiry).
+- *Capture source.* An optional `captureSource` in the existing `profiles` record (no schema bump), preserved by every profile rewrite, validated on read with a Device GPS default for old or invalid records. In `App` the source is `null` until restored and capture requires it, set in the same batch as `storage-restored`, so Device GPS cannot start first.
+
+**Measured:** from the start of a reload to Writer `owned`: 199, 197 and 232 ms (three reloads, one run); before, about 17 s plus a manual click.
+
+**Tests**
+
+- RED observed first. Unit: the new specs failed on missing modules and methods (`capture-source-kind`, `writer-presence`, `saveCaptureSource`, the replaceable-owner argument and the coordinator `presence` option). Browser: the rewritten reload test, run against the original `App.tsx`, `writer-lease.ts` and `runner-storage.ts` (stashed), failed with Writer stuck at `conflict` for the 10 s bound; run with only the source restore neutered, it failed at `expectSimulatorSelected` (select showed `geolocation`).
+- Not red first: the copied-`sessionStorage` second-tab test (the app never used `sessionStorage`, so it passes by construction and is a regression guard), and the upload-failure test (written after mutation A showed the gap; it passed on clean code and failed under the mutation).
+- Unit: web 111 tests (24 new), all passing; `npm run verify` exit 0 (lint, typecheck, `test:migrations` 36, API 626, web 111, contracts 15, fixtures 14, simulator 3, production build); `npm ci --dry-run` exit 0.
+- Browser, Chromium, Node 24.11.1 / npm 11.6.2, dedicated `running_tracker_test` database through the unchanged environment guard: `npm run test:e2e` 27 passed in 1.7 min (about 1 m 45 s wall; the deliberate `test.fail()` in the harness suite is one of the 27). The clean-code result for every file (`record` 1, `reload-offline` 3, `second-tab` 2, `coach-live` 2, `environment`, `harness`, `smoke`) is that one full run; `record`, `reload-offline` and `second-tab` were also run on their own during development, and `coach-live` on its own only under mutation C.
+- Replaced: `test.fixme` reload test is now the ordinary `reload: a recording Simulator run recovers on its own and keeps its sequence` (reload, Writer owned within 10 s, no Retry ownership button, Simulator selected, Device GPS never used (a spy on the Geolocation API over the whole context), capture completes, buffer drains, run finishes, server sequences unique and gap-free and the acknowledged prefix intact). The 90 s workaround test that clicked Retry ownership was deleted; it only documented the defect.
+- Added: `upload failure: points of a failed send are kept and delivered exactly once...` (503 on the points endpoint while the browser is online) and a second-tab variant whose page inherits the first page's `sessionStorage`.
+
+**Mutation checks** (each applied to clean committed code, run, observed, reverted; `git status` clean after each)
+
+| Mutation | Test run | Result |
+|---|---|---|
+| A. `point-upload-worker.ts` acknowledges (deletes) the batch before awaiting `send` | `reload-offline.spec.ts` as it was | **Not detected**: both tests passed. The offline test never fails a send (the uploader stops while the browser is offline). This was a real gap in the previous suite. |
+| A, after adding the upload-failure test | `reload-offline.spec.ts` | Upload-failure test FAILED in `expectUniqueAndGapFree`: server sequences `[1, 4, 5, 6]`, seq 2 and 3 missing. The other two tests still passed. |
+| B. `writer-lease.ts`: a competing claimant is made to succeed | `second-tab.spec.ts` | Both tests FAILED at `expectReadOnly`: Writer expected `conflict`, received `owned`. |
+| C. `live-state.ts`: an org's last non-empty live state is served when the current one is empty (a revoked run stays in the stream) | `coach-live.spec.ts` | Revoke test FAILED at `coach.markers()` `toHaveCount(0)`: 1 marker; the "appears live" test passed. |
+| D (extra). `App.tsx` ignores the stored capture source | reload test | FAILED at `expectSimulatorSelected`: `geolocation`. |
+
+The server filters live runs with row-level security inside the query, so mutation C wraps `readLiveState` instead of changing the SQL.
+
+**Mistakes and deviations**
+
+- My first duplicate-tab test called `runId` before the start was acknowledged and failed; fixed by waiting for `recording`.
+- The first `geolocation-spy` typed its loop generically and failed typecheck and lint; rewritten explicitly with a scoped `unbound-method` exemption.
+- The updated expectations of two existing exact-shape `loadRecovery` assertions (they now include `captureSource`).
+- `docs/superpowers/plans/2026-10-02-browser-e2e.md`: checkboxes were all unchecked although tasks 1 to 6 were committed. They are now reconciled with the commits and the runs above; RED-first steps of tasks 1 to 6 that cannot be evidenced from the repository stay unchecked with a note, not claimed.
+
+**Remaining browser limitations**
+
+- Chromium only. Firefox, WebKit, mobile and device behaviour (background throttling, real GPS and permission prompts) are not verified; Web Lock release timing on navigation was observed only in Chromium, and a back/forward cache is not covered.
+- Chrome's "Duplicate tab" cannot be driven by Playwright; the test models inherited `sessionStorage` only.
+- A genuine second tab shows Writer `acquiring` for up to 3 s before `conflict`.
+- A tab on an older build holds no lock and is treated as gone by a newer tab; it is fenced at its next renew or append.
+- No real OpenID provider, no real GPS, no Mapbox rendering; the suite is not part of `npm run verify`. A separate `browser` job was added to `.github/workflows/ci.yml` afterwards (own PostGIS service, `npm run build`, `playwright install --with-deps chromium`, `npm run test:e2e`, test-results uploaded on failure). When this was written it had never run on a GitHub runner; see "Browser CI on a GitHub-hosted runner (2026-10-03)" below for what happened when it did.
+- The sequence of the Simulator restarts after a reload (a new segment with six more points), by design of the source.
+
+## D10 — measured GPS tolerances on synthetic worldwide tracks (2026-10-03)
+
+D10 asked for global GPS/simplification fixtures, measured error and documented accuracy limits. This increment measures the real SQL (`evaluate_track_edge`, `simplify_display_geometry`, algorithm `v1`) on **synthetic** runs; it does not touch any algorithm. The full results, the method and the caveats are in `docs/reports/d10-gps-tolerances.md`; the test is `apps/api/test/gps-tolerance.integration.test.ts`.
+
+- Method: a runner on a 150 m loop at 3 m/s, a fix every 2 s, seeded white Gaussian noise of 0, 3, 8, 15, 20 and 25 m, at 11 sites (equator, 70N, 78N, 89.5N, 78S, the prime meridian, two antimeridian crossings and others); two extra speeds (11 and 13 m/s) on a noiseless loop. Noise is white, which is harsher than real correlated error in some respects and blind to drift in others.
+- Result 1: the 5 m display tolerance holds worldwide; the worst distance from a recorded point to the simplified line was 4.998 m, at every latitude and across the antimeridian.
+- Result 2: the display line does not remove noise above that tolerance; against the true loop it is up to about 10 m off at 3 m of noise and 18 to 30 m at 8 m.
+- Result 3: edges fail the 12 m/s rule long before the 30 m accuracy cutoff: 10 to 17% rejected at 8 m of noise (12 m reported), 45 to 62% at 15 m (22.5 m reported), 64 to 80% at 20 m, and everything at 25 m (37.5 m reported, `poor_accuracy`).
+- Result 4: the run distance (a sum of unsimplified accepted edges) is 120 to 134% of the truth at 3 m of white noise and 174 to 202% at 8 m, and falls to 51 to 97% at 20 m because rejected edges count for nothing.
+- Result 5: 11 m/s is accepted and 13 m/s is rejected on every edge.
+
+Verification (2026-10-03, local `running_tracker_test`): the new test passes (8 tests, including guards that the full matrix was measured, so they cannot pass vacuously); lint and the API typecheck are clean. One of my own mistakes was caught by those guards: the speed run first re-measured 3 m/s and duplicated a row. RED-first does not apply to a measurement; the assertions encode the measured limits with margin and are meant to fail when the algorithm version changes them.
+
+What remains open for D10: recorded real-device traces (walking, running, cycling, under trees and between buildings), tunnel and signal-loss patterns, other sampling intervals and device classes, and the decision whether speeds above 12 m/s are supported. D10 is therefore **PARTIAL**, not resolved. Any change to findings 3 and 4 would be a new algorithm version and should wait for real traces.
+
+## Browser CI on a GitHub-hosted runner (2026-10-03)
+
+The `browser` job of `.github/workflows/ci.yml` had only been reproduced locally. This increment ran the workflow on GitHub-hosted runners for the first time and fixed what that exposed. No application code and no GPS algorithm was changed.
+
+**What the history showed before any change.** After PR #1 was merged, `origin/main` held the browser tests but neither the `browser` job nor the reload fix; those commits were only on `feat/browser-e2e`, and a push to that branch starts nothing (the workflow listened to `pull_request` and pushes to `main`). More importantly, 26 of the 30 earlier workflow runs had failed, every one in the `verify` job: 24 at `npm run lint`, one at `npm run typecheck` and one at `npm run test:integration` (the last two were not examined). The only four green runs date from 2026-09-19 to 2026-09-21.
+
+**Finding 1 (class B, build ordering).** Type-aware ESLint resolves `@running-tracker/contracts` and `fixtures` through their built `dist/`, which is not committed. On a clean checkout `npm run lint` reported 1632 unresolved-type errors (reproduced locally after removing only `dist/`, `tsconfig.tsbuildinfo` and `test-results/`, then `npm ci`). `typecheck`, `test` and `build` already build their dependencies through `pre*` hooks; `lint` did not. The earlier green runs predate the `dist`-based packages. Fix: a root `prelint` hook that builds `@running-tracker/fixtures` (which builds `contracts` first). This also repairs `npm run verify` on a fresh clone.
+
+**Finding 2 (workflow trigger).** A branch without an open pull request could not run the workflow at all. Fix: a `workflow_dispatch` trigger. The workflow's jobs, services and steps are unchanged.
+
+**Local check from a clean build state** (Node 24.11.1, npm 11.6.2): `npm ci`, `npm run build` (33 s, the `prebuild` hooks make the order work), `npm run test:e2e` (27 passed, 1.8 min), and, after the `prelint` fix, `npm run verify` from deleted `dist/` (exit 0; 626 API, 111 web, 15 contracts, 14 fixtures and 3 simulator tests, plus the migration tests).
+
+**GitHub Actions** (workflow `CI`, dispatched on `feat/browser-e2e` at `71e6cf5`):
+
+| Run | verify | browser | Browser suite |
+| --- | --- | --- | --- |
+| 37121538709 | passed, 3 min 40 s | passed, 3 min 23 s | 27 passed (1.5 min) |
+| 37121907866 | passed, 3 min 30 s | passed, 3 min 25 s | 27 passed (1.5 min) |
+
+Both runs passed on the first attempt with no retry and no change to a test or timeout. Of the browser job, `npm run build` took about 49 s, installing Chromium with its system packages about 24 s and the suite about 93 s. The `verify` job ran 325 integration tests and skipped 9: the backup/restore file skips itself when its backup variables are not set, as before. These are two runs, not a measure of stability.
+
+**Isolation as it ran.** The two jobs have no `needs` between them and each starts its own PostGIS container, bootstrapped and migrated inside the job, so they never share `running_tracker_test`. All four database variables name that one database (the log mentions no other database name apart from the sentinel `running_tracker_main_must_not_be_used` given to `DATABASE_URL`), and the `_test` guard in `tests/e2e/support/environment.ts` is unchanged. Nothing is committed under `dist/`; the job builds it. Chromium is installed inside the job.
+
+**Not exercised.** The `if: failure()` upload of `tests/e2e/test-results` (traces and failure screenshots, 7 days) was skipped because both runs passed, so it has not been seen working. The suite has no HTML report; the Playwright reporter is `list`.
+
+## D10 — privacy-safe real GPS trace ingestion, sanitization, replay and report (2026-10-03)
+
+The synthetic D10 measurements left one gap: no real-device trace. This increment builds the workflow that makes real traces usable without committing anything private. It is **tooling only**: no GPS algorithm, no SQL, no migration and no production code path was changed (the speed rule, the accuracy and gap limits, the canonical distance, the 5 m simplification and the `v1` version are exactly as before). The workflow, privacy model and evidence thresholds are in `docs/runbooks/gps-traces.md`; the generated report is `docs/reports/d10-real-traces.md`.
+
+**Real traces: none.** `.local/gps-traces/` did not exist and the project holds no `.gpx`, `.tcx` or `.fit` file anywhere. Nothing was fabricated. Real trace analysis is blocked on collecting and importing device traces; the committed report says so (0 traces analysed). **D10 stays PARTIAL.**
+
+**What was built** (`apps/api/src/gps-traces/`):
+
+- `gpx.ts` and `raw-trace.ts`: a strict GPX reader (one track, one segment, a timezone-qualified `<time>` on every point, optional accuracy from an `accuracy`/`hacc`/`horizontalAccuracy` extension). It rejects DTDs, empty traces, several segments, non-finite or out-of-range coordinates, exactly (0, 0), duplicate or backwards timestamps and mixed accuracy, and it repairs nothing. Error messages name a point number and a field, never a value. No XML dependency was added. FIT, TCX, KML, GeoJSON and CSV are not read: the documented answer is "export to GPX first".
+- `geodesy.ts`, `sanitize.ts`: the first fix becomes the origin; each fix becomes its east/north offset in metres (WGS84 Vincenty inverse, a geodesic azimuthal-equidistant frame, the same family as the production simplifier), rounded to 1 mm; time becomes elapsed milliseconds. Verified against the published Vincenty reference line to a millimetre, and round trips within 0.1 mm at the equator, 78 S and across the antimeridian.
+- `trace-schema.ts`: fixture schema version 1, strict zod objects (an unknown field such as `latitude`, `recordedAt` or `deviceId` is rejected), first point must be the origin at time zero, strictly increasing integer times, at most 10 000 points and 50 km, accuracy on all points or none, unknown schema versions rejected by name. Canonical serialization (fixed key order, one point per line).
+- `replay.ts`: re-anchors a fixture at a fixed synthetic point (50.000 N, 10.000 E) and epoch (2000-01-01 UTC), numbers points from 1, and validates every point with the production `pointInputSchema`. Replay uses an assumed 5 m accuracy when a fixture has none, and the report says so.
+- `analyze.ts`: writes the points with the production `insertPointsSql` in a rolled-back transaction on the `_test` database (the connection comes from `loadIntegrationTestConfiguration`, which refuses any database not ending in `_test`), then reads the production `evaluate_track_edge`, `calculate_run_summary` and `simplify_display_geometry`. The per-edge query only wires `evaluate_track_edge` the way `calculate_run_summary` does; its totals are checked against the production summary's own counters and distance, and a mismatch is printed as `DISAGREES`.
+- `statistics.ts`, `report-render.ts`: source characteristics (points, duration, median and p95 interval, gaps over the evaluator's 10 s, accuracy distribution), edge verdicts with the production rejection reasons, speed distributions, raw polyline distance and canonical accepted distance side by side (neither called ground truth), the display metric of the synthetic D10 test (largest distance from an accepted vertex to the displayed line, against the 5 m tolerance), and descriptive signals (isolated, paired and longer excessive-speed runs; repeated coordinates; a jitter ratio; rejection by worse-endpoint accuracy bucket). The aggregate report pools counts, shows ratios as per-trace ranges and never averages unrelated metrics.
+- CLIs: `npm run gps:sanitize`, `gps:analyze`, `gps:report` (root scripts forward to the API workspace; relative paths resolve from where `npm` was run, through `INIT_CWD`). `gps:sanitize` refuses to overwrite without `--force`, refuses neutral-name violations and the raw directory, and prints only counts and timing. `gps:report --check` and an integration test fail when the committed report is stale.
+
+**Privacy protections.** `.local/` was already ignored; raw GPS extensions (`.gpx`, `.tcx`, `.fit`, `.kml`, `.kmz`, any letter case) are now ignored everywhere, and the fixtures and the report are pinned to LF in `.gitattributes`. A privacy scan on fixture text (fields that identify a location, time, device or person; dates; times of day; 9-digit Unix-like numbers; 4-decimal coordinate-like numbers) runs when the sanitizer writes and when a fixture is loaded. Tests ask git whether raw paths are ignored, that fixture paths are not, and that no raw GPS format and nothing under `.local/` is tracked. The fixture directory may hold only `*.trace.json` and a README. These are removal of the location and the clock, not anonymity: the shape, orientation, stops and pace of the route remain, so a distinctive route could be matched to a street network, and fixtures from one person can be correlated. The runbook says so and asks for recording that starts and stops away from sensitive addresses.
+
+**Verification** (Node 24.11.1, npm 11.6.2, Windows, local `running_tracker_test`):
+
+- New unit tests: 119 in 11 spec files under `src/gps-traces/` (geodesy, schema, GPX, raw-trace validation, sanitizer, replay, statistics, rendering, sanitizer CLI, privacy and gitignore, end-to-end pipeline). New integration tests: 20 (13 replay-through-production-SQL cases with known verdicts for a clean line, a spike pair, a gap, 13 m/s, 11 m/s, poor accuracy, missing accuracy and an end-to-end raw-GPX case; 7 for the analyze and report commands, including "the committed report is current").
+- `npm run verify` exit 0 (API 745 unit tests, up from 626; web 111; contracts 15; fixtures 14; simulator 3; migration tests). `npm run test:integration`: 39 files, 354 tests passed, including the unchanged `gps-tolerance` test.
+- Mutation checks, then restored: coarsening the sanitizer rounding to 5 cm (5 tests failed), shifting the replay clock by 1 ms per point (7 failed), swapping x and y in the geodesy (4 failed).
+- A manual end-to-end run of the real npm commands on an invented raw GPX (placed in the ignored raw directory, deleted afterwards, nothing staged): the sanitizer wrote a fixture with no coordinates, date or name, refused a second write, and `gps:analyze` reported the injected spike pair and the 15 s gap with the per-edge check agreeing with the production summary.
+- Playwright was not run: no browser code, build path or workflow changed, and `verify` does not include it.
+
+**Mistakes of mine caught on the way.** All in tests, none in the tools: a spec expected the wrong p95 of a five-element list, a test helper's default parameter silently replaced `undefined`, a GPX-gap expectation was off by one second, a regex in a privacy test had lost its backslashes to the shell, and two fixtures were written to the same directory as the report. Each was fixed in the test after the failure showed the cause; none changed a production file.
+
+**What this does not establish.** It does not validate v1 on real devices: there is no real trace. It does not measure behaviour at other places on the globe (replay uses one synthetic anchor; the synthetic worldwide test covers that). The thresholds in the runbook are rules of thumb to prompt a closer look, not derived values. Before any statement about algorithm `v2`, the runbook asks for at least 5 traces, 3 scenarios and 2 devices, with the count quoted alongside every number.
+
+**Next:** record 3 to 5 short traces as described in the runbook, sanitize and commit them with `npm run gps:report`, and read the report against the evidence table.
+
+
+## Browser OpenID Connect sign-in suite (2026-10-03)
+
+D10 was not touched (still PARTIAL, algorithm unchanged, zero real traces). After D10 the next unblocked gap, found by reading the code and not only the documents, was that the one sign-in path production has (OpenID Connect, a `SameSite=Strict` session cookie handed over by a 200 meta-refresh page, a `Lax` login cookie) had only ever run through Node `fetch` clients. The existing browser suite signs in with `POST /api/session`, which production does not mount. ADR-0046 and this file both said "a real browser ... was not exercised".
+
+**Added** (test code and test configuration only; no production code changed):
+
+- `tests/e2e/support/oidc-provider-server.ts`: a real `oidc-provider` process (development login and consent pages) on `http://localhost:9100`.
+- `tests/e2e/playwright.config.ts`: a second project, `chromium-oidc`, and three more `webServer` entries: that provider, an API with OpenID Connect and **no local session endpoint** (port 3101, `SESSION_COOKIE_SECURE=true`, `SESSION_TTL_MS=20000`) and a second Vite server (5274). The application is on `127.0.0.1` and the provider on `localhost`: different sites, so the return from the provider is a real cross-site navigation. The original `chromium` project ignores `oidc/`.
+- `tests/e2e/support/oidc.ts`, `support/environment.ts`, `support/database.ts` (`setSuiteUserIdentity`: only the two fixed suite users, only in a `_test` database, restored after each test), `oidc/sign-in.spec.ts` (9 tests), `tsconfig.json` (the new directory is type-checked and linted), `tests/e2e/package.json` (`oidc-provider`, `@types/oidc-provider`, `tsx`, the versions `apps/api` already pins; the lockfile gained four lines).
+
+**What the nine tests assert in Chromium:** an anonymous visitor sees "Sign in required" and `POST /api/session` is 404; a sign-in through the provider ends on `/` with "Session ready", a `HttpOnly` `SameSite=Strict` `Secure` `Path=/` cookie that script cannot read, no login cookie left, a tenant read of the member's organization is 200 and of another organization 403 (row-level security through the browser's own requests), and the exact sequence of top-level navigations with whether each carried the session cookie (`/ false`, `/api/auth/login false`, `/api/auth/callback false`, `/ true`); an identity nobody provisioned gets the fixed message, no cookie, a clean URL, and no repeat after a reload; a replayed callback is a 302 to `login_expired` and leaves the existing session cookie unchanged; a callback opened in another browser context is refused; an altered `state` is refused as `denied` (one `auth.login.failed` event, then a fresh sign-in works); cancelling at the provider is `denied`; a sign-out (`DELETE /api/session`) removes the cookie from the real cookie jar, `GET /api/session` is then 401, a reload shows "Sign in required", and the next sign-in completes with no provider login page (the provider session is not ended: no RP-initiated logout, as documented); after the 20 s session lifetime the server answers 401 even to the old token sent explicitly, and a new sign-in gives a later `expiresAt`.
+
+**Findings** (nothing below was changed in production code):
+
+1. **The meta-refresh page is observable in Chromium, but sign-in does not depend on it.** With the callback temporarily answering a plain 302, sign-in still completed, because the page's later `fetch` calls are same-site. A probe of the navigation requests showed why the design still matters: the document request after a 302 goes out **without** the Strict cookie (`/ false`), and with the 200 page it carries it (`/ true`). So the ADR-0046 reasoning holds in Chromium, but the current single-page app's document load does not need the cookie, so a 302 would not have broken it. The test therefore asserts the navigation sequence, not only "sign-in completed". Firefox and WebKit were not run.
+2. **An open page does not notice that its session expired.** After the lifetime passed (probed with the Coach view open for 36 s) the page still showed "Session ready ... Expires <a time in the past>" and no sign-in prompt, until a reload. Not asserted either way and not fixed: what the page should do is a product decision.
+3. **The web app has no sign-out control.** `DELETE /api/session` exists and works in the browser (above) but nothing in `apps/web` calls it.
+4. Playwright limits found while building the suite (not product defects): `context.cookies(url)` leaves out a Secure cookie for an `http` URL; `context.request` does not send a Secure cookie to an `http` origin although Chromium does for a loopback one (so after sign-in the suite uses requests made by the page itself); `route.continue({ url })` is not applied to a request that is a redirect target (the `state` is altered on the application's own `/api/auth/login` response instead); the provider's login page imports a Google font, which the suite blocks so it does not need the internet.
+
+**Verification evidence** (Node 24.11.1, npm 11.6.2, the real test PostGIS from `.env`):
+
+- `npx playwright test --project=chromium-oidc` twice in a row on the first complete version: 9 passed each time. The navigation-sequence assertion was added afterwards; it was run alone first and then in the full runs below.
+- `npm run test:e2e`: **36 passed** (27 existing, 9 new), 2.6 minutes, twice: once on the working tree and once after the clean reinstall below. The test database held no suite users or suite organizations afterwards.
+- `npm run typecheck --workspace=@running-tracker/e2e` and `npx eslint tests/e2e`: no output. (The first lint run failed because `tsconfig.json` did not include `oidc/`; fixed.)
+- Clean checkout: removed every `dist/`, `tsconfig.tsbuildinfo`, `test-results` and every `node_modules`, then `npm ci` (323 packages added, 0 vulnerabilities: the edited lockfile is consistent) and `npm run verify`: exit 0 (lint, typecheck, scripts 36 of 36, API 745 in 87 files, web 111, contracts 15, fixtures 14, simulator 3, build). `npm run test:integration` and `deploy:verify` were not run: no API, SQL, migration or deployment file changed.
+
+**Mutation checks** (production file changed temporarily, reverted with `git checkout`, `git diff` empty afterwards):
+
+- The callback answers `302 /` instead of the meta-refresh page: the happy-path test failed with exactly `"/ true"` against `"/ false"`.
+- The login cookie made `SameSite=Strict`: 8 failed and 1 passed (the anonymous test, which never signs in), every sign-in ending in `login_expired`.
+
+**Mistakes during the work:** a patch built with a Bash `-e` string and backticks emptied two template literals in the spec (the known shell gotcha; fixed with the editor, and the failing run showed it at once); three first-run failures were test bugs (a missing import, a missing fixture in two tests) and one was the Playwright redirect limit above.
+
+**Not verified:** any real identity provider and real TLS to one; Firefox, WebKit, mobile; the production-built web bundle behind the nginx proxy and its headers (the suite uses the Vite development server); a `Secure` cookie over real HTTPS (it was exercised over `http` on a loopback address, which Chromium accepts); provider-side account changes; and **this suite on a GitHub-hosted runner**: the `browser` job runs `npm run test:e2e` and so picks the new project up, but nothing was pushed, so the new ports (3101, 5274, 9100), the `localhost` fallback between IPv6 and IPv4 and the added 23 s are unproven there.
+
+**Next:** decide what an open page and the sign-out control should do (findings 2 and 3), or run the new project on a hosted runner first.

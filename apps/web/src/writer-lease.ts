@@ -1,7 +1,11 @@
 import type { IndexedDbRunnerStorage, WriterLease } from './runner-storage.js';
+import { browserWriterPresence, type WriterPresence } from './writer-presence.js';
 
 const DEFAULT_LEASE_DURATION_MS = 15_000;
 const DEFAULT_RENEW_INTERVAL_MS = 5_000;
+// How long a claimant that finds a live lease waits for its holder to be proven gone. A reload releases the
+// holder's lock within milliseconds; a genuine second tab never does and reports the conflict after this bound.
+const DEFAULT_TAKEOVER_WAIT_MS = 3_000;
 
 type WriterLeaseStorage = Pick<
   IndexedDbRunnerStorage,
@@ -19,8 +23,10 @@ export interface WriterLeaseCoordinatorOptions {
   leaseDurationMs?: number;
   onState: (state: WriterOwnershipState) => void;
   ownerId?: string;
+  presence?: WriterPresence;
   renewIntervalMs?: number;
   storage: WriterLeaseStorage;
+  takeoverWaitMs?: number;
   userId: string;
 }
 
@@ -32,12 +38,15 @@ export class WriterLeaseCoordinator {
   readonly #leaseDurationMs: number;
   readonly #onState: (state: WriterOwnershipState) => void;
   readonly #ownerId: string;
+  readonly #presence: WriterPresence;
   readonly #renewIntervalMs: number;
   readonly #storage: WriterLeaseStorage;
+  readonly #takeoverWaitMs: number;
   readonly #userId: string;
   #claimPromise: Promise<boolean> | null = null;
   #disposed = false;
   #lease: WriterLease | null = null;
+  #presenceRelease: (() => void) | null = null;
   #timer: ReturnType<typeof setTimeout> | null = null;
 
   public constructor(options: WriterLeaseCoordinatorOptions) {
@@ -53,6 +62,8 @@ export class WriterLeaseCoordinator {
     }
     this.#onState = options.onState;
     this.#ownerId = options.ownerId ?? crypto.randomUUID();
+    this.#presence = options.presence ?? browserWriterPresence();
+    this.#takeoverWaitMs = options.takeoverWaitMs ?? DEFAULT_TAKEOVER_WAIT_MS;
     this.#storage = options.storage;
     this.#userId = options.userId;
   }
@@ -132,19 +143,39 @@ export class WriterLeaseCoordinator {
     this.#clearTimer();
     const lease = this.#lease;
     this.#lease = null;
-    if (lease !== null) {
-      await this.#storage.releaseWriterLease(lease);
+    try {
+      if (lease !== null) {
+        await this.#storage.releaseWriterLease(lease);
+      }
+    } finally {
+      this.#presenceRelease?.();
+      this.#presenceRelease = null;
     }
   }
 
   async #claim(): Promise<boolean> {
     this.#onState({ status: 'acquiring' });
     try {
-      const result = await this.#storage.acquireWriterLease(
-        this.#userId,
-        this.#ownerId,
-        this.#leaseDurationMs,
-      );
+      // The presence must be live before this owner id can appear in a lease, or a rival would read the
+      // lease as abandoned.
+      if (this.#presenceRelease === null) {
+        const release = await this.#presence.announce(this.#ownerId);
+        if (this.#disposed) {
+          release();
+          return false;
+        }
+        this.#presenceRelease = release;
+      }
+      let result = await this.#acquire([]);
+      if (!result.acquired && !this.#disposed) {
+        // A live lease of a different owner: wait, bounded, for that owner to be proven gone (a reload or a
+        // crash), then replace exactly that owner. A live holder keeps the lease and this claim conflicts.
+        const holder = result.lease.ownerId;
+        const gone = await this.#presence.waitForGone(holder, this.#takeoverWaitMs);
+        if (!this.#disposed) {
+          result = await this.#acquire(gone ? [holder] : []);
+        }
+      }
       if (this.#disposed) {
         if (result.acquired) {
           await this.#storage.releaseWriterLease(result.lease);
@@ -169,6 +200,15 @@ export class WriterLeaseCoordinator {
       }
       return false;
     }
+  }
+
+  #acquire(replaceableOwnerIds: readonly string[]) {
+    return this.#storage.acquireWriterLease(
+      this.#userId,
+      this.#ownerId,
+      this.#leaseDurationMs,
+      replaceableOwnerIds,
+    );
   }
 
   #scheduleRenewal(): void {

@@ -139,6 +139,27 @@ export async function createScenarioData(environment: E2eEnvironment): Promise<S
   return data;
 }
 
+// Provisions a person for OpenID Connect sign-in, the way the runbook does: the stored identity is
+// `<issuer>|<subject>`. Only the two fixed suite users can be changed, so nothing else's identity is touched.
+export async function setSuiteUserIdentity(
+  environment: E2eEnvironment,
+  userId: string,
+  externalIdentity: string,
+): Promise<void> {
+  if (userId !== environment.runnerUserId && userId !== environment.coachUserId) {
+    throw new Error('Only the fixed suite users can be given an identity');
+  }
+  await withOwnerTransaction(environment, async (client) => {
+    const result = await client.query('UPDATE users SET external_identity = $2 WHERE id = $1', [
+      userId,
+      externalIdentity,
+    ]);
+    if (result.rowCount !== 1) {
+      throw new Error('The suite user does not exist; create the scenario first');
+    }
+  });
+}
+
 // Deletes by the exact organization id this scenario created and nothing else.
 export async function removeScenarioData(environment: E2eEnvironment, data: ScenarioData): Promise<void> {
   await withOwnerTransaction(environment, (client) => deleteOrganizations(client, [data.orgId]));

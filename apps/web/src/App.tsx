@@ -6,6 +6,11 @@ import { ArchiveScreen } from './ArchiveScreen.js';
 import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
+import {
+  DEFAULT_CAPTURE_SOURCE_KIND,
+  parseCaptureSourceKind,
+  type CaptureSourceKind,
+} from './capture-source-kind.js';
 import { PointUploadWorker } from './point-upload-worker.js';
 import {
   createRun,
@@ -40,7 +45,6 @@ type StorageState =
   | { status: 'loading' }
   | { status: 'ready' }
   | { message: string; status: 'error' };
-type CaptureSourceKind = 'geolocation' | 'simulator';
 type ActiveView = 'archive' | 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
@@ -80,7 +84,9 @@ export function App() {
   const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
   const [writer, setWriter] = useState<WriterOwnershipState>({ status: 'unclaimed' });
   const [capture, setCapture] = useState<CaptureState>({ status: 'idle' });
-  const [captureSourceKind, setCaptureSourceKind] = useState<CaptureSourceKind>('geolocation');
+  // null until the stored choice has been restored: capture must not start, and the select must not change,
+  // before then, or a restored Simulator run would briefly start the Device GPS.
+  const [captureSourceKind, setCaptureSourceKind] = useState<CaptureSourceKind | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>('runner');
   const captureController = useRef<CaptureController | null>(null);
   const restoredUserId = useRef<string | null>(null);
@@ -141,6 +147,7 @@ export function App() {
     let active = true;
     const userId = session.session.identity.userId;
     setStorage({ status: 'loading' });
+    setCaptureSourceKind(null);
     void (async () => {
       try {
         const recovery = await getBrowserRunnerStorage().loadRecovery(userId);
@@ -151,6 +158,8 @@ export function App() {
         if (recovery.orgId !== null) {
           setOrgId(recovery.orgId);
         }
+        // Set in the same batch as the storage becoming ready, which every capture start waits for.
+        setCaptureSourceKind(recovery.captureSource);
         dispatch({
           pendingPointCount: recovery.pendingPointCount,
           request: recovery.request,
@@ -264,6 +273,7 @@ export function App() {
       || storage.status !== 'ready'
       || writer.status !== 'owned'
       || runner.run?.status !== 'recording'
+      || captureSourceKind === null
       || !uuidSchema.safeParse(normalizedOrgId).success
     ) {
       setCapture({ status: 'idle' });
@@ -465,6 +475,16 @@ export function App() {
     void executeRequest(request);
   };
 
+  const chooseCaptureSource = (kind: CaptureSourceKind) => {
+    setCaptureSourceKind(kind);
+    if (session.status !== 'ready') {
+      return;
+    }
+    getBrowserRunnerStorage()
+      .saveCaptureSource(session.session.identity.userId, kind)
+      .catch((error: unknown) => setStorage({ message: errorMessage(error), status: 'error' }));
+  };
+
   const clearFinishedRun = async () => {
     if (session.status !== 'ready') {
       return;
@@ -537,10 +557,15 @@ export function App() {
           <div className="capture-source">
             <label htmlFor="capture-source">Capture source</label>
             <select
-              disabled={runner.run?.status === 'recording' || busy}
+              disabled={
+                captureSourceKind === null
+                || runner.run?.status === 'recording'
+                || busy
+                || (runner.run !== null && writer.status !== 'owned')
+              }
               id="capture-source"
-              onChange={(event) => setCaptureSourceKind(event.target.value as CaptureSourceKind)}
-              value={captureSourceKind}
+              onChange={(event) => chooseCaptureSource(parseCaptureSourceKind(event.target.value))}
+              value={captureSourceKind ?? DEFAULT_CAPTURE_SOURCE_KIND}
             >
               <option value="geolocation">Device GPS</option>
               <option value="simulator">Simulator · normal · seed 1</option>

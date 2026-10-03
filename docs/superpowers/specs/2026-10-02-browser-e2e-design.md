@@ -1,6 +1,6 @@
 # Browser end-to-end tests (runner recording and coach live view)
 
-Date: 2026-10-02. Status: design, awaiting review.
+Date: 2026-10-02. Status: implemented and verified in Chromium on a workstation (updated 2026-10-03); the scenarios below describe what is verified, and "Verification of the tests themselves" records what the mutations showed.
 Audience: the maintainer of this repository and the agent that implements it.
 Source of the requirement: `docs/implementation-plan.md` section 7 ("Browser: recording, IndexedDB reload/offline,
 observer reconnect, grant revoke, archive refresh"). No browser test exists today; every claim about the web app
@@ -98,17 +98,23 @@ clock is needed). Test timeouts are set from that, not from sleeps; waits are on
 
 1. **Record and finish.** Runner opens Runner, enters the organization ID, selects the Simulator, starts, waits until
    capture completes and the buffer is empty, finishes. Server: run `finished`, 6 distinct `seq`, contiguous.
-2. **Reload mid-run.** Reload after at least one point is buffered. Expected: the run is restored as `recording`, the
-   writer lease is re-acquired, `seq` values never repeat and nothing buffered is lost. Server: every `seq` unique,
-   the set is gap-free from the first one, and the count is at least the number acknowledged before the reload.
-   (The Simulator restarts after a reload, so more than 6 points may exist; the assertion is on uniqueness and
-   absence of gaps, not on a fixed count. The actual behavior is recorded when the scenario is first run.)
+2. **Reload mid-run (verified).** Reload after a point was acknowledged by the server. Verified behaviour: the run is
+   restored as `recording`; the tab owns the writer lease again without a click and well inside the old lease's 15 s
+   (the test allows 10 s; about 0.2 s was measured), with a new fencing token; no "Retry ownership" button is offered;
+   the Simulator remains the selected source and the Geolocation API is never called (spied across the reload);
+   capture restarts in a new segment and completes; the buffer drains; the run finishes. Server: every `seq` unique,
+   the set gap-free, the points acknowledged before the reload intact at the start, and the count at least those plus
+   the points captured after the reload. The Simulator restarts after a reload, so more than 6 points exist. The two
+   defects first found by this scenario (a reload conflicting with its own lease; the capture source lost) are fixed;
+   see ADR-0047 and `docs/progress.md`.
 3. **Offline then online.** `context.setOffline(true)` after the run starts. Expected: the offline notice shows,
    points keep accumulating in IndexedDB, nothing reaches the server. After `setOffline(false)` the buffer drains.
    Server: all `seq` present exactly once, none missing.
 4. **Second tab.** The same signed-in user opens a second page in the same context while the first is recording.
-   Expected: the second page shows the writer-conflict notice, its controls are disabled, and the server receives no
-   point from it (the `seq` set equals the first tab's).
+   Expected: the second page shows the writer-conflict notice (after a bounded wait of up to 3 s), its controls are
+   disabled, and the server receives no point from it (the `seq` set equals the first tab's). A variant gives the
+   second page a copy of the first page's `sessionStorage`, the closest model Playwright offers of Chrome's "Duplicate
+   tab"; the real menu item cannot be driven.
 5. **Coach sees live.** A second browser context, signed in as the coach, opens Coach with the organization ID.
    The test (as owner, through the API) grants the coach live access to the runner's run while the runner records
    in the browser. Expected: the run appears under `Live run markers`, first as unconfirmed and then as confirmed
@@ -138,11 +144,11 @@ scratch edit of product code, confirms the named scenario fails, and reverts the
 
 | Mutation | Scenario that must fail |
 |---|---|
-| In `point-upload-worker.ts`, delete points from the buffer before the server acknowledges the batch | 3 (offline then online) |
+| In `point-upload-worker.ts`, delete points from the buffer before the server acknowledges the batch | **Not scenario 3** (measured: it passed, because the uploader stops while offline and never fails a send). Caught by the added upload-failure scenario (503 on the points endpoint while online) |
 | In `writer-lease.ts`, make a second claimant succeed | 4 (second tab) |
 | In the live-state server filter, keep a revoked run in the stream | 6 (revoke) |
 
-The mutations are never committed. The report states which ones were run and what failed.
+The mutations are never committed. The report states which ones were run and what failed. Results (2026-10-03) are in `docs/progress.md`: the first mutation exposed a gap in scenario 3 and led to the extra scenario; the other two failed the scenarios named above.
 
 ## 7. Documentation
 

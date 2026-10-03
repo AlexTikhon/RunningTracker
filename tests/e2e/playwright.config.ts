@@ -8,7 +8,8 @@ import { loadE2eEnvironment } from './support/environment.js';
 // so a wrong database never reaches the API process.
 const environment = loadE2eEnvironment();
 
-const repositoryRoot = resolve(import.meta.dirname, '..', '..');
+const { oidc } = environment;
+const repositoryRoot =resolve(import.meta.dirname, '..', '..');
 const apiPort = new URL(environment.apiOrigin).port;
 const webPort = new URL(environment.webOrigin).port;
 
@@ -20,7 +21,16 @@ export default defineConfig({
   fullyParallel: false,
   globalTeardown: './global-teardown.ts',
   outputDir: 'test-results',
-  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+  projects: [
+    // The development-session stack (a local session endpoint, no identity provider).
+    { name: 'chromium', testIgnore: /[\\/]oidc[\\/]/, use: { browserName: 'chromium' } },
+    // The OpenID Connect stack: the same sign-in route production has, against a real provider process.
+    {
+      name: 'chromium-oidc',
+      testMatch: /[\\/]oidc[\\/].*\.spec\.ts$/,
+      use: { baseURL: environment.oidc.webOrigin, browserName: 'chromium' },
+    },
+  ],
   reporter: 'list',
   retries: 0,
   testDir: '.',
@@ -59,6 +69,55 @@ export default defineConfig({
       stderr: 'pipe',
       stdout: 'pipe',
       url: environment.webOrigin,
+    },
+    {
+      // OpenID Connect stack. The provider (oidc-provider with its development login pages) ...
+      command: 'node --import tsx support/oidc-provider-server.ts',
+      cwd: import.meta.dirname,
+      env: {
+        OIDC_E2E_CLIENT_ID: oidc.clientId,
+        OIDC_E2E_CLIENT_SECRET: oidc.clientSecret,
+        OIDC_E2E_ISSUER: oidc.providerOrigin,
+        OIDC_E2E_REDIRECT_URI: oidc.redirectUri,
+      },
+      reuseExistingServer: false,
+      stderr: 'pipe',
+      stdout: 'pipe',
+      url: `${oidc.providerOrigin}/.well-known/openid-configuration`,
+    },
+    {
+      // ... the API with OIDC and no local session endpoint, which is what production has ...
+      command: 'node --import tsx src/entrypoint.ts',
+      cwd: resolve(repositoryRoot, 'apps', 'api'),
+      env: {
+        ALLOWED_ORIGINS: oidc.webOrigin,
+        APP_ENV: 'test',
+        DATABASE_URL: environment.runtimeDatabaseUrl,
+        LIVE_TRACK_CURSOR_SIGNING_KEY: liveTrackCursorSigningKey,
+        MAINTENANCE_DATABASE_URL: environment.maintenanceDatabaseUrl,
+        OIDC_CLIENT_ID: oidc.clientId,
+        OIDC_CLIENT_SECRET: oidc.clientSecret,
+        OIDC_ISSUER_URL: oidc.providerOrigin,
+        OIDC_REDIRECT_URI: oidc.redirectUri,
+        PORT: new URL(oidc.apiOrigin).port,
+        // The production default. Chromium stores a Secure cookie for a loopback origin over plain http.
+        SESSION_COOKIE_SECURE: 'true',
+        SESSION_TTL_MS: String(oidc.sessionTtlMs),
+      },
+      reuseExistingServer: false,
+      stderr: 'pipe',
+      stdout: 'pipe',
+      url: `${oidc.apiOrigin}/api/health/ready`,
+    },
+    {
+      // ... and the web app on its own origin.
+      command: `npx vite --port ${new URL(oidc.webOrigin).port}`,
+      cwd: resolve(repositoryRoot, 'apps', 'web'),
+      env: { API_PROXY_TARGET: oidc.apiOrigin },
+      reuseExistingServer: false,
+      stderr: 'pipe',
+      stdout: 'pipe',
+      url: oidc.webOrigin,
     },
   ],
   workers: 1,
