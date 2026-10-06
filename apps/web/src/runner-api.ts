@@ -3,6 +3,7 @@ import {
   archiveMetadataResponseSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
+  organizationListResponseSchema,
   runCommandResponseSchema,
   runViewSchema,
   sessionResponseSchema,
@@ -126,6 +127,30 @@ export async function loadSession(signal?: AbortSignal): Promise<SessionResponse
   }
   const response = await requestJson('/api/session', options);
   return sessionResponseSchema.parse(requireSuccess(response));
+}
+
+// The organizations this identity has an active membership in, as identifiers in the server's fixed order.
+export async function loadOrganizations(signal?: AbortSignal): Promise<string[]> {
+  const options: RequestInit = { credentials: 'same-origin' };
+  if (signal !== undefined) {
+    options.signal = signal;
+  }
+  const response = await requestJson('/api/organizations', options);
+  return organizationListResponseSchema
+    .parse(requireSuccess(response))
+    .items.map((item) => item.organizationId);
+}
+
+// Ends the application session on the server; the answer clears the session cookie. This is not a logout at
+// the identity provider (ADR-0046).
+export async function endSession(csrf: CsrfCredentials, signal?: AbortSignal): Promise<void> {
+  const response = await requestJson('/api/session', {
+    credentials: 'same-origin',
+    headers: { [csrf.headerName]: csrf.token },
+    method: 'DELETE',
+    ...(signal === undefined ? {} : { signal }),
+  });
+  requireSuccess(response);
 }
 
 export async function loadArchiveMetadata(

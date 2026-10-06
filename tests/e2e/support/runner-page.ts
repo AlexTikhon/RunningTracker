@@ -2,6 +2,7 @@ import { expect } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
 import type { AuthedApi } from './api.js';
+import { expectOrganizationSelected } from './session.js';
 
 export type StateCardLabel = 'Capture' | 'Network' | 'Recording' | 'Server state' | 'Upload' | 'Writer';
 
@@ -24,11 +25,12 @@ export class RunnerPage {
 
   async open(orgId: string): Promise<void> {
     await this.openRunnerView();
-    await this.page.getByLabel('Organization ID').fill(orgId);
+    // The person belongs to this one organization, so it is selected without any click or typing.
+    await expectOrganizationSelected(this.page, orgId);
   }
 
   // Opens the Runner view of a tab that finds the user's run already active: the run is restored on load, so
-  // there is no Organization ID field to fill.
+  // the organization is the run's own and nothing needs choosing.
   async openRestoredRun(): Promise<void> {
     await this.openRunnerView();
   }

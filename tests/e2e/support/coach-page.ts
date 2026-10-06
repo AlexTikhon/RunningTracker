@@ -1,6 +1,8 @@
 import { expect } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
+import { expectOrganizationSelected } from './session.js';
+
 export type CoachMarkerQuality = 'confirmed' | 'stale' | 'unavailable' | 'unconfirmed';
 
 const qualities: readonly string[] = ['confirmed', 'stale', 'unavailable', 'unconfirmed'];
@@ -15,12 +17,11 @@ export class CoachPage {
   async open(orgId: string): Promise<void> {
     await this.page.goto('/');
     await this.page.getByRole('navigation', { name: 'Application view' }).getByRole('button', { name: 'Coach' }).click();
-    // The hidden Runner view has an input with the same label; a role query skips hidden elements.
-    await this.page.getByRole('textbox', { name: 'Organization ID' }).fill(orgId);
+    await expectOrganizationSelected(this.page, orgId);
   }
 
-  // The connection indicator ("live", "connecting", ...). The hidden Runner view and the "enter an organization"
-  // prerequisite also have role=status, but only this one has a span with the state in it.
+  // The connection indicator ("live", "connecting", ...). The hidden Runner view and the organization prompts
+  // also have role=status, but only this one has a span with the state in it.
   streamStatus(): Locator {
     return this.page.getByRole('status').filter({ has: this.page.locator('span') });
   }

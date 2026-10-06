@@ -21,4 +21,19 @@ describe('App', () => {
     expect(markup).toContain('Coach');
     expect(markup).toContain('Archive');
   });
+
+  it('never asks for an organization identifier', () => {
+    const markup = renderToStaticMarkup(<App />);
+
+    expect(markup).not.toContain('Organization ID');
+    expect(markup).not.toContain('00000000-0000-4000-8000-000000000000');
+    expect(markup).not.toContain('<input');
+  });
+
+  it('starts by checking the session, with no sign-out offered before there is one', () => {
+    const markup = renderToStaticMarkup(<App />);
+
+    expect(markup).toContain('Checking session');
+    expect(markup).not.toContain('Sign out');
+  });
 });

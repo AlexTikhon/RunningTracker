@@ -37,6 +37,28 @@ function startRecording() {
 }
 
 describe('runnerReducer', () => {
+  it('forgets the signed-out identity run, pending request, error and upload state, but keeps the connection', () => {
+    const pending = runnerReducer(startRecording(), {
+      request: {
+        commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        expectedControlRevision: '0',
+        kind: 'command',
+        orgId: startRequest.orgId,
+        runId: startRequest.runId,
+        type: 'pause',
+      },
+      type: 'request-started',
+    });
+    const buffered = runnerReducer(
+      runnerReducer(pending, { runId: startRequest.runId, type: 'point-buffered' }),
+      { connectivity: 'offline', type: 'connectivity-changed' },
+    );
+    expect(buffered.pendingRequest).not.toBeNull();
+    expect(buffered.upload.pendingCount).toBe(1);
+
+    expect(runnerReducer(buffered, { type: 'session-ended' })).toEqual(createInitialRunnerState('offline'));
+  });
+
   it.each(['pause', 'finish'] as const)('keeps %s confirmed in either upload/command ACK order', (type) => {
     const request: CommandRequest = { kind: 'command', orgId: startRequest.orgId, runId: startRequest.runId, commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', expectedControlRevision: '0', type };
     const result: RunCommandResponse = { commandId: request.commandId, controlRevision: '1', dataRevision: '1', status: type === 'pause' ? 'paused' : 'finished', finishedAt: type === 'finish' ? '2026-09-26T08:01:00.000Z' : null };

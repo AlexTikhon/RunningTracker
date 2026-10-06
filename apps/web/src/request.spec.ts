@@ -34,6 +34,13 @@ describe('request lifetime', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts a 204 answer that has no body, and still rejects a 200 whose body is not JSON', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 204 })));
+    await expect(requestJson('/test')).resolves.toMatchObject({ payload: undefined, response: { status: 204 } });
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(new Response('not json', { status: 200 })));
+    await expect(requestJson('/test')).rejects.toBeInstanceOf(SyntaxError);
+  });
+
   it('announces 401 before reading a stalled error body', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401, ok: false, json: () => new Promise(() => {}) }));
     const required = vi.fn();

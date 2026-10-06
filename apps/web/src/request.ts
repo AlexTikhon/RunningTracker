@@ -30,7 +30,8 @@ export async function requestJson(url: string, options: RequestInit = {}): Promi
         let payload: unknown;
         try { payload = await response.json(); } catch (error) {
           controller.signal.throwIfAborted();
-          if (response.ok) throw error;
+          // 204 has no body by definition; any other success must carry JSON.
+          if (response.ok && response.status !== 204) throw error;
         }
         controller.signal.throwIfAborted();
         return { response, payload };

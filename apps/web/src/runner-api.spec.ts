@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createRun,
+  endSession,
   loadArchiveMetadata,
+  loadOrganizations,
   loadSession,
   readLiveTrackChangesPage,
   readLiveTrackSnapshotPage,
@@ -35,6 +37,56 @@ describe('runner API', () => {
       credentials: 'same-origin',
       signal: expect.any(AbortSignal) as AbortSignal,
     });
+  });
+
+  it('loads the identifiers of the organizations the session belongs to, in the server order', async () => {
+    const other = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ items: [{ organizationId: orgId }, { organizationId: other }] })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(loadOrganizations()).resolves.toEqual([orgId, other]);
+    expect(fetchMock).toHaveBeenCalledWith('/api/organizations', {
+      credentials: 'same-origin',
+      signal: expect.any(AbortSignal) as AbortSignal,
+    });
+  });
+
+  it('refuses an organization list outside the contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ items: [{ organizationId: orgId, name: 'x' }] }))),
+    );
+
+    await expect(loadOrganizations()).rejects.toThrow();
+  });
+
+  it('ends the session with a DELETE that carries the CSRF token and tolerates the empty 204', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(endSession(csrf)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith('/api/session', {
+      credentials: 'same-origin',
+      headers: { 'x-csrf-token': csrf.token },
+      method: 'DELETE',
+      signal: expect.any(AbortSignal) as AbortSignal,
+    });
+  });
+
+  it('reports a refused sign-out as an API error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: { code: 'CSRF_DENIED', message: 'The CSRF token is missing or invalid', requestId: runId } }),
+          { status: 403 },
+        ),
+      ),
+    );
+
+    await expect(endSession(csrf)).rejects.toMatchObject({ code: 'CSRF_DENIED', status: 403 });
   });
 
   it('loads revision-bound archive metadata through the canonical period query', async () => {

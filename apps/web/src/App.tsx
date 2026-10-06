@@ -1,4 +1,4 @@
-import { uuidSchema, type RunCommandType } from '@running-tracker/contracts';
+import type { RunCommandType } from '@running-tracker/contracts';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
@@ -6,12 +6,14 @@ import { ArchiveScreen } from './ArchiveScreen.js';
 import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
-import {
-  DEFAULT_CAPTURE_SOURCE_KIND,
-  parseCaptureSourceKind,
-  type CaptureSourceKind,
-} from './capture-source-kind.js';
+import type { CaptureSourceKind } from './capture-source-kind.js';
+import { organizationLabel, organizationPrompt } from './organization-selection.js';
+import { OrganizationPicker } from './OrganizationPicker.js';
 import { executeRunnerRequest } from './runner-requests.js';
+import { RunnerView, type StorageState } from './RunnerView.js';
+import { SessionBar } from './SessionBar.js';
+import { unsentWorkNote } from './unsent-work.js';
+import { useOrganizations } from './use-organizations.js';
 import { useRunnerSession } from './use-runner-session.js';
 import { PointUploadWorker } from './point-upload-worker.js';
 import {
@@ -22,9 +24,7 @@ import {
 import { getBrowserRunnerStorage } from './runner-storage.js';
 import { SignInNotice, signInFailureMessage } from './sign-in.js';
 import {
-  availableCommands,
   createInitialRunnerState,
-  runnerPhase,
   runnerReducer,
   type CommandRequest,
   type RunnerRequest,
@@ -37,10 +37,6 @@ import {
 } from './writer-lease.js';
 
 type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
-type StorageState =
-  | { status: 'loading' }
-  | { status: 'ready' }
-  | { message: string; status: 'error' };
 type ActiveView = 'archive' | 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
@@ -71,7 +67,9 @@ function durationLabel(startedAt: string | undefined, finishedAt: string | null 
 
 export function App() {
   const [health, setHealth] = useState<HealthState>(initialHealth);
-  const [orgId, setOrgId] = useState('');
+  // The organization the current run belongs to, from the run's own durable record. It is not the selection:
+  // choosing another organization to look at can never redirect a run's capture or upload.
+  const [runOrgId, setRunOrgId] = useState<string | null>(null);
   const [signInFailure] = useState(() =>
     typeof window === 'undefined' ? undefined : signInFailureMessage(window.location.search),
   );
@@ -96,14 +94,27 @@ export function App() {
     }
     restoredUserId.current = null;
   }, []);
-  const { session, refreshSession } = useRunnerSession(suspendRunner);
+  // After an explicit sign-out the page forgets what it showed for that person. Only in-memory state goes: the
+  // exact points, requests and run pointer stay in IndexedDB for the same person's next sign-in.
+  const forgetSignedOutIdentity = useCallback(() => {
+    dispatch({ type: 'session-ended' });
+    setRunOrgId(null);
+    setStorage({ status: 'loading' });
+    setCaptureSourceKind(null);
+    setCapture({ status: 'idle' });
+    setWriter({ status: 'unclaimed' });
+  }, []);
+  const { session, refreshSession, signOut, signOutState } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
+  const { choose: chooseOrganization, discovery, prefer: preferOrganization, reload: reloadOrganizations, selectedOrgId } =
+    useOrganizations(session);
   const [runner, dispatch] = useReducer(
     runnerReducer,
     typeof navigator === 'undefined' || navigator.onLine !== false ? 'online' : 'offline',
     createInitialRunnerState,
   );
   latestUpload.current = runner.upload;
-  const normalizedOrgId = orgId.trim().toLowerCase();
+  // A run is captured and uploaded for the organization it was started in; before one exists, the selection decides.
+  const scopeOrgId = runner.run !== null ? runOrgId ?? selectedOrgId : selectedOrgId;
   const mapboxAccessToken = (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '').trim() || null;
 
   const refreshHealth = useCallback(async (signal?: AbortSignal) => {
@@ -146,9 +157,8 @@ export function App() {
           return;
         }
         restoredUserId.current = userId;
-        if (recovery.orgId !== null) {
-          setOrgId(recovery.orgId);
-        }
+        setRunOrgId(recovery.orgId);
+        preferOrganization(recovery.orgId);
         // Set in the same batch as the storage becoming ready, which every capture start waits for.
         setCaptureSourceKind(recovery.captureSource);
         dispatch({
@@ -168,7 +178,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [session]);
+  }, [preferOrganization, session]);
 
   useEffect(() => {
     if (session.status !== 'ready') {
@@ -215,13 +225,13 @@ export function App() {
       || writer.status !== 'owned'
       || runner.run === null
       || runner.upload.status === 'blocked'
-      || !uuidSchema.safeParse(normalizedOrgId).success
+      || scopeOrgId === null
     ) {
       return undefined;
     }
     const runnerStorage = getBrowserRunnerStorage();
     const scope = {
-      orgId: normalizedOrgId,
+      orgId: scopeOrgId,
       runId: runner.run.runId,
       userId: session.session.identity.userId,
     };
@@ -258,7 +268,7 @@ export function App() {
         uploadWorker.current = null;
       }
     };
-  }, [normalizedOrgId, runner.run?.runId, session, storage.status, writer.status]);
+  }, [scopeOrgId, runner.run?.runId, session, storage.status, writer.status]);
 
   useEffect(() => {
     uploadWorker.current?.setOnline(runner.connectivity === 'online');
@@ -273,13 +283,13 @@ export function App() {
       || runner.upload.status === 'blocked'
       || runner.run?.status !== 'recording'
       || captureSourceKind === null
-      || !uuidSchema.safeParse(normalizedOrgId).success
+      || scopeOrgId === null
     ) {
       setCapture({ status: 'idle' });
       return undefined;
     }
     const scope = {
-      orgId: normalizedOrgId,
+      orgId: scopeOrgId,
       runId: runner.run.runId,
       userId: session.session.identity.userId,
     };
@@ -303,7 +313,7 @@ export function App() {
       controller.stop();
       if (captureController.current === controller) captureController.current = null;
     };
-  }, [captureSourceKind, normalizedOrgId, runner.run?.runId, runner.run?.status, runner.upload.status === 'blocked', session, storage.status, writer.status]);
+  }, [captureSourceKind, scopeOrgId, runner.run?.runId, runner.run?.status, runner.upload.status === 'blocked', session, storage.status, writer.status]);
 
   useEffect(() => {
     if (runner.run === null || runner.run.status === 'finished') {
@@ -353,7 +363,7 @@ export function App() {
     }
     const recovery = await getBrowserRunnerStorage().loadRecovery(session.session.identity.userId);
     if (recovery.orgId !== null) {
-      setOrgId(recovery.orgId);
+      setRunOrgId(recovery.orgId);
     }
     if (
       runner.pendingRequest === null
@@ -384,8 +394,6 @@ export function App() {
     }
   }, [synchronizeAfterClaim]);
 
-  const validOrgId = uuidSchema.safeParse(normalizedOrgId).success;
-  const phase = runnerPhase(runner);
   const busy = runner.pendingRequest !== null;
   const controlsDisabled = busy
     || runner.error !== null
@@ -393,21 +401,18 @@ export function App() {
     || storage.status !== 'ready'
     || writer.status === 'acquiring'
     || (runner.run !== null && writer.status !== 'owned');
-  const commands = runner.run === null ? [] : availableCommands(runner.run.status);
-  const captureDetail = capture.status === 'capturing' || capture.status === 'complete'
-    ? `segment ${capture.segmentId} · ${capture.capturedCount} buffered`
-    : capture.status === 'starting'
-      ? capture.source
-      : capture.status === 'error' || capture.status === 'lost'
-        ? capture.message
-        : 'Starts while the run is recording';
   const elapsed = useMemo(
     () => durationLabel(runner.run?.startedAt, runner.run?.finishedAt, now),
     [now, runner.run?.finishedAt, runner.run?.startedAt],
   );
+  const needsOrganization = organizationPrompt(discovery, selectedOrgId);
+  const organizationNote = session.status !== 'ready'
+    ? 'Sign in to start a run.'
+    : needsOrganization
+      ?? `This run will be recorded in organization ${organizationLabel(selectedOrgId ?? '', discovery.status === 'ready' ? discovery.organizations : [])}. The server rechecks active membership inside the run transaction.`;
 
   const start = async () => {
-    if (!validOrgId || controlsDisabled || runner.run !== null) {
+    if (selectedOrgId === null || controlsDisabled || runner.run !== null) {
       return;
     }
     if (!await claimWriter()) {
@@ -415,22 +420,23 @@ export function App() {
     }
     const request: StartRequest = {
       kind: 'start',
-      orgId: normalizedOrgId,
+      orgId: selectedOrgId,
       runId: crypto.randomUUID(),
       startedAt: new Date().toISOString(),
     };
+    setRunOrgId(selectedOrgId);
     void executeRequest(request);
   };
 
   const command = (type: RunCommandType) => {
-    if (runner.run === null || controlsDisabled) {
+    if (runner.run === null || scopeOrgId === null || controlsDisabled) {
       return;
     }
     const request: CommandRequest = {
       commandId: crypto.randomUUID(),
       expectedControlRevision: runner.run.controlRevision,
       kind: 'command',
-      orgId: normalizedOrgId,
+      orgId: scopeOrgId,
       runId: runner.run.runId,
       type,
     };
@@ -460,8 +466,8 @@ export function App() {
     }
   };
 
-  const rejectedScope = session.status === 'ready' && runner.run !== null
-    ? { userId: session.session.identity.userId, orgId: normalizedOrgId, runId: runner.run.runId } : null;
+  const rejectedScope = session.status === 'ready' && runner.run !== null && scopeOrgId !== null
+    ? { userId: session.session.identity.userId, orgId: scopeOrgId, runId: runner.run.runId } : null;
   const exportRejectedPoints = async () => {
     if (rejectedScope === null) return;
     try {
@@ -486,6 +492,11 @@ export function App() {
       await writerCoordinator.current?.release();
     } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
   };
+
+  const viewPrerequisite = (what: string) =>
+    session.status === 'ready'
+      ? needsOrganization ?? ''
+      : `An active session is required before the ${what} can open.`;
 
   return (
     <main>
@@ -523,262 +534,79 @@ export function App() {
         </div>
       </header>
 
+      <div className="context-bar">
+        <OrganizationPicker
+          locked={runner.run !== null || busy}
+          onChoose={chooseOrganization}
+          onRetry={reloadOrganizations}
+          selected={selectedOrgId}
+          state={discovery}
+        />
+        <SessionBar
+          onRetry={() => void refreshSession()}
+          onSignOut={() => void signOut()}
+          session={session}
+          signOut={signOutState}
+          unsentNote={unsentWorkNote(runner)}
+        />
+      </div>
+
+      {session.status === 'required' && <SignInNotice failure={signInFailure} message={session.message} />}
+
       <div hidden={activeView !== 'runner'}>
-      <section className="runner-shell" aria-labelledby="runner-title">
-        <div className="runner-copy">
-          <p className="eyebrow">Runner console · P05.5</p>
-          <h1 id="runner-title">Your run,<br />under control.</h1>
-          <p className="lede">
-            Device GPS and the seeded simulator share one fenced foreground capture path. Measurements
-            are durably sequenced in IndexedDB before the uploader can send them.
-          </p>
-        </div>
-
-        <section className="control-card" aria-label="Run controls">
-          <div className="control-card__topline">
-            <span className={`phase-badge phase-badge--${phase}`}>{phase}</span>
-            <span className="run-id">{runner.run ? `#${runner.run.runId.slice(0, 8)}` : 'No active run'}</span>
-          </div>
-
-          <p className="timer" aria-label={`Elapsed time ${elapsed}`}>{elapsed}</p>
-          <p className="timer-label">elapsed foreground session</p>
-
-          <div className="capture-source">
-            <label htmlFor="capture-source">Capture source</label>
-            <select
-              disabled={
-                captureSourceKind === null
-                || runner.run?.status === 'recording'
-                || busy
-                || (runner.run !== null && writer.status !== 'owned')
-              }
-              id="capture-source"
-              onChange={(event) => chooseCaptureSource(parseCaptureSourceKind(event.target.value))}
-              value={captureSourceKind ?? DEFAULT_CAPTURE_SOURCE_KIND}
-            >
-              <option value="geolocation">Device GPS</option>
-              <option value="simulator">Simulator · normal · seed 1</option>
-            </select>
-            <span>Foreground only. Pausing or losing the writer lease stops capture.</span>
-          </div>
-
-          {runner.run === null ? (
-            <div className="start-panel">
-              <label htmlFor="organization-id">Organization ID</label>
-              <input
-                aria-describedby="organization-help"
-                autoComplete="off"
-                id="organization-id"
-                onChange={(event) => setOrgId(event.target.value)}
-                placeholder="00000000-0000-4000-8000-000000000000"
-                spellCheck={false}
-                value={orgId}
-              />
-              <p id="organization-help">The server rechecks active membership inside the run transaction.</p>
-              <button className="primary-action" disabled={!validOrgId || controlsDisabled} onClick={() => void start()} type="button">
-                {phase === 'starting' ? 'Starting…' : 'Start run'}
-              </button>
-            </div>
-          ) : (
-            <div className="command-grid">
-              {commands.includes('pause') && (
-                <button disabled={controlsDisabled || runner.upload.status === 'blocked'} onClick={() => command('pause')} type="button">
-                  {phase === 'pausing' ? 'Pausing…' : 'Pause'}
-                </button>
-              )}
-              {commands.includes('resume') && (
-                <button disabled={controlsDisabled || runner.upload.status === 'blocked'} onClick={() => command('resume')} type="button">
-                  {phase === 'resuming' ? 'Resuming…' : 'Resume'}
-                </button>
-              )}
-              {commands.includes('finish') && (
-                <button className="finish-action" disabled={controlsDisabled} onClick={() => command('finish')} type="button">
-                  {phase === 'finishing' ? 'Finishing…' : 'Finish'}
-                </button>
-              )}
-              {runner.run.status === 'finished' && (
-                <button
-                  className="primary-action"
-                  disabled={controlsDisabled || runner.upload.pendingCount > 0 || writer.status !== 'owned'}
-                  onClick={() => void clearFinishedRun()}
-                  type="button"
-                >
-                  New run
-                </button>
-              )}
-            </div>
-          )}
-        </section>
-      </section>
-
-      {runner.connectivity === 'offline' && (
-        <section className="notice notice--offline" role="status">
-          <strong>Offline</strong>
-          <span>Lifecycle requests can be saved locally and retried after reconnection.</span>
-        </section>
-      )}
-
-      {runner.upload.status === 'blocked' && (
-        <section className="notice notice--error" role="alert">
-          <strong>Buffered points were rejected</strong>
-          <span>{runner.upload.message} Export the retained points before discarding them. Discard removes this browser's queue; finish the run before clearing it.</span>
-          <button disabled={rejectedScope === null} onClick={() => void exportRejectedPoints()} type="button">Export buffered points</button>
-          <button disabled={rejectedScope === null || busy || writer.status !== 'owned' || runner.run?.status !== 'finished'} onClick={() => void discardRejectedPoints()} type="button">Discard buffered points and clear run</button>
-        </section>
-      )}
-
-      {session.status === 'required' && <SignInNotice failure={signInFailure} />}
-
-      {storage.status === 'error' && (
-        <section className="notice notice--error" role="alert">
-          <div><strong>Local storage unavailable</strong><span>{storage.message}</span></div>
-        </section>
-      )}
-
-      {(capture.status === 'error' || capture.status === 'lost') && (
-        <section className="notice notice--error" role="alert">
-          <div><strong>Capture stopped</strong><span>{capture.message}</span></div>
-        </section>
-      )}
-
-      {(writer.status === 'conflict' || writer.status === 'lost' || writer.status === 'error') && (
-        <section className="notice notice--writer" role="alert">
-          <div>
-            <strong>
-              {writer.status === 'error' ? 'Writer ownership unavailable' : 'Another tab may own recording'}
-            </strong>
-            <span>
-              {writer.status === 'conflict'
-                ? `This tab is read-only while the current lease is live (through ${new Date(writer.expiresAt).toLocaleTimeString()}).`
-                : writer.message}
-            </span>
-          </div>
-          <button onClick={() => void claimWriter()} type="button">Retry ownership</button>
-        </section>
-      )}
-
-      {runner.error !== null && (
-        <section className="notice notice--error" role="alert">
-          <div><strong>Request not confirmed</strong><span>{runner.error.message}</span></div>
-          <button
-            disabled={runner.connectivity === 'offline' || session.status !== 'ready' || writer.status !== 'owned'}
-            onClick={() => void executeRequest(runner.error!.request)}
-            type="button"
-          >
-            Retry same request
-          </button>
-        </section>
-      )}
-
-      <section className="state-grid" aria-label="Runner state">
-        <StateCard detail={runner.run?.status ?? 'Ready for a new run'} label="Recording" value={phase} />
-        <StateCard
-          detail={runner.connectivity === 'online' ? 'Server controls available' : 'Waiting for connection'}
-          label="Network"
-          value={runner.connectivity}
+        <RunnerView
+          canStart={scopeOrgId !== null}
+          capture={capture}
+          captureSourceKind={captureSourceKind}
+          controlsDisabled={controlsDisabled}
+          elapsed={elapsed}
+          onChooseCaptureSource={chooseCaptureSource}
+          onClearFinishedRun={() => void clearFinishedRun()}
+          onCommand={command}
+          onRetryOwnership={() => void claimWriter()}
+          onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
+          onStart={() => void start()}
+          organizationNote={organizationNote}
+          rejected={{
+            canDiscard: rejectedScope !== null,
+            canExport: rejectedScope !== null,
+            onDiscard: () => void discardRejectedPoints(),
+            onExport: () => void exportRejectedPoints(),
+          }}
+          runner={runner}
+          sessionReady={session.status === 'ready'}
+          storage={storage}
+          writer={writer}
         />
-        <StateCard
-          detail={runner.upload.message ?? (runner.upload.pendingCount === 0 ? 'No buffered points' : `${runner.upload.pendingCount} pending`)}
-          label="Upload"
-          value={runner.upload.status}
-        />
-        <StateCard
-          detail={runner.run ? `control rev ${runner.run.controlRevision}` : 'No server revision yet'}
-          label="Server state"
-          value={runner.error === null ? 'confirmed' : 'error'}
-        />
-        <StateCard
-          detail={writer.status === 'owned' ? `fence ${writer.fencingToken}` : 'Controls require the browser lease'}
-          label="Writer"
-          value={writer.status}
-        />
-        <StateCard detail={captureDetail} label="Capture" value={capture.status} />
-      </section>
       </div>
 
       {activeView === 'coach' && (
-        <>
-          <section className="coach-org" aria-label="Coach organization">
-            <label htmlFor="coach-organization-id">Organization ID</label>
-            <input
-              autoComplete="off"
-              id="coach-organization-id"
-              onChange={(event) => setOrgId(event.target.value)}
-              placeholder="00000000-0000-4000-8000-000000000000"
-              spellCheck={false}
-              value={orgId}
-            />
-            <span>The live endpoint revalidates this identity's membership and run grants.</span>
-          </section>
-          {session.status === 'ready' && validOrgId ? (
-            <CoachScreen
-              orgId={normalizedOrgId}
-              sessionExpiresAt={session.session.expiresAt}
-              userId={session.session.identity.userId}
-            />
-          ) : (
-            <section className="coach-prerequisite" role="status">
-              {session.status === 'ready'
-                ? 'Enter a valid organization UUID to open the coach stream.'
-                : 'An active session is required before the coach stream can open.'}
-            </section>
-          )}
-        </>
+        session.status === 'ready' && selectedOrgId !== null ? (
+          <CoachScreen
+            orgId={selectedOrgId}
+            sessionExpiresAt={session.session.expiresAt}
+            userId={session.session.identity.userId}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('coach stream')}</section>
+        )
       )}
 
       {activeView === 'archive' && (
-        <>
-          <section className="coach-org" aria-label="Archive organization">
-            <label htmlFor="archive-organization-id">Organization ID</label>
-            <input
-              autoComplete="off"
-              id="archive-organization-id"
-              onChange={(event) => setOrgId(event.target.value)}
-              placeholder="00000000-0000-4000-8000-000000000000"
-              spellCheck={false}
-              value={orgId}
-            />
-            <span>Metadata and every tile request revalidate membership and history access.</span>
-          </section>
-          {session.status === 'ready' && validOrgId ? (
-            <ArchiveScreen
-              accessToken={mapboxAccessToken}
-              orgId={normalizedOrgId}
-              userId={session.session.identity.userId}
-            />
-          ) : (
-            <section className="coach-prerequisite" role="status">
-              {session.status === 'ready'
-                ? 'Enter a valid organization UUID to open the archive source.'
-                : 'An active session is required before the archive source can open.'}
-            </section>
-          )}
-        </>
+        session.status === 'ready' && selectedOrgId !== null ? (
+          <ArchiveScreen
+            accessToken={mapboxAccessToken}
+            orgId={selectedOrgId}
+            userId={session.session.identity.userId}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('archive source')}</section>
+        )
       )}
-
-      <section className={`session-bar session-bar--${session.status}`} aria-live="polite">
-        {session.status === 'loading' && <span>Checking session…</span>}
-        {session.status === 'ready' && (
-          <><span>Session ready · user {session.session.identity.userId.slice(0, 8)}</span><span>Expires {new Date(session.session.expiresAt).toLocaleTimeString()}</span></>
-        )}
-        {session.status === 'required' && (
-          <><span>{session.message}</span><button onClick={() => void refreshSession()} type="button">Retry session</button></>
-        )}
-      </section>
     </main>
   );
 }
 
 function StatusDot({ label, value }: { label: string; value: string }) {
   return <span><i className={`dot dot--${value}`} aria-hidden="true" />{label} {value}</span>;
-}
-
-function StateCard({ detail, label, value }: { detail: string; label: string; value: string }) {
-  return (
-    <article className="state-card">
-      <p>{label}</p>
-      <strong>{value}</strong>
-      <span>{detail}</span>
-    </article>
-  );
 }

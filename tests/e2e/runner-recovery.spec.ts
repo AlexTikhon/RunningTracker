@@ -3,6 +3,7 @@ import type { Route } from '@playwright/test';
 import { authedApi, signIn } from './support/api.js';
 import { expect, test } from './support/fixtures.js';
 import { RunnerPage } from './support/runner-page.js';
+import { expectSignedIn } from './support/session.js';
 
 function deferred() {
   let resolve = () => {};
@@ -100,7 +101,7 @@ test('401 suspends recording without reload and fresh session credentials resume
   await page.unroute('**/points');
   await signIn(context, environment, scenario.runnerUserId);
   await page.getByRole('button', { name: 'Retry session' }).click();
-  await expect(page.getByText(/^Session ready/)).toBeVisible();
+  await expectSignedIn(page, scenario.runnerUserId);
   await runner.waitForEmptyBuffer();
   await expect(runner.card('Capture').value).toHaveText('capturing');
   expect(unauthorized).toBe(1);

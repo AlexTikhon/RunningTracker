@@ -71,6 +71,7 @@ export type RunnerEvent =
   | { dataRevision: string; runId: string; type: 'point-batch-acknowledged' }
   | { run: RunView; type: 'run-reconciled' }
   | { type: 'rejected-run-discarded' }
+  | { type: 'session-ended' }
   | { type: 'finished-run-cleared' }
   | { upload: UploadState; type: 'upload-changed' };
 
@@ -184,6 +185,10 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
           pendingCount: state.upload.pendingCount + 1,
         },
       };
+    case 'session-ended':
+      // Signing out removes what the previous identity's page showed. The durable copy in IndexedDB is not part of
+      // this state and is untouched: the next sign-in restores it for the same user only.
+      return createInitialRunnerState(state.connectivity);
     case 'rejected-run-discarded':
       return { ...state, error: null, pendingRequest: null, run: null, upload: { message: null, pendingCount: 0, status: 'idle' } };
     case 'finished-run-cleared':
