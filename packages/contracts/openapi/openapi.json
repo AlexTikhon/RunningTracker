@@ -20,6 +20,9 @@
       "name": "Session"
     },
     {
+      "name": "Organizations"
+    },
+    {
       "name": "Runs"
     },
     {
@@ -239,6 +242,30 @@
               }
             },
             "description": "The database is unavailable."
+          }
+        }
+      }
+    },
+    "/api/organizations": {
+      "get": {
+        "tags": [
+          "Organizations"
+        ],
+        "summary": "List the organizations the current identity belongs to",
+        "description": "The identity comes only from the session; there is no way to ask about another user. Returns the organizations in which the identity has an active membership, ordered by organization id, at most 100. A person with no active membership gets an empty list, not an error. Only identifiers are returned: this is discovery, and every request that follows is still checked against the membership inside its own transaction.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationListResponse"
+                }
+              }
+            },
+            "description": "Organizations with an active membership."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
           }
         }
       }
@@ -1817,6 +1844,33 @@
         },
         "required": [
           "status"
+        ],
+        "additionalProperties": false
+      },
+      "OrganizationListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "organizationId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              },
+              "required": [
+                "organizationId"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "items"
         ],
         "additionalProperties": false
       },

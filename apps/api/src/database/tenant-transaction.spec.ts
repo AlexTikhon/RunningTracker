@@ -5,6 +5,7 @@ import {
   TenantTransactionCommitError,
   TenantTransactionRolledBackError,
   withTenantTransaction,
+  withUserTransaction,
 } from './tenant-transaction.js';
 
 const context = {
@@ -69,6 +70,31 @@ describe('withTenantTransaction', () => {
       ],
       ['COMMIT'],
     ]);
+  });
+
+  it('sets only the identity for the user-only transaction, with no organization at all', async () => {
+    const harness = createHarness();
+
+    await expect(
+      withUserTransaction(harness.pool, { userId: context.userId.toUpperCase() }, () =>
+        Promise.resolve('result'),
+      ),
+    ).resolves.toBe('result');
+
+    expect(harness.query.mock.calls).toEqual([
+      ['BEGIN'],
+      ["SELECT set_config('app.user_id', $1, true)", [context.userId]],
+      ['COMMIT'],
+    ]);
+  });
+
+  it('refuses a malformed identity in the user-only transaction before touching the pool', async () => {
+    const harness = createHarness();
+
+    await expect(
+      withUserTransaction(harness.pool, { userId: 'not-a-uuid' }, () => Promise.resolve('never')),
+    ).rejects.toThrow(TypeError);
+    expect(harness.connect).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown visibility scope before touching the pool', async () => {

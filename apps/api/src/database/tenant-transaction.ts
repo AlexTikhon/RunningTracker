@@ -69,9 +69,39 @@ export async function withTenantTransaction<Result>(
   context: TenantContext,
   callback: (client: PoolClient) => Promise<Result>,
 ): Promise<Result> {
-  const userId = validatedUuid('userId', context.userId);
-  const orgId = validatedUuid('orgId', context.orgId);
-  const visibilityScope = validatedVisibilityScope(context.visibilityScope);
+  return runScopedTransaction(
+    pool,
+    {
+      orgId: validatedUuid('orgId', context.orgId),
+      userId: validatedUuid('userId', context.userId),
+      visibilityScope: validatedVisibilityScope(context.visibilityScope),
+    },
+    callback,
+  );
+}
+
+/**
+ * The same transaction boundary for the one question asked before an organization exists: which
+ * organizations does this identity belong to. Only `app.user_id` is set, so no tenant row policy
+ * matches and nothing but the narrow discovery function can answer (migration 0022).
+ */
+export async function withUserTransaction<Result>(
+  pool: Pick<Pool, 'connect'>,
+  context: Pick<TenantContext, 'userId'>,
+  callback: (client: PoolClient) => Promise<Result>,
+): Promise<Result> {
+  return runScopedTransaction(
+    pool,
+    { orgId: undefined, userId: validatedUuid('userId', context.userId), visibilityScope: undefined },
+    callback,
+  );
+}
+
+async function runScopedTransaction<Result>(
+  pool: Pick<Pool, 'connect'>,
+  { orgId, userId, visibilityScope }: { orgId: string | undefined; userId: string; visibilityScope: 'live' | undefined },
+  callback: (client: PoolClient) => Promise<Result>,
+): Promise<Result> {
   const client = await pool.connect();
   let phase: 'connected' | 'begun' | 'committing' | 'complete' = 'connected';
   let destroyReason: Error | undefined;
@@ -79,7 +109,9 @@ export async function withTenantTransaction<Result>(
   try {
     await client.query('BEGIN');
     phase = 'begun';
-    await (visibilityScope
+    await (orgId === undefined
+      ? client.query("SELECT set_config('app.user_id', $1, true)", [userId])
+      : visibilityScope
       ? client.query(
           "SELECT set_config('app.user_id', $1, true), set_config('app.org_id', $2, true), set_config('app.visibility_scope', $3, true)",
           [userId, orgId, visibilityScope],

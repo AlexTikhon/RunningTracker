@@ -11,6 +11,8 @@ import {
   liveTrackChangesQuerySchema,
   nearbyQuerySchema,
   openApiDocument,
+  ORGANIZATION_LIST_MAX,
+  organizationListResponseSchema,
   pointInputSchema,
   qualityStatsSchema,
   revisionSchema,
@@ -299,6 +301,35 @@ describe('ordinary HTTP contracts', () => {
     };
     expect(sessionResponseSchema.parse(session)).toEqual(session);
     expect(apiErrorResponseSchema.parse(apiError)).toEqual(apiError);
+  });
+});
+
+describe('organization discovery contract', () => {
+  const organizationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+  it('accepts an empty list and a list of bare identifiers', () => {
+    expect(organizationListResponseSchema.parse({ items: [] })).toEqual({ items: [] });
+    expect(organizationListResponseSchema.parse({ items: [{ organizationId }] })).toEqual({
+      items: [{ organizationId }],
+    });
+  });
+
+  it('rejects extra fields, malformed identifiers and an unbounded list', () => {
+    expect(organizationListResponseSchema.safeParse({ items: [{ organizationId, name: 'x' }] }).success).toBe(false);
+    expect(organizationListResponseSchema.safeParse({ items: [{ organizationId: 'not-a-uuid' }] }).success).toBe(false);
+    expect(organizationListResponseSchema.safeParse({ items: [], nextCursor: null }).success).toBe(false);
+    const full = Array.from({ length: ORGANIZATION_LIST_MAX }, () => ({ organizationId }));
+    expect(organizationListResponseSchema.safeParse({ items: full }).success).toBe(true);
+    expect(organizationListResponseSchema.safeParse({ items: [...full, { organizationId }] }).success).toBe(false);
+  });
+
+  it('is documented as an authenticated read that takes no parameters', () => {
+    const operation = openApiDocument.paths['/api/organizations'].get;
+    expect('parameters' in operation).toBe(false);
+    expect('security' in operation).toBe(false);
+    expect(operation.responses['200'].content['application/json'].schema.$ref).toBe(
+      '#/components/schemas/OrganizationListResponse',
+    );
   });
 });
 
