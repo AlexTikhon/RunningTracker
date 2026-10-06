@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Date: September 21, 2026
-Status: agreed architecture, implemented through P12 and verified on one workstation; `docs/progress.md` holds the evidence for each stage and the ADRs (0001–0047) record the decisions. Nothing has run on a real host, against a real identity provider, with a production backup schedule, or in any browser but Chromium (a Playwright suite covers recording, reload, offline, a second tab and the coach live view there; its CI job has passed once on a GitHub-hosted runner), and the measured limits (P11) come from a local dataset. No production RPO or RTO is claimed. Decisions D01–D09 are resolved as recorded in `docs/decision-backlog.md` (D03b and D09 for the mechanism and the local drill only); D10, real-world GPS tolerances, is PARTIAL: measured on synthetic worldwide tracks (`docs/reports/d10-gps-tolerances.md`), not on recorded device traces; privacy-safe tooling to sanitize and replay recorded traces exists (`docs/runbooks/gps-traces.md`) but none has been analysed yet. Three read endpoints of §11.3 (`/runs/{runId}/track`, `/archive/runs`, `/live/nearby`) are specified but were never built. Stage-by-stage design notes follow in the sections below.
+Status: agreed architecture, implemented through P12 and verified on one workstation; `docs/progress.md` holds the evidence for each stage and the ADRs (0001–0049) record the decisions. Nothing has run on a real host, against a real identity provider, with a production backup schedule, or in any browser but Chromium (a Playwright suite covers recording, reload, offline, a second tab, the coach live view, the OpenID Connect sign-in against a test provider, organization discovery and sign-out there; its CI job last passed on a GitHub-hosted runner with 36 of today's 51 tests, before ADR-0048), and the measured limits (P11) come from a local dataset. No production RPO or RTO is claimed. Decisions D01–D09 are resolved as recorded in `docs/decision-backlog.md` (D03b and D09 for the mechanism and the local drill only); D10, real-world GPS tolerances, is PARTIAL: measured on synthetic worldwide tracks (`docs/reports/d10-gps-tolerances.md`), not on recorded device traces; privacy-safe tooling to sanitize and replay recorded traces exists (`docs/runbooks/gps-traces.md`) but none has been analysed yet. Three read endpoints of §11.3 (`/runs/{runId}/track`, `/archive/runs`, `/live/nearby`) are specified but were never built. Stage-by-stage design notes follow in the sections below.
 Scope: a personal learning project for practicing backend, geospatial, and full-stack architecture.
 
 This document supersedes fragments v0.1–v0.5. In case of discrepancy, v1.0 governs. Numeric limits not specified by the user are initial design parameters, subject to verification.
@@ -367,7 +367,7 @@ P09.5 implements this lifecycle as a separate controller, decoupled from the Map
 
 ## 11. API contracts
 
-Application API base prefix: /api/orgs/{orgId}; the session API uses `/api/session`. All dates are ISO 8601 UTC, coordinates are longitude/latitude. The user identifier is taken from the verified server-side session, not from headers/body/query.
+Application API base prefix: /api/orgs/{orgId}; the session API uses `/api/session` and organization discovery `/api/organizations`. All dates are ISO 8601 UTC, coordinates are longitude/latitude. The user identifier is taken from the verified server-side session, not from headers/body/query.
 
 ### 11.0 Session boundary
 
@@ -375,7 +375,8 @@ Application API base prefix: /api/orgs/{orgId}; the session API uses `/api/sessi
 |---|---|---|
 | POST /api/session | Only when explicitly enabled development/test local auth; exact configured Origin; application/json; `{ userId }` from a server allowlist | 201 `{ identity: { userId }, expiresAt, csrf: { headerName, token } }` + session cookie |
 | GET /api/session | A valid, unexpired/unrevoked session cookie | 200 with the same public session response |
-| DELETE /api/session | Session cookie + exact Origin + session-bound `x-csrf-token` | 204, server-side revoke and a cleared cookie |
+| DELETE /api/session | Session cookie + exact Origin + session-bound `x-csrf-token` | 204, server-side revoke and a cleared cookie. The web app's Sign out button calls it (ADR-0049) |
+| GET /api/organizations | A valid session cookie; no parameters (any query string is a 400) | 200 `{ items: [{ organizationId }] }`: the organizations of the session's identity with an active membership, ordered by id, at most 100; an empty list when there are none. Answered by a read-only database function that reads `app.user_id` (migration 0022, ADR-0049) |
 | GET /api/auth/login | Only when OpenID Connect is configured (404 otherwise); a browser navigation, not a `fetch` | 302 to the identity provider and a short-lived `HttpOnly`, `SameSite=Lax`, `Path=/api/auth` login cookie; 503 `IDENTITY_PROVIDER_UNAVAILABLE` or `LOGIN_TEMPORARILY_UNAVAILABLE` |
 | GET /api/auth/callback | Same; the provider's redirect target, with the login cookie | 200 page that navigates to the application, with the session cookie; any failure is a 302 to the post-login path with `sign_in_error` set to one of `denied`, `login_expired`, `not_provisioned`, `unavailable` |
 

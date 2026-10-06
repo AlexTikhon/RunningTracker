@@ -71,7 +71,7 @@ await fetch('/api/session', {
 }).then((response) => response.status)   // 201
 ```
 
-Reload. Open the Coach tab and enter the organization ID. The stream opens with no runs. The session cookie is
+Reload. The page shows the one organization this person belongs to, already selected (nothing is typed). Open the Coach tab. The stream opens with no runs. The session cookie is
 `HttpOnly`, so the console cannot read it; that is the point.
 
 ## 4. Play the runner
@@ -96,11 +96,15 @@ demo does not repeat it).
 ## 5. Browse the archive
 
 The summary worker runs once a minute (`RUN_SUMMARY_INTERVAL_MS`), so the script reports the summary after up to
-about a minute. Then open the Archive tab with the same organization ID. With a Mapbox token the run's line is drawn
+about a minute. Then open the Archive tab; it uses the same organization. With a Mapbox token the run's line is drawn
 from revision-bound tiles; the view picks up the new archive revision by itself within 30 seconds or on tab focus.
 Without a token, the tab shows the token notice and nothing is drawn.
 
 ## 6. Sign out
+
+Press **Sign out** in the bar under the title. The page asks the server to end the session, and then shows "Sign in required". Anything the runner had not uploaded stays in this browser for the same person.
+
+The same call from the console, if you prefer:
 
 ```js
 const { csrf } = await (await fetch('/api/session')).json();
@@ -117,7 +121,7 @@ await fetch('/api/session', { method: 'DELETE', headers: { 'x-csrf-token': csrf.
 | `demo:run` says it cannot reach the API | The API is not running at `http://127.0.0.1:3000` (`--api-url` changes it; only loopback hosts are accepted) |
 | `demo:run` answers 403 `ORG_ACCESS_DENIED` | `demo:seed` was not run against the database the API uses |
 | The summary is not published within 150 s | The API process is not running its maintenance jobs, or the database is not the one the script's run was written to |
-| The Coach tab shows nothing | The organization ID is wrong, or the coach has no share on the run (the script creates one) |
+| The Coach tab shows nothing | The coach has no share on the run (the script creates one), or the page shows no organization: `demo:seed` was not run against the database the API uses |
 
 ## Removing the demo
 

@@ -139,7 +139,7 @@ IndexedDB for that user. Reauthentication restores them with the new session's C
 | Gap | Note |
 |---|---|
 | Verification against a real provider | Not performed |
-| Logout at the provider (RP-initiated logout) | `DELETE /api/session` ends the application session only |
+| Logout at the provider (RP-initiated logout) | `DELETE /api/session` ends the application session only. The web app's Sign out button calls it (ADR-0049), so the next sign-in completes without a login page while the provider session lives |
 | Provisioning through the application | Manual SQL by design for now |
 | Shared session store | Sessions are process memory; a restart signs everyone out |
 | Provider-side re-validation of a live session | A disabled provider account keeps its session until expiry |
