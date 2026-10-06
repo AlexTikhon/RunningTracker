@@ -74,6 +74,10 @@ export function createOidcRouter({
   }
   const secure = config.SESSION_COOKIE_SECURE;
   const router = createRouter();
+  // Process-wide admission, including provider work still in flight. Client IP
+  // limiting belongs to nginx's direct socket boundary, never forwarded headers.
+  const initiations: number[] = [];
+  let inFlight = 0;
 
   const failureLocation = (failure: SignInFailure): string => {
     const target = new URL(oidc.postLoginPath, 'http://localhost');
@@ -94,16 +98,29 @@ export function createOidcRouter({
     next();
   });
 
-  router.get('/login', async (_request, response) => {
+  router.get('/login', async (request, response) => {
+    const now = Date.now();
+    while (initiations[0] !== undefined && initiations[0] <= now - 60_000) initiations.shift();
+    if (inFlight >= 5 || initiations.length >= 30) {
+      response.setHeader('Retry-After', '60');
+      throw new ApiError(429, 'LOGIN_RATE_LIMITED', 'Too many sign-in attempts; retry shortly');
+    }
+    initiations.push(now);
+    inFlight += 1;
+    let loginId: string | undefined;
     try {
+      loginId = loginStore.reserve(parseCookie(request.header('cookie'), loginCookieName));
       const { authorizationUrl, pending } = await client.beginLogin();
-      const loginId = loginStore.begin(pending);
+      if (!loginStore.completeReservation(loginId, pending)) {
+        throw new OidcLoginStoreCapacityError();
+      }
       response.setHeader(
         'Set-Cookie',
         loginCookie(loginId, Math.max(1, Math.floor(oidc.loginTtlMs / 1_000)), secure),
       );
       response.redirect(302, authorizationUrl.toString());
     } catch (error) {
+      if (loginId !== undefined) loginStore.take(loginId);
       if (error instanceof OidcProviderUnavailableError) {
         logger.warn('auth.login.failed', { reason: 'provider_unavailable', ...describeError(error) });
         throw new ApiError(503, 'IDENTITY_PROVIDER_UNAVAILABLE', 'The identity provider is unavailable');
@@ -113,6 +130,8 @@ export function createOidcRouter({
         throw new ApiError(503, 'LOGIN_TEMPORARILY_UNAVAILABLE', 'Sign-in is temporarily unavailable');
       }
       throw error;
+    } finally {
+      inFlight -= 1;
     }
   });
 

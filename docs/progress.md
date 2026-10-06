@@ -1,6 +1,17 @@
 # Implementation progress
 
-Last updated: 2026-10-02.
+Last updated: 2026-10-05.
+
+Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
+the reducer and IndexedDB; shared session suspension preserves durable recovery; JSON requests
+have cancellation and body-inclusive deadlines; terminal upload rejection persists across reload
+and offers export/fenced discard after finish; login admission reserves capacity before provider
+work and throttles anonymous initiations at the application and public-edge proxy.
+
+Verified on the workstation: `npm run verify` (750 API and 124 web tests, workspace checks/builds),
+18 real PostgreSQL/session/OIDC integration tests, `npm run deploy:verify`, including forged-IP
+and alternate-path login throttle checks, and all 41 Playwright checks, including recording expiry
+without reload, fresh-session buffer recovery, terminal rejection/export/discard and exact command retry.
 
 | Stage | Status | Result |
 |---|---|---|

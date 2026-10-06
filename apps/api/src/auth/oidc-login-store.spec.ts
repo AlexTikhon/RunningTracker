@@ -36,6 +36,14 @@ function createStore(overrides: { maxEntries?: number; ttlMs?: number } = {}) {
 }
 
 describe('OidcLoginStore', () => {
+  it('reserves capacity before asynchronous discovery and expires an unfinished reservation', () => {
+    const { clock, store } = createStore({ maxEntries: 1 });
+    const id = store.reserve();
+    expect(() => store.reserve()).toThrow(OidcLoginStoreCapacityError);
+    clock.advance(1_000);
+    expect(store.completeReservation(id, attempt)).toBe(false);
+    expect(() => store.begin(attempt)).not.toThrow();
+  });
   it('returns the stored attempt exactly once', () => {
     const { store } = createStore();
     const loginId = store.begin(attempt);

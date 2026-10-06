@@ -1,6 +1,6 @@
 import express from 'express';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Clock } from '../clock.js';
 import { validateEnvironment } from '../config/environment.js';
@@ -19,12 +19,13 @@ const userId = '11111111-1111-4111-8111-111111111111';
 const authorizationUrl = new URL('https://idp.example/realm/auth?client_id=running-tracker&state=s1');
 
 class FixedClock implements Clock {
+  public now = Date.parse('2026-10-02T10:00:00.000Z');
   public clearTimeout(handle: ReturnType<typeof setTimeout>): void {
     clearTimeout(handle);
   }
 
   public monotonicNow(): number {
-    return Date.parse('2026-10-02T10:00:00.000Z');
+    return this.now;
   }
 
   public setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
@@ -32,11 +33,12 @@ class FixedClock implements Clock {
   }
 
   public utcNow(): Date {
-    return new Date('2026-10-02T10:00:00.000Z');
+    return new Date(this.now);
   }
 }
 
 interface Harness {
+  clock: FixedClock;
   app: express.Express;
   client: { completions: Array<{ callbackUrl: string; pendingState: string }> };
   logs: string[];
@@ -117,7 +119,7 @@ function createHarness(
     }),
   );
   app.use(apiErrorHandler());
-  return { app, client: { completions }, logs, sessions };
+  return { app, clock, client: { completions }, logs, sessions };
 }
 
 function cookieValue(response: request.Response, name: string): string | undefined {
@@ -138,6 +140,8 @@ async function startLogin(harness: Harness): Promise<string> {
   }
   return loginCookie;
 }
+
+afterEach(() => vi.useRealTimers());
 
 describe('OIDC login routes', () => {
   it('redirects to the provider and holds the attempt in a short-lived Lax cookie', async () => {
@@ -294,6 +298,54 @@ describe('OIDC login routes', () => {
     const response = await request(harness.app).get('/api/auth/login').expect(503);
 
     expect(response.body).toMatchObject({ error: { code: 'LOGIN_TEMPORARILY_UNAVAILABLE' } });
+  });
+
+  it('replaces this browser attempt even at capacity, and consumes only the replacement callback', async () => {
+    const harness = createHarness({ maxEntries: 1 });
+    const first = await startLogin(harness);
+    const replacement = await request(harness.app).get('/api/auth/login').set('Cookie', `running_tracker_login=${first}`).expect(302);
+    const second = cookieValue(replacement, 'running_tracker_login');
+    expect(second).not.toBe(first);
+    const stale = await request(harness.app).get('/api/auth/callback?code=old').set('Cookie', `running_tracker_login=${first}`).expect(302);
+    expect(stale.headers.location).toContain('login_expired');
+    await request(harness.app).get('/api/auth/callback?code=new').set('Cookie', `running_tracker_login=${second}`).expect(200);
+    expect(harness.client.completions).toMatchObject([{ pendingState: 'state-2' }]);
+  });
+
+  it('rejects admission before provider work and frees expired reservations for legitimate login', async () => {
+    const begin = vi.fn<OidcClient['beginLogin']>().mockResolvedValue({ authorizationUrl, pending: { codeVerifier: 'v', nonce: 'n', state: 's' } });
+    const harness = createHarness({ begin, maxEntries: 1 });
+    await startLogin(harness);
+    await request(harness.app).get('/api/auth/login').expect(503);
+    expect(begin).toHaveBeenCalledOnce();
+    harness.clock.now += 600_000;
+    await request(harness.app).get('/api/auth/login').expect(302);
+    expect(begin).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds login initiation rate regardless of forged forwarded addresses and recovers after the window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const harness = createHarness();
+    for (let index = 0; index < 30; index += 1) await request(harness.app).get('/api/auth/login').expect(302);
+    const rejected = await request(harness.app).get('/api/auth/login').set('X-Forwarded-For', '203.0.113.2').expect(429);
+    expect(rejected.headers['retry-after']).toBe('60');
+    vi.setSystemTime(Date.now() + 60_000);
+    await request(harness.app).get('/api/auth/login').expect(302);
+  });
+
+  it('reserves capacity before concurrent provider work and releases failed reservations', async () => {
+    let rejectPending: (error: Error) => void = () => {};
+    const pending = new Promise<Awaited<ReturnType<OidcClient['beginLogin']>>>((_resolve, reject) => { rejectPending = reject; });
+    const begin = vi.fn<OidcClient['beginLogin']>().mockReturnValue(pending);
+    const harness = createHarness({ begin, maxEntries: 1 });
+    const first = request(harness.app).get('/api/auth/login').then((response) => response.status);
+    await vi.waitFor(() => expect(begin).toHaveBeenCalledOnce());
+    await request(harness.app).get('/api/auth/login').expect(503);
+    expect(begin).toHaveBeenCalledOnce();
+    rejectPending(new OidcProviderUnavailableError('offline'));
+    expect(await first).toBe(503);
+    begin.mockResolvedValue({ authorizationUrl, pending: { codeVerifier: 'v', nonce: 'n', state: 's' } });
+    await request(harness.app).get('/api/auth/login').expect(302);
   });
 
   it('logs only an outcome code, never a code, token, subject, or provider message', async () => {

@@ -121,7 +121,18 @@ token or subject).
 | `login_expired` | The attempt is older than `OIDC_LOGIN_TTL_MS` (10 minutes), was started in another browser, or was already used | Start again from the app |
 | `unavailable` | Provider outage, timeout, a 5xx, or a non-conforming response while exchanging the code | Provider status; API container reaches the issuer over HTTPS |
 | HTTP 503 `IDENTITY_PROVIDER_UNAVAILABLE` at `/api/auth/login` | Discovery failed, or the provider does not advertise PKCE S256 | `curl` the discovery document from inside the API container |
-| HTTP 503 `LOGIN_TEMPORARILY_UNAVAILABLE` | The pending-login store is full (100 attempts in 10 minutes) | Traffic to `/api/auth/login`; rate limiting belongs at the proxy |
+| HTTP 503 `LOGIN_TEMPORARILY_UNAVAILABLE` | The pending-login store is full (100 attempts in 10 minutes) | Traffic to `/api/auth/login`; the browser's previous attempt is replaced when restarting |
+| HTTP 429 at login / `LOGIN_RATE_LIMITED` from the API | Public-edge per-IP throttling, or application admission (five in flight, thirty per minute) | Wait and retry; investigate abandoned initiations and abusive traffic |
+
+The production nginx proxy is the public edge: it limits the direct socket address to five login
+initiations per minute, with burst four. It does not derive that identity from client-supplied
+`X-Forwarded-For` or `X-Real-IP`, and the API admission is process-wide, independent of those headers.
+If another ingress is placed in front of nginx, configure that ingress's exact trusted addresses
+before enabling real-IP processing; otherwise its users share the ingress address's allowance.
+
+When the application session expires, the runner suspends capture and upload and shows sign-in
+without requiring a reload. Buffered points and exact unresolved lifecycle requests remain in
+IndexedDB for that user. Reauthentication restores them with the new session's CSRF credentials.
 
 ## Not done here
 

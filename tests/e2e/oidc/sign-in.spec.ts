@@ -1,3 +1,4 @@
+import { RunnerPage } from '../support/runner-page.js';
 import type { Cookie } from '@playwright/test';
 
 import {
@@ -244,7 +245,7 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     expect(interactions).toHaveLength(0);
   });
 
-  test('an expired session is refused by the server and the person can sign in again', async ({
+  test('expiry suspends a recording runner without reload and reauthentication drains its retained points', async ({
     context,
     environment,
     page,
@@ -253,6 +254,15 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     await page.goto('/');
     await signInAt(page, environment, provisionedSubject);
     await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    const runner = new RunnerPage(page);
+    await page.getByLabel('Organization ID').fill(provisioned.orgId);
+    await runner.useSimulator();
+    await page.route('**/points', async (route) => {
+      if (route.request().method() !== 'POST') await route.continue();
+    });
+    await runner.start();
+    await expect(runner.card('Recording').value).toHaveText('recording');
+    await runner.waitForPendingAtLeast(2);
     const token = findCookie(await context.cookies(), sessionCookieName)?.value;
     expect(token).toBeDefined();
     const first = (await pageFetch(page, '/api/session')).body as { expiresAt: string };
@@ -267,11 +277,17 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     });
     expect(replayed.status()).toBe(401);
 
-    await page.reload();
+    await expect(runner.card('Capture').value).toHaveText('idle');
+    await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeDisabled();
+    await page.unroute('**/points');
     await expect(page.getByText('Sign in required')).toBeVisible();
     await page.getByRole('link', { name: 'Sign in' }).click();
     await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
     const second = (await pageFetch(page, '/api/session')).body as { expiresAt: string };
+    await runner.waitForEmptyBuffer();
+    await expect(runner.card('Recording').value).toHaveText('recording');
+    await runner.finish();
+    await expect(runner.card('Recording').value).toHaveText('finished');
     expect(Date.parse(second.expiresAt)).toBeGreaterThan(Date.parse(first.expiresAt));
   });
 });

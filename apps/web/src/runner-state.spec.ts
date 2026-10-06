@@ -37,6 +37,19 @@ function startRecording() {
 }
 
 describe('runnerReducer', () => {
+  it.each(['pause', 'finish'] as const)('keeps %s confirmed in either upload/command ACK order', (type) => {
+    const request: CommandRequest = { kind: 'command', orgId: startRequest.orgId, runId: startRequest.runId, commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', expectedControlRevision: '0', type };
+    const result: RunCommandResponse = { commandId: request.commandId, controlRevision: '1', dataRevision: '1', status: type === 'pause' ? 'paused' : 'finished', finishedAt: type === 'finish' ? '2026-09-26T08:01:00.000Z' : null };
+    for (const uploadFirst of [true, false]) {
+      let state = runnerReducer(startRecording(), { type: 'request-started', request });
+      if (uploadFirst) state = runnerReducer(state, { type: 'point-batch-acknowledged', runId: request.runId, dataRevision: '2' });
+      state = runnerReducer(state, { type: 'command-succeeded', request, result });
+      if (!uploadFirst) state = runnerReducer(state, { type: 'point-batch-acknowledged', runId: request.runId, dataRevision: '2' });
+      expect(state.run).toMatchObject({ controlRevision: '1', dataRevision: '2', status: result.status, finishedAt: result.finishedAt });
+      state = runnerReducer(state, { type: 'run-reconciled', run: { ...recordingRun, dataRevision: '3' } });
+      expect(state.run).toMatchObject({ controlRevision: '1', dataRevision: '3', status: result.status });
+    }
+  });
   it('moves from idle through starting to recording', () => {
     const idle = createInitialRunnerState('online');
     const pending = runnerReducer(idle, { request: startRequest, type: 'request-started' });

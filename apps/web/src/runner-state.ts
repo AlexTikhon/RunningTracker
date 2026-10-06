@@ -1,7 +1,9 @@
 import type { RunCommandResponse, RunCommandType, RunStatus, RunView } from '@running-tracker/contracts';
 
+import { advanceDataRevision, mergeCommandResult, mergeRunSnapshot } from './run-snapshot.js';
+
 export type Connectivity = 'online' | 'offline';
-export type UploadStatus = 'idle' | 'uploading' | 'retrying' | 'error';
+export type UploadStatus = 'idle' | 'uploading' | 'retrying' | 'error' | 'suspended' | 'blocked';
 
 export interface UploadState {
   message: string | null;
@@ -55,6 +57,7 @@ export type RunnerEvent =
   | { connectivity: Connectivity; type: 'connectivity-changed' }
   | {
       pendingPointCount: number;
+      uploadRejection?: string | null;
       request: RunnerRequest | null;
       run: RunView | null;
       type: 'storage-restored';
@@ -67,6 +70,7 @@ export type RunnerEvent =
   | { runId: string; type: 'point-buffered' }
   | { dataRevision: string; runId: string; type: 'point-batch-acknowledged' }
   | { run: RunView; type: 'run-reconciled' }
+  | { type: 'rejected-run-discarded' }
   | { type: 'finished-run-cleared' }
   | { upload: UploadState; type: 'upload-changed' };
 
@@ -106,14 +110,6 @@ function assertRequestAllowed(state: RunnerState, request: RunnerRequest): void 
   }
 }
 
-function latestRunSnapshot(current: RunView, incoming: RunView): RunView {
-  const dataOrder = BigInt(incoming.dataRevision) - BigInt(current.dataRevision);
-  if (dataOrder !== 0n) {
-    return dataOrder > 0n ? incoming : current;
-  }
-  return BigInt(incoming.controlRevision) >= BigInt(current.controlRevision) ? incoming : current;
-}
-
 export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerState {
   switch (event.type) {
     case 'connectivity-changed':
@@ -132,9 +128,9 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
             },
         run: event.run,
         upload: {
-          message: null,
+          message: event.uploadRejection ?? null,
           pendingCount: event.pendingPointCount,
-          status: 'idle',
+          status: event.uploadRejection ? 'blocked' : 'idle',
         },
       };
     case 'request-started':
@@ -151,7 +147,7 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         ...state,
         error: null,
         pendingRequest: null,
-        run: state.run === null ? event.run : latestRunSnapshot(state.run, event.run),
+        run: state.run === null ? event.run : mergeRunSnapshot(state.run, event.run),
       };
     case 'command-succeeded':
       if (!isSameRequest(state.pendingRequest, event.request) || state.run === null) {
@@ -161,19 +157,13 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         ...state,
         error: null,
         pendingRequest: null,
-        run: {
-          ...state.run,
-          controlRevision: event.result.controlRevision,
-          dataRevision: event.result.dataRevision,
-          finishedAt: event.result.finishedAt,
-          status: event.result.status,
-        },
+        run: mergeCommandResult(state.run, event.result),
       };
     case 'request-reconciled':
       if (!isSameRequest(state.pendingRequest, event.request)) {
         return state;
       }
-      return { ...state, error: null, pendingRequest: null, run: event.run };
+      return { ...state, error: null, pendingRequest: null, run: mergeRunSnapshot(state.run, event.run) };
     case 'request-failed':
       if (!isSameRequest(state.pendingRequest, event.request)) {
         return state;
@@ -194,6 +184,8 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
           pendingCount: state.upload.pendingCount + 1,
         },
       };
+    case 'rejected-run-discarded':
+      return { ...state, error: null, pendingRequest: null, run: null, upload: { message: null, pendingCount: 0, status: 'idle' } };
     case 'finished-run-cleared':
       if (state.run?.status !== 'finished' || state.pendingRequest !== null) {
         throw new Error('Only a settled finished run can be cleared');
@@ -210,15 +202,13 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       }
       return {
         ...state,
-        run: BigInt(event.dataRevision) > BigInt(state.run.dataRevision)
-          ? { ...state.run, dataRevision: event.dataRevision }
-          : state.run,
+        run: advanceDataRevision(state.run, event.dataRevision),
       };
     case 'run-reconciled':
       if (state.run?.runId !== event.run.runId) {
         return state;
       }
-      return { ...state, run: latestRunSnapshot(state.run, event.run) };
+      return { ...state, run: mergeRunSnapshot(state.run, event.run) };
     case 'upload-changed':
       return { ...state, upload: event.upload };
   }

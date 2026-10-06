@@ -1,4 +1,4 @@
-import { uuidSchema, type RunCommandType, type SessionResponse } from '@running-tracker/contracts';
+import { uuidSchema, type RunCommandType } from '@running-tracker/contracts';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
@@ -11,13 +11,12 @@ import {
   parseCaptureSourceKind,
   type CaptureSourceKind,
 } from './capture-source-kind.js';
+import { executeRunnerRequest } from './runner-requests.js';
+import { useRunnerSession } from './use-runner-session.js';
 import { PointUploadWorker } from './point-upload-worker.js';
 import {
-  createRun,
-  loadSession,
   readRun,
   RunnerApiError,
-  sendRunCommand,
   uploadPointBatch,
 } from './runner-api.js';
 import { getBrowserRunnerStorage } from './runner-storage.js';
@@ -30,6 +29,7 @@ import {
   type CommandRequest,
   type RunnerRequest,
   type StartRequest,
+  type UploadState,
 } from './runner-state.js';
 import {
   WriterLeaseCoordinator,
@@ -37,10 +37,6 @@ import {
 } from './writer-lease.js';
 
 type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
-type SessionState =
-  | { status: 'loading' }
-  | { message: string; status: 'required' }
-  | { session: SessionResponse; status: 'ready' };
 type StorageState =
   | { status: 'loading' }
   | { status: 'ready' }
@@ -75,7 +71,6 @@ function durationLabel(startedAt: string | undefined, finishedAt: string | null 
 
 export function App() {
   const [health, setHealth] = useState<HealthState>(initialHealth);
-  const [session, setSession] = useState<SessionState>({ status: 'loading' });
   const [orgId, setOrgId] = useState('');
   const [signInFailure] = useState(() =>
     typeof window === 'undefined' ? undefined : signInFailureMessage(window.location.search),
@@ -92,11 +87,22 @@ export function App() {
   const restoredUserId = useRef<string | null>(null);
   const uploadWorker = useRef<PointUploadWorker | null>(null);
   const writerCoordinator = useRef<WriterLeaseCoordinator | null>(null);
+  const latestUpload = useRef<UploadState>({ message: null, pendingCount: 0, status: 'idle' });
+  const suspendRunner = useCallback(() => {
+    captureController.current?.stop();
+    uploadWorker.current?.stop();
+    if (uploadWorker.current !== null && latestUpload.current.status !== 'blocked') {
+      dispatch({ type: 'upload-changed', upload: { ...latestUpload.current, status: 'suspended', message: 'Sign in to resume upload.' } });
+    }
+    restoredUserId.current = null;
+  }, []);
+  const { session, refreshSession } = useRunnerSession(suspendRunner);
   const [runner, dispatch] = useReducer(
     runnerReducer,
     typeof navigator === 'undefined' || navigator.onLine !== false ? 'online' : 'offline',
     createInitialRunnerState,
   );
+  latestUpload.current = runner.upload;
   const normalizedOrgId = orgId.trim().toLowerCase();
   const mapboxAccessToken = (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '').trim() || null;
 
@@ -106,20 +112,6 @@ export function App() {
     } catch (error) {
       if (!isAbortError(error)) {
         setHealth({ api: 'down', database: 'unknown' });
-      }
-    }
-  }, []);
-
-  const refreshSession = useCallback(async (signal?: AbortSignal) => {
-    setSession({ status: 'loading' });
-    try {
-      setSession({ session: await loadSession(signal), status: 'ready' });
-    } catch (error) {
-      if (!isAbortError(error)) {
-        setSession({
-          message: 'A session is required: sign in, or create the local development session.',
-          status: 'required',
-        });
       }
     }
   }, []);
@@ -136,9 +128,8 @@ export function App() {
   useEffect(() => {
     const controller = new AbortController();
     void refreshHealth(controller.signal);
-    void refreshSession(controller.signal);
     return () => controller.abort();
-  }, [refreshHealth, refreshSession]);
+  }, [refreshHealth]);
 
   useEffect(() => {
     if (session.status !== 'ready' || restoredUserId.current === session.session.identity.userId) {
@@ -161,6 +152,7 @@ export function App() {
         // Set in the same batch as the storage becoming ready, which every capture start waits for.
         setCaptureSourceKind(recovery.captureSource);
         dispatch({
+          uploadRejection: recovery.uploadRejection,
           pendingPointCount: recovery.pendingPointCount,
           request: recovery.request,
           run: recovery.run,
@@ -219,8 +211,10 @@ export function App() {
     if (
       session.status !== 'ready'
       || storage.status !== 'ready'
+      || restoredUserId.current !== session.session.identity.userId
       || writer.status !== 'owned'
       || runner.run === null
+      || runner.upload.status === 'blocked'
       || !uuidSchema.safeParse(normalizedOrgId).success
     ) {
       return undefined;
@@ -235,20 +229,23 @@ export function App() {
       onAcknowledged: (dataRevision) => {
         dispatch({ dataRevision, runId: scope.runId, type: 'point-batch-acknowledged' });
       },
-      onPermanentError: async () => {
-        const authoritativeRun = await readRun(scope.orgId, scope.runId);
+      onPermanentError: async (error, signal) => {
+        captureController.current?.stop();
+        await runnerStorage.rejectUpload(scope, errorMessage(error));
+        const authoritativeRun = await readRun(scope.orgId, scope.runId, signal);
         await runnerStorage.saveRunSnapshot(scope.userId, scope.orgId, authoritativeRun);
         dispatch({ run: authoritativeRun, type: 'run-reconciled' });
       },
       onState: (nextUpload) => dispatch({ type: 'upload-changed', upload: nextUpload }),
       scope,
-      send: async (points) => {
+      send: async (points, signal) => {
         if (!await writerCoordinator.current?.assertOwned()) {
           throw new Error('Point upload stopped because this tab no longer owns the writer lease');
         }
         return uploadPointBatch(
           { orgId: scope.orgId, points, runId: scope.runId },
           session.session.csrf,
+          signal,
         );
       },
       storage: runnerStorage,
@@ -271,7 +268,9 @@ export function App() {
     if (
       session.status !== 'ready'
       || storage.status !== 'ready'
+      || restoredUserId.current !== session.session.identity.userId
       || writer.status !== 'owned'
+      || runner.upload.status === 'blocked'
       || runner.run?.status !== 'recording'
       || captureSourceKind === null
       || !uuidSchema.safeParse(normalizedOrgId).success
@@ -304,7 +303,7 @@ export function App() {
       controller.stop();
       if (captureController.current === controller) captureController.current = null;
     };
-  }, [captureSourceKind, normalizedOrgId, runner.run?.runId, runner.run?.status, session, storage.status, writer.status]);
+  }, [captureSourceKind, normalizedOrgId, runner.run?.runId, runner.run?.status, runner.upload.status === 'blocked', session, storage.status, writer.status]);
 
   useEffect(() => {
     if (runner.run === null || runner.run.status === 'finished') {
@@ -324,62 +323,24 @@ export function App() {
       }
       dispatch({ request, type: 'request-started' });
       try {
-        const runnerStorage = getBrowserRunnerStorage();
-        await runnerStorage.queueRequest(session.session.identity.userId, request, runner.run);
-        if (runner.connectivity === 'offline') {
-          dispatch({
-            message: 'Saved locally. Retry the same request when the connection returns.',
-            request,
-            type: 'request-failed',
-          });
-          return;
-        }
-        if (request.kind === 'start') {
-          const run = await createRun(request, session.session.csrf);
-          if (!await writerCoordinator.current?.assertOwned()) {
-            throw new Error(
-              'Writer ownership changed after the server response; the exact start request remains queued.',
-            );
-          }
-          await runnerStorage.acknowledgeStart(session.session.identity.userId, request, run);
-          dispatch({ request, run, type: 'start-succeeded' });
-          return;
-        }
-        if (runner.run === null) {
-          throw new Error('The durable command has no confirmed run state');
-        }
-        const result = await sendRunCommand(request, session.session.csrf);
-        if (!await writerCoordinator.current?.assertOwned()) {
-          throw new Error(
-            'Writer ownership changed after the server response; the exact command remains queued.',
-          );
-        }
-        await runnerStorage.acknowledgeCommand(
-          session.session.identity.userId,
+        const outcome = await executeRunnerRequest({
+          assertOwned: async () => await writerCoordinator.current?.assertOwned() ?? false,
+          csrf: session.session.csrf,
+          online: runner.connectivity === 'online',
           request,
-          runner.run,
-          result,
-        );
-        dispatch({ request, result, type: 'command-succeeded' });
-      } catch (error) {
-        if (
-          request.kind === 'command'
-          && error instanceof RunnerApiError
-          && error.code === 'CONTROL_REVISION_CONFLICT'
-        ) {
-          try {
-            const authoritativeRun = await readRun(request.orgId, request.runId);
-            await getBrowserRunnerStorage().acknowledgeReconciledRequest(
-              session.session.identity.userId,
-              request,
-              authoritativeRun,
-            );
-            dispatch({ request, run: authoritativeRun, type: 'request-reconciled' });
-            return;
-          } catch {
-            // Preserve the original command failure when reconciliation is unavailable.
-          }
+          run: runner.run,
+          signal: session.signal,
+          storage: getBrowserRunnerStorage(),
+          userId: session.session.identity.userId,
+        });
+        if (outcome.kind === 'start' && request.kind === 'start') {
+          dispatch({ request, run: outcome.run, type: 'start-succeeded' });
+        } else if (outcome.kind === 'command' && request.kind === 'command') {
+          dispatch({ request, result: outcome.result, type: 'command-succeeded' });
+        } else if (outcome.kind === 'reconciled' && request.kind === 'command') {
+          dispatch({ request, run: outcome.run, type: 'request-reconciled' });
         }
+      } catch (error) {
         dispatch({ message: errorMessage(error), request, type: 'request-failed' });
       }
     },
@@ -399,6 +360,7 @@ export function App() {
       && (recovery.run !== null || recovery.request !== null)
     ) {
       dispatch({
+        uploadRejection: recovery.uploadRejection,
         pendingPointCount: recovery.pendingPointCount,
         request: recovery.request,
         run: recovery.run,
@@ -498,6 +460,33 @@ export function App() {
     }
   };
 
+  const rejectedScope = session.status === 'ready' && runner.run !== null
+    ? { userId: session.session.identity.userId, orgId: normalizedOrgId, runId: runner.run.runId } : null;
+  const exportRejectedPoints = async () => {
+    if (rejectedScope === null) return;
+    try {
+      const points = await getBrowserRunnerStorage().exportBufferedPoints(rejectedScope);
+      const url = URL.createObjectURL(new Blob([JSON.stringify({ ...rejectedScope, points }, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `run-${rejectedScope.runId}-buffer.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
+  };
+  const discardRejectedPoints = async () => {
+    if (rejectedScope === null || busy) return;
+    try {
+      const lease = await writerCoordinator.current?.assertOwnedLease();
+      if (!lease) return;
+      captureController.current?.stop();
+      uploadWorker.current?.stop();
+      await getBrowserRunnerStorage().discardRejectedRun(rejectedScope, lease);
+      dispatch({ type: 'rejected-run-discarded' });
+      await writerCoordinator.current?.release();
+    } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
+  };
+
   return (
     <main>
       <header className="topbar">
@@ -593,12 +582,12 @@ export function App() {
           ) : (
             <div className="command-grid">
               {commands.includes('pause') && (
-                <button disabled={controlsDisabled} onClick={() => command('pause')} type="button">
+                <button disabled={controlsDisabled || runner.upload.status === 'blocked'} onClick={() => command('pause')} type="button">
                   {phase === 'pausing' ? 'Pausing…' : 'Pause'}
                 </button>
               )}
               {commands.includes('resume') && (
-                <button disabled={controlsDisabled} onClick={() => command('resume')} type="button">
+                <button disabled={controlsDisabled || runner.upload.status === 'blocked'} onClick={() => command('resume')} type="button">
                   {phase === 'resuming' ? 'Resuming…' : 'Resume'}
                 </button>
               )}
@@ -610,7 +599,7 @@ export function App() {
               {runner.run.status === 'finished' && (
                 <button
                   className="primary-action"
-                  disabled={runner.upload.pendingCount > 0 || writer.status !== 'owned'}
+                  disabled={controlsDisabled || runner.upload.pendingCount > 0 || writer.status !== 'owned'}
                   onClick={() => void clearFinishedRun()}
                   type="button"
                 >
@@ -626,6 +615,15 @@ export function App() {
         <section className="notice notice--offline" role="status">
           <strong>Offline</strong>
           <span>Lifecycle requests can be saved locally and retried after reconnection.</span>
+        </section>
+      )}
+
+      {runner.upload.status === 'blocked' && (
+        <section className="notice notice--error" role="alert">
+          <strong>Buffered points were rejected</strong>
+          <span>{runner.upload.message} Export the retained points before discarding them. Discard removes this browser's queue; finish the run before clearing it.</span>
+          <button disabled={rejectedScope === null} onClick={() => void exportRejectedPoints()} type="button">Export buffered points</button>
+          <button disabled={rejectedScope === null || busy || writer.status !== 'owned' || runner.run?.status !== 'finished'} onClick={() => void discardRejectedPoints()} type="button">Discard buffered points and clear run</button>
         </section>
       )}
 

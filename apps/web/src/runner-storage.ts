@@ -10,6 +10,7 @@ import {
   type RunView,
 } from '@running-tracker/contracts';
 
+import { advanceDataRevision, mergeCommandResult, mergeRunSnapshot } from './run-snapshot.js';
 import { parseCaptureSourceKind, type CaptureSourceKind } from './capture-source-kind.js';
 import type { CommandRequest, RunnerRequest, StartRequest } from './runner-state.js';
 
@@ -40,6 +41,7 @@ interface ProfileRecord {
 }
 
 interface RunRecord {
+  uploadRejection?: string;
   nextSeq: string;
   nextSegmentId?: number;
   orgId: string;
@@ -92,6 +94,7 @@ export type WriterLeaseAcquisition =
   | { acquired: false; lease: WriterLease };
 
 export interface RunnerRecovery {
+  uploadRejection: string | null;
   captureSource: CaptureSourceKind;
   orgId: string | null;
   pendingPointCount: number;
@@ -223,29 +226,8 @@ function parseRunnerRequest(value: unknown): RunnerRequest {
   throw new Error('Stored runner request kind is invalid');
 }
 
-function commandRun(run: RunView, result: RunCommandResponse): RunView {
-  return runViewSchema.parse({
-    ...run,
-    controlRevision: result.controlRevision,
-    dataRevision: result.dataRevision,
-    finishedAt: result.finishedAt,
-    status: result.status,
-  });
-}
-
 function compareRequests(left: RequestRecord, right: RequestRecord): number {
   return left.enqueuedAt.localeCompare(right.enqueuedAt) || left.requestKey.localeCompare(right.requestKey);
-}
-
-function latestRunSnapshot(current: RunView | null | undefined, incoming: RunView): RunView {
-  if (current === null || current === undefined) {
-    return incoming;
-  }
-  const dataOrder = BigInt(incoming.dataRevision) - BigInt(current.dataRevision);
-  if (dataOrder !== 0n) {
-    return dataOrder > 0n ? incoming : current;
-  }
-  return BigInt(incoming.controlRevision) >= BigInt(current.controlRevision) ? incoming : current;
 }
 
 export class IndexedDbRunnerStorage {
@@ -398,6 +380,7 @@ export class IndexedDbRunnerStorage {
       const runStore = transaction.objectStore(STORES.runs);
       const key = runStorageKey(scope);
       const existing = (await requestResult(runStore.get(key))) as RunRecord | undefined;
+      if (existing?.uploadRejection !== undefined) throw new Error('Discard the rejected queue before capturing more points');
       if (existing?.run === null || existing?.run === undefined) {
         throw new Error('Capture requires a confirmed run snapshot');
       }
@@ -445,6 +428,7 @@ export class IndexedDbRunnerStorage {
       const runStore = transaction.objectStore(STORES.runs);
       const key = runStorageKey(scope);
       const existing = (await requestResult(runStore.get(key))) as RunRecord | undefined;
+      if (existing?.uploadRejection !== undefined) throw new Error('Discard the rejected queue before capturing more points');
       const nextSeq = BigInt(existing?.nextSeq ?? '1');
       if (nextSeq > MAX_SEQ) {
         throw new Error('The local point sequence is exhausted');
@@ -538,7 +522,7 @@ export class IndexedDbRunnerStorage {
         && record?.run !== undefined
         && BigInt(dataRevision) > BigInt(record.run.dataRevision)
       ) {
-        runStore.put({ ...record, run: { ...record.run, dataRevision } });
+        runStore.put({ ...record, run: advanceDataRevision(record.run, dataRevision) });
       }
     }
     await done;
@@ -650,7 +634,7 @@ export class IndexedDbRunnerStorage {
     );
     const done = transactionDone(transaction);
     transaction.objectStore(STORES.requests).delete(requestStorageKey(userId, request));
-    await this.#putRunSnapshot(transaction, userId, request.orgId, commandRun(currentRun, result));
+    await this.#putRunSnapshot(transaction, userId, request.orgId, mergeCommandResult(currentRun, result));
     await done;
   }
 
@@ -708,6 +692,7 @@ export class IndexedDbRunnerStorage {
     requestRecords.sort(compareRequests);
 
     let run: RunView | null = null;
+    let uploadRejection: string | null = null;
     if (profile?.activeOrgId !== null && profile?.activeOrgId !== undefined && profile.activeRunId !== null) {
       const scope = validateScope({
         orgId: profile.activeOrgId,
@@ -718,6 +703,7 @@ export class IndexedDbRunnerStorage {
         transaction.objectStore(STORES.runs).get(runStorageKey(scope)),
       )) as RunRecord | undefined;
       run = record?.run === null || record?.run === undefined ? null : runViewSchema.parse(record.run);
+      uploadRejection = record?.uploadRejection ?? null;
     }
 
     const pending = requestRecords[0];
@@ -738,6 +724,7 @@ export class IndexedDbRunnerStorage {
     }
     await done;
     return {
+      uploadRejection,
       captureSource: parseCaptureSourceKind(profile?.captureSource),
       orgId: request?.orgId ?? profile?.activeOrgId ?? null,
       pendingPointCount,
@@ -761,6 +748,62 @@ export class IndexedDbRunnerStorage {
     };
     store.put(profile);
     await done;
+  }
+
+  public async rejectUpload(scopeInput: RunScope, message: string): Promise<void> {
+    const scope = validateScope(scopeInput);
+    const database = await this.#open();
+    const transaction = database.transaction(STORES.runs, 'readwrite');
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(STORES.runs);
+    const record = (await requestResult(store.get(runStorageKey(scope)))) as RunRecord | undefined;
+    if (record) store.put({ ...record, uploadRejection: message });
+    await done;
+  }
+
+  public async exportBufferedPoints(scopeInput: RunScope): Promise<PointInput[]> {
+    const scope = validateScope(scopeInput);
+    const database = await this.#open();
+    const transaction = database.transaction(STORES.points, 'readonly');
+    const done = transactionDone(transaction);
+    const range = this.#keyRange.bound([scope.userId, scope.orgId, scope.runId, ''], [scope.userId, scope.orgId, scope.runId, '\uffff']);
+    const records = await requestResult(transaction.objectStore(STORES.points).index('by-run-seq').getAll(range)) as PointRecord[];
+    await done;
+    return records.map((record) => pointInputSchema.parse(record.point));
+  }
+
+  // Reject, capture and discard transactions serialize through the run store.
+  // Resolve the blocked queue and its exact commands before clearing the pointer.
+  public async discardRejectedRun(scopeInput: RunScope, lease: WriterLease): Promise<void> {
+    const scope = validateScope(scopeInput);
+    if (lease.userId !== scope.userId) throw new Error('Writer lease does not match the run');
+    const database = await this.#open();
+    const transaction = database.transaction([STORES.leases, STORES.points, STORES.requests, STORES.profiles, STORES.runs], 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      await this.#assertCurrentLease(transaction, lease);
+      const runs = transaction.objectStore(STORES.runs);
+      const record = await requestResult(runs.get(runStorageKey(scope))) as RunRecord | undefined;
+      const profiles = transaction.objectStore(STORES.profiles);
+      const profile = await requestResult(profiles.get(scope.userId)) as ProfileRecord | undefined;
+      if (!record?.uploadRejection || record.run?.status !== 'finished' || profile?.activeRunId !== scope.runId || profile.activeOrgId !== scope.orgId) {
+        throw new Error('Only the active rejected run can be discarded');
+      }
+      const points = transaction.objectStore(STORES.points);
+      const range = this.#keyRange.bound([scope.userId, scope.orgId, scope.runId, ''], [scope.userId, scope.orgId, scope.runId, '\uffff']);
+      for (const key of await requestResult(points.index('by-run-seq').getAllKeys(range))) points.delete(key);
+      const requests = transaction.objectStore(STORES.requests);
+      const queued = await requestResult(requests.index('by-user').getAll(scope.userId)) as RequestRecord[];
+      for (const entry of queued) {
+        if (entry.request.orgId === scope.orgId && entry.request.runId === scope.runId) requests.delete(entry.storageKey);
+      }
+      profiles.put({ ...profile, activeRunId: null, activeOrgId: null });
+      await done;
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   // The source is a per-user selection that outlives any one run, so it lives in the profile next to the active
@@ -811,10 +854,11 @@ export class IndexedDbRunnerStorage {
     const storageKey = runStorageKey(scope);
     const existing = (await requestResult(store.get(storageKey))) as RunRecord | undefined;
     const record: RunRecord = {
+      ...(existing?.uploadRejection === undefined ? {} : { uploadRejection: existing.uploadRejection }),
       nextSeq: existing?.nextSeq ?? '1',
       ...(existing?.nextSegmentId === undefined ? {} : { nextSegmentId: existing.nextSegmentId }),
       orgId: scope.orgId,
-      run: latestRunSnapshot(existing?.run, run),
+      run: mergeRunSnapshot(existing?.run, run),
       runId: scope.runId,
       storageKey,
       userId: scope.userId,

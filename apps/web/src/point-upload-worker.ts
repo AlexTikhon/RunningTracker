@@ -16,11 +16,12 @@ type UploadStorage = Pick<
 
 export interface PointUploadWorkerOptions {
   onAcknowledged?: (dataRevision: string) => void;
-  onPermanentError?: (error: unknown) => Promise<void> | void;
+  onAuthenticationRequired?: () => void;
+  onPermanentError?: (error: unknown, signal: AbortSignal) => Promise<void> | void;
   onState: (state: UploadState) => void;
   random?: () => number;
   scope: RunScope;
-  send: (points: PointInput[]) => Promise<IngestPointsResponse>;
+  send: (points: PointInput[], signal: AbortSignal) => Promise<IngestPointsResponse>;
   storage: UploadStorage;
 }
 
@@ -61,6 +62,8 @@ function errorMessage(error: unknown): string {
 export class PointUploadWorker {
   readonly #options: PointUploadWorkerOptions;
   readonly #random: () => number;
+  #controller: AbortController | null = null;
+  #generation = 0;
   #attempt = 0;
   #halted = false;
   #online = false;
@@ -77,6 +80,7 @@ export class PointUploadWorker {
     if (!this.#stopped) {
       return;
     }
+    this.#generation += 1;
     this.#stopped = false;
     this.#online = online;
     if (online) {
@@ -105,6 +109,8 @@ export class PointUploadWorker {
 
   public stop(): void {
     this.#stopped = true;
+    this.#generation += 1;
+    this.#controller?.abort();
     this.#clearTimer();
   }
 
@@ -138,17 +144,24 @@ export class PointUploadWorker {
       return;
     }
     this.#running = true;
+    const generation = this.#generation;
+    const controller = new AbortController();
+    this.#controller = controller;
     let batch: PointInput[] = [];
     try {
       batch = await this.#options.storage.readPointBatch(this.#options.scope, BATCH_LIMIT);
+      controller.signal.throwIfAborted();
       if (batch.length === 0) {
         this.#options.onState({ message: null, pendingCount: 0, status: 'idle' });
         return;
       }
 
       const beforeCount = await this.#pendingCount(batch.length);
+      controller.signal.throwIfAborted();
       this.#options.onState({ message: null, pendingCount: beforeCount, status: 'uploading' });
-      const result = await this.#options.send(batch);
+      controller.signal.throwIfAborted();
+      const result = await this.#options.send(batch, controller.signal);
+      controller.signal.throwIfAborted();
       if (result.insertedCount + result.duplicateCount !== batch.length) {
         throw new PointUploadProtocolError(
           'The server acknowledgement does not account for every point in the sent batch',
@@ -161,7 +174,7 @@ export class PointUploadWorker {
       );
       this.#attempt = 0;
       const pendingCount = await this.#pendingCount(Math.max(0, beforeCount - batch.length));
-      if (!this.#stopped) {
+      if (!this.#stopped && generation === this.#generation) {
         this.#options.onAcknowledged?.(result.dataRevision);
         this.#options.onState({
           message: null,
@@ -173,18 +186,26 @@ export class PointUploadWorker {
         queueMicrotask(() => this.#schedule(0));
       }
     } catch (error) {
+      if (controller.signal.aborted || generation !== this.#generation) return;
       const pendingCount = await this.#pendingCount(batch.length);
+      if (controller.signal.aborted || generation !== this.#generation) return;
+      if (error instanceof RunnerApiError && error.status === 401) {
+        this.#halted = true;
+        this.#options.onState({ message: 'Sign in to resume upload.', pendingCount, status: 'suspended' });
+        this.#options.onAuthenticationRequired?.();
+        return;
+      }
       if (isPermanent(error)) {
         this.#halted = true;
-        if (!this.#stopped) {
+        if (!this.#stopped && generation === this.#generation) {
           try {
-            await this.#options.onPermanentError?.(error);
+            await this.#options.onPermanentError?.(error, controller.signal);
           } catch {
             // The upload error remains authoritative; reconciliation is best-effort.
           }
         }
-        if (!this.#stopped) {
-          this.#options.onState({ message: errorMessage(error), pendingCount, status: 'error' });
+        if (!this.#stopped && generation === this.#generation) {
+          this.#options.onState({ message: errorMessage(error), pendingCount, status: 'blocked' });
         }
         return;
       }
@@ -201,6 +222,8 @@ export class PointUploadWorker {
       queueMicrotask(() => this.#schedule(delayMs));
     } finally {
       this.#running = false;
+      if (this.#controller === controller) this.#controller = null;
+      if (generation !== this.#generation) this.#schedule(0);
     }
   }
 }

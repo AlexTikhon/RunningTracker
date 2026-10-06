@@ -317,12 +317,22 @@ try {
   assert.equal(oidcLogin.status, 503, oidcLogin.body);
   assert.equal(JSON.parse(oidcLogin.body).error.code, 'IDENTITY_PROVIDER_UNAVAILABLE');
   assert.equal(oidcLogin.headers['cache-control'], 'no-store');
+  // The public socket is the limiter key. Header spoofing, a trailing slash and
+  // Express's case-insensitive route spelling must not bypass the same zone.
+  const loginBurst = await Promise.all(Array.from({ length: 12 }, (_, index) =>
+    http2Request(index % 2 === 0 ? '/api/auth/login/' : '/API/AUTH/LOGIN', {
+      'x-forwarded-for': `203.0.113.${index + 1}`,
+      'x-real-ip': `198.51.100.${index + 1}`,
+    }),
+  ));
+  assert.ok(loginBurst.some((response) => response.status === 429), 'login burst bypassed the public-edge limiter');
+  assert.ok(loginBurst.every((response) => [429, 503].includes(response.status)), 'unexpected login admission response');
   assert.equal((await http2Request('/api/session')).status, 401);
   assert.equal((await http2Request('/api/health/ready')).status, 200);
   assert.ok(apiEnvironment.includes('OIDC_REDIRECT_URI=' + origin + '/api/auth/callback'));
   assert.ok(apiEnvironment.some((entry) => entry.startsWith('OIDC_CLIENT_SECRET_FILE=/run/secrets/')));
   assert.ok(!apiEnvironment.some((entry) => entry.startsWith('OIDC_CLIENT_SECRET=')), 'client secret is an environment value');
-  results.signIn = 'no dev login (404); /api/auth/login answers 503 for an unreachable provider; API stays ready';
+  results.signIn = 'no dev login (404); unreachable provider returns 503; login burst returns 429 despite forged IP headers and alternate route spellings; API stays ready';
 
   // 10. Restart and redeploy behaviour: the API returns, the one-shot job is idempotent.
   compose(['restart', 'api']);

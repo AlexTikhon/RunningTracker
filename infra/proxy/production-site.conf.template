@@ -76,6 +76,25 @@ server {
     proxy_pass_header X-Accel-Buffering;
   }
 
+  location ~* ^/api/auth/login/?$ {
+    include /etc/nginx/snippets/security-headers.conf;
+    limit_req zone=oidc_login burst=4 nodelay;
+    limit_req_status 429;
+    proxy_pass http://running_tracker_api;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $http_host;
+    # Overwrite, never append untrusted client-supplied identity headers.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 30s;
+    proxy_next_upstream off;
+    proxy_cache off;
+  }
+
   location /api/ {
     include /etc/nginx/snippets/security-headers.conf;
     proxy_pass http://running_tracker_api;

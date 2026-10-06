@@ -33,6 +33,7 @@ describe('runner API', () => {
     await expect(loadSession()).resolves.toEqual(session);
     expect(fetchMock).toHaveBeenCalledWith('/api/session', {
       credentials: 'same-origin',
+      signal: expect.any(AbortSignal) as AbortSignal,
     });
   });
 
@@ -61,7 +62,7 @@ describe('runner API', () => {
     }, controller.signal)).resolves.toEqual(metadata);
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/orgs/${orgId}/archive/metadata?from=2026-09-01T00%3A00%3A00.000Z&to=2026-10-01T00%3A00%3A00.000Z`,
-      { credentials: 'same-origin', signal: controller.signal },
+      { credentials: 'same-origin', signal: expect.any(AbortSignal) as AbortSignal },
     );
   });
 
@@ -83,6 +84,7 @@ describe('runner API', () => {
     expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/runs/${runId}`, {
       body: JSON.stringify({ startedAt: run.startedAt }),
       credentials: 'same-origin',
+      signal: expect.any(AbortSignal) as AbortSignal,
       headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token },
       method: 'PUT',
     });
@@ -149,10 +151,12 @@ describe('runner API', () => {
     });
     expect(fetchMock).toHaveBeenNthCalledWith(1, `/api/orgs/${orgId}/runs/${runId}`, {
       credentials: 'same-origin',
+      signal: expect.any(AbortSignal) as AbortSignal,
     });
     expect(fetchMock).toHaveBeenNthCalledWith(2, `/api/orgs/${orgId}/runs/${runId}/points`, {
       body: JSON.stringify({ points: [point] }),
       credentials: 'same-origin',
+      signal: expect.any(AbortSignal) as AbortSignal,
       headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token },
       method: 'POST',
     });
@@ -242,12 +246,12 @@ describe('runner API', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       `/api/orgs/${orgId}/runs/${runId}/live-track?cursor=snapshot-cursor`,
-      { credentials: 'same-origin' },
+      { credentials: 'same-origin', signal: expect.any(AbortSignal) as AbortSignal },
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       `/api/orgs/${orgId}/runs/${runId}/live-track/changes?afterRevision=4`,
-      { credentials: 'same-origin' },
+      { credentials: 'same-origin', signal: expect.any(AbortSignal) as AbortSignal },
     );
   });
 });
