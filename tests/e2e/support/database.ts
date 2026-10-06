@@ -139,6 +139,72 @@ export async function createScenarioData(environment: E2eEnvironment): Promise<S
   return data;
 }
 
+export interface ExtraOrganizations {
+  readonly organizationIds: readonly string[];
+  readonly outsiderUserIds: readonly string[];
+}
+
+// Organizations for the discovery scenarios, next to the scenario's own. Each is created with explicit
+// memberships and removed by exact id (see removeExtraOrganizations), so nothing here can touch another row.
+export async function createExtraOrganization(
+  environment: E2eEnvironment,
+  memberships: ReadonlyArray<{ readonly active: boolean; readonly userId: string }>,
+): Promise<string> {
+  const orgId = randomUUID();
+  await withOwnerTransaction(environment, async (client) => {
+    await client.query('INSERT INTO organizations (id) VALUES ($1)', [orgId]);
+    for (const membership of memberships) {
+      await client.query(
+        "INSERT INTO memberships (org_id, user_id, role, active) VALUES ($1, $2, 'runner', $3)",
+        [orgId, membership.userId, membership.active],
+      );
+    }
+  });
+  return orgId;
+}
+
+// Ends or restores one membership in place. The row is the scenario's own, so it is removed with the organization.
+export async function setMembershipActive(
+  environment: E2eEnvironment,
+  orgId: string,
+  userId: string,
+  active: boolean,
+): Promise<void> {
+  await withOwnerTransaction(environment, async (client) => {
+    const result = await client.query(
+      'UPDATE memberships SET active = $3 WHERE org_id = $1 AND user_id = $2',
+      [orgId, userId, active],
+    );
+    if (result.rowCount !== 1) {
+      throw new Error('The membership does not exist');
+    }
+  });
+}
+
+// A person who is not a suite user, for an organization the suite users must never be shown.
+export async function createOutsider(environment: E2eEnvironment): Promise<string> {
+  const userId = randomUUID();
+  await withOwnerTransaction(environment, async (client) => {
+    await client.query('INSERT INTO users (id, external_identity) VALUES ($1, $2)', [
+      userId,
+      `e2e|outsider-${userId}`,
+    ]);
+  });
+  return userId;
+}
+
+export async function removeExtraOrganizations(
+  environment: E2eEnvironment,
+  extra: ExtraOrganizations,
+): Promise<void> {
+  await withOwnerTransaction(environment, async (client) => {
+    await deleteOrganizations(client, [...extra.organizationIds]);
+    if (extra.outsiderUserIds.length > 0) {
+      await client.query('DELETE FROM users WHERE id = ANY($1::uuid[])', [[...extra.outsiderUserIds]]);
+    }
+  });
+}
+
 // Provisions a person for OpenID Connect sign-in, the way the runbook does: the stored identity is
 // `<issuer>|<subject>`. Only the two fixed suite users can be changed, so nothing else's identity is touched.
 export async function setSuiteUserIdentity(
