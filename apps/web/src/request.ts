@@ -8,7 +8,13 @@ export function onAuthenticationRequired(listener: () => void): () => void {
 
 // The deadline covers both headers and body consumption. Racing the entire
 // operation also settles callers whose transport does not honour AbortSignal.
-export async function requestJson(url: string, options: RequestInit = {}): Promise<{ response: Response; payload: unknown }> {
+// A caller that orders its own answers (the session check) turns the 401 announcement off and acts on the answer it
+// is handed instead, so that a late 401 from an older request cannot end a newer session.
+export async function requestJson(
+  url: string,
+  options: RequestInit = {},
+  { announceUnauthorized = true }: { announceUnauthorized?: boolean } = {},
+): Promise<{ response: Response; payload: unknown }> {
   const controller = new AbortController();
   const abort = () => controller.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', abort, { once: true });
@@ -26,7 +32,7 @@ export async function requestJson(url: string, options: RequestInit = {}): Promi
         controller.signal.throwIfAborted();
         const response = await fetch(url, { ...options, signal: controller.signal });
         controller.signal.throwIfAborted();
-        if (response.status === 401) authenticationEvents.dispatchEvent(new Event('required'));
+        if (announceUnauthorized && response.status === 401) authenticationEvents.dispatchEvent(new Event('required'));
         let payload: unknown;
         try { payload = await response.json(); } catch (error) {
           controller.signal.throwIfAborted();

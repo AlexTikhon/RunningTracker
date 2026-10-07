@@ -1,4 +1,4 @@
-import type { SessionState, SignOutState } from './use-runner-session.js';
+import type { SessionState, SessionVerification, SignOutState } from './use-runner-session.js';
 
 interface SessionBarProps {
   onRetry: () => void;
@@ -7,11 +7,16 @@ interface SessionBarProps {
   signOut: SignOutState;
   // Said next to the button when signing out would leave something behind on this device; null when nothing is.
   unsentNote: string | null;
+  // Whether the server could be asked lately; when it could not, the session is still the one the page holds.
+  verification?: SessionVerification;
 }
+
+export const sessionUnverifiedNote =
+  'Cannot confirm your session right now. Your work stays on this device and the check is repeated automatically.';
 
 // What the person needs from their session: whether they are signed in, the way to sign out, and what signing
 // out does to unsent work. The user and expiry are developer diagnostics and stay behind a disclosure.
-export function SessionBar({ onRetry, onSignOut, session, signOut, unsentNote }: SessionBarProps) {
+export function SessionBar({ onRetry, onSignOut, session, signOut, unsentNote, verification }: SessionBarProps) {
   return (
     <section className={`session-bar session-bar--${session.status}`} aria-label="Session" aria-live="polite">
       {session.status === 'loading' && <span>Checking session…</span>}
@@ -27,6 +32,7 @@ export function SessionBar({ onRetry, onSignOut, session, signOut, unsentNote }:
           <button disabled={signOut.status === 'working'} onClick={onSignOut} type="button">
             {signOut.status === 'working' ? 'Signing out…' : 'Sign out'}
           </button>
+          {verification?.status === 'unavailable' && <span className="session-note" role="status">{sessionUnverifiedNote}</span>}
           {unsentNote !== null && <span className="session-note">{unsentNote}</span>}
           {signOut.status === 'failed' && <span className="session-failure" role="alert">{signOut.message}</span>}
         </>

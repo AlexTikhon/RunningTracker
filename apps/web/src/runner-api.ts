@@ -125,7 +125,8 @@ export async function loadSession(signal?: AbortSignal): Promise<SessionResponse
   if (signal !== undefined) {
     options.signal = signal;
   }
-  const response = await requestJson('/api/session', options);
+  // The caller orders session checks and acts on a 401 itself; announcing it here would bypass that ordering.
+  const response = await requestJson('/api/session', options, { announceUnauthorized: false });
   return sessionResponseSchema.parse(requireSuccess(response));
 }
 

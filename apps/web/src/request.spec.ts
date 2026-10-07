@@ -55,6 +55,15 @@ describe('request lifetime', () => {
     unsubscribe();
   });
 
+  it('stays quiet about a 401 for a caller that asked to handle it itself, and still returns the answer', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 401 })));
+    const required = vi.fn();
+    const unsubscribe = onAuthenticationRequired(required);
+    await expect(requestJson('/test', {}, { announceUnauthorized: false })).resolves.toMatchObject({ response: { status: 401 } });
+    expect(required).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
   it('reuses the exact mutation URL and body after an unknown timed-out outcome', async () => {
     vi.useFakeTimers();
     const input = { orgId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', runId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', startedAt: '2026-10-05T10:00:00.000Z' };

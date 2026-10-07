@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { SessionBar } from './SessionBar.js';
-import type { SessionState, SignOutState } from './use-runner-session.js';
+import { SessionBar, sessionUnverifiedNote } from './SessionBar.js';
+import type { SessionState, SessionVerification, SignOutState } from './use-runner-session.js';
 
 const noop = () => undefined;
 const ready = {
@@ -15,9 +15,21 @@ const ready = {
   status: 'ready',
 } satisfies SessionState;
 
-function render(session: SessionState, signOut: SignOutState = { status: 'idle' }, unsentNote: string | null = null) {
+function render(
+  session: SessionState,
+  signOut: SignOutState = { status: 'idle' },
+  unsentNote: string | null = null,
+  verification?: SessionVerification,
+) {
   return renderToStaticMarkup(
-    <SessionBar onRetry={noop} onSignOut={noop} session={session} signOut={signOut} unsentNote={unsentNote} />,
+    <SessionBar
+      onRetry={noop}
+      onSignOut={noop}
+      session={session}
+      signOut={signOut}
+      unsentNote={unsentNote}
+      {...(verification === undefined ? {} : { verification })}
+    />,
   );
 }
 
@@ -49,6 +61,21 @@ describe('SessionBar', () => {
   it('shows what signing out leaves behind only when there is something', () => {
     expect(render(ready)).not.toContain('session-note');
     expect(render(ready, { status: 'idle' }, 'Unsent data stays on this device.')).toContain('Unsent data stays on this device.');
+  });
+
+  it('keeps the person signed in, and says the server cannot be asked, while verification is unavailable', () => {
+    const markup = render(ready, { status: 'idle' }, null, { retryAfterMs: null, status: 'unavailable' });
+
+    expect(markup).toContain('Signed in');
+    expect(markup).toContain('Sign out');
+    expect(markup).toContain(sessionUnverifiedNote);
+    expect(markup).not.toContain('Not signed in');
+    expect(markup).not.toMatch(/expired|ended/iu);
+  });
+
+  it('says nothing extra for a confirmed session', () => {
+    expect(render(ready, { status: 'idle' }, null, { status: 'confirmed' })).not.toContain(sessionUnverifiedNote);
+    expect(render(ready)).not.toContain(sessionUnverifiedNote);
   });
 
   it('shows the not-signed-in state without a Sign out button', () => {

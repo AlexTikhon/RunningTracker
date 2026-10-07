@@ -108,7 +108,7 @@ export function App() {
     setCapture({ status: 'idle' });
     setWriter({ status: 'unclaimed' });
   }, []);
-  const { session, refreshSession, signOut, signOutState } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
+  const { session, refreshSession, signOut, signOutState, verification } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
   const { choose: chooseOrganization, discovery, prefer: preferOrganization, reload: reloadOrganizations, selectedOrgId } =
     useOrganizations(session);
   const [runner, dispatch] = useReducer(
@@ -611,6 +611,7 @@ export function App() {
           session={session}
           signOut={signOutState}
           unsentNote={unsentWorkNote(runner)}
+          verification={verification}
         />
       </div>
 

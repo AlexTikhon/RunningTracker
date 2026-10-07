@@ -12,7 +12,7 @@ const ready = {
   status: 'ready',
 } satisfies SessionState;
 
-function required(reason: 'expired' | 'none' | 'signed-out'): SessionState {
+function required(reason: 'expired' | 'none' | 'signed-out' | 'unreachable'): SessionState {
   return { message: sessionEndMessages[reason], reason, status: 'required' };
 }
 
@@ -32,6 +32,22 @@ describe('nextSessionEnd', () => {
     expect(nextSessionEnd(required('expired'), 'none')).toBe('expired');
     expect(nextSessionEnd(required('none'), 'expired')).toBe('expired');
     expect(nextSessionEnd(required('expired'), 'signed-out')).toBe('signed-out');
+  });
+});
+
+describe('nextSessionEnd and an unreachable server', () => {
+  it('never turns a known ending into "unreachable", and lets the real answer replace "unreachable"', () => {
+    expect(nextSessionEnd(required('expired'), 'unreachable')).toBe('expired');
+    expect(nextSessionEnd(required('signed-out'), 'unreachable')).toBe('signed-out');
+    expect(nextSessionEnd(required('unreachable'), 'none')).toBe('none');
+    expect(nextSessionEnd(required('unreachable'), 'expired')).toBe('expired');
+    expect(nextSessionEnd({ status: 'loading' }, 'unreachable')).toBe('unreachable');
+  });
+
+  it('says the server could not be reached, not that the session ended', () => {
+    expect(sessionEndMessages.unreachable).toContain('could not be reached');
+    expect(sessionEndMessages.unreachable).not.toMatch(/ended|expired/iu);
+    expect(sessionEndMessages.unreachable).toContain('stays on this device');
   });
 });
 
