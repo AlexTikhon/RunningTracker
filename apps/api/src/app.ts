@@ -33,6 +33,7 @@ import {
   createLiveSseHub,
   type LiveConnectionManager,
 } from './live/live-sse.js';
+import { createOrganizationRouter } from './organizations/organization.routes.js';
 import { createRunRouter } from './runs/run.routes.js';
 import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 
@@ -123,6 +124,10 @@ export function createApp({
     );
   }
   app.use(
+    '/api/organizations',
+    createOrganizationRouter({ pool: pool as Pick<Pool, 'connect'>, sessionManager: sessions }),
+  );
+  app.use(
     '/api/orgs/:orgId',
     createArchiveRouter({
       clock,
@@ -150,7 +155,12 @@ export function createApp({
     app.use('/api', testOnlyRouter);
   }
   app.use('/api', unknownApiRoute);
-  app.use(apiErrorHandler());
+  app.use(
+    apiErrorHandler({
+      lockTimeoutMs: config.DB_LOCK_TIMEOUT_MS,
+      statementTimeoutMs: config.DB_STATEMENT_TIMEOUT_MS,
+    }),
+  );
 
   return app;
 }

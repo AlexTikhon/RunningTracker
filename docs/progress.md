@@ -1,6 +1,24 @@
 # Implementation progress
 
-Last updated: 2026-10-02.
+Last updated: 2026-10-06.
+
+Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
+the reducer and IndexedDB; shared session suspension preserves durable recovery; JSON requests
+have cancellation and body-inclusive deadlines; terminal upload rejection persists across reload
+and offers export/fenced discard after finish; login admission reserves capacity before provider
+work and throttles anonymous initiations at the application and public-edge proxy.
+
+Verified on the workstation at ADR-0048 (2026-10-05): `npm run verify` (750 API and 124 web tests, workspace checks/builds),
+18 real PostgreSQL/session/OIDC integration tests, `npm run deploy:verify`, including forged-IP
+and alternate-path login throttle checks, and all 41 Playwright checks, including recording expiry
+without reload, fresh-session buffer recovery, terminal rejection/export/discard and exact command retry.
+
+Portfolio release pass (ADR-0049, 2026-10-06): the web app lists the organizations the person belongs to
+(`GET /api/organizations`, migration 0022) instead of asking for a UUID, has a Sign out button that
+deletes nothing durable, and its shell is split into components. Verified on the workstation: `npm run
+verify` (759 API and 166 web tests; also after a clean reinstall), 366 real PostgreSQL integration tests
+in 40 files, `npm run deploy:verify`, and all 51 Playwright checks (42 `chromium`, 9 `chromium-oidc`; twice).
+Not run on a GitHub-hosted runner since de0e9cc. See the last section.
 
 | Stage | Status | Result |
 |---|---|---|
@@ -1335,7 +1353,7 @@ Limits and unverified claims:
 - one Windows workstation, a self-signed certificate, high ports. Not exercised: a Linux host (bind-mount ownership for uid 1000 is documented, not run), real DNS, a real CA or renewal, ports 80/443, and a journal directory on genuinely off-host storage;
 - the resource limits are starting values from the P11 measurements (API RSS peaked near 217 MiB), and the P11 load scenarios ran against a process, not these limits; capacity under them is not re-measured;
 - there is no sign-in: local login is forbidden in production and the identity provider is P12.1, so the deployment serves the web app and health checks but cannot authenticate anyone. Sessions remain in process memory;
-- not done: a full Content-Security-Policy (needs a browser check against Mapbox), proxy rate limiting (no traffic model), encryption of database traffic inside the host or of the data volume, image signing or scanning, log shipping;
+- not done: a full Content-Security-Policy (needs a browser check against Mapbox), proxy rate limiting (no traffic model; login initiation only since ADR-0048), encryption of database traffic inside the host or of the data volume, image signing or scanning, log shipping;
 - a README edit through a shell one-liner let the shell interpret backticks and run a few nonexistent commands, all of which failed harmlessly; the README was repaired by hand.
 
 P12.2 is DONE. P12 remains IN PROGRESS. The next stage is P12.1 (blocked on an external decision: which identity provider and protocol, its issuer, client credentials, and redirect URLs) or P12.3 (a backup/restore drill that can be built and timed locally in an isolated environment: encrypted dump to off-host storage, restore into a scratch database, `restore:reapply-deletions`; real-environment RPO/RTO figures still need a target environment).
@@ -1501,7 +1519,7 @@ What remains unverified (also stated in ADR-0046 and the runbook):
 
 - any real identity provider (Keycloak, Google, Auth0 or another), real TLS to a provider, provider key rotation, clock skew, and issuer-spelling differences; a real browser (the `SameSite` and meta-refresh reasoning was not exercised in one); load;
 - a person disabled at the provider keeps an existing application session until `SESSION_TTL_MS` (8 hours by default) or an API restart; deactivating the membership applies at the next request. No provider-side re-validation, no RP-initiated logout, no shared session store;
-- a flood of `GET /api/auth/login` can fill the 100-entry pending store for ten minutes (503 until it drains); request-rate limiting is not built, and the proxy is where it belongs;
+- a flood of `GET /api/auth/login` can fill the 100-entry pending store for ten minutes (503 until it drains); request-rate limiting is not built, and the proxy is where it belongs (amended by ADR-0048: login initiation is now bounded in the application and limited per address at the proxy; no other request rate limiting is built);
 - provisioning people is manual SQL by design for now; the SDD status header was not rewritten (P12.5).
 
 P12.1 is DONE. D03b is RESOLVED for the mechanism, not for any real provider. P12 stays IN PROGRESS. The next stage is P12.5 — update the README, SDD, API specification and progress to match what is implemented, and prepare the final demo.
@@ -1538,7 +1556,7 @@ What remains unverified or not done:
 - **The browser steps of the demo**: the sign-in snippet run in a console, the Coach and Archive tabs, the Sign in notice, and any rendering of the archive map (it needs a public `VITE_MAPBOX_ACCESS_TOKEN`, which this workstation does not have). Everything the browser would call was exercised over HTTP instead.
 - The demo does not use OpenID Connect and its runner is a script. A real provider (Keycloak in Docker) was not tried, so the sign-in claim of P12.1 is unchanged: verified against a test provider only.
 - The demo left data in the development database: the demo organization and users, and three finished runs with summaries. `LOCAL_AUTH` was passed to the API process through its environment only; `.env` was not changed.
-- Production gaps recorded in `docs/runbooks/deployment.md` and ADR-0046 stand: rate limiting at the proxy, a full Content-Security-Policy, session re-validation against the provider, and a real host, CA, schedule, key custody and capacity.
+- Production gaps recorded in `docs/runbooks/deployment.md` and ADR-0046 stand: rate limiting at the proxy (login initiation only since ADR-0048), a full Content-Security-Policy, session re-validation against the provider, and a real host, CA, schedule, key custody and capacity.
 - D10 is open; no production RPO or RTO is claimed.
 
 P12.5 is DONE. P12 is DONE as a workstation-verified stage; its production claims remain limited as above. There is no further stage in the plan.
@@ -1697,8 +1715,8 @@ D10 was not touched (still PARTIAL, algorithm unchanged, zero real traces). Afte
 **Findings** (nothing below was changed in production code):
 
 1. **The meta-refresh page is observable in Chromium, but sign-in does not depend on it.** With the callback temporarily answering a plain 302, sign-in still completed, because the page's later `fetch` calls are same-site. A probe of the navigation requests showed why the design still matters: the document request after a 302 goes out **without** the Strict cookie (`/ false`), and with the 200 page it carries it (`/ true`). So the ADR-0046 reasoning holds in Chromium, but the current single-page app's document load does not need the cookie, so a 302 would not have broken it. The test therefore asserts the navigation sequence, not only "sign-in completed". Firefox and WebKit were not run.
-2. **An open page does not notice that its session expired.** After the lifetime passed (probed with the Coach view open for 36 s) the page still showed "Session ready ... Expires <a time in the past>" and no sign-in prompt, until a reload. Not asserted either way and not fixed: what the page should do is a product decision.
-3. **The web app has no sign-out control.** `DELETE /api/session` exists and works in the browser (above) but nothing in `apps/web` calls it.
+2. **An open page does not notice that its session expired.** After the lifetime passed (probed with the Coach view open for 36 s) the page still showed "Session ready ... Expires <a time in the past>" and no sign-in prompt, until a reload. Not asserted either way and not fixed: what the page should do is a product decision. **Resolved by ADR-0048:** the session lifetime is shared, expiry and any 401 suspend the runner and show sign-in, and focus revalidates; the expiry test covers it.
+3. **The web app has no sign-out control.** `DELETE /api/session` exists and works in the browser (above) but nothing in `apps/web` calls it. **Resolved by ADR-0049:** the session bar has a Sign out button.
 4. Playwright limits found while building the suite (not product defects): `context.cookies(url)` leaves out a Secure cookie for an `http` URL; `context.request` does not send a Secure cookie to an `http` origin although Chromium does for a loopback one (so after sign-in the suite uses requests made by the page itself); `route.continue({ url })` is not applied to a request that is a redirect target (the `state` is altered on the application's own `/api/auth/login` response instead); the provider's login page imports a Google font, which the suite blocks so it does not need the internet.
 
 **Verification evidence** (Node 24.11.1, npm 11.6.2, the real test PostGIS from `.env`):
@@ -1717,4 +1735,42 @@ D10 was not touched (still PARTIAL, algorithm unchanged, zero real traces). Afte
 
 **Not verified:** any real identity provider and real TLS to one; Firefox, WebKit, mobile; the production-built web bundle behind the nginx proxy and its headers (the suite uses the Vite development server); a `Secure` cookie over real HTTPS (it was exercised over `http` on a loopback address, which Chromium accepts); provider-side account changes; and **this suite on a GitHub-hosted runner**: the `browser` job runs `npm run test:e2e` and so picks the new project up, but nothing was pushed, so the new ports (3101, 5274, 9100), the `localhost` fallback between IPv6 and IPv4 and the added 23 s are unproven there.
 
-**Next:** decide what an open page and the sign-out control should do (findings 2 and 3), or run the new project on a hosted runner first.
+**Next:** decide what an open page and the sign-out control should do (findings 2 and 3), or run the new project on a hosted runner first. (Later, the same day: the pull-request run on de0e9cc passed all 36 tests on a hosted runner, GitHub Actions run 37143081739; findings 2 and 3 were then done in ADR-0048 and ADR-0049.)
+
+## Portfolio release pass: organization discovery, sign-out, shell split, documentation (2026-10-06)
+
+D10 was not touched (still PARTIAL, algorithm unchanged, zero real traces). The remaining gap was not in the back end. A person had to know a database UUID to use the product, could not end their session from the page, and `App.tsx` held every effect, three copies of the organization input and the whole session bar. The repository was read first and confirmed each of those; the prompt's observations about documentation drift were also checked against code before anything was edited. Design and limits: ADR-0049.
+
+**API** (`da25d0a`): `GET /api/organizations`, session-authenticated, no parameters (a query string is a 400), `no-store`, `{ items: [{ organizationId }] }`, active memberships only, ordered by id, at most 100, an empty list for a person with none. Row-level security needs an organization before any row is visible, so the runtime role cannot ask; migration 0022 adds a read-only `SECURITY DEFINER` function with no argument that reads `app.user_id` (same shape as `resolve_login_user`, executable by the runtime role only) and `withUserTransaction` sets that one setting. No owner-role query and no new table policy. The shared Zod contract, the OpenAPI entry and the regenerated `openapi.json` follow; the route-coverage test picked the route up with no change, and the three deliberately unimplemented reads are untouched.
+
+**Web** (`9791176`):
+
+- Discovery runs once the session is ready; one organization is selected on its own, several are offered in a selector, none shows "No organization yet" with a plain instruction. The selection is derived from the list the server just returned, so a remembered or recovered choice that is no longer a membership is ignored. The remembered choice is kept in `localStorage` under the user id. The manual UUID input is gone from all three views, with no debug variant.
+- **A latent defect found and fixed on the way:** the Coach and Archive inputs shared one value with the uploader and the capture controller, so changing it while a run existed would have sent that run's points to the other organization. A run now keeps the organization recorded with it (from IndexedDB or from its start), and the selector is disabled while a run exists.
+- **Sign out** calls `DELETE /api/session` and waits for the server. A 401 counts as signed out; any other failure leaves the person signed in and says so. Success stops capture and upload through the existing suspension, releases the writer lease, resets the in-memory runner state (`session-ended`), selection and list, and shows "Sign in required" with the reason (signed out, expired, or never signed in; the most specific reason wins). IndexedDB is not touched.
+- `requestJson` threw on a 204 because an empty body is not JSON; it now accepts a 204 and still rejects a 200 that is not JSON.
+- Shell: `SessionBar` (Signed in, Sign out, the user and expiry behind a "Session details" disclosure, a line about what is left behind when something is unsent), `OrganizationPicker`, `RejectedBufferNotice`, `RunnerView` (renders and reports intent only). `App.tsx` went from 784 to 612 lines and still owns the effects, the writer coordinator, the upload worker and the capture controller: moving those would have meant a hook with twenty inputs and no clearer behaviour, so they stay.
+
+**Browser tests** (`2fc834a`): ten new scenarios, none of which types an identifier. Organizations: the only one is selected with no field and every view uses it; several, with a foreign and an inactive organization (absent from the list and from `GET /api/organizations`, and the foreign one is a 403 from the server), the choice survives views and reload, and a run is recorded and uploaded in the chosen organization; a remembered organization that is no longer a membership is ignored; no membership gives the plain explanation and an empty list. Sign out: the cookie leaves the jar and the session, the organization list and an archive read answer 401; a failed sign-out keeps the session; mid-run, the buffered points stay in IndexedDB (read directly) and after signing in again each is delivered exactly once; a pending pause is retried with the identical body; a rejected buffer is still blocked and exportable; the coach signing in on the runner's browser sees no run, no buffer and no upload attempt, and the runner's durable state is unchanged. The OpenID Connect project's sign-out test now clicks the button instead of calling the endpoint.
+
+**Verification evidence** (Node 24.11.1, npm 11.6.2, the real test PostGIS from `.env`):
+
+- `npm run verify`: exit 0 on the working tree and again after the clean reinstall below. Scripts 36, API 759 in 88 files (750 before), web 166 in 28 files (124 before), contracts 18, fixtures 14, simulator 3, build.
+- `npm run test:integration`: 40 files, 366 tests pass, including the 12 new discovery tests under the runtime role.
+- `npm run deploy:verify`: exit 0 (the new migration applies on a fresh database; the login throttle checks pass).
+- `npm run test:e2e`: 51 passed, 4.1 minutes, twice (before the commit, and after the clean reinstall). 41 existed before this pass.
+- Clean checkout: removed every `dist/`, `node_modules/`, `apps/web/tsconfig.tsbuildinfo` and `tests/e2e/test-results`; kept `.env`, `.local/` and `.superpowers/`; `npm ci` then `npm run verify` (above). `npm ci` reports **1 high-severity advisory in `source-map-js`** (a transitive dependency of the build tooling, GHSA-68fv-2mgg-jv7q, event-loop denial of service through crafted source maps). It was not introduced here, no dependency changed, and it was not fixed (`npm audit fix` would change the lockfile).
+
+**Mutation checks** (temporary, reverted; `git status` empty afterwards):
+
+- The discovery function without `AND membership.active` (in the test database only): 1 of 12 integration tests failed (the inactive membership); restored from the migration text and re-run: 12 passed.
+- The same function without the identity filter: 8 of 12 failed.
+- Sign-out additionally calling `indexedDB.deleteDatabase`: 4 of the 6 sign-out tests failed (mid-run recovery, pending request, rejected buffer, a different person); the two that read no durable state passed, as they should. Reverted with `git checkout`.
+
+**Documentation corrected, each against code first:** the README opening (it said the sign-in flow was never in a browser; it has run in Chromium against a test provider since 2026-10-03), the README runner section ("enter an organization UUID"), the Playwright counts and the CI sentence (the last hosted run passed 36 tests on de0e9cc, the suite is now 51, and nothing since has run on a hosted runner), the SDD status line (ADRs through 0049, what the browser suite covers) and its session table (the new route), `deployment.md` (it listed request rate limiting as not built; login initiation is limited at the edge and in the API since ADR-0048, every other route is not), the identity-provider and demo runbooks, the plan and the backlog. Old statements in this file that ADR-0048 or ADR-0049 superseded were not rewritten; each has an amendment note beside it.
+
+**Mistakes during the work:** one patch used a shell heredoc with an apostrophe and the whole command failed to parse, so nothing from it was written (the known gotcha; rewritten with the editor); a test waited for an "N pending" card that shows the retry message while uploads fail (now it polls the durable store); an empty-organization status is a `status`, not a `region`, so the role query missed it; the hidden Runner view repeats some text, which needs role queries instead of text queries.
+
+**Not verified:** the new commits on a GitHub-hosted runner (nothing was pushed); Firefox, WebKit, mobile; a sign-out in one tab reaching another tab (by design at the next request or when the tab regains focus, as for expiry; not tested); a person with more than 100 memberships (the list is capped at the first 100 by id, stated in the OpenAPI text); a real identity provider; the remembered organization of a signed-out identity stays in `localStorage` (an id the person belongs to, keyed by user, applied only through the list).
+
+**Next:** nothing in this repository is left that would change what a user can do. Record real traces for D10 (the runbook), use a real provider and a real host if this is ever deployed, and run the hosted CI job once for the commits after de0e9cc.

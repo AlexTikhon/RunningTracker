@@ -3,7 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { systemClock } from '../clock.js';
 import { validateEnvironment } from '../config/environment.js';
 import type { DatabaseClient, DatabasePool } from './database.js';
-import { DatabaseProbe, DatabaseQueryTimeoutError, createDatabasePool } from './database.js';
+import {
+  DatabaseProbe,
+  DatabaseQueryTimeoutError,
+  createDatabasePool,
+  createMaintenanceDatabasePool,
+} from './database.js';
 
 describe('DatabaseProbe', () => {
   it('destroys a client after a query deadline and does not accumulate occupied slots', async () => {
@@ -50,5 +55,24 @@ describe('DatabaseProbe', () => {
     expect(pool.options.connectionTimeoutMillis).toBe(321);
     expect(pool.options.max).toBe(4);
     await pool.end();
+  });
+
+  it('hands the runtime SQL budgets to PostgreSQL as connection parameters, and not to the maintenance pool', async () => {
+    const environment = validateEnvironment({
+      APP_ENV: 'test',
+      DATABASE_URL:
+        'postgresql://running_tracker_runtime:password@127.0.0.1:5433/running_tracker_test',
+      MAINTENANCE_DATABASE_URL:
+        'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker_test',
+      DB_LOCK_TIMEOUT_MS: 111,
+      DB_STATEMENT_TIMEOUT_MS: 222,
+    });
+    const runtime = createDatabasePool(environment);
+    const maintenance = createMaintenanceDatabasePool(environment);
+
+    expect(runtime.options).toMatchObject({ lock_timeout: 111, statement_timeout: 222 });
+    expect(maintenance.options.statement_timeout).toBeUndefined();
+    expect(maintenance.options.lock_timeout).toBeUndefined();
+    await Promise.all([runtime.end(), maintenance.end()]);
   });
 });

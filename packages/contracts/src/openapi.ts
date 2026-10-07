@@ -10,6 +10,7 @@ import {
   ingestPointsRequestSchema,
   ingestPointsResponseSchema,
   nearbyResponseSchema,
+  organizationListResponseSchema,
   pointsResponseSchema,
   runCommandRequestSchema,
   runCommandResponseSchema,
@@ -72,6 +73,7 @@ export const openApiDocument = {
   security: [{ sessionCookie: [] }],
   tags: [
     { name: 'Session' },
+    { name: 'Organizations' },
     { name: 'Runs' },
     { name: 'Shares' },
     { name: 'Live reads' },
@@ -167,6 +169,18 @@ export const openApiDocument = {
         responses: {
           '200': jsonResponse('The API and database are ready.', 'HealthResponse'),
           '503': jsonResponse('The database is unavailable.', 'HealthResponse'),
+        },
+      },
+    },
+    '/api/organizations': {
+      get: {
+        tags: ['Organizations'],
+        summary: 'List the organizations the current identity belongs to',
+        description:
+          'The identity comes only from the session; there is no way to ask about another user. Returns the organizations in which the identity has an active membership, ordered by organization id, at most 100. A person with no active membership gets an empty list, not an error. Only identifiers are returned: this is discovery, and every request that follows is still checked against the membership inside its own transaction.',
+        responses: {
+          '200': jsonResponse('Organizations with an active membership.', 'OrganizationListResponse'),
+          ...defaultErrors,
         },
       },
     },
@@ -422,6 +436,7 @@ export const openApiDocument = {
       SessionResponse: jsonSchema(sessionResponseSchema),
       ApiErrorResponse: jsonSchema(apiErrorResponseSchema),
       HealthResponse: jsonSchema(healthResponseSchema),
+      OrganizationListResponse: jsonSchema(organizationListResponseSchema),
       CreateRunRequest: jsonSchema(createRunRequestSchema),
       RunCommandRequest: jsonSchema(runCommandRequestSchema),
       RunCommandResponse: jsonSchema(runCommandResponseSchema),

@@ -28,6 +28,14 @@ describe('SignInNotice', () => {
     expect(markup).not.toContain('role="alert"');
   });
 
+  it('says why the session is gone when there is no failure, and lets a failure take precedence', () => {
+    const plain = renderToStaticMarkup(<SignInNotice failure={undefined} message="You are signed out." />);
+    expect(plain).toContain('You are signed out.');
+    const failed = renderToStaticMarkup(<SignInNotice failure="Sign-in is temporarily unavailable." message="You are signed out." />);
+    expect(failed).toContain('Sign-in is temporarily unavailable.');
+    expect(failed).not.toContain('You are signed out.');
+  });
+
   it('shows the failure as an alert', () => {
     const markup = renderToStaticMarkup(
       <SignInNotice failure="Your account is not set up for this service yet." />,

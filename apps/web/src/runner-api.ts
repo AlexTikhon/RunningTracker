@@ -3,6 +3,7 @@ import {
   archiveMetadataResponseSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
+  organizationListResponseSchema,
   runCommandResponseSchema,
   runViewSchema,
   sessionResponseSchema,
@@ -15,6 +16,8 @@ import {
   type RunView,
   type SessionResponse,
 } from '@running-tracker/contracts';
+
+import { requestJson } from './request.js';
 
 export interface CsrfCredentials {
   headerName: 'x-csrf-token';
@@ -85,16 +88,7 @@ function retryAfterMs(response: Response): number | null {
   return Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : null;
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return undefined;
-  }
-}
-
-async function requireSuccess(response: Response): Promise<unknown> {
-  const payload = await readJson(response);
+function requireSuccess({ response, payload }: { response: Response; payload: unknown }): unknown {
   if (response.ok) {
     return payload;
   }
@@ -131,8 +125,32 @@ export async function loadSession(signal?: AbortSignal): Promise<SessionResponse
   if (signal !== undefined) {
     options.signal = signal;
   }
-  const response = await fetch('/api/session', options);
-  return sessionResponseSchema.parse(await requireSuccess(response));
+  const response = await requestJson('/api/session', options);
+  return sessionResponseSchema.parse(requireSuccess(response));
+}
+
+// The organizations this identity has an active membership in, as identifiers in the server's fixed order.
+export async function loadOrganizations(signal?: AbortSignal): Promise<string[]> {
+  const options: RequestInit = { credentials: 'same-origin' };
+  if (signal !== undefined) {
+    options.signal = signal;
+  }
+  const response = await requestJson('/api/organizations', options);
+  return organizationListResponseSchema
+    .parse(requireSuccess(response))
+    .items.map((item) => item.organizationId);
+}
+
+// Ends the application session on the server; the answer clears the session cookie. This is not a logout at
+// the identity provider (ADR-0046).
+export async function endSession(csrf: CsrfCredentials, signal?: AbortSignal): Promise<void> {
+  const response = await requestJson('/api/session', {
+    credentials: 'same-origin',
+    headers: { [csrf.headerName]: csrf.token },
+    method: 'DELETE',
+    ...(signal === undefined ? {} : { signal }),
+  });
+  requireSuccess(response);
 }
 
 export async function loadArchiveMetadata(
@@ -140,61 +158,66 @@ export async function loadArchiveMetadata(
   signal: AbortSignal,
 ): Promise<ArchiveMetadataResponse> {
   const query = new URLSearchParams({ from: input.from, to: input.to });
-  const response = await fetch(
+  const response = await requestJson(
     `/api/orgs/${encodeURIComponent(input.orgId)}/archive/metadata?${query.toString()}`,
     {
       credentials: 'same-origin',
       signal,
     },
   );
-  return archiveMetadataResponseSchema.parse(await requireSuccess(response));
+  return archiveMetadataResponseSchema.parse(requireSuccess(response));
 }
 
 export async function createRun(
   input: CreateRunInput,
   csrf: CsrfCredentials,
+  signal?: AbortSignal,
 ): Promise<RunView> {
-  const response = await fetch(
+  const response = await requestJson(
     `/api/orgs/${encodeURIComponent(input.orgId)}/runs/${encodeURIComponent(input.runId)}`,
     {
       body: JSON.stringify({ startedAt: input.startedAt }),
       credentials: 'same-origin',
       headers: mutationHeaders(csrf),
       method: 'PUT',
+      ...(signal === undefined ? {} : { signal }),
     },
   );
-  return runViewSchema.parse(await requireSuccess(response));
+  return runViewSchema.parse(requireSuccess(response));
 }
 
-export async function readRun(orgId: string, runId: string): Promise<RunView> {
-  const response = await fetch(
+export async function readRun(orgId: string, runId: string, signal?: AbortSignal): Promise<RunView> {
+  const response = await requestJson(
     `/api/orgs/${encodeURIComponent(orgId)}/runs/${encodeURIComponent(runId)}`,
-    { credentials: 'same-origin' },
+    { credentials: 'same-origin', ...(signal === undefined ? {} : { signal }) },
   );
-  return runViewSchema.parse(await requireSuccess(response));
+  return runViewSchema.parse(requireSuccess(response));
 }
 
 export async function uploadPointBatch(
   input: PointBatchInput,
   csrf: CsrfCredentials,
+  signal?: AbortSignal,
 ): Promise<IngestPointsResponse> {
-  const response = await fetch(
+  const response = await requestJson(
     `/api/orgs/${encodeURIComponent(input.orgId)}/runs/${encodeURIComponent(input.runId)}/points`,
     {
       body: JSON.stringify({ points: input.points }),
       credentials: 'same-origin',
       headers: mutationHeaders(csrf),
       method: 'POST',
+      ...(signal === undefined ? {} : { signal }),
     },
   );
-  return ingestPointsResponseSchema.parse(await requireSuccess(response));
+  return ingestPointsResponseSchema.parse(requireSuccess(response));
 }
 
 export async function sendRunCommand(
   input: RunCommandInput,
   csrf: CsrfCredentials,
+  signal?: AbortSignal,
 ): Promise<RunCommandResponse> {
-  const response = await fetch(
+  const response = await requestJson(
     `/api/orgs/${encodeURIComponent(input.orgId)}/runs/${encodeURIComponent(input.runId)}/commands`,
     {
       body: JSON.stringify({
@@ -205,9 +228,10 @@ export async function sendRunCommand(
       credentials: 'same-origin',
       headers: mutationHeaders(csrf),
       method: 'POST',
+      ...(signal === undefined ? {} : { signal }),
     },
   );
-  return runCommandResponseSchema.parse(await requireSuccess(response));
+  return runCommandResponseSchema.parse(requireSuccess(response));
 }
 
 function liveTrackUrl(
@@ -239,8 +263,8 @@ export async function readLiveTrackSnapshotPage(
   if (signal !== undefined) {
     options.signal = signal;
   }
-  const response = await fetch(liveTrackUrl(input, '', query), options);
-  return liveTrackResponseSchema.parse(await requireSuccess(response));
+  const response = await requestJson(liveTrackUrl(input, '', query), options);
+  return liveTrackResponseSchema.parse(requireSuccess(response));
 }
 
 export async function readLiveTrackChangesPage(
@@ -257,6 +281,6 @@ export async function readLiveTrackChangesPage(
   if (signal !== undefined) {
     options.signal = signal;
   }
-  const response = await fetch(liveTrackUrl(input, '/changes', query), options);
-  return liveTrackResponseSchema.parse(await requireSuccess(response));
+  const response = await requestJson(liveTrackUrl(input, '/changes', query), options);
+  return liveTrackResponseSchema.parse(requireSuccess(response));
 }

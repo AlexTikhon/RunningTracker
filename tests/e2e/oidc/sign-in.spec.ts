@@ -1,3 +1,5 @@
+import { RunnerPage } from '../support/runner-page.js';
+import { expectOrganizationSelected, expectSignedIn, expectSignedOut } from '../support/session.js';
 import type { Cookie } from '@playwright/test';
 
 import {
@@ -56,7 +58,7 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
 
     await signInAt(page, environment, provisionedSubject);
 
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    await expectSignedIn(page, provisioned.userId);
     // Back on the plain application path: nothing from the callback remains in the address bar.
     expect(page.url()).toBe(`${environment.oidc.webOrigin}/`);
     expect(callbacks.urls).toHaveLength(1);
@@ -118,7 +120,7 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     const callbacks = recordCallbackRequests(page, environment);
     await page.goto('/');
     await signInAt(page, environment, provisionedSubject);
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    await expectSignedIn(page, provisioned.userId);
     const before = findCookie(await context.cookies(), sessionCookieName);
     const replayUrl = callbacks.urls[0];
     expect(replayUrl).toBeDefined();
@@ -142,7 +144,7 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     const callbacks = recordCallbackRequests(page, environment);
     await page.goto('/');
     await signInAt(page, environment, provisionedSubject);
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    await expectSignedIn(page, provisioned.userId);
     const callbackUrl = callbacks.urls[0] as string;
 
     // Someone else's browser: no login cookie, no session.
@@ -189,7 +191,7 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     // knows this browser, so it answers without asking for a login again.
     await page.unroute(loginRoute);
     await page.getByRole('link', { name: 'Sign in' }).click();
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    await expectSignedIn(page, provisioned.userId);
   });
 
   test('cancelling at the provider returns to the application with a fixed message and no session', async ({
@@ -207,7 +209,7 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     expect(findCookie(await context.cookies(), sessionCookieName)).toBeUndefined();
   });
 
-  test('signing out clears the cookie in the browser; the provider session is not ended', async ({
+  test('the Sign out button ends the session on the server and in the browser; the provider session is not ended', async ({
     context,
     environment,
     page,
@@ -215,19 +217,21 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
   }) => {
     await page.goto('/');
     await signInAt(page, environment, provisionedSubject);
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
-    const session = await pageFetch(page, '/api/session');
-    const { csrf } = session.body as { csrf: { headerName: string; token: string } };
+    await expectSignedIn(page, provisioned.userId);
+    const token = findCookie(await context.cookies(), sessionCookieName)?.value;
+    expect(token).toBeDefined();
 
-    const signedOut = await pageFetch(page, '/api/session', {
-      headers: { [csrf.headerName]: csrf.token },
-      method: 'DELETE',
-    });
+    await page.getByRole('button', { name: 'Sign out' }).click();
 
-    expect(signedOut.status).toBe(204);
+    await expectSignedOut(page);
     // Removed from the real cookie jar: the clearing Set-Cookie matches the attributes it was set with.
     expect(findCookie(await context.cookies(), sessionCookieName)).toBeUndefined();
     expect((await pageFetch(page, '/api/session')).status).toBe(401);
+    // Not only the browser dropping its cookie: the server itself refuses the old token.
+    const replayed = await page.request.get(`${environment.oidc.webOrigin}/api/session`, {
+      headers: { cookie: `${sessionCookieName}=${token as string}` },
+    });
+    expect(replayed.status()).toBe(401);
     await page.reload();
     await expect(page.getByText('Sign in required')).toBeVisible();
 
@@ -240,11 +244,11 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
       }
     });
     await page.getByRole('link', { name: 'Sign in' }).click();
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    await expectSignedIn(page, provisioned.userId);
     expect(interactions).toHaveLength(0);
   });
 
-  test('an expired session is refused by the server and the person can sign in again', async ({
+  test('expiry suspends a recording runner without reload and reauthentication drains its retained points', async ({
     context,
     environment,
     page,
@@ -252,7 +256,16 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
   }) => {
     await page.goto('/');
     await signInAt(page, environment, provisionedSubject);
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    await expectSignedIn(page, provisioned.userId);
+    const runner = new RunnerPage(page);
+    await expectOrganizationSelected(page, provisioned.orgId);
+    await runner.useSimulator();
+    await page.route('**/points', async (route) => {
+      if (route.request().method() !== 'POST') await route.continue();
+    });
+    await runner.start();
+    await expect(runner.card('Recording').value).toHaveText('recording');
+    await runner.waitForPendingAtLeast(2);
     const token = findCookie(await context.cookies(), sessionCookieName)?.value;
     expect(token).toBeDefined();
     const first = (await pageFetch(page, '/api/session')).body as { expiresAt: string };
@@ -267,11 +280,17 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
     });
     expect(replayed.status()).toBe(401);
 
-    await page.reload();
+    await expect(runner.card('Capture').value).toHaveText('idle');
+    await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeDisabled();
+    await page.unroute('**/points');
     await expect(page.getByText('Sign in required')).toBeVisible();
     await page.getByRole('link', { name: 'Sign in' }).click();
-    await expect(page.getByText(`Session ready · user ${provisioned.userId.slice(0, 8)}`)).toBeVisible();
+    await expectSignedIn(page, provisioned.userId);
     const second = (await pageFetch(page, '/api/session')).body as { expiresAt: string };
+    await runner.waitForEmptyBuffer();
+    await expect(runner.card('Recording').value).toHaveText('recording');
+    await runner.finish();
+    await expect(runner.card('Recording').value).toHaveText('finished');
     expect(Date.parse(second.expiresAt)).toBeGreaterThan(Date.parse(first.expiresAt));
   });
 });

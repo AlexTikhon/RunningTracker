@@ -68,6 +68,13 @@ export const healthResponseSchema = z.strictObject({
   status: z.enum(['ok', 'not-ready']),
 });
 
+// The organizations the signed-in identity belongs to through an active membership. Only the identifier is
+// exposed: the organizations table holds nothing else, and a name would have to be invented for the screen.
+export const ORGANIZATION_LIST_MAX = 100;
+export const organizationListResponseSchema = z.strictObject({
+  items: z.array(z.strictObject({ organizationId: uuidSchema })).max(ORGANIZATION_LIST_MAX),
+});
+
 export const organizationPathSchema = z.strictObject({ orgId: uuidSchema });
 export const runPathSchema = z.strictObject({ orgId: uuidSchema, runId: uuidSchema });
 export const runSharePathSchema = z.strictObject({
@@ -322,6 +329,7 @@ export type ArchiveRunListQuery = z.infer<typeof archiveRunListQuerySchema>;
 export type NearbyQuery = z.infer<typeof nearbyQuerySchema>;
 export type NearbyResponse = z.infer<typeof nearbyResponseSchema>;
 export type ArchiveMetadataResponse = z.infer<typeof archiveMetadataResponseSchema>;
+export type OrganizationListResponse = z.infer<typeof organizationListResponseSchema>;
 export type OrganizationPath = z.infer<typeof organizationPathSchema>;
 export type RunPath = z.infer<typeof runPathSchema>;
 export type RunSharePath = z.infer<typeof runSharePathSchema>;

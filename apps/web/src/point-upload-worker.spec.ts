@@ -1,4 +1,4 @@
-import type { PointInput } from '@running-tracker/contracts';
+import type { IngestPointsResponse, PointInput } from '@running-tracker/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { PointUploadProtocolError, PointUploadWorker } from './point-upload-worker.js';
@@ -44,6 +44,46 @@ afterEach(() => {
 });
 
 describe('PointUploadWorker', () => {
+  it('suspends 401 without treating the retained batch as terminally rejected', async () => {
+    vi.useFakeTimers();
+    const harness = storageHarness(1);
+    const onPermanentError = vi.fn();
+    const onAuthenticationRequired = vi.fn();
+    const onState = vi.fn();
+    const send = vi.fn().mockRejectedValue(new RunnerApiError('Sign in', 401, 'UNAUTHENTICATED', null));
+    const worker = new PointUploadWorker({ scope, storage: harness.storage, send, onState, onPermanentError, onAuthenticationRequired });
+    worker.start(true);
+    await vi.runAllTimersAsync();
+    worker.wake();
+    worker.setOnline(true);
+    await vi.runAllTimersAsync();
+    expect(send).toHaveBeenCalledOnce();
+    expect(onAuthenticationRequired).toHaveBeenCalledOnce();
+    expect(onPermanentError).not.toHaveBeenCalled();
+    expect(onState).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'suspended', pendingCount: 1 }));
+    expect(harness.acknowledged).toEqual([]);
+  });
+
+  it('cancels an outstanding send on stop and drains the same points on restart', async () => {
+    vi.useFakeTimers();
+    const harness = storageHarness(1);
+    let firstSignal: AbortSignal | undefined;
+    const send = vi.fn<(points: PointInput[], signal: AbortSignal) => Promise<IngestPointsResponse>>()
+      .mockImplementationOnce((_points, signal) => {
+        firstSignal = signal;
+        return new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('Stopped', 'AbortError')), { once: true }));
+      }).mockResolvedValueOnce({ dataRevision: '1', duplicateCount: 0, insertedCount: 1 });
+    const worker = new PointUploadWorker({ scope, storage: harness.storage, send, onState: vi.fn() });
+    worker.start(true);
+    await vi.advanceTimersByTimeAsync(0);
+    worker.stop();
+    expect(firstSignal?.aborted).toBe(true);
+    expect(harness.acknowledged).toEqual([]);
+    worker.start(true);
+    await vi.runAllTimersAsync();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(harness.acknowledged).toEqual([['1']]);
+  });
   it('uploads sequential bounded batches and deletes each exact acknowledged sequence set', async () => {
     vi.useFakeTimers();
     const harness = storageHarness(205);
@@ -176,7 +216,7 @@ describe('PointUploadWorker', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(harness.acknowledged).toEqual([]);
-    expect(onState).toHaveBeenLastCalledWith(expect.objectContaining({ pendingCount: 1, status: 'error' }));
+    expect(onState).toHaveBeenLastCalledWith(expect.objectContaining({ pendingCount: 1, status: 'blocked' }));
   });
 
   it('treats an incomplete success acknowledgement as permanent and never deletes the batch', async () => {
@@ -195,6 +235,6 @@ describe('PointUploadWorker', () => {
     await vi.runAllTimersAsync();
 
     expect(harness.acknowledged).toEqual([]);
-    expect(reconcile).toHaveBeenCalledWith(expect.any(PointUploadProtocolError));
+    expect(reconcile).toHaveBeenCalledWith(expect.any(PointUploadProtocolError), expect.any(AbortSignal));
   });
 });

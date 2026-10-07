@@ -26,7 +26,7 @@ export interface OidcLoginStoreOptions {
 
 interface StoredLogin {
   expiresAt: number;
-  login: PendingLogin;
+  login?: PendingLogin;
 }
 
 function digest(loginId: string): string {
@@ -56,18 +56,35 @@ export class OidcLoginStore {
   }
 
   public begin(login: PendingLogin): string {
+    const loginId = this.reserve();
+    this.completeReservation(loginId, login);
+    return loginId;
+  }
+
+  public reserve(previousLoginId?: string): string {
     const now = this.#clock.utcNow().getTime();
     for (const [key, entry] of this.#entries) {
       if (entry.expiresAt <= now) {
         this.#entries.delete(key);
       }
     }
+    if (previousLoginId !== undefined && loginIdPattern.test(previousLoginId)) this.#entries.delete(digest(previousLoginId));
     if (this.#entries.size >= this.#maxEntries) {
       throw new OidcLoginStoreCapacityError();
     }
     const loginId = randomBytes(32).toString('base64url');
-    this.#entries.set(digest(loginId), { expiresAt: now + this.#ttlMs, login });
+    this.#entries.set(digest(loginId), { expiresAt: now + this.#ttlMs });
     return loginId;
+  }
+
+  public completeReservation(loginId: string, login: PendingLogin): boolean {
+    const entry = this.#entries.get(digest(loginId));
+    if (!entry || entry.expiresAt <= this.#clock.utcNow().getTime()) {
+      this.#entries.delete(digest(loginId));
+      return false;
+    }
+    entry.login = login;
+    return true;
   }
 
   public take(loginId: string): PendingLogin | undefined {

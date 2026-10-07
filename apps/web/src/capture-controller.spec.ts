@@ -26,16 +26,15 @@ const measurement = {
 function sourceHarness() {
   let sink: CaptureSink | null = null;
   const stop = vi.fn();
-  const source: CaptureSource = {
-    label: 'Test source',
-    start: vi.fn((nextSink: CaptureSink) => {
-      sink = nextSink;
-      return { stop };
-    }),
-  };
+  const start = vi.fn((nextSink: CaptureSink) => {
+    sink = nextSink;
+    return { stop };
+  });
+  const source: CaptureSource = { label: 'Test source', start };
   return {
     emit: () => sink?.measurement(measurement),
     source,
+    start,
     stop,
   };
 }
@@ -104,6 +103,33 @@ describe('CaptureController', () => {
 
     expect(source.stop).toHaveBeenCalledOnce();
     expect(storage.appendPointForWriter).not.toHaveBeenCalled();
+  });
+
+  it('never subscribes when the run is learned to be finished while the start is still in flight', async () => {
+    const source = sourceHarness();
+    let resolveOwnership: ((value: WriterLease | null) => void) | undefined;
+    const storage = {
+      allocateCaptureSegment: vi.fn(() => Promise.resolve(0)),
+      appendPointForWriter: vi.fn(),
+    };
+    const states: CaptureState[] = [];
+    const controller = new CaptureController({
+      assertOwnedLease: () => new Promise<WriterLease | null>((resolve) => { resolveOwnership = resolve; }),
+      onPoint: vi.fn(),
+      onState: (state) => states.push(state),
+      scope,
+      source: source.source,
+      storage,
+    });
+    const started = controller.start();
+    // The reconciliation says FINISHED: the effect cleanup stops the controller before the lease answer arrives.
+    controller.stop();
+    resolveOwnership?.(lease);
+
+    await expect(started).resolves.toBe(false);
+    expect(source.start).not.toHaveBeenCalled();
+    expect(storage.allocateCaptureSegment).not.toHaveBeenCalled();
+    expect(states.at(-1)).toEqual({ status: 'idle' });
   });
 
   it('fails closed when the lease is lost before accepting a measurement', async () => {

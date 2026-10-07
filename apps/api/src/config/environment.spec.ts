@@ -49,8 +49,10 @@ describe('validateEnvironment', () => {
     expect(environment).toMatchObject({
       APP_ENV: 'development',
       DB_CONNECTION_TIMEOUT_MS: 2_000,
+      DB_LOCK_TIMEOUT_MS: 2_000,
       DB_POOL_MAX: 10,
       DB_QUERY_TIMEOUT_MS: 1_000,
+      DB_STATEMENT_TIMEOUT_MS: 5_000,
       PORT: 3_100,
       LIVE_TRACK_CURSOR_SIGNING_KEY:
         'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE',
@@ -67,6 +69,38 @@ describe('validateEnvironment', () => {
       RUN_TOMBSTONE_RECLAIM_INTERVAL_MS: 300_000,
       SHUTDOWN_TIMEOUT_MS: 5_000,
     });
+  });
+
+  it('bounds the runtime SQL budgets and refuses an unreachable lock budget', () => {
+    expect(
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        DB_LOCK_TIMEOUT_MS: '750',
+        DB_STATEMENT_TIMEOUT_MS: '1500',
+      }),
+    ).toMatchObject({ DB_LOCK_TIMEOUT_MS: 750, DB_STATEMENT_TIMEOUT_MS: 1_500 });
+
+    for (const invalid of [
+      { DB_STATEMENT_TIMEOUT_MS: '0' },
+      { DB_STATEMENT_TIMEOUT_MS: '60001' },
+      { DB_STATEMENT_TIMEOUT_MS: 'soon' },
+      { DB_LOCK_TIMEOUT_MS: '0' },
+      { DB_LOCK_TIMEOUT_MS: '-1' },
+      { DB_LOCK_TIMEOUT_MS: '60001' },
+    ]) {
+      expect(() => validateEnvironment({ ...validApplicationEnvironment, ...invalid })).toThrow(
+        'Invalid environment configuration',
+      );
+    }
+
+    // statement_timeout also covers time spent waiting for a lock, so a larger lock budget could never fire.
+    expect(() =>
+      validateEnvironment({
+        ...validApplicationEnvironment,
+        DB_LOCK_TIMEOUT_MS: '3000',
+        DB_STATEMENT_TIMEOUT_MS: '2000',
+      }),
+    ).toThrow('DB_LOCK_TIMEOUT_MS must not exceed DB_STATEMENT_TIMEOUT_MS');
   });
 
   it('rejects startup without a PostgreSQL URL', () => {

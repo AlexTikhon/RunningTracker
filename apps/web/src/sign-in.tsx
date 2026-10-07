@@ -14,12 +14,12 @@ export function signInFailureMessage(search: string): string | undefined {
   return code !== null && Object.hasOwn(failureMessages, code) ? failureMessages[code] : undefined;
 }
 
-export function SignInNotice({ failure }: { failure: string | undefined }) {
+export function SignInNotice({ failure, message }: { failure: string | undefined; message?: string }) {
   return (
     <section className="notice notice--error" {...(failure === undefined ? {} : { role: 'alert' })}>
       <div>
         <strong>Sign in required</strong>
-        <span>{failure ?? 'Sign in with your organization account to record and view runs.'}</span>
+        <span>{failure ?? message ?? 'Sign in with your organization account to record and view runs.'}</span>
       </div>
       {/* A real navigation: the browser must leave for the identity provider. */}
       <a className="button" href={signInPath}>Sign in</a>

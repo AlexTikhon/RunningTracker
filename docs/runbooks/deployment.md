@@ -161,7 +161,7 @@ current permissions, open) and the local drill are in the same runbook.
 | A scheduled daily backup on this host, off-host backup storage, key custody, and a backup-age alert (the commands and a local restore drill exist, P12.3; production RPO/RTO is not established) | operator |
 | Sessions after a restore (process memory: everyone signs in again). Revoked shares and deactivated memberships are restored by the access-restriction journal (P12.4, ADR-0045) | none |
 | Full Content-Security-Policy (only `frame-ancestors` is set; a script/style/connect policy must be validated against the Mapbox map in a browser) | before public launch |
-| Request rate limiting at the proxy (no measured per-client traffic model to size it) | before public launch |
+| General request rate limiting at the proxy. Only sign-in initiation is limited (ADR-0048: five per minute per direct address with burst four at the edge, plus process-wide admission in the API); no other route is, because there is no measured per-client traffic model to size it | before public launch |
 | Encryption of database traffic inside the Docker network (single host; unencrypted by design here) and of the data volume at rest (a host/disk concern) | operator |
 | Image publication, signing, vulnerability scanning, host patching | operator |
 | Confirming the journal directory is really off-host | operator |

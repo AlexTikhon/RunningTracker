@@ -20,12 +20,24 @@ export class DatabaseQueryTimeoutError extends Error {
   }
 }
 
+/**
+ * The runtime pool carries its SQL budgets as connection startup parameters. They are in force before the first
+ * statement of every checkout, including the identity lookup and the archive authorization locks, and nothing in
+ * this codebase issues a session-level SET, so they cannot drift between borrowers. A transaction may tighten
+ * them with SET LOCAL (the archive tile render does); PostgreSQL restores these values when it ends.
+ * `statement_timeout` also covers time spent waiting for a lock, so `lock_timeout` is the earlier, finer bound.
+ * Maintenance work has different cost profiles and deliberately gets no runtime budget here.
+ * `idle_in_transaction_session_timeout` is intentionally not set: when the server ends a checked-out
+ * connection, pg raises an unhandled client 'error' that terminates the process.
+ */
 export function createDatabasePool(config: Environment): Pool {
   const pool = new Pool({
     application_name: 'running-tracker-api',
     connectionString: config.DATABASE_URL,
     connectionTimeoutMillis: config.DB_CONNECTION_TIMEOUT_MS,
+    lock_timeout: config.DB_LOCK_TIMEOUT_MS,
     max: config.DB_POOL_MAX,
+    statement_timeout: config.DB_STATEMENT_TIMEOUT_MS,
   });
 
   pool.on('error', (error) => {

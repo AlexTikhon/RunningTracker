@@ -1,4 +1,4 @@
-import { uuidSchema, type RunCommandType, type SessionResponse } from '@running-tracker/contracts';
+import type { RunCommandType } from '@running-tracker/contracts';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { loadHealth, type HealthSnapshot } from './health.js';
@@ -6,30 +6,33 @@ import { ArchiveScreen } from './ArchiveScreen.js';
 import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
-import {
-  DEFAULT_CAPTURE_SOURCE_KIND,
-  parseCaptureSourceKind,
-  type CaptureSourceKind,
-} from './capture-source-kind.js';
+import type { CaptureSourceKind } from './capture-source-kind.js';
+import { organizationLabel, organizationPrompt } from './organization-selection.js';
+import { OrganizationPicker } from './OrganizationPicker.js';
+import { executeRunnerRequest } from './runner-requests.js';
+import { RunnerView, type StorageState } from './RunnerView.js';
+import { SessionBar } from './SessionBar.js';
+import { unsentWorkNote } from './unsent-work.js';
+import { useOrganizations } from './use-organizations.js';
+import { useRunnerSession } from './use-runner-session.js';
 import { PointUploadWorker } from './point-upload-worker.js';
+import { AUTHORITY_RETRY_MS, readAuthoritativeRun } from './run-authority.js';
 import {
-  createRun,
-  loadSession,
   readRun,
   RunnerApiError,
-  sendRunCommand,
   uploadPointBatch,
 } from './runner-api.js';
 import { getBrowserRunnerStorage } from './runner-storage.js';
 import { SignInNotice, signInFailureMessage } from './sign-in.js';
 import {
-  availableCommands,
+  captureMayRun,
   createInitialRunnerState,
-  runnerPhase,
+  needsAuthoritativeRead,
   runnerReducer,
   type CommandRequest,
   type RunnerRequest,
   type StartRequest,
+  type UploadState,
 } from './runner-state.js';
 import {
   WriterLeaseCoordinator,
@@ -37,14 +40,6 @@ import {
 } from './writer-lease.js';
 
 type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
-type SessionState =
-  | { status: 'loading' }
-  | { message: string; status: 'required' }
-  | { session: SessionResponse; status: 'ready' };
-type StorageState =
-  | { status: 'loading' }
-  | { status: 'ready' }
-  | { message: string; status: 'error' };
 type ActiveView = 'archive' | 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
@@ -75,8 +70,9 @@ function durationLabel(startedAt: string | undefined, finishedAt: string | null 
 
 export function App() {
   const [health, setHealth] = useState<HealthState>(initialHealth);
-  const [session, setSession] = useState<SessionState>({ status: 'loading' });
-  const [orgId, setOrgId] = useState('');
+  // The organization the current run belongs to, from the run's own durable record. It is not the selection:
+  // choosing another organization to look at can never redirect a run's capture or upload.
+  const [runOrgId, setRunOrgId] = useState<string | null>(null);
   const [signInFailure] = useState(() =>
     typeof window === 'undefined' ? undefined : signInFailureMessage(window.location.search),
   );
@@ -92,12 +88,38 @@ export function App() {
   const restoredUserId = useRef<string | null>(null);
   const uploadWorker = useRef<PointUploadWorker | null>(null);
   const writerCoordinator = useRef<WriterLeaseCoordinator | null>(null);
+  const latestUpload = useRef<UploadState>({ message: null, pendingCount: 0, status: 'idle' });
+  const suspendRunner = useCallback(() => {
+    captureController.current?.stop();
+    uploadWorker.current?.stop();
+    if (uploadWorker.current !== null && latestUpload.current.status !== 'blocked') {
+      dispatch({ type: 'upload-changed', upload: { ...latestUpload.current, status: 'suspended', message: 'Sign in to resume upload.' } });
+    }
+    restoredUserId.current = null;
+  }, []);
+  // After an explicit sign-out the page forgets what it showed for that person. Only in-memory state goes: the
+  // exact points, requests and run pointer stay in IndexedDB for the same person's next sign-in.
+  const forgetSignedOutIdentity = useCallback(() => {
+    dispatch({ type: 'session-ended' });
+    setRunOrgId(null);
+    setStorage({ status: 'loading' });
+    setCaptureSourceKind(null);
+    setCapture({ status: 'idle' });
+    setWriter({ status: 'unclaimed' });
+  }, []);
+  const { session, refreshSession, signOut, signOutState } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
+  const { choose: chooseOrganization, discovery, prefer: preferOrganization, reload: reloadOrganizations, selectedOrgId } =
+    useOrganizations(session);
   const [runner, dispatch] = useReducer(
     runnerReducer,
     typeof navigator === 'undefined' || navigator.onLine !== false ? 'online' : 'offline',
     createInitialRunnerState,
   );
-  const normalizedOrgId = orgId.trim().toLowerCase();
+  latestUpload.current = runner.upload;
+  // A run is captured and uploaded for the organization it was started in; before one exists, the selection decides.
+  const scopeOrgId = runner.run !== null ? runOrgId ?? selectedOrgId : selectedOrgId;
+  // Capture runs only for a lifecycle the server has confirmed (or, offline, one that will be confirmed on reconnection).
+  const captureAllowed = captureMayRun(runner);
   const mapboxAccessToken = (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '').trim() || null;
 
   const refreshHealth = useCallback(async (signal?: AbortSignal) => {
@@ -106,20 +128,6 @@ export function App() {
     } catch (error) {
       if (!isAbortError(error)) {
         setHealth({ api: 'down', database: 'unknown' });
-      }
-    }
-  }, []);
-
-  const refreshSession = useCallback(async (signal?: AbortSignal) => {
-    setSession({ status: 'loading' });
-    try {
-      setSession({ session: await loadSession(signal), status: 'ready' });
-    } catch (error) {
-      if (!isAbortError(error)) {
-        setSession({
-          message: 'A session is required: sign in, or create the local development session.',
-          status: 'required',
-        });
       }
     }
   }, []);
@@ -136,9 +144,8 @@ export function App() {
   useEffect(() => {
     const controller = new AbortController();
     void refreshHealth(controller.signal);
-    void refreshSession(controller.signal);
     return () => controller.abort();
-  }, [refreshHealth, refreshSession]);
+  }, [refreshHealth]);
 
   useEffect(() => {
     if (session.status !== 'ready' || restoredUserId.current === session.session.identity.userId) {
@@ -155,12 +162,12 @@ export function App() {
           return;
         }
         restoredUserId.current = userId;
-        if (recovery.orgId !== null) {
-          setOrgId(recovery.orgId);
-        }
+        setRunOrgId(recovery.orgId);
+        preferOrganization(recovery.orgId);
         // Set in the same batch as the storage becoming ready, which every capture start waits for.
         setCaptureSourceKind(recovery.captureSource);
         dispatch({
+          uploadRejection: recovery.uploadRejection,
           pendingPointCount: recovery.pendingPointCount,
           request: recovery.request,
           run: recovery.run,
@@ -176,7 +183,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [session]);
+  }, [preferOrganization, session]);
 
   useEffect(() => {
     if (session.status !== 'ready') {
@@ -219,15 +226,17 @@ export function App() {
     if (
       session.status !== 'ready'
       || storage.status !== 'ready'
+      || restoredUserId.current !== session.session.identity.userId
       || writer.status !== 'owned'
       || runner.run === null
-      || !uuidSchema.safeParse(normalizedOrgId).success
+      || runner.upload.status === 'blocked'
+      || scopeOrgId === null
     ) {
       return undefined;
     }
     const runnerStorage = getBrowserRunnerStorage();
     const scope = {
-      orgId: normalizedOrgId,
+      orgId: scopeOrgId,
       runId: runner.run.runId,
       userId: session.session.identity.userId,
     };
@@ -235,20 +244,23 @@ export function App() {
       onAcknowledged: (dataRevision) => {
         dispatch({ dataRevision, runId: scope.runId, type: 'point-batch-acknowledged' });
       },
-      onPermanentError: async () => {
-        const authoritativeRun = await readRun(scope.orgId, scope.runId);
+      onPermanentError: async (error, signal) => {
+        captureController.current?.stop();
+        await runnerStorage.rejectUpload(scope, errorMessage(error));
+        const authoritativeRun = await readRun(scope.orgId, scope.runId, signal);
         await runnerStorage.saveRunSnapshot(scope.userId, scope.orgId, authoritativeRun);
         dispatch({ run: authoritativeRun, type: 'run-reconciled' });
       },
       onState: (nextUpload) => dispatch({ type: 'upload-changed', upload: nextUpload }),
       scope,
-      send: async (points) => {
+      send: async (points, signal) => {
         if (!await writerCoordinator.current?.assertOwned()) {
           throw new Error('Point upload stopped because this tab no longer owns the writer lease');
         }
         return uploadPointBatch(
           { orgId: scope.orgId, points, runId: scope.runId },
           session.session.csrf,
+          signal,
         );
       },
       storage: runnerStorage,
@@ -261,7 +273,7 @@ export function App() {
         uploadWorker.current = null;
       }
     };
-  }, [normalizedOrgId, runner.run?.runId, session, storage.status, writer.status]);
+  }, [scopeOrgId, runner.run?.runId, session, storage.status, writer.status]);
 
   useEffect(() => {
     uploadWorker.current?.setOnline(runner.connectivity === 'online');
@@ -271,16 +283,19 @@ export function App() {
     if (
       session.status !== 'ready'
       || storage.status !== 'ready'
+      || restoredUserId.current !== session.session.identity.userId
       || writer.status !== 'owned'
-      || runner.run?.status !== 'recording'
+      || runner.upload.status === 'blocked'
+      || runner.run === null
+      || !captureAllowed
       || captureSourceKind === null
-      || !uuidSchema.safeParse(normalizedOrgId).success
+      || scopeOrgId === null
     ) {
       setCapture({ status: 'idle' });
       return undefined;
     }
     const scope = {
-      orgId: normalizedOrgId,
+      orgId: scopeOrgId,
       runId: runner.run.runId,
       userId: session.session.identity.userId,
     };
@@ -304,7 +319,7 @@ export function App() {
       controller.stop();
       if (captureController.current === controller) captureController.current = null;
     };
-  }, [captureSourceKind, normalizedOrgId, runner.run?.runId, runner.run?.status, session, storage.status, writer.status]);
+  }, [captureAllowed, captureSourceKind, scopeOrgId, runner.run?.runId, runner.upload.status === 'blocked', session, storage.status, writer.status]);
 
   useEffect(() => {
     if (runner.run === null || runner.run.status === 'finished') {
@@ -324,67 +339,67 @@ export function App() {
       }
       dispatch({ request, type: 'request-started' });
       try {
-        const runnerStorage = getBrowserRunnerStorage();
-        await runnerStorage.queueRequest(session.session.identity.userId, request, runner.run);
-        if (runner.connectivity === 'offline') {
-          dispatch({
-            message: 'Saved locally. Retry the same request when the connection returns.',
-            request,
-            type: 'request-failed',
-          });
-          return;
-        }
-        if (request.kind === 'start') {
-          const run = await createRun(request, session.session.csrf);
-          if (!await writerCoordinator.current?.assertOwned()) {
-            throw new Error(
-              'Writer ownership changed after the server response; the exact start request remains queued.',
-            );
-          }
-          await runnerStorage.acknowledgeStart(session.session.identity.userId, request, run);
-          dispatch({ request, run, type: 'start-succeeded' });
-          return;
-        }
-        if (runner.run === null) {
-          throw new Error('The durable command has no confirmed run state');
-        }
-        const result = await sendRunCommand(request, session.session.csrf);
-        if (!await writerCoordinator.current?.assertOwned()) {
-          throw new Error(
-            'Writer ownership changed after the server response; the exact command remains queued.',
-          );
-        }
-        await runnerStorage.acknowledgeCommand(
-          session.session.identity.userId,
+        const outcome = await executeRunnerRequest({
+          assertOwned: async () => await writerCoordinator.current?.assertOwned() ?? false,
+          csrf: session.session.csrf,
+          online: runner.connectivity === 'online',
           request,
-          runner.run,
-          result,
-        );
-        dispatch({ request, result, type: 'command-succeeded' });
-      } catch (error) {
-        if (
-          request.kind === 'command'
-          && error instanceof RunnerApiError
-          && error.code === 'CONTROL_REVISION_CONFLICT'
-        ) {
-          try {
-            const authoritativeRun = await readRun(request.orgId, request.runId);
-            await getBrowserRunnerStorage().acknowledgeReconciledRequest(
-              session.session.identity.userId,
-              request,
-              authoritativeRun,
-            );
-            dispatch({ request, run: authoritativeRun, type: 'request-reconciled' });
-            return;
-          } catch {
-            // Preserve the original command failure when reconciliation is unavailable.
-          }
+          run: runner.run,
+          signal: session.signal,
+          storage: getBrowserRunnerStorage(),
+          userId: session.session.identity.userId,
+        });
+        if (outcome.kind === 'start' && request.kind === 'start') {
+          dispatch({ request, run: outcome.run, type: 'start-succeeded' });
+        } else if (outcome.kind === 'command' && request.kind === 'command') {
+          dispatch({ request, result: outcome.result, type: 'command-succeeded' });
+        } else if (outcome.kind === 'reconciled' && request.kind === 'command') {
+          dispatch({ request, run: outcome.run, type: 'request-reconciled' });
         }
+      } catch (error) {
         dispatch({ message: errorMessage(error), request, type: 'request-failed' });
       }
     },
     [runner.connectivity, runner.run, session, storage.status],
   );
+
+  // Asks the server what the run is. A lifecycle read back from IndexedDB, or recorded while offline, is only
+  // recoverable data until this answers; capture and the controls wait for it.
+  const confirmRun = useCallback(() => {
+    if (
+      session.status !== 'ready'
+      || storage.status !== 'ready'
+      || restoredUserId.current !== session.session.identity.userId
+      || runner.run === null
+      || runner.connectivity !== 'online'
+      || scopeOrgId === null
+    ) {
+      return;
+    }
+    const attempt = runner.authorityAttempt + 1;
+    dispatch({ attempt, type: 'authority-requested' });
+    void readAuthoritativeRun({
+      attempt,
+      scope: { orgId: scopeOrgId, runId: runner.run.runId, userId: session.session.identity.userId },
+      signal: session.signal,
+      // Only the writer tab stores the answer; any tab may show it.
+      storage: writer.status === 'owned' ? getBrowserRunnerStorage() : null,
+    }).then((event) => {
+      if (event !== null) dispatch(event);
+    });
+  }, [runner.authorityAttempt, runner.connectivity, runner.run?.runId, scopeOrgId, session, storage.status, writer.status]);
+
+  const mustConfirm = needsAuthoritativeRead(runner);
+  useEffect(() => {
+    if (mustConfirm) confirmRun();
+  }, [confirmRun, mustConfirm]);
+
+  const retryConfirmation = runner.authority.status === 'unreachable' && runner.connectivity === 'online';
+  useEffect(() => {
+    if (!retryConfirmation) return undefined;
+    const timer = window.setTimeout(confirmRun, AUTHORITY_RETRY_MS);
+    return () => window.clearTimeout(timer);
+  }, [confirmRun, retryConfirmation]);
 
   const synchronizeAfterClaim = useCallback(async () => {
     if (session.status !== 'ready' || storage.status !== 'ready') {
@@ -392,13 +407,14 @@ export function App() {
     }
     const recovery = await getBrowserRunnerStorage().loadRecovery(session.session.identity.userId);
     if (recovery.orgId !== null) {
-      setOrgId(recovery.orgId);
+      setRunOrgId(recovery.orgId);
     }
     if (
       runner.pendingRequest === null
       && (recovery.run !== null || recovery.request !== null)
     ) {
       dispatch({
+        uploadRejection: recovery.uploadRejection,
         pendingPointCount: recovery.pendingPointCount,
         request: recovery.request,
         run: recovery.run,
@@ -422,30 +438,27 @@ export function App() {
     }
   }, [synchronizeAfterClaim]);
 
-  const validOrgId = uuidSchema.safeParse(normalizedOrgId).success;
-  const phase = runnerPhase(runner);
   const busy = runner.pendingRequest !== null;
   const controlsDisabled = busy
     || runner.error !== null
+    || runner.authority.status === 'confirming'
+    || mustConfirm
     || session.status !== 'ready'
     || storage.status !== 'ready'
     || writer.status === 'acquiring'
     || (runner.run !== null && writer.status !== 'owned');
-  const commands = runner.run === null ? [] : availableCommands(runner.run.status);
-  const captureDetail = capture.status === 'capturing' || capture.status === 'complete'
-    ? `segment ${capture.segmentId} · ${capture.capturedCount} buffered`
-    : capture.status === 'starting'
-      ? capture.source
-      : capture.status === 'error' || capture.status === 'lost'
-        ? capture.message
-        : 'Starts while the run is recording';
   const elapsed = useMemo(
     () => durationLabel(runner.run?.startedAt, runner.run?.finishedAt, now),
     [now, runner.run?.finishedAt, runner.run?.startedAt],
   );
+  const needsOrganization = organizationPrompt(discovery, selectedOrgId);
+  const organizationNote = session.status !== 'ready'
+    ? 'Sign in to start a run.'
+    : needsOrganization
+      ?? `This run will be recorded in organization ${organizationLabel(selectedOrgId ?? '', discovery.status === 'ready' ? discovery.organizations : [])}. The server rechecks active membership inside the run transaction.`;
 
   const start = async () => {
-    if (!validOrgId || controlsDisabled || runner.run !== null) {
+    if (selectedOrgId === null || controlsDisabled || runner.run !== null) {
       return;
     }
     if (!await claimWriter()) {
@@ -453,22 +466,23 @@ export function App() {
     }
     const request: StartRequest = {
       kind: 'start',
-      orgId: normalizedOrgId,
+      orgId: selectedOrgId,
       runId: crypto.randomUUID(),
       startedAt: new Date().toISOString(),
     };
+    setRunOrgId(selectedOrgId);
     void executeRequest(request);
   };
 
   const command = (type: RunCommandType) => {
-    if (runner.run === null || controlsDisabled) {
+    if (runner.run === null || scopeOrgId === null || controlsDisabled) {
       return;
     }
     const request: CommandRequest = {
       commandId: crypto.randomUUID(),
       expectedControlRevision: runner.run.controlRevision,
       kind: 'command',
-      orgId: normalizedOrgId,
+      orgId: scopeOrgId,
       runId: runner.run.runId,
       type,
     };
@@ -497,6 +511,38 @@ export function App() {
       setStorage({ message: errorMessage(error), status: 'error' });
     }
   };
+
+  const rejectedScope = session.status === 'ready' && runner.run !== null && scopeOrgId !== null
+    ? { userId: session.session.identity.userId, orgId: scopeOrgId, runId: runner.run.runId } : null;
+  const exportRejectedPoints = async () => {
+    if (rejectedScope === null) return;
+    try {
+      const points = await getBrowserRunnerStorage().exportBufferedPoints(rejectedScope);
+      const url = URL.createObjectURL(new Blob([JSON.stringify({ ...rejectedScope, points }, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `run-${rejectedScope.runId}-buffer.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
+  };
+  const discardRejectedPoints = async () => {
+    if (rejectedScope === null || busy) return;
+    try {
+      const lease = await writerCoordinator.current?.assertOwnedLease();
+      if (!lease) return;
+      captureController.current?.stop();
+      uploadWorker.current?.stop();
+      await getBrowserRunnerStorage().discardRejectedRun(rejectedScope, lease);
+      dispatch({ type: 'rejected-run-discarded' });
+      await writerCoordinator.current?.release();
+    } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
+  };
+
+  const viewPrerequisite = (what: string) =>
+    session.status === 'ready'
+      ? needsOrganization ?? ''
+      : `An active session is required before the ${what} can open.`;
 
   return (
     <main>
@@ -534,253 +580,80 @@ export function App() {
         </div>
       </header>
 
+      <div className="context-bar">
+        <OrganizationPicker
+          locked={runner.run !== null || busy}
+          onChoose={chooseOrganization}
+          onRetry={reloadOrganizations}
+          selected={selectedOrgId}
+          state={discovery}
+        />
+        <SessionBar
+          onRetry={() => void refreshSession()}
+          onSignOut={() => void signOut()}
+          session={session}
+          signOut={signOutState}
+          unsentNote={unsentWorkNote(runner)}
+        />
+      </div>
+
+      {session.status === 'required' && <SignInNotice failure={signInFailure} message={session.message} />}
+
       <div hidden={activeView !== 'runner'}>
-      <section className="runner-shell" aria-labelledby="runner-title">
-        <div className="runner-copy">
-          <p className="eyebrow">Runner console · P05.5</p>
-          <h1 id="runner-title">Your run,<br />under control.</h1>
-          <p className="lede">
-            Device GPS and the seeded simulator share one fenced foreground capture path. Measurements
-            are durably sequenced in IndexedDB before the uploader can send them.
-          </p>
-        </div>
-
-        <section className="control-card" aria-label="Run controls">
-          <div className="control-card__topline">
-            <span className={`phase-badge phase-badge--${phase}`}>{phase}</span>
-            <span className="run-id">{runner.run ? `#${runner.run.runId.slice(0, 8)}` : 'No active run'}</span>
-          </div>
-
-          <p className="timer" aria-label={`Elapsed time ${elapsed}`}>{elapsed}</p>
-          <p className="timer-label">elapsed foreground session</p>
-
-          <div className="capture-source">
-            <label htmlFor="capture-source">Capture source</label>
-            <select
-              disabled={
-                captureSourceKind === null
-                || runner.run?.status === 'recording'
-                || busy
-                || (runner.run !== null && writer.status !== 'owned')
-              }
-              id="capture-source"
-              onChange={(event) => chooseCaptureSource(parseCaptureSourceKind(event.target.value))}
-              value={captureSourceKind ?? DEFAULT_CAPTURE_SOURCE_KIND}
-            >
-              <option value="geolocation">Device GPS</option>
-              <option value="simulator">Simulator · normal · seed 1</option>
-            </select>
-            <span>Foreground only. Pausing or losing the writer lease stops capture.</span>
-          </div>
-
-          {runner.run === null ? (
-            <div className="start-panel">
-              <label htmlFor="organization-id">Organization ID</label>
-              <input
-                aria-describedby="organization-help"
-                autoComplete="off"
-                id="organization-id"
-                onChange={(event) => setOrgId(event.target.value)}
-                placeholder="00000000-0000-4000-8000-000000000000"
-                spellCheck={false}
-                value={orgId}
-              />
-              <p id="organization-help">The server rechecks active membership inside the run transaction.</p>
-              <button className="primary-action" disabled={!validOrgId || controlsDisabled} onClick={() => void start()} type="button">
-                {phase === 'starting' ? 'Starting…' : 'Start run'}
-              </button>
-            </div>
-          ) : (
-            <div className="command-grid">
-              {commands.includes('pause') && (
-                <button disabled={controlsDisabled} onClick={() => command('pause')} type="button">
-                  {phase === 'pausing' ? 'Pausing…' : 'Pause'}
-                </button>
-              )}
-              {commands.includes('resume') && (
-                <button disabled={controlsDisabled} onClick={() => command('resume')} type="button">
-                  {phase === 'resuming' ? 'Resuming…' : 'Resume'}
-                </button>
-              )}
-              {commands.includes('finish') && (
-                <button className="finish-action" disabled={controlsDisabled} onClick={() => command('finish')} type="button">
-                  {phase === 'finishing' ? 'Finishing…' : 'Finish'}
-                </button>
-              )}
-              {runner.run.status === 'finished' && (
-                <button
-                  className="primary-action"
-                  disabled={runner.upload.pendingCount > 0 || writer.status !== 'owned'}
-                  onClick={() => void clearFinishedRun()}
-                  type="button"
-                >
-                  New run
-                </button>
-              )}
-            </div>
-          )}
-        </section>
-      </section>
-
-      {runner.connectivity === 'offline' && (
-        <section className="notice notice--offline" role="status">
-          <strong>Offline</strong>
-          <span>Lifecycle requests can be saved locally and retried after reconnection.</span>
-        </section>
-      )}
-
-      {session.status === 'required' && <SignInNotice failure={signInFailure} />}
-
-      {storage.status === 'error' && (
-        <section className="notice notice--error" role="alert">
-          <div><strong>Local storage unavailable</strong><span>{storage.message}</span></div>
-        </section>
-      )}
-
-      {(capture.status === 'error' || capture.status === 'lost') && (
-        <section className="notice notice--error" role="alert">
-          <div><strong>Capture stopped</strong><span>{capture.message}</span></div>
-        </section>
-      )}
-
-      {(writer.status === 'conflict' || writer.status === 'lost' || writer.status === 'error') && (
-        <section className="notice notice--writer" role="alert">
-          <div>
-            <strong>
-              {writer.status === 'error' ? 'Writer ownership unavailable' : 'Another tab may own recording'}
-            </strong>
-            <span>
-              {writer.status === 'conflict'
-                ? `This tab is read-only while the current lease is live (through ${new Date(writer.expiresAt).toLocaleTimeString()}).`
-                : writer.message}
-            </span>
-          </div>
-          <button onClick={() => void claimWriter()} type="button">Retry ownership</button>
-        </section>
-      )}
-
-      {runner.error !== null && (
-        <section className="notice notice--error" role="alert">
-          <div><strong>Request not confirmed</strong><span>{runner.error.message}</span></div>
-          <button
-            disabled={runner.connectivity === 'offline' || session.status !== 'ready' || writer.status !== 'owned'}
-            onClick={() => void executeRequest(runner.error!.request)}
-            type="button"
-          >
-            Retry same request
-          </button>
-        </section>
-      )}
-
-      <section className="state-grid" aria-label="Runner state">
-        <StateCard detail={runner.run?.status ?? 'Ready for a new run'} label="Recording" value={phase} />
-        <StateCard
-          detail={runner.connectivity === 'online' ? 'Server controls available' : 'Waiting for connection'}
-          label="Network"
-          value={runner.connectivity}
+        <RunnerView
+          canStart={scopeOrgId !== null}
+          capture={capture}
+          captureSourceKind={captureSourceKind}
+          controlsDisabled={controlsDisabled}
+          elapsed={elapsed}
+          onChooseCaptureSource={chooseCaptureSource}
+          onClearFinishedRun={() => void clearFinishedRun()}
+          onConfirmRun={confirmRun}
+          onCommand={command}
+          onRetryOwnership={() => void claimWriter()}
+          onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
+          onStart={() => void start()}
+          organizationNote={organizationNote}
+          rejected={{
+            canDiscard: rejectedScope !== null,
+            canExport: rejectedScope !== null,
+            onDiscard: () => void discardRejectedPoints(),
+            onExport: () => void exportRejectedPoints(),
+          }}
+          runner={runner}
+          sessionReady={session.status === 'ready'}
+          storage={storage}
+          writer={writer}
         />
-        <StateCard
-          detail={runner.upload.message ?? (runner.upload.pendingCount === 0 ? 'No buffered points' : `${runner.upload.pendingCount} pending`)}
-          label="Upload"
-          value={runner.upload.status}
-        />
-        <StateCard
-          detail={runner.run ? `control rev ${runner.run.controlRevision}` : 'No server revision yet'}
-          label="Server state"
-          value={runner.error === null ? 'confirmed' : 'error'}
-        />
-        <StateCard
-          detail={writer.status === 'owned' ? `fence ${writer.fencingToken}` : 'Controls require the browser lease'}
-          label="Writer"
-          value={writer.status}
-        />
-        <StateCard detail={captureDetail} label="Capture" value={capture.status} />
-      </section>
       </div>
 
       {activeView === 'coach' && (
-        <>
-          <section className="coach-org" aria-label="Coach organization">
-            <label htmlFor="coach-organization-id">Organization ID</label>
-            <input
-              autoComplete="off"
-              id="coach-organization-id"
-              onChange={(event) => setOrgId(event.target.value)}
-              placeholder="00000000-0000-4000-8000-000000000000"
-              spellCheck={false}
-              value={orgId}
-            />
-            <span>The live endpoint revalidates this identity's membership and run grants.</span>
-          </section>
-          {session.status === 'ready' && validOrgId ? (
-            <CoachScreen
-              orgId={normalizedOrgId}
-              sessionExpiresAt={session.session.expiresAt}
-              userId={session.session.identity.userId}
-            />
-          ) : (
-            <section className="coach-prerequisite" role="status">
-              {session.status === 'ready'
-                ? 'Enter a valid organization UUID to open the coach stream.'
-                : 'An active session is required before the coach stream can open.'}
-            </section>
-          )}
-        </>
+        session.status === 'ready' && selectedOrgId !== null ? (
+          <CoachScreen
+            orgId={selectedOrgId}
+            sessionExpiresAt={session.session.expiresAt}
+            userId={session.session.identity.userId}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('coach stream')}</section>
+        )
       )}
 
       {activeView === 'archive' && (
-        <>
-          <section className="coach-org" aria-label="Archive organization">
-            <label htmlFor="archive-organization-id">Organization ID</label>
-            <input
-              autoComplete="off"
-              id="archive-organization-id"
-              onChange={(event) => setOrgId(event.target.value)}
-              placeholder="00000000-0000-4000-8000-000000000000"
-              spellCheck={false}
-              value={orgId}
-            />
-            <span>Metadata and every tile request revalidate membership and history access.</span>
-          </section>
-          {session.status === 'ready' && validOrgId ? (
-            <ArchiveScreen
-              accessToken={mapboxAccessToken}
-              orgId={normalizedOrgId}
-              userId={session.session.identity.userId}
-            />
-          ) : (
-            <section className="coach-prerequisite" role="status">
-              {session.status === 'ready'
-                ? 'Enter a valid organization UUID to open the archive source.'
-                : 'An active session is required before the archive source can open.'}
-            </section>
-          )}
-        </>
+        session.status === 'ready' && selectedOrgId !== null ? (
+          <ArchiveScreen
+            accessToken={mapboxAccessToken}
+            orgId={selectedOrgId}
+            userId={session.session.identity.userId}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('archive source')}</section>
+        )
       )}
-
-      <section className={`session-bar session-bar--${session.status}`} aria-live="polite">
-        {session.status === 'loading' && <span>Checking session…</span>}
-        {session.status === 'ready' && (
-          <><span>Session ready · user {session.session.identity.userId.slice(0, 8)}</span><span>Expires {new Date(session.session.expiresAt).toLocaleTimeString()}</span></>
-        )}
-        {session.status === 'required' && (
-          <><span>{session.message}</span><button onClick={() => void refreshSession()} type="button">Retry session</button></>
-        )}
-      </section>
     </main>
   );
 }
 
 function StatusDot({ label, value }: { label: string; value: string }) {
   return <span><i className={`dot dot--${value}`} aria-hidden="true" />{label} {value}</span>;
-}
-
-function StateCard({ detail, label, value }: { detail: string; label: string; value: string }) {
-  return (
-    <article className="state-card">
-      <p>{label}</p>
-      <strong>{value}</strong>
-      <span>{detail}</span>
-    </article>
-  );
 }

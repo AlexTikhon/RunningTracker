@@ -42,6 +42,75 @@ function createStorage(factory: IDBFactory, databaseName: string) {
 }
 
 describe('IndexedDbRunnerStorage', () => {
+  it.each(['pause', 'finish'] as const)('recovers %s after interleaved upload and lifecycle acknowledgements', async (type) => {
+    for (const uploadFirst of [true, false]) {
+      const factory = new IDBFactory();
+      const databaseName = crypto.randomUUID();
+      const storage = createStorage(factory, databaseName);
+      await storage.acknowledgeStart(userId, startRequest, recordingRun);
+      const request: CommandRequest = { ...scope, kind: 'command', commandId: crypto.randomUUID(), expectedControlRevision: '0', type };
+      await storage.queueRequest(userId, request, recordingRun);
+      await storage.appendPoint(scope, measurement);
+      if (uploadFirst) await storage.acknowledgePointBatch(scope, ['1'], '2');
+      await storage.acknowledgeCommand(userId, request, recordingRun, { commandId: request.commandId, controlRevision: '1', dataRevision: '1', status: type === 'pause' ? 'paused' : 'finished', finishedAt: type === 'finish' ? '2026-09-26T08:01:00.000Z' : null });
+      if (!uploadFirst) await storage.acknowledgePointBatch(scope, ['1'], '2');
+      await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, dataRevision: '3' });
+      await storage.close();
+      const reopened = createStorage(factory, databaseName);
+      await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ request: null, pendingPointCount: 0, run: { controlRevision: '1', dataRevision: '3', status: type === 'pause' ? 'paused' : 'finished' } });
+      await reopened.close();
+    }
+  });
+
+  it('keeps an auto-finished run FINISHED when the acknowledgement of an older pause arrives after it, across reload', async () => {
+    const factory = new IDBFactory();
+    const databaseName = crypto.randomUUID();
+    const storage = createStorage(factory, databaseName);
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    const pause: CommandRequest = { ...scope, kind: 'command', commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'pause' };
+    await storage.queueRequest(userId, pause, recordingRun);
+    await storage.appendPoint(scope, measurement);
+    // The server paused (control revision 1), then auto-finished: status and data revision change, control revision does not.
+    await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' });
+    await storage.acknowledgeCommand(userId, pause, recordingRun, { commandId: pause.commandId, controlRevision: '1', dataRevision: '2', finishedAt: null, status: 'paused' });
+    await storage.close();
+
+    const reopened = createStorage(factory, databaseName);
+    await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({
+      pendingPointCount: 1,
+      request: null,
+      run: { controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' },
+    });
+    await reopened.close();
+  });
+
+  it('retains rejected points through reload, fences capture and atomically discards only the settled rejected run', async () => {
+    const factory = new IDBFactory();
+    const name = crypto.randomUUID();
+    const storage = createStorage(factory, name);
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    await storage.appendPoint(scope, measurement);
+    const otherScope = { ...scope, runId: crypto.randomUUID() };
+    await storage.appendPoint(otherScope, measurement);
+    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT');
+    await storage.close();
+    const reopened = createStorage(factory, name);
+    await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ uploadRejection: 'RUN_POINT_LIMIT', pendingPointCount: 1 });
+    await expect(reopened.appendPoint(scope, measurement)).rejects.toThrow('rejected queue');
+    const acquisition = await reopened.acquireWriterLease(userId, crypto.randomUUID(), 15_000);
+    const lease = acquisition.lease;
+    await expect(reopened.discardRejectedRun(scope, lease)).rejects.toThrow('active rejected run');
+    await reopened.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', status: 'finished', finishedAt: '2026-09-26T08:01:00.000Z' });
+    const request: CommandRequest = { kind: 'command', orgId, runId, commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'finish' };
+    await reopened.queueRequest(userId, request, recordingRun);
+    await expect(reopened.exportBufferedPoints(scope)).resolves.toMatchObject([{ seq: '1' }]);
+    await expect(reopened.discardRejectedRun(scope, { ...lease, fencingToken: '0' })).rejects.toThrow();
+    await expect(reopened.countPoints(scope)).resolves.toBe(1);
+    await reopened.discardRejectedRun(scope, lease);
+    await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ run: null, request: null, pendingPointCount: 0 });
+    await expect(reopened.countPoints(scope)).resolves.toBe(0);
+    await expect(reopened.countPoints(otherScope)).resolves.toBe(1);
+  });
   it('allocates seq and stores each point atomically across concurrent transactions and reload', async () => {
     const factory = new IDBFactory();
     const databaseName = crypto.randomUUID();
@@ -121,6 +190,7 @@ describe('IndexedDbRunnerStorage', () => {
 
     await reopened.acknowledgeStart(userId, startRequest, recordingRun);
     await expect(reopened.loadRecovery(userId)).resolves.toEqual({
+      uploadRejection: null,
       captureSource: 'geolocation',
       orgId,
       pendingPointCount: 0,
@@ -200,6 +270,7 @@ describe('IndexedDbRunnerStorage', () => {
     await storage.clearActiveRun(userId);
 
     await expect(storage.loadRecovery(userId)).resolves.toEqual({
+      uploadRejection: null,
       captureSource: 'geolocation',
       orgId: null,
       pendingPointCount: 0,
@@ -274,6 +345,7 @@ describe('IndexedDbRunnerStorage', () => {
       await storage.clearActiveRun(userId);
 
       await expect(storage.loadRecovery(userId)).resolves.toEqual({
+      uploadRejection: null,
         captureSource: 'simulator',
         orgId: null,
         pendingPointCount: 0,
