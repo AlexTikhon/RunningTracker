@@ -155,7 +155,12 @@ export function createApp({
     app.use('/api', testOnlyRouter);
   }
   app.use('/api', unknownApiRoute);
-  app.use(apiErrorHandler());
+  app.use(
+    apiErrorHandler({
+      lockTimeoutMs: config.DB_LOCK_TIMEOUT_MS,
+      statementTimeoutMs: config.DB_STATEMENT_TIMEOUT_MS,
+    }),
+  );
 
   return app;
 }

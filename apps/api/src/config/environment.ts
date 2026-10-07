@@ -213,6 +213,8 @@ const environmentSchema = z
     DB_POOL_MAX: z.coerce.number().int().positive().max(50).default(10),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(2_000),
     DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(1_000),
+    DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
+    DB_LOCK_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(2_000),
     ALLOWED_ORIGINS: originList,
     LOCAL_AUTH_ENABLED: environmentBoolean.default(false),
     LOCAL_AUTH_USER_IDS: uuidList,
@@ -286,6 +288,14 @@ const environmentSchema = z
         code: 'custom',
         message: 'MAINTENANCE_DATABASE_URL must target the same host, port, and database as DATABASE_URL',
         path: ['MAINTENANCE_DATABASE_URL'],
+      });
+    }
+    if (environment.DB_LOCK_TIMEOUT_MS > environment.DB_STATEMENT_TIMEOUT_MS) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'DB_LOCK_TIMEOUT_MS must not exceed DB_STATEMENT_TIMEOUT_MS: statement_timeout also covers lock waits, so a larger lock budget could never fire',
+        path: ['DB_LOCK_TIMEOUT_MS'],
       });
     }
     if (environment.APP_ENV === 'production' && environment.LOCAL_AUTH_ENABLED) {

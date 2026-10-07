@@ -116,6 +116,8 @@ services:
       METRICS_HOST: 0.0.0.0
       METRICS_PORT: 9464
       DB_POOL_MAX: 10
+      DB_STATEMENT_TIMEOUT_MS: 5000
+      DB_LOCK_TIMEOUT_MS: 2000
       RUN_SUMMARY_CONCURRENCY: 2
       # Heap ceiling under the 512 MiB container limit; the P11 loads peaked near 217 MiB RSS.
       NODE_OPTIONS: --max-old-space-size=320
