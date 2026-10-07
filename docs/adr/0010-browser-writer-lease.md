@@ -3,6 +3,7 @@
 - Status: accepted; P05.4 implemented and locally verified
 - Date: 2026-09-26
 - Scope: P05.4 only
+- Amended by: ADR-0053 (release keeps the lease record, so the fencing token never restarts)
 
 ## Context
 

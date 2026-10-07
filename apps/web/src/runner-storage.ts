@@ -28,8 +28,17 @@ const STORES = {
   runs: 'runs',
 } as const;
 
+// One record per user for the lifetime of the database: its fencingToken is the durable ownership epoch. A
+// release keeps the record and stamps releasedAt, because deleting it would let the next acquisition start the
+// epoch again and revive every capability issued before (ADR-0053). Records written before releasedAt existed
+// are live exactly while unexpired, as always.
 interface WriterLeaseRecord extends WriterLease {
+  releasedAt?: string;
   storageKey: string;
+}
+
+function isLiveLease(record: WriterLeaseRecord, now: Date): boolean {
+  return record.releasedAt === undefined && Date.parse(record.expiresAt) > now.getTime();
 }
 
 interface ProfileRecord {
@@ -273,14 +282,15 @@ export class IndexedDbRunnerStorage {
         existing !== undefined
         && existing.ownerId !== ownerId
         && !replaceableOwnerIds.includes(existing.ownerId)
-        && Date.parse(existing.expiresAt) > now.getTime()
+        && isLiveLease(existing, now)
       ) {
         await done;
         return { acquired: false, lease: parseWriterLease(existing) };
       }
 
-      const sameLiveOwner = existing?.ownerId === ownerId
-        && Date.parse(existing.expiresAt) > now.getTime();
+      // Only a live lease of this same owner is re-confirmed under its own token. Everything else (nothing yet,
+      // expired, released, or a replaced dead owner) starts a new generation from the stored epoch.
+      const sameLiveOwner = existing?.ownerId === ownerId && isLiveLease(existing, now);
       const fencingToken = sameLiveOwner
         ? revisionSchema.parse(existing.fencingToken)
         : revisionSchema.parse((BigInt(existing?.fencingToken ?? '0') + 1n).toString());
@@ -318,7 +328,7 @@ export class IndexedDbRunnerStorage {
         existing === undefined
         || existing.ownerId !== lease.ownerId
         || existing.fencingToken !== lease.fencingToken
-        || Date.parse(existing.expiresAt) <= now.getTime()
+        || !isLiveLease(existing, now)
       ) {
         await done;
         return null;
@@ -339,16 +349,25 @@ export class IndexedDbRunnerStorage {
 
   public async releaseWriterLease(leaseInput: WriterLease): Promise<boolean> {
     const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    const now = this.#now();
     const database = await this.#open();
     const transaction = database.transaction(STORES.leases, 'readwrite');
     const done = transactionDone(transaction);
     try {
       const store = transaction.objectStore(STORES.leases);
       const existing = (await requestResult(store.get(lease.userId))) as WriterLeaseRecord | undefined;
-      const matches = existing?.ownerId === lease.ownerId
+      // Only the current, still unreleased holder can release. The record stays: ownership ends, the epoch does not.
+      const matches = existing !== undefined
+        && existing.releasedAt === undefined
+        && existing.ownerId === lease.ownerId
         && existing.fencingToken === lease.fencingToken;
       if (matches) {
-        store.delete(lease.userId);
+        const released: WriterLeaseRecord = {
+          ...existing,
+          expiresAt: now.toISOString(),
+          releasedAt: now.toISOString(),
+        };
+        store.put(released);
       }
       await done;
       return matches;
@@ -472,7 +491,7 @@ export class IndexedDbRunnerStorage {
       existing === undefined
       || existing.ownerId !== lease.ownerId
       || existing.fencingToken !== lease.fencingToken
-      || Date.parse(existing.expiresAt) <= this.#now().getTime()
+      || !isLiveLease(existing, this.#now())
     ) {
       throw new Error('This tab no longer owns the writer lease');
     }
