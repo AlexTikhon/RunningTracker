@@ -281,3 +281,28 @@ export async function countScenarioRows(
     };
   });
 }
+
+// The server's own 24-hour auto-finish (app_private.auto_finish_runs, run by the maintenance role) with the clock
+// moved 25 hours ahead, so every run still recording or paused becomes finished the way it does in production:
+// status and data revision change, control revision does not. The function is global by design; this runs only
+// against the disposable _test database, which the live connection confirms before anything is called.
+export async function autoFinishRuns(environment: E2eEnvironment): Promise<number> {
+  const client = new pg.Client({
+    application_name: 'running-tracker-e2e-auto-finish',
+    connectionString: environment.maintenanceDatabaseUrl,
+  });
+  await client.connect();
+  try {
+    const database = await client.query<{ name: string }>('SELECT current_database() AS name');
+    const name = database.rows[0]?.name ?? '';
+    if (!name.endsWith('_test')) {
+      throw new Error(`Connected database "${name}" does not end in _test: the browser suite refuses to touch it`);
+    }
+    const result = await client.query<{ finished_count: number }>(
+      "SELECT app_private.auto_finish_runs(now() + interval '25 hours') AS finished_count",
+    );
+    return result.rows[0]?.finished_count ?? 0;
+  } finally {
+    await client.end();
+  }
+}

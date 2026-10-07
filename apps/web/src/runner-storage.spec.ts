@@ -62,6 +62,28 @@ describe('IndexedDbRunnerStorage', () => {
     }
   });
 
+  it('keeps an auto-finished run FINISHED when the acknowledgement of an older pause arrives after it, across reload', async () => {
+    const factory = new IDBFactory();
+    const databaseName = crypto.randomUUID();
+    const storage = createStorage(factory, databaseName);
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    const pause: CommandRequest = { ...scope, kind: 'command', commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'pause' };
+    await storage.queueRequest(userId, pause, recordingRun);
+    await storage.appendPoint(scope, measurement);
+    // The server paused (control revision 1), then auto-finished: status and data revision change, control revision does not.
+    await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' });
+    await storage.acknowledgeCommand(userId, pause, recordingRun, { commandId: pause.commandId, controlRevision: '1', dataRevision: '2', finishedAt: null, status: 'paused' });
+    await storage.close();
+
+    const reopened = createStorage(factory, databaseName);
+    await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({
+      pendingPointCount: 1,
+      request: null,
+      run: { controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' },
+    });
+    await reopened.close();
+  });
+
   it('retains rejected points through reload, fences capture and atomically discards only the settled rejected run', async () => {
     const factory = new IDBFactory();
     const name = crypto.randomUUID();

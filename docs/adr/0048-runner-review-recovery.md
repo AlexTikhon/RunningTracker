@@ -3,6 +3,7 @@
 - Status: accepted; implemented and verified locally
 - Date: 2026-10-05
 - Amends: ADR-0009 upload outcomes, ADR-0046 login admission
+- Amended by: ADR-0051 (decision 1: equal control revisions no longer let the incoming snapshot win; finished is absorbing)
 
 ## Decision
 

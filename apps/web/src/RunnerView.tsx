@@ -31,6 +31,7 @@ interface RunnerViewProps {
   writer: WriterOwnershipState;
   onChooseCaptureSource: (kind: CaptureSourceKind) => void;
   onClearFinishedRun: () => void;
+  onConfirmRun: () => void;
   onCommand: (type: RunCommandType) => void;
   onRetryOwnership: () => void;
   onRetryRequest: () => void;
@@ -53,6 +54,7 @@ export function RunnerView({
   writer,
   onChooseCaptureSource,
   onClearFinishedRun,
+  onConfirmRun,
   onCommand,
   onRetryOwnership,
   onRetryRequest,
@@ -193,6 +195,21 @@ export function RunnerView({
         </section>
       )}
 
+      {(runner.authority.status === 'unreachable' || runner.authority.status === 'refused') && (
+        <section className="notice notice--error" role="alert">
+          <div>
+            <strong>{runner.authority.status === 'refused' ? 'Run not confirmed by the server' : 'Confirming this run with the server'}</strong>
+            <span>
+              {runner.authority.message} Recording stays stopped and the buffered points stay on this device
+              until the server confirms the run.
+            </span>
+          </div>
+          <button disabled={runner.connectivity === 'offline' || !sessionReady} onClick={onConfirmRun} type="button">
+            Check again
+          </button>
+        </section>
+      )}
+
       {runner.error !== null && (
         <section className="notice notice--error" role="alert">
           <div><strong>Request not confirmed</strong><span>{runner.error.message}</span></div>
@@ -221,7 +238,7 @@ export function RunnerView({
         <StateCard
           detail={runner.run ? `control rev ${runner.run.controlRevision}` : 'No server revision yet'}
           label="Server state"
-          value={runner.error === null ? 'confirmed' : 'error'}
+          value={runner.error !== null ? 'error' : runner.authority.status === 'confirmed' ? 'confirmed' : runner.authority.status}
         />
         <StateCard
           detail={writer.status === 'owned' ? `fence ${writer.fencingToken}` : 'Controls require the browser lease'}

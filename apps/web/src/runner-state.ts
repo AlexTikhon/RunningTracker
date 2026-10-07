@@ -34,7 +34,26 @@ export interface RunnerFailure {
   request: RunnerRequest;
 }
 
+// Whether the lifecycle shown for the current run comes from a server answer, kept apart from the lifecycle
+// itself: the copy in IndexedDB is recoverable data, never proof that the server still considers the run active.
+//  - confirmed:   a server answer in this page lifetime (start, command, reconciliation, authoritative read)
+//  - restored:    read from IndexedDB; the server has not been asked yet
+//  - offline:     could not be asked because the browser is offline; ask again on reconnection
+//  - confirming:  the authoritative read `attempt` is in flight; `offlineCapture` keeps an offline capture running
+//  - unreachable: asked while online without an answer (network, timeout, 5xx); not proof of anything
+//  - refused:     the server answered that the run is not readable (403/404/410...); not resumable
+export type RunAuthority =
+  | { status: 'confirmed' }
+  | { status: 'restored' }
+  | { status: 'offline' }
+  | { attempt: number; offlineCapture: boolean; status: 'confirming' }
+  | { message: string; status: 'unreachable' }
+  | { message: string; status: 'refused' };
+
 export interface RunnerState {
+  authority: RunAuthority;
+  // Counts authoritative reads so a late answer to a superseded one is recognisable and dropped.
+  authorityAttempt: number;
   connectivity: Connectivity;
   error: RunnerFailure | null;
   pendingRequest: RunnerRequest | null;
@@ -70,6 +89,9 @@ export type RunnerEvent =
   | { runId: string; type: 'point-buffered' }
   | { dataRevision: string; runId: string; type: 'point-batch-acknowledged' }
   | { run: RunView; type: 'run-reconciled' }
+  | { attempt: number; type: 'authority-requested' }
+  | { attempt: number; run: RunView; type: 'authority-confirmed' }
+  | { attempt: number; kind: 'refused' | 'unreachable'; message: string; type: 'authority-unconfirmed' }
   | { type: 'rejected-run-discarded' }
   | { type: 'session-ended' }
   | { type: 'finished-run-cleared' }
@@ -77,12 +99,50 @@ export type RunnerEvent =
 
 export function createInitialRunnerState(connectivity: Connectivity): RunnerState {
   return {
+    authority: { status: 'confirmed' },
+    authorityAttempt: 0,
     connectivity,
     error: null,
     pendingRequest: null,
     run: null,
     upload: { message: null, pendingCount: 0, status: 'idle' },
   };
+}
+
+// An offline period ends any confirmation: the server may have changed the run meanwhile, so the first answer
+// after reconnection must be an authoritative read. Only states that can still hold a capture or a stale view
+// are downgraded; an in-flight read and a refusal keep their meaning.
+function afterConnectivityChange(authority: RunAuthority, connectivity: Connectivity): RunAuthority {
+  if (connectivity !== 'offline') return authority;
+  return authority.status === 'confirmed' || authority.status === 'restored' || authority.status === 'unreachable'
+    ? { status: 'offline' }
+    : authority;
+}
+
+// The one gate for starting or continuing capture. A restored lifecycle is not trusted until the server has
+// answered; the exception is the existing offline behaviour, where the server cannot answer and the run is
+// recorded locally, to be confirmed on reconnection.
+export function captureMayRun(state: RunnerState): boolean {
+  if (state.run?.status !== 'recording') return false;
+  switch (state.authority.status) {
+    case 'confirmed':
+    case 'offline':
+      return true;
+    case 'confirming':
+      return state.authority.offlineCapture;
+    case 'restored':
+    case 'unreachable':
+    case 'refused':
+      return false;
+  }
+}
+
+// Whether the run must be asked about now: a restored or offline-recorded lifecycle, once the browser is online.
+export function needsAuthoritativeRead(state: RunnerState): boolean {
+  return state.connectivity === 'online'
+    && state.run !== null
+    && state.run.status !== 'finished'
+    && (state.authority.status === 'restored' || state.authority.status === 'offline');
 }
 
 function isSameRequest(left: RunnerRequest | null, right: RunnerRequest): boolean {
@@ -114,13 +174,20 @@ function assertRequestAllowed(state: RunnerState, request: RunnerRequest): void 
 export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerState {
   switch (event.type) {
     case 'connectivity-changed':
-      return { ...state, connectivity: event.connectivity };
+      return {
+        ...state,
+        authority: state.run === null ? state.authority : afterConnectivityChange(state.authority, event.connectivity),
+        connectivity: event.connectivity,
+      };
     case 'storage-restored':
       if (state.pendingRequest !== null) {
         throw new Error('Durable state cannot be synchronized during an active request');
       }
       return {
         ...state,
+        authority: event.run === null
+          ? { status: 'confirmed' }
+          : state.connectivity === 'offline' ? { status: 'offline' } : { status: 'restored' },
         error: event.request === null
           ? null
           : {
@@ -146,6 +213,7 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       }
       return {
         ...state,
+        authority: { status: 'confirmed' },
         error: null,
         pendingRequest: null,
         run: state.run === null ? event.run : mergeRunSnapshot(state.run, event.run),
@@ -156,6 +224,7 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       }
       return {
         ...state,
+        authority: { status: 'confirmed' },
         error: null,
         pendingRequest: null,
         run: mergeCommandResult(state.run, event.result),
@@ -164,7 +233,13 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       if (!isSameRequest(state.pendingRequest, event.request)) {
         return state;
       }
-      return { ...state, error: null, pendingRequest: null, run: mergeRunSnapshot(state.run, event.run) };
+      return {
+        ...state,
+        authority: { status: 'confirmed' },
+        error: null,
+        pendingRequest: null,
+        run: mergeRunSnapshot(state.run, event.run),
+      };
     case 'request-failed':
       if (!isSameRequest(state.pendingRequest, event.request)) {
         return state;
@@ -190,13 +265,21 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       // this state and is untouched: the next sign-in restores it for the same user only.
       return createInitialRunnerState(state.connectivity);
     case 'rejected-run-discarded':
-      return { ...state, error: null, pendingRequest: null, run: null, upload: { message: null, pendingCount: 0, status: 'idle' } };
+      return {
+        ...state,
+        authority: { status: 'confirmed' },
+        error: null,
+        pendingRequest: null,
+        run: null,
+        upload: { message: null, pendingCount: 0, status: 'idle' },
+      };
     case 'finished-run-cleared':
       if (state.run?.status !== 'finished' || state.pendingRequest !== null) {
         throw new Error('Only a settled finished run can be cleared');
       }
       return {
         ...state,
+        authority: { status: 'confirmed' },
         error: null,
         run: null,
         upload: { message: null, pendingCount: 0, status: 'idle' },
@@ -213,7 +296,50 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       if (state.run?.runId !== event.run.runId) {
         return state;
       }
-      return { ...state, run: mergeRunSnapshot(state.run, event.run) };
+      return { ...state, authority: { status: 'confirmed' }, run: mergeRunSnapshot(state.run, event.run) };
+    case 'authority-requested':
+      // Exactly the next attempt, for a run that still has a lifecycle to ask about; a duplicate request for the
+      // same attempt (two effects in one render) and a request for a finished run change nothing.
+      if (
+        event.attempt !== state.authorityAttempt + 1
+        || state.run === null
+        || state.run.status === 'finished'
+        || state.authority.status === 'confirmed'
+        || state.authority.status === 'confirming'
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        authority: {
+          attempt: event.attempt,
+          offlineCapture: state.authority.status === 'offline',
+          status: 'confirming',
+        },
+        authorityAttempt: event.attempt,
+      };
+    case 'authority-confirmed':
+      // Only the answer to the read in flight counts, and only for the run it was asked about. The merge is the
+      // ordering rule, so an answer older than what is already known cannot move the lifecycle backwards.
+      if (
+        state.authority.status !== 'confirming'
+        || state.authority.attempt !== event.attempt
+        || state.run?.runId !== event.run.runId
+      ) {
+        return state;
+      }
+      return { ...state, authority: { status: 'confirmed' }, run: mergeRunSnapshot(state.run, event.run) };
+    case 'authority-unconfirmed':
+      if (state.authority.status !== 'confirming' || state.authority.attempt !== event.attempt) {
+        return state;
+      }
+      // Failing to reach the server while the browser is offline is the offline case, not a fault.
+      return {
+        ...state,
+        authority: event.kind === 'unreachable' && state.connectivity === 'offline'
+          ? { status: 'offline' }
+          : { message: event.message, status: event.kind },
+      };
     case 'upload-changed':
       return { ...state, upload: event.upload };
   }

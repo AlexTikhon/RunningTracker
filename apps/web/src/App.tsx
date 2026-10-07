@@ -16,6 +16,7 @@ import { unsentWorkNote } from './unsent-work.js';
 import { useOrganizations } from './use-organizations.js';
 import { useRunnerSession } from './use-runner-session.js';
 import { PointUploadWorker } from './point-upload-worker.js';
+import { AUTHORITY_RETRY_MS, readAuthoritativeRun } from './run-authority.js';
 import {
   readRun,
   RunnerApiError,
@@ -24,7 +25,9 @@ import {
 import { getBrowserRunnerStorage } from './runner-storage.js';
 import { SignInNotice, signInFailureMessage } from './sign-in.js';
 import {
+  captureMayRun,
   createInitialRunnerState,
+  needsAuthoritativeRead,
   runnerReducer,
   type CommandRequest,
   type RunnerRequest,
@@ -115,6 +118,8 @@ export function App() {
   latestUpload.current = runner.upload;
   // A run is captured and uploaded for the organization it was started in; before one exists, the selection decides.
   const scopeOrgId = runner.run !== null ? runOrgId ?? selectedOrgId : selectedOrgId;
+  // Capture runs only for a lifecycle the server has confirmed (or, offline, one that will be confirmed on reconnection).
+  const captureAllowed = captureMayRun(runner);
   const mapboxAccessToken = (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '').trim() || null;
 
   const refreshHealth = useCallback(async (signal?: AbortSignal) => {
@@ -281,7 +286,8 @@ export function App() {
       || restoredUserId.current !== session.session.identity.userId
       || writer.status !== 'owned'
       || runner.upload.status === 'blocked'
-      || runner.run?.status !== 'recording'
+      || runner.run === null
+      || !captureAllowed
       || captureSourceKind === null
       || scopeOrgId === null
     ) {
@@ -313,7 +319,7 @@ export function App() {
       controller.stop();
       if (captureController.current === controller) captureController.current = null;
     };
-  }, [captureSourceKind, scopeOrgId, runner.run?.runId, runner.run?.status, runner.upload.status === 'blocked', session, storage.status, writer.status]);
+  }, [captureAllowed, captureSourceKind, scopeOrgId, runner.run?.runId, runner.upload.status === 'blocked', session, storage.status, writer.status]);
 
   useEffect(() => {
     if (runner.run === null || runner.run.status === 'finished') {
@@ -357,6 +363,44 @@ export function App() {
     [runner.connectivity, runner.run, session, storage.status],
   );
 
+  // Asks the server what the run is. A lifecycle read back from IndexedDB, or recorded while offline, is only
+  // recoverable data until this answers; capture and the controls wait for it.
+  const confirmRun = useCallback(() => {
+    if (
+      session.status !== 'ready'
+      || storage.status !== 'ready'
+      || restoredUserId.current !== session.session.identity.userId
+      || runner.run === null
+      || runner.connectivity !== 'online'
+      || scopeOrgId === null
+    ) {
+      return;
+    }
+    const attempt = runner.authorityAttempt + 1;
+    dispatch({ attempt, type: 'authority-requested' });
+    void readAuthoritativeRun({
+      attempt,
+      scope: { orgId: scopeOrgId, runId: runner.run.runId, userId: session.session.identity.userId },
+      signal: session.signal,
+      // Only the writer tab stores the answer; any tab may show it.
+      storage: writer.status === 'owned' ? getBrowserRunnerStorage() : null,
+    }).then((event) => {
+      if (event !== null) dispatch(event);
+    });
+  }, [runner.authorityAttempt, runner.connectivity, runner.run?.runId, scopeOrgId, session, storage.status, writer.status]);
+
+  const mustConfirm = needsAuthoritativeRead(runner);
+  useEffect(() => {
+    if (mustConfirm) confirmRun();
+  }, [confirmRun, mustConfirm]);
+
+  const retryConfirmation = runner.authority.status === 'unreachable' && runner.connectivity === 'online';
+  useEffect(() => {
+    if (!retryConfirmation) return undefined;
+    const timer = window.setTimeout(confirmRun, AUTHORITY_RETRY_MS);
+    return () => window.clearTimeout(timer);
+  }, [confirmRun, retryConfirmation]);
+
   const synchronizeAfterClaim = useCallback(async () => {
     if (session.status !== 'ready' || storage.status !== 'ready') {
       return false;
@@ -397,6 +441,8 @@ export function App() {
   const busy = runner.pendingRequest !== null;
   const controlsDisabled = busy
     || runner.error !== null
+    || runner.authority.status === 'confirming'
+    || mustConfirm
     || session.status !== 'ready'
     || storage.status !== 'ready'
     || writer.status === 'acquiring'
@@ -562,6 +608,7 @@ export function App() {
           elapsed={elapsed}
           onChooseCaptureSource={chooseCaptureSource}
           onClearFinishedRun={() => void clearFinishedRun()}
+          onConfirmRun={confirmRun}
           onCommand={command}
           onRetryOwnership={() => void claimWriter()}
           onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
