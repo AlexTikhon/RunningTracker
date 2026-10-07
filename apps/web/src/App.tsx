@@ -28,6 +28,7 @@ import {
   captureMayRun,
   createInitialRunnerState,
   needsAuthoritativeRead,
+  refusedRunMayBeDetached,
   runnerReducer,
   type CommandRequest,
   type RunnerRequest,
@@ -539,6 +540,22 @@ export function App() {
     } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
   };
 
+  // Local recovery cleanup for a run the server refuses (ADR-0052). It never calls the API: the run can be neither
+  // finished nor deleted by this browser any more. Everything local is stopped first, the transaction checks the
+  // writer lease and the exact active run itself, and only then does the page let go of the run and the lease.
+  const discardRefusedRecovery = async () => {
+    if (rejectedScope === null || busy || !refusedRunMayBeDetached(runner)) return;
+    try {
+      const lease = await writerCoordinator.current?.assertOwnedLease();
+      if (!lease) return;
+      captureController.current?.stop();
+      uploadWorker.current?.stop();
+      await getBrowserRunnerStorage().discardRefusedRun(rejectedScope, lease);
+      dispatch({ runId: rejectedScope.runId, type: 'local-recovery-discarded' });
+      await writerCoordinator.current?.release();
+    } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
+  };
+
   const viewPrerequisite = (what: string) =>
     session.status === 'ready'
       ? needsOrganization ?? ''
@@ -614,6 +631,10 @@ export function App() {
           onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
           onStart={() => void start()}
           organizationNote={organizationNote}
+          refused={{
+            canDiscard: rejectedScope !== null,
+            onDiscard: () => void discardRefusedRecovery(),
+          }}
           rejected={{
             canDiscard: rejectedScope !== null,
             canExport: rejectedScope !== null,

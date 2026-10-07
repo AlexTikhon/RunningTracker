@@ -83,11 +83,37 @@ describe('readAuthoritativeRun', () => {
     await expect(storage.readPointBatch(scope)).resolves.toHaveLength(1);
   });
 
-  it.each([403, 404, 410, 409])('%i is an answer that the run is not readable: refused, local data untouched', async (status) => {
+  it.each([
+    [410, 'RUN_DELETED'],
+    [404, 'RUN_NOT_FOUND'],
+    [403, 'ORG_ACCESS_DENIED'],
+    [409, 'CONTROL_REVISION_CONFLICT'],
+    [404, 'ROUTE_NOT_FOUND'],
+    [400, 'INVALID_REQUEST'],
+  ])('%i %s is an answer that the run is not readable: refused with its code, local data untouched', async (status, code) => {
     const storage = await storageWithRecordingRun();
-    const event = await readAuthoritativeRun({ attempt: 1, read: () => Promise.reject(apiError(status)), scope, signal: abort.signal, storage });
-    expect(event).toMatchObject({ kind: 'refused', type: 'authority-unconfirmed' });
+    const event = await readAuthoritativeRun({ attempt: 1, read: () => Promise.reject(apiError(status, code)), scope, signal: abort.signal, storage });
+    expect(event).toEqual({ attempt: 1, code, kind: 'refused', message: `The server said no (${code}).`, type: 'authority-unconfirmed' });
     await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 1, run: { status: 'recording' } });
+  });
+
+  it('keeps the server error code and not the response body or the request reference in the refusal', async () => {
+    const storage = await storageWithRecordingRun();
+    const error = new RunnerApiError('The run has been deleted', 410, 'RUN_DELETED', 'req-123');
+    const event = await readAuthoritativeRun({ attempt: 1, read: () => Promise.reject(error), scope, signal: abort.signal, storage });
+    expect(Object.keys(event ?? {}).sort()).toEqual(['attempt', 'code', 'kind', 'message', 'type']);
+  });
+
+  it.each([
+    ['500', apiError(500, 'RUN_DELETED')],
+    ['429', apiError(429, 'RUN_DELETED')],
+    ['408', apiError(408, 'ORG_ACCESS_DENIED')],
+    ['a network failure', new TypeError('Failed to fetch')],
+  ])('%s never carries a refusal code, whatever the code says', async (_name, error) => {
+    const storage = await storageWithRecordingRun();
+    const event = await readAuthoritativeRun({ attempt: 1, read: () => Promise.reject(error), scope, signal: abort.signal, storage });
+    expect(event).toMatchObject({ kind: 'unreachable' });
+    expect(event).not.toHaveProperty('code');
   });
 
   it('401 is left to the session layer and says nothing about the run', async () => {

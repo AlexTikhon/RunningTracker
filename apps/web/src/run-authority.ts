@@ -38,8 +38,9 @@ function describe(error: unknown): string {
 // What the failures mean:
 //  - no answer (network, timeout, 5xx, 408/425/429, unreadable body): unreachable. Not "finished", not "deleted",
 //    not "signed out": nothing is concluded and nothing local is touched.
-//  - the server answered that the run cannot be read (403, 404, 410, other 4xx): refused. Capture does not
-//    resume, and nothing local is deleted either; the buffered points stay exportable.
+//  - the server answered that the run cannot be read (403, 404, 410, other 4xx): refused, with the server's error
+//    code. Capture does not resume, and nothing local is deleted either; the buffered points stay exportable.
+//    Which refusals also open the explicit local discard is decided from the code, in refusedRunMayBeDetached.
 //  - 401: the session layer suspends everything on its own; there is nothing to report about the run.
 // The local copy is only ever advanced here, through the same monotonic merge as every other writer.
 export async function readAuthoritativeRun(options: AuthorityReadOptions): Promise<AuthorityEvent | null> {
@@ -56,7 +57,9 @@ export async function readAuthoritativeRun(options: AuthorityReadOptions): Promi
     if (error instanceof RunnerApiError) {
       if (error.status === 401) return null;
       const refused = error.status >= 400 && error.status < 500 && !transientStatuses.has(error.status);
-      return { attempt, kind: refused ? 'refused' : 'unreachable', message: describe(error), type: 'authority-unconfirmed' };
+      return refused
+        ? { attempt, code: error.code, kind: 'refused', message: describe(error), type: 'authority-unconfirmed' }
+        : { attempt, kind: 'unreachable', message: describe(error), type: 'authority-unconfirmed' };
     }
     return { attempt, kind: 'unreachable', message: describe(error), type: 'authority-unconfirmed' };
   }

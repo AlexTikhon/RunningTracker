@@ -1,4 +1,5 @@
 import type { RunCommandType } from '@running-tracker/contracts';
+import { useState } from 'react';
 
 import type { CaptureState } from './capture-controller.js';
 import {
@@ -6,8 +7,9 @@ import {
   parseCaptureSourceKind,
   type CaptureSourceKind,
 } from './capture-source-kind.js';
+import { RefusedRunNotice } from './RefusedRunNotice.js';
 import { RejectedBufferNotice } from './RejectedBufferNotice.js';
-import { availableCommands, runnerPhase, type RunnerState } from './runner-state.js';
+import { availableCommands, refusedRunMayBeDetached, runnerPhase, type RunnerState } from './runner-state.js';
 import type { WriterOwnershipState } from './writer-lease.js';
 
 export type StorageState =
@@ -25,6 +27,8 @@ interface RunnerViewProps {
   // Said at the Start button: which organization the run goes to, or why none is chosen yet.
   organizationNote: string;
   rejected: { canDiscard: boolean; canExport: boolean; onDiscard: () => void; onExport: () => void };
+  // The local discard of a run the server refuses (ADR-0052); the export is the same as for rejected points.
+  refused: { canDiscard: boolean; onDiscard: () => void };
   runner: RunnerState;
   sessionReady: boolean;
   storage: StorageState;
@@ -48,6 +52,7 @@ export function RunnerView({
   elapsed,
   organizationNote,
   rejected,
+  refused,
   runner,
   sessionReady,
   storage,
@@ -60,6 +65,7 @@ export function RunnerView({
   onRetryRequest,
   onStart,
 }: RunnerViewProps) {
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const phase = runnerPhase(runner);
   const busy = runner.pendingRequest !== null;
   const commands = runner.run === null ? [] : availableCommands(runner.run.status);
@@ -157,7 +163,8 @@ export function RunnerView({
         </section>
       )}
 
-      {runner.upload.status === 'blocked' && (
+      {/* A run the server refuses has its own notice, which owns the export and the discard. */}
+      {runner.upload.status === 'blocked' && !refusedRunMayBeDetached(runner) && (
         <RejectedBufferNotice
           canDiscard={rejected.canDiscard && !busy && writer.status === 'owned' && runner.run?.status === 'finished'}
           canExport={rejected.canExport}
@@ -195,10 +202,10 @@ export function RunnerView({
         </section>
       )}
 
-      {(runner.authority.status === 'unreachable' || runner.authority.status === 'refused') && (
+      {runner.authority.status === 'unreachable' && (
         <section className="notice notice--error" role="alert">
           <div>
-            <strong>{runner.authority.status === 'refused' ? 'Run not confirmed by the server' : 'Confirming this run with the server'}</strong>
+            <strong>Confirming this run with the server</strong>
             <span>
               {runner.authority.message} Recording stays stopped and the buffered points stay on this device
               until the server confirms the run.
@@ -208,6 +215,23 @@ export function RunnerView({
             Check again
           </button>
         </section>
+      )}
+
+      {runner.authority.status === 'refused' && (
+        <RefusedRunNotice
+          canCheckAgain={runner.connectivity === 'online' && sessionReady}
+          canDiscard={refused.canDiscard && !busy && writer.status === 'owned'}
+          canExport={rejected.canExport}
+          confirming={confirmingDiscard}
+          detachable={refusedRunMayBeDetached(runner)}
+          message={runner.authority.message}
+          onCancelDiscard={() => setConfirmingDiscard(false)}
+          onCheckAgain={() => { setConfirmingDiscard(false); onConfirmRun(); }}
+          onConfirmDiscard={() => { setConfirmingDiscard(false); refused.onDiscard(); }}
+          onExport={rejected.onExport}
+          onRequestDiscard={() => setConfirmingDiscard(true)}
+          pendingCount={runner.upload.pendingCount}
+        />
       )}
 
       {runner.error !== null && (

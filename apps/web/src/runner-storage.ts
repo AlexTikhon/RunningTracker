@@ -775,6 +775,32 @@ export class IndexedDbRunnerStorage {
   // Reject, capture and discard transactions serialize through the run store.
   // Resolve the blocked queue and its exact commands before clearing the pointer.
   public async discardRejectedRun(scopeInput: RunScope, lease: WriterLease): Promise<void> {
+    await this.#discardActiveRun(
+      scopeInput,
+      lease,
+      (record) => record?.uploadRejection !== undefined && record.uploadRejection !== '' && record.run?.status === 'finished',
+      'Only the active rejected run can be discarded',
+    );
+  }
+
+  // The local half of a run the server refuses (ADR-0052): the run is deleted or no longer accessible, so it can
+  // be neither finished nor uploaded, and the ordinary discard (finished, upload rejected) can never apply. The
+  // caller decides from the server's answer that the run is refused; this only fences and clears. It never talks
+  // to the server and never marks the run finished.
+  public async discardRefusedRun(scopeInput: RunScope, lease: WriterLease): Promise<void> {
+    await this.#discardActiveRun(scopeInput, lease, () => true, 'Only the active run can be discarded');
+  }
+
+  // One transaction for everything that must change together: the lease is checked inside it, the profile must
+  // still point at exactly this user, organization and run, and the buffered points, the queued requests and the
+  // pointer go together or not at all. The run record stays, inactive, as it does after any discard: it holds the
+  // next point sequence, so a sequence number of this run is never issued twice.
+  async #discardActiveRun(
+    scopeInput: RunScope,
+    lease: WriterLease,
+    mayDiscard: (record: RunRecord | undefined) => boolean,
+    refusal: string,
+  ): Promise<void> {
     const scope = validateScope(scopeInput);
     if (lease.userId !== scope.userId) throw new Error('Writer lease does not match the run');
     const database = await this.#open();
@@ -786,8 +812,8 @@ export class IndexedDbRunnerStorage {
       const record = await requestResult(runs.get(runStorageKey(scope))) as RunRecord | undefined;
       const profiles = transaction.objectStore(STORES.profiles);
       const profile = await requestResult(profiles.get(scope.userId)) as ProfileRecord | undefined;
-      if (!record?.uploadRejection || record.run?.status !== 'finished' || profile?.activeRunId !== scope.runId || profile.activeOrgId !== scope.orgId) {
-        throw new Error('Only the active rejected run can be discarded');
+      if (!mayDiscard(record) || profile?.activeRunId !== scope.runId || profile.activeOrgId !== scope.orgId) {
+        throw new Error(refusal);
       }
       const points = transaction.objectStore(STORES.points);
       const range = this.#keyRange.bound([scope.userId, scope.orgId, scope.runId, ''], [scope.userId, scope.orgId, scope.runId, '\uffff']);
