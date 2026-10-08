@@ -1,5 +1,5 @@
-import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { describe, expect, it } from 'vitest';
+import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb';
+import { describe, expect, it, vi } from 'vitest';
 
 import { IndexedDbRunnerStorage, type PointMeasurement } from './runner-storage.js';
 import type { CommandRequest, StartRequest } from './runner-state.js';
@@ -54,7 +54,7 @@ describe('IndexedDbRunnerStorage', () => {
       if (uploadFirst) await storage.acknowledgePointBatch(scope, ['1'], '2');
       await storage.acknowledgeCommand(userId, request, recordingRun, { commandId: request.commandId, controlRevision: '1', dataRevision: '1', status: type === 'pause' ? 'paused' : 'finished', finishedAt: type === 'finish' ? '2026-09-26T08:01:00.000Z' : null });
       if (!uploadFirst) await storage.acknowledgePointBatch(scope, ['1'], '2');
-      await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, dataRevision: '3' });
+      await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, dataRevision: '3' });
       await storage.close();
       const reopened = createStorage(factory, databaseName);
       await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ request: null, pendingPointCount: 0, run: { controlRevision: '1', dataRevision: '3', status: type === 'pause' ? 'paused' : 'finished' } });
@@ -71,7 +71,7 @@ describe('IndexedDbRunnerStorage', () => {
     await storage.queueRequest(userId, pause, recordingRun);
     await storage.appendPoint(scope, measurement);
     // The server paused (control revision 1), then auto-finished: status and data revision change, control revision does not.
-    await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' });
+    await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' });
     await storage.acknowledgeCommand(userId, pause, recordingRun, { commandId: pause.commandId, controlRevision: '1', dataRevision: '2', finishedAt: null, status: 'paused' });
     await storage.close();
 
@@ -92,7 +92,7 @@ describe('IndexedDbRunnerStorage', () => {
     await storage.appendPoint(scope, measurement);
     const otherScope = { ...scope, runId: crypto.randomUUID() };
     await storage.appendPoint(otherScope, measurement);
-    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT');
+    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT', (await storage.acquireWriterLease(userId, crypto.randomUUID(), 15_000)).lease);
     await storage.close();
     const reopened = createStorage(factory, name);
     await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ uploadRejection: 'RUN_POINT_LIMIT', pendingPointCount: 1 });
@@ -100,7 +100,7 @@ describe('IndexedDbRunnerStorage', () => {
     const acquisition = await reopened.acquireWriterLease(userId, crypto.randomUUID(), 15_000);
     const lease = acquisition.lease;
     await expect(reopened.discardRejectedRun(scope, lease)).rejects.toThrow('active rejected run');
-    await reopened.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', status: 'finished', finishedAt: '2026-09-26T08:01:00.000Z' });
+    await reopened.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', status: 'finished', finishedAt: '2026-09-26T08:01:00.000Z' });
     const request: CommandRequest = { kind: 'command', orgId, runId, commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'finish' };
     await reopened.queueRequest(userId, request, recordingRun);
     await expect(reopened.exportBufferedPoints(scope)).resolves.toMatchObject([{ seq: '1' }]);
@@ -164,7 +164,7 @@ describe('IndexedDbRunnerStorage', () => {
 
     await storage.acknowledgePointBatch(scope, ['1'], '4');
     await storage.acknowledgePointBatch(scope, ['1'], '3');
-    await storage.saveRunSnapshot(userId, orgId, recordingRun);
+    await storage.activateRunSnapshot(userId, orgId, recordingRun);
 
     await expect(storage.countPoints(scope)).resolves.toBe(1);
     await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
@@ -328,7 +328,7 @@ describe('IndexedDbRunnerStorage', () => {
       await storage.acknowledgeStart(userId, startRequest, recordingRun);
       await storage.saveCaptureSource(userId, 'simulator');
 
-      await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', status: 'paused' });
+      await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', status: 'paused' });
 
       await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
         captureSource: 'simulator',
@@ -390,5 +390,185 @@ describe('IndexedDbRunnerStorage', () => {
       await expect(storage.saveCaptureSource(userId, 'carrier-pigeon' as never)).rejects.toThrow();
       await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ captureSource: 'geolocation' });
     });
+  });
+});
+
+// A run the server no longer lets this identity read: its local recovery is cleared only on purpose, only by the
+// writer, and only for exactly the run that is active (ADR-0052).
+describe('discardRefusedRun', () => {
+  const otherUserId = '22222222-2222-4222-8222-222222222222';
+  const otherRunId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const otherOrgId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const pause: CommandRequest = { ...scope, kind: 'command', commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'pause' };
+
+  async function refusedRun() {
+    const factory = new IDBFactory();
+    const name = crypto.randomUUID();
+    const storage = createStorage(factory, name);
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    await storage.appendPoint(scope, measurement);
+    await storage.appendPoint(scope, measurement);
+    await storage.queueRequest(userId, pause, recordingRun);
+    const { lease } = await storage.acquireWriterLease(userId, crypto.randomUUID(), 15_000);
+    return { factory, lease, name, storage };
+  }
+
+  it('removes the exact run: buffered points, its queued requests and the active pointer, in one step', async () => {
+    const { storage, lease } = await refusedRun();
+    // Neighbours that must survive: another run of the same user, and another user with its own active run.
+    const neighbour = { ...scope, runId: otherRunId };
+    await storage.appendPoint(neighbour, measurement);
+    const stranger = { orgId, runId: otherRunId, userId: otherUserId };
+    await storage.acknowledgeStart(otherUserId, { kind: 'start', orgId, runId: otherRunId, startedAt: measurement.recordedAt }, { ...recordingRun, runId: otherRunId });
+    await storage.appendPoint(stranger, measurement);
+    // The refusal alone changed nothing, and the points can still be exported first.
+    await expect(storage.exportBufferedPoints(scope)).resolves.toMatchObject([{ seq: '1' }, { seq: '2' }]);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 2, request: { commandId: pause.commandId }, run: { status: 'recording' } });
+    await storage.discardRefusedRun(scope, lease);
+
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ orgId: null, pendingPointCount: 0, request: null, run: null });
+    await expect(storage.countPoints(scope)).resolves.toBe(0);
+    await expect(storage.exportBufferedPoints(scope)).resolves.toEqual([]);
+    await expect(storage.countPoints(neighbour)).resolves.toBe(1);
+    await expect(storage.loadRecovery(otherUserId)).resolves.toMatchObject({ pendingPointCount: 1, run: { runId: otherRunId } });
+  });
+
+  it('does not need a finished run or a rejected upload, which is what the ordinary discard requires', async () => {
+    const { storage, lease } = await refusedRun();
+    await expect(storage.discardRejectedRun(scope, lease)).rejects.toThrow('active rejected run');
+    await expect(storage.countPoints(scope)).resolves.toBe(2);
+    await storage.discardRefusedRun(scope, lease);
+    await expect(storage.countPoints(scope)).resolves.toBe(0);
+  });
+
+  it('lets the next run start: nothing active, nothing queued, the capture source preference kept', async () => {
+    const { storage, lease } = await refusedRun();
+    await storage.saveCaptureSource(userId, 'simulator');
+    await storage.discardRefusedRun(scope, lease);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ captureSource: 'simulator', request: null, run: null });
+    const next = { ...startRequest, runId: otherRunId };
+    await storage.acknowledgeStart(userId, next, { ...recordingRun, runId: otherRunId });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ orgId, run: { runId: otherRunId } });
+  });
+
+  it('keeps the inactive run record so that a sequence number of the discarded run is never issued twice', async () => {
+    const { storage, lease } = await refusedRun();
+    await storage.discardRefusedRun(scope, lease);
+    await expect(storage.appendPoint(scope, measurement)).resolves.toMatchObject({ seq: '3' });
+  });
+
+  it('survives a reload: the discarded run is not restored', async () => {
+    const { factory, name, storage, lease } = await refusedRun();
+    await storage.discardRefusedRun(scope, lease);
+    await storage.close();
+    const reopened = createStorage(factory, name);
+    await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 0, request: null, run: null });
+  });
+
+  it('a lease that is not the current one cannot discard, and nothing changes', async () => {
+    const { storage, lease } = await refusedRun();
+    for (const stale of [
+      { ...lease, fencingToken: '0' },
+      { ...lease, ownerId: crypto.randomUUID() },
+    ]) {
+      await expect(storage.discardRefusedRun(scope, stale)).rejects.toThrow('no longer owns the writer lease');
+    }
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 2, request: { commandId: pause.commandId }, run: { runId } });
+  });
+
+  it('a tab that lost the lease to another tab cannot delete what the new owner recovers, while the new owner can', async () => {
+    const { storage, lease: tabA } = await refusedRun();
+    // Tab B proves tab A is gone (writer-presence) and takes the live lease over, under a new fencing token.
+    const tabB = (await storage.acquireWriterLease(userId, crypto.randomUUID(), 15_000, [tabA.ownerId])).lease;
+    expect(tabB.fencingToken).not.toBe(tabA.fencingToken);
+
+    await expect(storage.discardRefusedRun(scope, tabA)).rejects.toThrow('no longer owns the writer lease');
+    await expect(storage.countPoints(scope)).resolves.toBe(2);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ run: { runId } });
+
+    await storage.discardRefusedRun(scope, tabB);
+    await expect(storage.countPoints(scope)).resolves.toBe(0);
+  });
+
+  it('an expired lease cannot discard', async () => {
+    const factory = new IDBFactory();
+    const name = crypto.randomUUID();
+    let now = new Date('2026-09-26T08:00:01.000Z');
+    const storage = new IndexedDbRunnerStorage({ databaseName: name, factory, keyRange: IDBKeyRange, now: () => now });
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    await storage.appendPoint(scope, measurement);
+    const { lease } = await storage.acquireWriterLease(userId, crypto.randomUUID(), 1_000);
+    now = new Date('2026-09-26T08:00:03.000Z');
+    await expect(storage.discardRefusedRun(scope, lease)).rejects.toThrow('no longer owns the writer lease');
+    await expect(storage.countPoints(scope)).resolves.toBe(1);
+  });
+
+  it.each([
+    ['another run', { runId: otherRunId }],
+    ['another organization', { orgId: otherOrgId }],
+  ])('a stale scope for %s is rejected and the active run is untouched', async (_name, change) => {
+    const { storage, lease } = await refusedRun();
+    await expect(storage.discardRefusedRun({ ...scope, ...change }, lease)).rejects.toThrow('Only the active run');
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 2, request: { commandId: pause.commandId }, run: { runId } });
+  });
+
+  it('a lease of another user cannot discard this user\'s run', async () => {
+    const { storage } = await refusedRun();
+    const foreign = (await storage.acquireWriterLease(otherUserId, crypto.randomUUID(), 15_000)).lease;
+    await expect(storage.discardRefusedRun(scope, foreign)).rejects.toThrow('does not match');
+    await expect(storage.countPoints(scope)).resolves.toBe(2);
+  });
+
+  it('a delayed discard of the old run cannot clear the newer run that replaced it', async () => {
+    const { storage, lease } = await refusedRun();
+    await storage.discardRefusedRun(scope, lease);
+    const newer = { ...startRequest, runId: otherRunId };
+    await storage.acknowledgeStart(userId, newer, { ...recordingRun, runId: otherRunId });
+    const newerScope = { ...scope, runId: otherRunId };
+    await storage.appendPoint(newerScope, measurement);
+    const newerPause: CommandRequest = { ...newerScope, kind: 'command', commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'pause' };
+    await storage.queueRequest(userId, newerPause, { ...recordingRun, runId: otherRunId });
+
+    // The same callback runs a second time, late.
+    await expect(storage.discardRefusedRun(scope, lease)).rejects.toThrow('Only the active run');
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
+      pendingPointCount: 1,
+      request: { commandId: newerPause.commandId },
+      run: { runId: otherRunId },
+    });
+  });
+
+  it('there is nothing to discard once the pointer is already cleared', async () => {
+    const { storage, lease } = await refusedRun();
+    await storage.clearActiveRun(userId);
+    await expect(storage.discardRefusedRun(scope, lease)).rejects.toThrow('Only the active run');
+    // The points were not touched by a discard that did not apply.
+    await expect(storage.countPoints(scope)).resolves.toBe(2);
+  });
+
+  it('a failure part-way through leaves the run fully recoverable', async () => {
+    const { storage, lease } = await refusedRun();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called back with the store as this below
+    const original = IDBObjectStore.prototype.delete;
+    const failing = vi.spyOn(IDBObjectStore.prototype, 'delete').mockImplementation(function (this: IDBObjectStore, key: IDBValidKey | IDBKeyRange) {
+      // The points are already deleted in this transaction when the queued requests are reached.
+      if (this.name === 'requests') throw new Error('disk failure');
+      return original.call(this, key);
+    });
+    try {
+      await expect(storage.discardRefusedRun(scope, lease)).rejects.toThrow('disk failure');
+    } finally {
+      failing.mockRestore();
+    }
+    await expect(storage.exportBufferedPoints(scope)).resolves.toMatchObject([{ seq: '1' }, { seq: '2' }]);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 2, request: { commandId: pause.commandId }, run: { runId } });
+  });
+
+  it('does not change what the ordinary discard of a rejected finished run does', async () => {
+    const { storage, lease } = await refusedRun();
+    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT', lease);
+    await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', finishedAt: '2026-09-26T08:01:00.000Z', status: 'finished' });
+    await storage.discardRejectedRun(scope, lease);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 0, request: null, run: null });
   });
 });

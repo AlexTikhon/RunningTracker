@@ -5,6 +5,7 @@ import {
   captureMayRun,
   createInitialRunnerState,
   needsAuthoritativeRead,
+  refusedRunMayBeDetached,
   runnerPhase,
   runnerReducer,
   type CommandRequest,
@@ -231,11 +232,23 @@ describe('recovery authority', () => {
     expect(state.run?.status).toBe('paused');
   });
 
-  it('accepts only the next attempt so two effects in one render start one read', () => {
+  it('numbers attempts by the coordinator that owns the reads: only a newer attempt starts one, an old or repeated number never does', () => {
     const state = restored('online', run('recording', 3, 5));
     const first = apply(state, { attempt: 1, type: 'authority-requested' });
     expect(runnerReducer(first, { attempt: 1, type: 'authority-requested' })).toBe(first);
-    expect(runnerReducer(state, { attempt: 2, type: 'authority-requested' })).toBe(state);
+    expect(runnerReducer(first, { attempt: 0, type: 'authority-requested' })).toBe(first);
+    // The coordinator may have used numbers for reads that were superseded before they were announced.
+    expect(runnerReducer(state, { attempt: 4, type: 'authority-requested' }).authority).toMatchObject({ attempt: 4, status: 'confirming' });
+  });
+
+  it('a newer attempt supersedes the read in flight, keeps the offline capture running and drops the older answer', () => {
+    const reconnected = apply(restored('offline', run('recording', 3, 5)), { connectivity: 'online', type: 'connectivity-changed' });
+    const first = apply(reconnected, { attempt: 1, type: 'authority-requested' });
+    const second = apply(first, { attempt: 2, type: 'authority-requested' });
+    expect(second.authority).toEqual({ attempt: 2, offlineCapture: true, status: 'confirming' });
+    expect(captureMayRun(second)).toBe(true);
+    expect(runnerReducer(second, { attempt: 1, run: run('finished', 3, 9), type: 'authority-confirmed' })).toBe(second);
+    expect(apply(second, { attempt: 2, run: run('recording', 3, 9), type: 'authority-confirmed' }).authority).toEqual({ status: 'confirmed' });
   });
 
   it('does not ask about a finished run', () => {
@@ -246,12 +259,19 @@ describe('recovery authority', () => {
 });
 
 describe('recovery without an answer', () => {
-  const unreadable = (state: RunnerState, kind: 'refused' | 'unreachable') =>
-    apply(state, { attempt: 1, kind, message: 'because', type: 'authority-unconfirmed' });
+  const unreadable = (state: RunnerState, kind: 'refused' | 'unreachable', code = 'RUN_DELETED') =>
+    apply(
+      state,
+      kind === 'refused'
+        ? { attempt: 1, code, kind, message: 'because', type: 'authority-unconfirmed' }
+        : { attempt: 1, kind, message: 'because', type: 'authority-unconfirmed' },
+    );
 
   it.each(['unreachable', 'refused'] as const)('%s keeps capture stopped and keeps the stored run', (kind) => {
     const state = unreadable(apply(restored('online', run('recording', 3, 5), 7), { attempt: 1, type: 'authority-requested' }), kind);
-    expect(state.authority).toEqual({ message: 'because', status: kind });
+    expect(state.authority).toEqual(
+      kind === 'refused' ? { code: 'RUN_DELETED', message: 'because', status: kind } : { message: 'because', status: kind },
+    );
     expect(captureMayRun(state)).toBe(false);
     expect(state.run).toMatchObject({ status: 'recording' });
     expect(state.upload.pendingCount).toBe(7);
@@ -273,7 +293,7 @@ describe('recovery without an answer', () => {
 
   it('drops a failure report for a superseded read', () => {
     const confirming = apply(restored('online', run('recording', 3, 5)), { attempt: 1, type: 'authority-requested' });
-    expect(runnerReducer(confirming, { attempt: 5, kind: 'refused', message: 'x', type: 'authority-unconfirmed' })).toBe(confirming);
+    expect(runnerReducer(confirming, { attempt: 5, code: 'RUN_DELETED', kind: 'refused', message: 'x', type: 'authority-unconfirmed' })).toBe(confirming);
   });
 });
 
@@ -343,7 +363,7 @@ describe('offline recovery and reconnection', () => {
     const refused = apply(
       restored('online', run('recording', 3, 5)),
       { attempt: 1, type: 'authority-requested' },
-      { attempt: 1, kind: 'refused', message: 'gone', type: 'authority-unconfirmed' },
+      { attempt: 1, code: 'RUN_DELETED', kind: 'refused', message: 'gone', type: 'authority-unconfirmed' },
       { connectivity: 'offline', type: 'connectivity-changed' },
     );
     expect(refused.authority.status).toBe('refused');
@@ -360,5 +380,123 @@ describe('offline recovery and reconnection', () => {
     expect(captureMayRun(idle)).toBe(false);
     expect(needsAuthoritativeRead(idle)).toBe(false);
     expect(apply(idle, { connectivity: 'offline', type: 'connectivity-changed' }).authority).toEqual({ status: 'confirmed' });
+  });
+});
+
+describe('a refusal that arrives outside a read (an upload, a command)', () => {
+  const refusal = (code: string, forRun = runId): RunnerEvent => ({ code, message: 'The server said no', runId: forRun, type: 'authority-refused' });
+
+  it.each(['RUN_DELETED', 'RUN_NOT_FOUND', 'ORG_ACCESS_DENIED'])('%s on a confirmed, recording run stops capture and offers the local detach', (code) => {
+    const state = apply(confirmedRecording(), refusal(code));
+    expect(state.authority).toEqual({ code, message: 'The server said no', status: 'refused' });
+    expect(captureMayRun(state)).toBe(false);
+    expect(refusedRunMayBeDetached(state)).toBe(true);
+    expect(state.run).toMatchObject({ status: 'recording' });
+  });
+
+  it('keeps the buffered count, the blocked upload and a failed request exactly as they were', () => {
+    const blocked = apply(
+      confirmedRecording(),
+      { pendingPointCount: 0, request: pauseCommand, run: run('recording', 3, 5), type: 'storage-restored' },
+      { upload: { message: 'gone', pendingCount: 6, status: 'blocked' }, type: 'upload-changed' },
+      refusal('RUN_DELETED'),
+    );
+    expect(blocked.upload).toEqual({ message: 'gone', pendingCount: 6, status: 'blocked' });
+    expect(blocked.error?.request).toEqual(pauseCommand);
+  });
+
+  it('also ends a read in flight and a finished run that still has points to send', () => {
+    const confirming = apply(restored('online', run('recording', 3, 5)), { attempt: 1, type: 'authority-requested' }, refusal('RUN_DELETED'));
+    expect(confirming.authority.status).toBe('refused');
+    expect(runnerReducer(confirming, { attempt: 1, run: run('recording', 3, 9), type: 'authority-confirmed' })).toBe(confirming);
+    const finished = apply(restored('online', run('finished', 4, 7)), refusal('ORG_ACCESS_DENIED'));
+    expect(refusedRunMayBeDetached(finished)).toBe(true);
+  });
+
+  it('is ignored for a run that is not the one shown, or when nothing is shown', () => {
+    const state = confirmedRecording();
+    expect(runnerReducer(state, refusal('RUN_DELETED', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'))).toBe(state);
+    const idle = createInitialRunnerState('online');
+    expect(runnerReducer(idle, refusal('RUN_DELETED'))).toBe(idle);
+  });
+
+  it('another refusal code is shown but never offers the detach', () => {
+    const state = apply(confirmedRecording(), refusal('INVALID_REQUEST'));
+    expect(state.authority.status).toBe('refused');
+    expect(refusedRunMayBeDetached(state)).toBe(false);
+  });
+});
+
+describe('a run the server refuses', () => {
+  const refusedWith = (code: string, pendingPointCount = 3) =>
+    apply(
+      restored('online', run('recording', 3, 5), pendingPointCount),
+      { attempt: 1, type: 'authority-requested' },
+      { attempt: 1, code, kind: 'refused', message: 'The server said no', type: 'authority-unconfirmed' },
+    );
+
+  it.each(['RUN_DELETED', 'RUN_NOT_FOUND', 'ORG_ACCESS_DENIED'])('%s means this identity cannot resume the run: the local detach is offered', (code) => {
+    const state = refusedWith(code);
+    expect(state.authority).toMatchObject({ code, status: 'refused' });
+    expect(refusedRunMayBeDetached(state)).toBe(true);
+    expect(captureMayRun(state)).toBe(false);
+  });
+
+  it.each(['ROUTE_NOT_FOUND', 'INVALID_REQUEST', 'ORIGIN_DENIED', 'HTTP_ERROR', 'CONTROL_REVISION_CONFLICT'])(
+    '%s says nothing about the run: no local detach',
+    (code) => {
+      expect(refusedRunMayBeDetached(refusedWith(code))).toBe(false);
+    },
+  );
+
+  it('an unreachable server, a restored, confirming, offline or confirmed run never offers the detach', () => {
+    const restoredState = restored('online', run('recording', 3, 5));
+    const confirming = apply(restoredState, { attempt: 1, type: 'authority-requested' });
+    const unreachable = apply(confirming, { attempt: 1, kind: 'unreachable', message: 'down', type: 'authority-unconfirmed' });
+    const offline = restored('offline', run('recording', 3, 5));
+    for (const state of [restoredState, confirming, unreachable, offline, confirmedRecording(), createInitialRunnerState('online')]) {
+      expect(refusedRunMayBeDetached(state)).toBe(false);
+    }
+  });
+
+  it('is a local event, not a lifecycle one: the run, its buffer and its blocked upload are gone, the idle flow is back', () => {
+    const state = apply(refusedWith('RUN_DELETED', 4), { runId, type: 'local-recovery-discarded' });
+    expect(state).toMatchObject({
+      authority: { status: 'confirmed' },
+      error: null,
+      pendingRequest: null,
+      run: null,
+      upload: { message: null, pendingCount: 0, status: 'idle' },
+    });
+    expect(runnerPhase(state)).toBe('idle');
+    // The next Start is a plain start from idle.
+    const start = { kind: 'start', orgId, runId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', startedAt } as const;
+    expect(apply(state, { request: start, type: 'request-started' }).pendingRequest).toEqual(start);
+  });
+
+  it('also clears a recovered request that belonged to the discarded run', () => {
+    const recovered = apply(createInitialRunnerState('online'), {
+      pendingPointCount: 2,
+      request: pauseCommand,
+      run: run('recording', 3, 5),
+      type: 'storage-restored',
+    });
+    expect(recovered.error?.request).toEqual(pauseCommand);
+    const state = apply(recovered, { runId, type: 'local-recovery-discarded' });
+    expect(state.error).toBeNull();
+    expect(state.run).toBeNull();
+  });
+
+  it('is ignored when the discarded run is not the one on screen', () => {
+    const state = refusedWith('RUN_DELETED');
+    const other = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    expect(runnerReducer(state, { runId: other, type: 'local-recovery-discarded' })).toBe(state);
+    expect(runnerReducer(createInitialRunnerState('online'), { runId, type: 'local-recovery-discarded' }).run).toBeNull();
+  });
+
+  it('never turns the run into a finished one on the way', () => {
+    const state = apply(refusedWith('RUN_DELETED'), { runId, type: 'local-recovery-discarded' });
+    expect(state.run).toBeNull();
+    expect(runnerPhase(state)).not.toBe('finished');
   });
 });

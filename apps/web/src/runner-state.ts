@@ -41,14 +41,15 @@ export interface RunnerFailure {
 //  - offline:     could not be asked because the browser is offline; ask again on reconnection
 //  - confirming:  the authoritative read `attempt` is in flight; `offlineCapture` keeps an offline capture running
 //  - unreachable: asked while online without an answer (network, timeout, 5xx); not proof of anything
-//  - refused:     the server answered that the run is not readable (403/404/410...); not resumable
+//  - refused:     the server answered that the run is not readable (403/404/410...); not resumable. `code` is the
+//                 server's error code, kept so that nothing has to be decided from the message (ADR-0052).
 export type RunAuthority =
   | { status: 'confirmed' }
   | { status: 'restored' }
   | { status: 'offline' }
   | { attempt: number; offlineCapture: boolean; status: 'confirming' }
   | { message: string; status: 'unreachable' }
-  | { message: string; status: 'refused' };
+  | { code: string; message: string; status: 'refused' };
 
 export interface RunnerState {
   authority: RunAuthority;
@@ -91,8 +92,14 @@ export type RunnerEvent =
   | { run: RunView; type: 'run-reconciled' }
   | { attempt: number; type: 'authority-requested' }
   | { attempt: number; run: RunView; type: 'authority-confirmed' }
-  | { attempt: number; kind: 'refused' | 'unreachable'; message: string; type: 'authority-unconfirmed' }
+  | { attempt: number; kind: 'unreachable'; message: string; type: 'authority-unconfirmed' }
+  | { attempt: number; code: string; kind: 'refused'; message: string; type: 'authority-unconfirmed' }
+  // The server refused the run in answer to an upload or a command, not to a read. Same meaning as a refused read.
+  | { code: string; message: string; runId: string; type: 'authority-refused' }
   | { type: 'rejected-run-discarded' }
+  // The browser's recovery copy of a run the server refused was cleared on purpose. Local only: not a lifecycle
+  // event, and nothing about the server run is implied.
+  | { runId: string; type: 'local-recovery-discarded' }
   | { type: 'session-ended' }
   | { type: 'finished-run-cleared' }
   | { upload: UploadState; type: 'upload-changed' };
@@ -135,6 +142,24 @@ export function captureMayRun(state: RunnerState): boolean {
     case 'refused':
       return false;
   }
+}
+
+// The answers that mean "this identity cannot use this run, now or later": the run was deleted, it does not exist
+// for this identity, or the membership that gave access is gone. Everything else a server can say about a read
+// (a malformed request, a missing route, a rejected origin, a conflict) is about the request or the deployment,
+// not the run, and never opens the local detach.
+const UNRECOVERABLE_RUN_CODES: ReadonlySet<string> = new Set(['RUN_DELETED', 'RUN_NOT_FOUND', 'ORG_ACCESS_DENIED']);
+
+export function isUnrecoverableRunCode(code: string): boolean {
+  return UNRECOVERABLE_RUN_CODES.has(code);
+}
+
+// Whether the person may be offered the explicit local discard: the server definitely refused this run for one of
+// the codes above. An unreachable server, a restored or unconfirmed run and any other refusal never qualify.
+export function refusedRunMayBeDetached(state: RunnerState): boolean {
+  return state.run !== null
+    && state.authority.status === 'refused'
+    && isUnrecoverableRunCode(state.authority.code);
 }
 
 // Whether the run must be asked about now: a restored or offline-recorded lifecycle, once the browser is online.
@@ -273,6 +298,20 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         run: null,
         upload: { message: null, pendingCount: 0, status: 'idle' },
       };
+    case 'local-recovery-discarded':
+      // Storage already cleared the run, so the page follows it, whatever the authority has become meanwhile; the
+      // only thing ignored is a report about a run that is not the one shown.
+      if (state.run?.runId !== event.runId) {
+        return state;
+      }
+      return {
+        ...state,
+        authority: { status: 'confirmed' },
+        error: null,
+        pendingRequest: null,
+        run: null,
+        upload: { message: null, pendingCount: 0, status: 'idle' },
+      };
     case 'finished-run-cleared':
       if (state.run?.status !== 'finished' || state.pendingRequest !== null) {
         throw new Error('Only a settled finished run can be cleared');
@@ -298,14 +337,15 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       }
       return { ...state, authority: { status: 'confirmed' }, run: mergeRunSnapshot(state.run, event.run) };
     case 'authority-requested':
-      // Exactly the next attempt, for a run that still has a lifecycle to ask about; a duplicate request for the
-      // same attempt (two effects in one render) and a request for a finished run change nothing.
+      // The reads are numbered by the coordinator that owns them (run-authority.ts), so a number is accepted when
+      // it is newer than every one seen; a repeated or older number, a request for a finished run and one for a
+      // confirmed run change nothing. A newer request while one is in flight supersedes it (the coordinator
+      // restarts a read after a writer change); the capture an offline read kept running stays running.
       if (
-        event.attempt !== state.authorityAttempt + 1
+        event.attempt <= state.authorityAttempt
         || state.run === null
         || state.run.status === 'finished'
         || state.authority.status === 'confirmed'
-        || state.authority.status === 'confirming'
       ) {
         return state;
       }
@@ -313,11 +353,20 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         ...state,
         authority: {
           attempt: event.attempt,
-          offlineCapture: state.authority.status === 'offline',
+          offlineCapture: state.authority.status === 'confirming'
+            ? state.authority.offlineCapture
+            : state.authority.status === 'offline',
           status: 'confirming',
         },
         authorityAttempt: event.attempt,
       };
+    case 'authority-refused':
+      // A definitive answer from an upload or a command rather than from a read. It is about one run, so a
+      // report for another run, or for none, changes nothing; otherwise it ends whatever read was in flight.
+      if (state.run?.runId !== event.runId) {
+        return state;
+      }
+      return { ...state, authority: { code: event.code, message: event.message, status: 'refused' } };
     case 'authority-confirmed':
       // Only the answer to the read in flight counts, and only for the run it was asked about. The merge is the
       // ordering rule, so an answer older than what is already known cannot move the lifecycle backwards.
@@ -336,9 +385,11 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       // Failing to reach the server while the browser is offline is the offline case, not a fault.
       return {
         ...state,
-        authority: event.kind === 'unreachable' && state.connectivity === 'offline'
-          ? { status: 'offline' }
-          : { message: event.message, status: event.kind },
+        authority: event.kind === 'refused'
+          ? { code: event.code, message: event.message, status: 'refused' }
+          : state.connectivity === 'offline'
+            ? { status: 'offline' }
+            : { message: event.message, status: 'unreachable' },
       };
     case 'upload-changed':
       return { ...state, upload: event.upload };

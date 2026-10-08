@@ -5,6 +5,8 @@ import type { E2eEnvironment } from './environment.js';
 
 export interface AuthedApi {
   createRun(orgId: string, runId: string, startedAt?: string): Promise<RunView>;
+  // The owner deleting the run (204): the server then answers 410 RUN_DELETED for it.
+  deleteRun(orgId: string, runId: string): Promise<void>;
   getRun(orgId: string, runId: string): Promise<RunView>;
   listRunIds(orgId: string): Promise<string[]>;
   getAllPoints(orgId: string, runId: string): Promise<Array<{ seq: string }>>;
@@ -94,6 +96,12 @@ export async function authedApi(context: BrowserContext, environment: E2eEnviron
       });
       expectStatus(response, 'PUT', path, [200, 201]);
       return (await response.json()) as RunView;
+    },
+
+    async deleteRun(orgId, runId) {
+      const path = runPath(orgId, runId);
+      const response = await context.request.delete(url(path), { headers: mutationHeaders });
+      expectStatus(response, 'DELETE', path, [204]);
     },
 
     async deleteShare(orgId, runId, userId) {

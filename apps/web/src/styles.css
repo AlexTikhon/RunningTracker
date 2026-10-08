@@ -95,6 +95,7 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .notice { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1.5rem; padding: 1rem 1.1rem; border-radius: 1rem; }
 .notice strong, .notice span { display: block; }
 .notice span { margin-top: 0.2rem; color: #c0c8c2; font-size: 0.86rem; }
+.notice__actions { display: flex; flex-wrap: wrap; gap: 0.6rem; }
 .notice--offline { border: 1px solid #6b5a2f; background: #2c2718; }
 .notice--error { border: 1px solid #75433e; background: #2e1d1b; }
 .notice--writer { border: 1px solid #6d547b; background: #281f2d; }

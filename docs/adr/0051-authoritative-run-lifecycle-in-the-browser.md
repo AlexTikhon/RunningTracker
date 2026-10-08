@@ -3,6 +3,8 @@
 - Status: accepted; implemented and verified locally
 - Date: 2026-10-07
 - Amends: ADR-0048 decision 1 (the lifecycle merge rule), ADR-0047 (reload recovery now asks the server before capture)
+- Amended by: ADR-0052 (a refused run with RUN_DELETED, RUN_NOT_FOUND or ORG_ACCESS_DENIED can be discarded locally, on purpose),
+  ADR-0055 (reads are owned, ordered and cancelled by one coordinator, and stored only by the current writer for the exact active run)
 
 ## Context
 

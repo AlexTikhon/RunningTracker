@@ -16,18 +16,20 @@ import { unsentWorkNote } from './unsent-work.js';
 import { useOrganizations } from './use-organizations.js';
 import { useRunnerSession } from './use-runner-session.js';
 import { PointUploadWorker } from './point-upload-worker.js';
-import { AUTHORITY_RETRY_MS, readAuthoritativeRun } from './run-authority.js';
 import {
-  readRun,
-  RunnerApiError,
-  uploadPointBatch,
-} from './runner-api.js';
+  AUTHORITY_RETRY_MS,
+  RunAuthority,
+  unrecoverableRefusalOf,
+  type AuthorityScope,
+} from './run-authority.js';
+import { RunnerApiError, uploadPointBatch } from './runner-api.js';
 import { getBrowserRunnerStorage } from './runner-storage.js';
 import { SignInNotice, signInFailureMessage } from './sign-in.js';
 import {
   captureMayRun,
   createInitialRunnerState,
   needsAuthoritativeRead,
+  refusedRunMayBeDetached,
   runnerReducer,
   type CommandRequest,
   type RunnerRequest,
@@ -79,6 +81,8 @@ export function App() {
   const [now, setNow] = useState(() => Date.now());
   const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
   const [writer, setWriter] = useState<WriterOwnershipState>({ status: 'unclaimed' });
+  // True from the start of an explicit claim until the page has taken over what the previous owner left behind.
+  const [writerSyncing, setWriterSyncing] = useState(false);
   const [capture, setCapture] = useState<CaptureState>({ status: 'idle' });
   // null until the stored choice has been restored: capture must not start, and the select must not change,
   // before then, or a restored Simulator run would briefly start the Device GPS.
@@ -107,7 +111,7 @@ export function App() {
     setCapture({ status: 'idle' });
     setWriter({ status: 'unclaimed' });
   }, []);
-  const { session, refreshSession, signOut, signOutState } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
+  const { session, refreshSession, signOut, signOutState, verification } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
   const { choose: chooseOrganization, discovery, prefer: preferOrganization, reload: reloadOrganizations, selectedOrgId } =
     useOrganizations(session);
   const [runner, dispatch] = useReducer(
@@ -116,6 +120,24 @@ export function App() {
     createInitialRunnerState,
   );
   latestUpload.current = runner.upload;
+  // Everything that decides whether a server answer about the run may still be used is asked of the page at the moment
+  // the answer arrives (run-authority.ts): the run, the identity and organization, the session and the writer.
+  const authorityPage = useRef<{ online: boolean; scope: AuthorityScope | null; signal: AbortSignal | null }>({
+    online: true,
+    scope: null,
+    signal: null,
+  });
+  const authority = useRef<RunAuthority | null>(null);
+  authority.current ??= new RunAuthority({
+    dispatch,
+    host: {
+      lease: () => writerCoordinator.current?.currentLease() ?? null,
+      online: () => authorityPage.current.online,
+      scope: () => authorityPage.current.scope,
+      signal: () => authorityPage.current.signal,
+    },
+    storage: { refreshActiveRun: (...input) => getBrowserRunnerStorage().refreshActiveRun(...input) },
+  });
   // A run is captured and uploaded for the organization it was started in; before one exists, the selection decides.
   const scopeOrgId = runner.run !== null ? runOrgId ?? selectedOrgId : selectedOrgId;
   // Capture runs only for a lifecycle the server has confirmed (or, offline, one that will be confirmed on reconnection).
@@ -235,6 +257,7 @@ export function App() {
       return undefined;
     }
     const runnerStorage = getBrowserRunnerStorage();
+    const writerLease = writerCoordinator.current?.currentLease() ?? null;
     const scope = {
       orgId: scopeOrgId,
       runId: runner.run.runId,
@@ -244,14 +267,22 @@ export function App() {
       onAcknowledged: (dataRevision) => {
         dispatch({ dataRevision, runId: scope.runId, type: 'point-batch-acknowledged' });
       },
-      onPermanentError: async (error, signal) => {
+      // The server rejected the points for good. What that means for the run is decided by the same scoped
+      // authority logic as a read: a definitive refusal joins the recovery flow at once, any other rejection asks
+      // the server what the run is. Both are dropped when the page has moved on to another run or writer.
+      onPermanentError: async (error) => {
+        const coordinator = authority.current;
+        if (writerLease === null || coordinator === null || !coordinator.isCurrentScope(scope)) return;
         captureController.current?.stop();
-        await runnerStorage.rejectUpload(scope, errorMessage(error));
-        const authoritativeRun = await readRun(scope.orgId, scope.runId, signal);
-        await runnerStorage.saveRunSnapshot(scope.userId, scope.orgId, authoritativeRun);
-        dispatch({ run: authoritativeRun, type: 'run-reconciled' });
+        const marked = await runnerStorage.rejectUpload(scope, errorMessage(error), writerLease);
+        if (marked.outcome === 'obsolete') return;
+        const refusal = unrecoverableRefusalOf(error);
+        if (refusal !== null) coordinator.refuse(scope, refusal);
+        else void coordinator.request({ reconcile: true });
       },
-      onState: (nextUpload) => dispatch({ type: 'upload-changed', upload: nextUpload }),
+      onState: (nextUpload) => {
+        if (authority.current?.isCurrentScope(scope)) dispatch({ type: 'upload-changed', upload: nextUpload });
+      },
       scope,
       send: async (points, signal) => {
         if (!await writerCoordinator.current?.assertOwned()) {
@@ -357,7 +388,18 @@ export function App() {
           dispatch({ request, run: outcome.run, type: 'request-reconciled' });
         }
       } catch (error) {
+        // The request stays exactly as it was, queued under its own identity. A definitive refusal of the run also
+        // stops the capture and opens the explicit discard; a network failure, a 5xx or any unknown outcome is
+        // only a failed request.
         dispatch({ message: errorMessage(error), request, type: 'request-failed' });
+        const refusal = request.kind === 'command' ? unrecoverableRefusalOf(error) : null;
+        if (refusal !== null) {
+          captureController.current?.stop();
+          authority.current?.refuse(
+            { orgId: request.orgId, runId: request.runId, userId: session.session.identity.userId },
+            refusal,
+          );
+        }
       }
     },
     [runner.connectivity, runner.run, session, storage.status],
@@ -365,34 +407,37 @@ export function App() {
 
   // Asks the server what the run is. A lifecycle read back from IndexedDB, or recorded while offline, is only
   // recoverable data until this answers; capture and the controls wait for it.
-  const confirmRun = useCallback(() => {
-    if (
-      session.status !== 'ready'
-      || storage.status !== 'ready'
-      || restoredUserId.current !== session.session.identity.userId
-      || runner.run === null
-      || runner.connectivity !== 'online'
-      || scopeOrgId === null
-    ) {
-      return;
-    }
-    const attempt = runner.authorityAttempt + 1;
-    dispatch({ attempt, type: 'authority-requested' });
-    void readAuthoritativeRun({
-      attempt,
-      scope: { orgId: scopeOrgId, runId: runner.run.runId, userId: session.session.identity.userId },
-      signal: session.signal,
-      // Only the writer tab stores the answer; any tab may show it.
-      storage: writer.status === 'owned' ? getBrowserRunnerStorage() : null,
-    }).then((event) => {
-      if (event !== null) dispatch(event);
-    });
-  }, [runner.authorityAttempt, runner.connectivity, runner.run?.runId, scopeOrgId, session, storage.status, writer.status]);
+  const confirmRun = useCallback(() => { void authority.current?.request(); }, []);
+
+  // The page states what it shows; the coordinator compares every completion with this, not with what was true when
+  // the read began. The writer capability is part of the key: another epoch is another operation.
+  authorityPage.current = {
+    online: runner.connectivity === 'online',
+    scope: session.status === 'ready'
+      && storage.status === 'ready'
+      && restoredUserId.current === session.session.identity.userId
+      && runner.run !== null
+      && scopeOrgId !== null
+      ? { orgId: scopeOrgId, runId: runner.run.runId, userId: session.session.identity.userId }
+      : null,
+    signal: session.status === 'ready' ? session.signal : null,
+  };
+  const authorityScope = authorityPage.current.scope;
+  const writerSettled = writer.status !== 'unclaimed' && writer.status !== 'acquiring' && !writerSyncing;
+  const authorityKey = authorityScope === null
+    ? null
+    : [authorityScope.userId, authorityScope.orgId, authorityScope.runId, writer.status === 'owned' ? writer.fencingToken : 'read-only'].join('|');
+  const authoritySignal = authorityPage.current.signal;
+  // A change of run, identity, organization, session or writer epoch (and closing the page) ends what was asked.
+  useEffect(() => () => authority.current?.invalidate(), [authorityKey, authoritySignal]);
 
   const mustConfirm = needsAuthoritativeRead(runner);
+  const confirming = runner.authority.status === 'confirming';
+  // Ask once the writer question is settled, so the answer is stored by the tab that owns the run. A read that was
+  // ended by a change above is asked again here while the reducer is still waiting for it.
   useEffect(() => {
-    if (mustConfirm) confirmRun();
-  }, [confirmRun, mustConfirm]);
+    if (authorityKey !== null && writerSettled && (mustConfirm || confirming)) confirmRun();
+  }, [authorityKey, confirmRun, confirming, mustConfirm, runner.connectivity, writerSettled]);
 
   const retryConfirmation = runner.authority.status === 'unreachable' && runner.connectivity === 'online';
   useEffect(() => {
@@ -413,6 +458,8 @@ export function App() {
       runner.pendingRequest === null
       && (recovery.run !== null || recovery.request !== null)
     ) {
+      // The restored state replaces what any read in flight was asked about.
+      authority.current?.invalidate();
       dispatch({
         uploadRejection: recovery.uploadRejection,
         pendingPointCount: recovery.pendingPointCount,
@@ -426,15 +473,20 @@ export function App() {
   }, [runner.pendingRequest, runner.run, session, storage.status]);
 
   const claimWriter = useCallback(async () => {
-    const acquired = await writerCoordinator.current?.claim() ?? false;
-    if (!acquired) {
-      return false;
-    }
+    setWriterSyncing(true);
     try {
-      return !await synchronizeAfterClaim();
-    } catch (error) {
-      setStorage({ message: errorMessage(error), status: 'error' });
-      return false;
+      const acquired = await writerCoordinator.current?.claim() ?? false;
+      if (!acquired) {
+        return false;
+      }
+      try {
+        return !await synchronizeAfterClaim();
+      } catch (error) {
+        setStorage({ message: errorMessage(error), status: 'error' });
+        return false;
+      }
+    } finally {
+      setWriterSyncing(false);
     }
   }, [synchronizeAfterClaim]);
 
@@ -503,6 +555,7 @@ export function App() {
     if (session.status !== 'ready') {
       return;
     }
+    authority.current?.invalidate();
     try {
       await getBrowserRunnerStorage().clearActiveRun(session.session.identity.userId);
       dispatch({ type: 'finished-run-cleared' });
@@ -531,11 +584,31 @@ export function App() {
     try {
       const lease = await writerCoordinator.current?.assertOwnedLease();
       if (!lease) return;
+      authority.current?.invalidate();
       captureController.current?.stop();
       uploadWorker.current?.stop();
       await getBrowserRunnerStorage().discardRejectedRun(rejectedScope, lease);
       dispatch({ type: 'rejected-run-discarded' });
       await writerCoordinator.current?.release();
+    } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
+  };
+
+  // Local recovery cleanup for a run the server refuses (ADR-0052). It never calls the API: the run can be neither
+  // finished nor deleted by this browser any more. Everything local is stopped first, the transaction checks the
+  // writer lease and the exact active run itself, and only then does the page let go of the run and the lease.
+  const discardRefusedRecovery = async () => {
+    if (rejectedScope === null || busy || !refusedRunMayBeDetached(runner)) return;
+    try {
+      const lease = await writerCoordinator.current?.assertOwnedLease();
+      if (!lease) return;
+      authority.current?.invalidate();
+      captureController.current?.stop();
+      uploadWorker.current?.stop();
+      await getBrowserRunnerStorage().discardRefusedRun(rejectedScope, lease);
+      dispatch({ runId: rejectedScope.runId, type: 'local-recovery-discarded' });
+      await writerCoordinator.current?.release();
+      // The refusal may have been a lost membership: the next run follows what the server lists now.
+      reloadOrganizations();
     } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
   };
 
@@ -594,6 +667,7 @@ export function App() {
           session={session}
           signOut={signOutState}
           unsentNote={unsentWorkNote(runner)}
+          verification={verification}
         />
       </div>
 
@@ -614,6 +688,10 @@ export function App() {
           onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
           onStart={() => void start()}
           organizationNote={organizationNote}
+          refused={{
+            canDiscard: rejectedScope !== null,
+            onDiscard: () => void discardRefusedRecovery(),
+          }}
           rejected={{
             canDiscard: rejectedScope !== null,
             canExport: rejectedScope !== null,

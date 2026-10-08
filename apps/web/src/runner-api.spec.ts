@@ -12,6 +12,7 @@ import {
   sendRunCommand,
   uploadPointBatch,
 } from './runner-api.js';
+import { onAuthenticationRequired } from './request.js';
 import type { RunnerApiError } from './runner-api.js';
 
 const csrf = { headerName: 'x-csrf-token' as const, token: 'a'.repeat(43) };
@@ -37,6 +38,23 @@ describe('runner API', () => {
       credentials: 'same-origin',
       signal: expect.any(AbortSignal) as AbortSignal,
     });
+  });
+
+  it.each([
+    [401, 'AUTH_REQUIRED', null],
+    [403, 'ORIGIN_DENIED', null],
+    [429, 'RATE_LIMITED', 3_000],
+    [503, 'SERVICE_UNAVAILABLE', null],
+  ])('reports a %i session answer with its status and code, and does not announce the 401 itself', async (status, code, retryAfter) => {
+    const headers = retryAfter === null ? {} : { 'retry-after': String(retryAfter / 1_000) };
+    const body = { error: { code, message: 'no', requestId: '22222222-2222-4222-8222-222222222222' } };
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(body), { headers, status })));
+    const announced = vi.fn();
+    const unsubscribe = onAuthenticationRequired(announced);
+
+    await expect(loadSession()).rejects.toMatchObject({ code, retryAfterMs: retryAfter, status });
+    expect(announced).not.toHaveBeenCalled();
+    unsubscribe();
   });
 
   it('loads the identifiers of the organizations the session belongs to, in the server order', async () => {

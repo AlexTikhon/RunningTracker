@@ -28,8 +28,17 @@ const STORES = {
   runs: 'runs',
 } as const;
 
+// One record per user for the lifetime of the database: its fencingToken is the durable ownership epoch. A
+// release keeps the record and stamps releasedAt, because deleting it would let the next acquisition start the
+// epoch again and revive every capability issued before (ADR-0053). Records written before releasedAt existed
+// are live exactly while unexpired, as always.
 interface WriterLeaseRecord extends WriterLease {
+  releasedAt?: string;
   storageKey: string;
+}
+
+function isLiveLease(record: WriterLeaseRecord, now: Date): boolean {
+  return record.releasedAt === undefined && Date.parse(record.expiresAt) > now.getTime();
 }
 
 interface ProfileRecord {
@@ -88,6 +97,13 @@ export interface WriterLease {
   ownerId: string;
   userId: string;
 }
+
+// The result of a write that is only valid for the current writer and the exact active run. `obsolete` means the
+// write was not made, and nothing else was either: the lease is no longer the live epoch, or the profile no longer
+// points at that user, organization and run.
+export type StorageWriteOutcome =
+  | { outcome: 'applied' }
+  | { outcome: 'obsolete'; reason: 'not-active' | 'writer-lost' };
 
 export type WriterLeaseAcquisition =
   | { acquired: true; lease: WriterLease }
@@ -273,14 +289,15 @@ export class IndexedDbRunnerStorage {
         existing !== undefined
         && existing.ownerId !== ownerId
         && !replaceableOwnerIds.includes(existing.ownerId)
-        && Date.parse(existing.expiresAt) > now.getTime()
+        && isLiveLease(existing, now)
       ) {
         await done;
         return { acquired: false, lease: parseWriterLease(existing) };
       }
 
-      const sameLiveOwner = existing?.ownerId === ownerId
-        && Date.parse(existing.expiresAt) > now.getTime();
+      // Only a live lease of this same owner is re-confirmed under its own token. Everything else (nothing yet,
+      // expired, released, or a replaced dead owner) starts a new generation from the stored epoch.
+      const sameLiveOwner = existing?.ownerId === ownerId && isLiveLease(existing, now);
       const fencingToken = sameLiveOwner
         ? revisionSchema.parse(existing.fencingToken)
         : revisionSchema.parse((BigInt(existing?.fencingToken ?? '0') + 1n).toString());
@@ -318,7 +335,7 @@ export class IndexedDbRunnerStorage {
         existing === undefined
         || existing.ownerId !== lease.ownerId
         || existing.fencingToken !== lease.fencingToken
-        || Date.parse(existing.expiresAt) <= now.getTime()
+        || !isLiveLease(existing, now)
       ) {
         await done;
         return null;
@@ -339,16 +356,25 @@ export class IndexedDbRunnerStorage {
 
   public async releaseWriterLease(leaseInput: WriterLease): Promise<boolean> {
     const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    const now = this.#now();
     const database = await this.#open();
     const transaction = database.transaction(STORES.leases, 'readwrite');
     const done = transactionDone(transaction);
     try {
       const store = transaction.objectStore(STORES.leases);
       const existing = (await requestResult(store.get(lease.userId))) as WriterLeaseRecord | undefined;
-      const matches = existing?.ownerId === lease.ownerId
+      // Only the current, still unreleased holder can release. The record stays: ownership ends, the epoch does not.
+      const matches = existing !== undefined
+        && existing.releasedAt === undefined
+        && existing.ownerId === lease.ownerId
         && existing.fencingToken === lease.fencingToken;
       if (matches) {
-        store.delete(lease.userId);
+        const released: WriterLeaseRecord = {
+          ...existing,
+          expiresAt: now.toISOString(),
+          releasedAt: now.toISOString(),
+        };
+        store.put(released);
       }
       await done;
       return matches;
@@ -465,17 +491,20 @@ export class IndexedDbRunnerStorage {
   }
 
   async #assertCurrentLease(transaction: IDBTransaction, lease: WriterLease): Promise<void> {
+    if (!await this.#holdsCurrentLease(transaction, lease)) {
+      throw new Error('This tab no longer owns the writer lease');
+    }
+  }
+
+  // Whether this exact capability (owner and epoch) is the live one, read inside the caller's transaction.
+  async #holdsCurrentLease(transaction: IDBTransaction, lease: WriterLease): Promise<boolean> {
     const existing = (await requestResult(
       transaction.objectStore(STORES.leases).get(lease.userId),
     )) as WriterLeaseRecord | undefined;
-    if (
-      existing === undefined
-      || existing.ownerId !== lease.ownerId
-      || existing.fencingToken !== lease.fencingToken
-      || Date.parse(existing.expiresAt) <= this.#now().getTime()
-    ) {
-      throw new Error('This tab no longer owns the writer lease');
-    }
+    return existing !== undefined
+      && existing.ownerId === lease.ownerId
+      && existing.fencingToken === lease.fencingToken
+      && isLiveLease(existing, this.#now());
   }
 
   public async readPointBatch(scopeInput: RunScope, limit = 100): Promise<PointInput[]> {
@@ -664,7 +693,10 @@ export class IndexedDbRunnerStorage {
     await done;
   }
 
-  public async saveRunSnapshot(userIdInput: string, orgIdInput: string, runInput: RunView): Promise<void> {
+  // Makes this run the active one: the profile points at it afterwards. Only for a run the page is taking up
+  // (a start, a queued command, a recovery); never for an answer about a run that was already active, which
+  // must use refreshActiveRun (ADR-0055).
+  public async activateRunSnapshot(userIdInput: string, orgIdInput: string, runInput: RunView): Promise<void> {
     const userId = uuidSchema.parse(userIdInput);
     const orgId = uuidSchema.parse(orgIdInput);
     const run = runViewSchema.parse(runInput);
@@ -673,6 +705,61 @@ export class IndexedDbRunnerStorage {
     const done = transactionDone(transaction);
     await this.#putRunSnapshot(transaction, userId, orgId, run);
     await done;
+  }
+
+  // Merges a server answer into the run the profile already points at. The lease and the exact user, organization
+  // and run are checked in the same transaction as the write, so an answer that arrives after the writer changed
+  // or the run was finished, cleared, discarded or replaced finds out here and changes nothing: the outcome says
+  // so, and no store is written. It never moves the pointer and never creates a record.
+  public async refreshActiveRun(
+    scopeInput: RunScope,
+    runInput: RunView,
+    leaseInput: WriterLease,
+  ): Promise<StorageWriteOutcome> {
+    const scope = validateScope(scopeInput);
+    const run = runViewSchema.parse(runInput);
+    if (run.runId !== scope.runId) throw new Error('The refreshed snapshot is not of the scoped run');
+    return this.#writeActiveRun(scope, leaseInput, (record) => ({
+      ...record,
+      run: mergeRunSnapshot(record.run ?? undefined, run),
+    }));
+  }
+
+  // One fenced write to the record of the run the profile points at (see refreshActiveRun for the rules).
+  async #writeActiveRun(
+    scope: RunScope,
+    leaseInput: WriterLease,
+    change: (record: RunRecord) => RunRecord,
+  ): Promise<StorageWriteOutcome> {
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    if (lease.userId !== scope.userId) throw new Error('Writer lease does not match the run');
+    const database = await this.#open();
+    const transaction = database.transaction([STORES.leases, STORES.profiles, STORES.runs], 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      if (!await this.#holdsCurrentLease(transaction, lease)) {
+        await done;
+        return { outcome: 'obsolete', reason: 'writer-lost' };
+      }
+      const profile = (await requestResult(transaction.objectStore(STORES.profiles).get(scope.userId))) as ProfileRecord | undefined;
+      const runs = transaction.objectStore(STORES.runs);
+      const record = (await requestResult(runs.get(runStorageKey(scope)))) as RunRecord | undefined;
+      if (
+        profile?.activeOrgId !== scope.orgId
+        || profile.activeRunId !== scope.runId
+        || record === undefined
+      ) {
+        await done;
+        return { outcome: 'obsolete', reason: 'not-active' };
+      }
+      runs.put(change(record));
+      await done;
+      return { outcome: 'applied' };
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   public async loadRecovery(userIdInput: string): Promise<RunnerRecovery> {
@@ -750,15 +837,11 @@ export class IndexedDbRunnerStorage {
     await done;
   }
 
-  public async rejectUpload(scopeInput: RunScope, message: string): Promise<void> {
+  // Marks the active run's queue as rejected so capture cannot add to it. Fenced like refreshActiveRun: a late
+  // upload failure of a run that was cleared, discarded or replaced, or of a writer that was lost, marks nothing.
+  public async rejectUpload(scopeInput: RunScope, message: string, lease: WriterLease): Promise<StorageWriteOutcome> {
     const scope = validateScope(scopeInput);
-    const database = await this.#open();
-    const transaction = database.transaction(STORES.runs, 'readwrite');
-    const done = transactionDone(transaction);
-    const store = transaction.objectStore(STORES.runs);
-    const record = (await requestResult(store.get(runStorageKey(scope)))) as RunRecord | undefined;
-    if (record) store.put({ ...record, uploadRejection: message });
-    await done;
+    return this.#writeActiveRun(scope, lease, (record) => ({ ...record, uploadRejection: message }));
   }
 
   public async exportBufferedPoints(scopeInput: RunScope): Promise<PointInput[]> {
@@ -775,6 +858,32 @@ export class IndexedDbRunnerStorage {
   // Reject, capture and discard transactions serialize through the run store.
   // Resolve the blocked queue and its exact commands before clearing the pointer.
   public async discardRejectedRun(scopeInput: RunScope, lease: WriterLease): Promise<void> {
+    await this.#discardActiveRun(
+      scopeInput,
+      lease,
+      (record) => record?.uploadRejection !== undefined && record.uploadRejection !== '' && record.run?.status === 'finished',
+      'Only the active rejected run can be discarded',
+    );
+  }
+
+  // The local half of a run the server refuses (ADR-0052): the run is deleted or no longer accessible, so it can
+  // be neither finished nor uploaded, and the ordinary discard (finished, upload rejected) can never apply. The
+  // caller decides from the server's answer that the run is refused; this only fences and clears. It never talks
+  // to the server and never marks the run finished.
+  public async discardRefusedRun(scopeInput: RunScope, lease: WriterLease): Promise<void> {
+    await this.#discardActiveRun(scopeInput, lease, () => true, 'Only the active run can be discarded');
+  }
+
+  // One transaction for everything that must change together: the lease is checked inside it, the profile must
+  // still point at exactly this user, organization and run, and the buffered points, the queued requests and the
+  // pointer go together or not at all. The run record stays, inactive, as it does after any discard: it holds the
+  // next point sequence, so a sequence number of this run is never issued twice.
+  async #discardActiveRun(
+    scopeInput: RunScope,
+    lease: WriterLease,
+    mayDiscard: (record: RunRecord | undefined) => boolean,
+    refusal: string,
+  ): Promise<void> {
     const scope = validateScope(scopeInput);
     if (lease.userId !== scope.userId) throw new Error('Writer lease does not match the run');
     const database = await this.#open();
@@ -786,8 +895,8 @@ export class IndexedDbRunnerStorage {
       const record = await requestResult(runs.get(runStorageKey(scope))) as RunRecord | undefined;
       const profiles = transaction.objectStore(STORES.profiles);
       const profile = await requestResult(profiles.get(scope.userId)) as ProfileRecord | undefined;
-      if (!record?.uploadRejection || record.run?.status !== 'finished' || profile?.activeRunId !== scope.runId || profile.activeOrgId !== scope.orgId) {
-        throw new Error('Only the active rejected run can be discarded');
+      if (!mayDiscard(record) || profile?.activeRunId !== scope.runId || profile.activeOrgId !== scope.orgId) {
+        throw new Error(refusal);
       }
       const points = transaction.objectStore(STORES.points);
       const range = this.#keyRange.bound([scope.userId, scope.orgId, scope.runId, ''], [scope.userId, scope.orgId, scope.runId, '\uffff']);

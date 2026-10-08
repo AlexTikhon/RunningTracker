@@ -81,6 +81,13 @@ export class WriterLeaseCoordinator {
     return this.#claimPromise;
   }
 
+  // The capability this tab holds right now, from memory: null once it was released, lost or disposed. It is what
+  // an operation captures when it starts, to find out when it finishes whether it still belongs to the same owner
+  // and epoch. It proves nothing by itself; the durable write checks the lease again in its own transaction.
+  public currentLease(): WriterLease | null {
+    return this.#disposed ? null : this.#lease;
+  }
+
   public async assertOwned(): Promise<boolean> {
     return await this.assertOwnedLease() !== null;
   }
