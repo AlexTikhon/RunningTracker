@@ -3,6 +3,7 @@
 - Status: accepted; implemented and verified locally
 - Date: 2026-10-07
 - Amends: ADR-0051 decisions 5 and 6 (a refused run now has a deliberate way out), ADR-0048 (the discard of rejected points stays as it was)
+- Amended by: ADR-0055 (the same refusal now also arrives from an upload or a command on an open page, without a reload)
 
 ## Context
 

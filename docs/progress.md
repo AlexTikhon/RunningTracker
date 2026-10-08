@@ -1774,3 +1774,56 @@ D10 was not touched (still PARTIAL, algorithm unchanged, zero real traces). The 
 **Not verified:** the new commits on a GitHub-hosted runner (nothing was pushed); Firefox, WebKit, mobile; a sign-out in one tab reaching another tab (by design at the next request or when the tab regains focus, as for expiry; not tested); a person with more than 100 memberships (the list is capped at the first 100 by id, stated in the OpenAPI text); a real identity provider; the remembered organization of a signed-out identity stays in `localStorage` (an id the person belongs to, keyed by user, applied only through the list).
 
 **Next:** nothing in this repository is left that would change what a user can do. Record real traces for D10 (the runbook), use a real provider and a real host if this is ever deployed, and run the hosted CI job once for the commits after de0e9cc.
+
+## Scoped, writer-fenced run authority and refusal recovery on an open page (2026-10-08)
+
+Source: `docs/reports/2026-10-08-followup-review.md`, findings 1 and 2. Contract and limits: ADR-0055. Nothing outside
+`apps/web` changed (no API, SQL, schema, dependency or session change), so the database integration suite was not run.
+
+**Root cause.** The answer to an authority read was stored (`saveRunSnapshot`) before the reducer could judge it, and that
+write pointed the profile at the response's run without checking the writer lease or the expected active run, so
+ignoring the reducer event could not undo it. Separately, the upload worker's permanent-error callback ran its own
+read-and-store; for a deleted run or a revoked membership that read fails, the worker swallows the error, and the page
+stayed "confirmed" with no discard until a reload.
+
+**Changes.** `runner-storage.ts`: `activateRunSnapshot` (moves the pointer) is separated from the fenced
+`refreshActiveRun` and `rejectUpload`, which check lease owner and epoch plus the exact user/organization/run profile in
+their own transaction and return `applied` or `obsolete` with zero writes. `run-authority.ts`: `RunAuthority` owns scope,
+generation, deduplication, supersession, invalidation and completion of every read (and the reconcile read after a
+rejected upload); one classifier for refusals. `runner-state.ts`: `authority-refused` event; attempts accepted when newer.
+`writer-lease.ts`: `currentLease()`. `runner-requests.ts`: a refused reconciliation read surfaces its refusal.
+`App.tsx`: reads wait for the writer question, are invalidated on scope or epoch change, restore, discard and unmount;
+upload and command refusals join the flow; discard reloads organizations. `RunnerView.tsx`: the state card says
+`refused` when it applies together with a failed request.
+
+**Red before green.** The unit and storage regressions were written first and failed on the previous code for the
+expected reasons (the new storage methods and coordinator did not exist; the reducer ignored the new event). The seven
+browser scenarios were then run against the previous source (my changes stashed): 5 failed as intended (an upload
+refusal stayed "confirmed"; a membership refusal stayed "confirmed"; a command refusal showed only "error"; a read held
+before a deletion left the page "confirming" and never refused; a lost and re-acquired writer did not ask again), and 2
+passed. Of those two, the transient-command scenario is a characterisation of behaviour that had to be preserved. The
+other, "old read of A after B started", passes on the previous source because Chromium aborts the superseded fetch;
+only the real-storage and coordinator tests, whose transport ignores the abort, can reproduce that defect. They were
+written first and failed because the fenced API did not exist yet; the review had reproduced the original defect with the
+same technique. Both are kept as regressions.
+
+**Executed after the change (Node 24.11.1, npm 11.6.2):**
+
+- `npm run verify`: **passed** (lint, typecheck, build, scripts 36, API 771, web 390, contracts 18, fixtures 14,
+  simulator 3 = 1232; was 1177, web +55).
+- `npm run test:e2e`: **passed**, 74 Chromium tests in 7.3 minutes (67 before, +7 in
+  `tests/e2e/authority-reconciliation.spec.ts`; the deliberately failing harness test is an expected failure).
+- Mutations, reverted afterwards: removing the lease check from the refresh transaction failed 5 storage/coordinator
+  tests; removing the active-profile check failed 4; ignoring the writer epoch in the coordinator failed the epoch test.
+- `npm run test:integration`, `deploy:verify`: **not run** (no backend, SQL, contract or deployment file changed).
+
+**Mistakes during the work:** a reconcile read (after a rejected upload) replaced the ordinary confirmation the reducer
+was still waiting for, which would have left "confirming" for ever if the server then did not answer (found by reading,
+fixed with a failing test first: a reconcile now joins the running confirmation); the first browser run of two scenarios timed out at the default 60 s and then again
+because the helper waited for a response that an aborted read never delivers (bounded now); the first green run exposed a
+stuck "restored" state, because an explicit claim re-syncs the page from IndexedDB while a read for the new epoch is
+already running (reads now wait for the claim's synchronisation and a restore invalidates the read); two lint errors in
+new specs (`reject(request.error)`).
+
+**Not verified / limits:** `acknowledgeStart/Command/Reconciled` and `queueRequest` still check ownership just before, not
+inside, their transactions (ADR-0055); two real devices or browsers other than Chromium; a hosted CI run.

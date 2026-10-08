@@ -49,3 +49,64 @@ export async function readDurableRunnerState(page: Page, userId: string): Promis
     { name: databaseName, user: userId },
   );
 }
+
+// The lifecycle status stored for the run the profile points at, or null when none is. A separate read so the
+// shape of DurableRunnerState, which many tests compare whole, does not change.
+export async function readDurableRunStatus(page: Page, userId: string): Promise<string | null> {
+  return page.evaluate(
+    async ({ name, user }) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error ?? new Error('Unable to open IndexedDB'));
+      });
+      try {
+        const read = <Record>(store: string, key: string): Promise<Record | undefined> =>
+          new Promise((resolve, reject) => {
+            const request = database.transaction(store, 'readonly').objectStore(store).get(key);
+            request.onsuccess = () => resolve(request.result as Record | undefined);
+            request.onerror = () => reject(request.error ?? new Error(`Unable to read ${store}`));
+          });
+        const profile = await read<{ activeOrgId: string | null; activeRunId: string | null }>('profiles', user);
+        if (profile?.activeRunId == null || profile.activeOrgId == null) return null;
+        const record = await read<{ run: { status: string } | null }>('runs', `${user}:${profile.activeOrgId}:${profile.activeRunId}`);
+        return record?.run?.status ?? null;
+      } finally {
+        database.close();
+      }
+    },
+    { name: databaseName, user: userId },
+  );
+}
+
+// Ends the writer lease record behind the page's back, as if the owner had been released or had expired: the page
+// finds out at its next renewal, and a claim afterwards starts a newer epoch for the same owner (ADR-0053).
+export async function endWriterLeaseBehindThePage(page: Page, userId: string): Promise<void> {
+  await page.evaluate(
+    async ({ name, user }) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error ?? new Error('Unable to open IndexedDB'));
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const transaction = database.transaction('leases', 'readwrite');
+          const store = transaction.objectStore('leases');
+          const get = store.get(user);
+          get.onsuccess = () => {
+            const record = get.result as Record<string, unknown> | undefined;
+            if (record === undefined) { reject(new Error('There is no lease to end')); return; }
+            const now = new Date().toISOString();
+            store.put({ ...record, expiresAt: now, releasedAt: now });
+          };
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error ?? new Error('Unable to end the lease'));
+        });
+      } finally {
+        database.close();
+      }
+    },
+    { name: databaseName, user: userId },
+  );
+}

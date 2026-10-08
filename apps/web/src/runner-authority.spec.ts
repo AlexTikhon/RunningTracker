@@ -232,11 +232,23 @@ describe('recovery authority', () => {
     expect(state.run?.status).toBe('paused');
   });
 
-  it('accepts only the next attempt so two effects in one render start one read', () => {
+  it('numbers attempts by the coordinator that owns the reads: only a newer attempt starts one, an old or repeated number never does', () => {
     const state = restored('online', run('recording', 3, 5));
     const first = apply(state, { attempt: 1, type: 'authority-requested' });
     expect(runnerReducer(first, { attempt: 1, type: 'authority-requested' })).toBe(first);
-    expect(runnerReducer(state, { attempt: 2, type: 'authority-requested' })).toBe(state);
+    expect(runnerReducer(first, { attempt: 0, type: 'authority-requested' })).toBe(first);
+    // The coordinator may have used numbers for reads that were superseded before they were announced.
+    expect(runnerReducer(state, { attempt: 4, type: 'authority-requested' }).authority).toMatchObject({ attempt: 4, status: 'confirming' });
+  });
+
+  it('a newer attempt supersedes the read in flight, keeps the offline capture running and drops the older answer', () => {
+    const reconnected = apply(restored('offline', run('recording', 3, 5)), { connectivity: 'online', type: 'connectivity-changed' });
+    const first = apply(reconnected, { attempt: 1, type: 'authority-requested' });
+    const second = apply(first, { attempt: 2, type: 'authority-requested' });
+    expect(second.authority).toEqual({ attempt: 2, offlineCapture: true, status: 'confirming' });
+    expect(captureMayRun(second)).toBe(true);
+    expect(runnerReducer(second, { attempt: 1, run: run('finished', 3, 9), type: 'authority-confirmed' })).toBe(second);
+    expect(apply(second, { attempt: 2, run: run('recording', 3, 9), type: 'authority-confirmed' }).authority).toEqual({ status: 'confirmed' });
   });
 
   it('does not ask about a finished run', () => {
@@ -368,6 +380,50 @@ describe('offline recovery and reconnection', () => {
     expect(captureMayRun(idle)).toBe(false);
     expect(needsAuthoritativeRead(idle)).toBe(false);
     expect(apply(idle, { connectivity: 'offline', type: 'connectivity-changed' }).authority).toEqual({ status: 'confirmed' });
+  });
+});
+
+describe('a refusal that arrives outside a read (an upload, a command)', () => {
+  const refusal = (code: string, forRun = runId): RunnerEvent => ({ code, message: 'The server said no', runId: forRun, type: 'authority-refused' });
+
+  it.each(['RUN_DELETED', 'RUN_NOT_FOUND', 'ORG_ACCESS_DENIED'])('%s on a confirmed, recording run stops capture and offers the local detach', (code) => {
+    const state = apply(confirmedRecording(), refusal(code));
+    expect(state.authority).toEqual({ code, message: 'The server said no', status: 'refused' });
+    expect(captureMayRun(state)).toBe(false);
+    expect(refusedRunMayBeDetached(state)).toBe(true);
+    expect(state.run).toMatchObject({ status: 'recording' });
+  });
+
+  it('keeps the buffered count, the blocked upload and a failed request exactly as they were', () => {
+    const blocked = apply(
+      confirmedRecording(),
+      { pendingPointCount: 0, request: pauseCommand, run: run('recording', 3, 5), type: 'storage-restored' },
+      { upload: { message: 'gone', pendingCount: 6, status: 'blocked' }, type: 'upload-changed' },
+      refusal('RUN_DELETED'),
+    );
+    expect(blocked.upload).toEqual({ message: 'gone', pendingCount: 6, status: 'blocked' });
+    expect(blocked.error?.request).toEqual(pauseCommand);
+  });
+
+  it('also ends a read in flight and a finished run that still has points to send', () => {
+    const confirming = apply(restored('online', run('recording', 3, 5)), { attempt: 1, type: 'authority-requested' }, refusal('RUN_DELETED'));
+    expect(confirming.authority.status).toBe('refused');
+    expect(runnerReducer(confirming, { attempt: 1, run: run('recording', 3, 9), type: 'authority-confirmed' })).toBe(confirming);
+    const finished = apply(restored('online', run('finished', 4, 7)), refusal('ORG_ACCESS_DENIED'));
+    expect(refusedRunMayBeDetached(finished)).toBe(true);
+  });
+
+  it('is ignored for a run that is not the one shown, or when nothing is shown', () => {
+    const state = confirmedRecording();
+    expect(runnerReducer(state, refusal('RUN_DELETED', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'))).toBe(state);
+    const idle = createInitialRunnerState('online');
+    expect(runnerReducer(idle, refusal('RUN_DELETED'))).toBe(idle);
+  });
+
+  it('another refusal code is shown but never offers the detach', () => {
+    const state = apply(confirmedRecording(), refusal('INVALID_REQUEST'));
+    expect(state.authority.status).toBe('refused');
+    expect(refusedRunMayBeDetached(state)).toBe(false);
   });
 });
 

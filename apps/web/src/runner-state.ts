@@ -94,6 +94,8 @@ export type RunnerEvent =
   | { attempt: number; run: RunView; type: 'authority-confirmed' }
   | { attempt: number; kind: 'unreachable'; message: string; type: 'authority-unconfirmed' }
   | { attempt: number; code: string; kind: 'refused'; message: string; type: 'authority-unconfirmed' }
+  // The server refused the run in answer to an upload or a command, not to a read. Same meaning as a refused read.
+  | { code: string; message: string; runId: string; type: 'authority-refused' }
   | { type: 'rejected-run-discarded' }
   // The browser's recovery copy of a run the server refused was cleared on purpose. Local only: not a lifecycle
   // event, and nothing about the server run is implied.
@@ -148,12 +150,16 @@ export function captureMayRun(state: RunnerState): boolean {
 // not the run, and never opens the local detach.
 const UNRECOVERABLE_RUN_CODES: ReadonlySet<string> = new Set(['RUN_DELETED', 'RUN_NOT_FOUND', 'ORG_ACCESS_DENIED']);
 
+export function isUnrecoverableRunCode(code: string): boolean {
+  return UNRECOVERABLE_RUN_CODES.has(code);
+}
+
 // Whether the person may be offered the explicit local discard: the server definitely refused this run for one of
 // the codes above. An unreachable server, a restored or unconfirmed run and any other refusal never qualify.
 export function refusedRunMayBeDetached(state: RunnerState): boolean {
   return state.run !== null
     && state.authority.status === 'refused'
-    && UNRECOVERABLE_RUN_CODES.has(state.authority.code);
+    && isUnrecoverableRunCode(state.authority.code);
 }
 
 // Whether the run must be asked about now: a restored or offline-recorded lifecycle, once the browser is online.
@@ -331,14 +337,15 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       }
       return { ...state, authority: { status: 'confirmed' }, run: mergeRunSnapshot(state.run, event.run) };
     case 'authority-requested':
-      // Exactly the next attempt, for a run that still has a lifecycle to ask about; a duplicate request for the
-      // same attempt (two effects in one render) and a request for a finished run change nothing.
+      // The reads are numbered by the coordinator that owns them (run-authority.ts), so a number is accepted when
+      // it is newer than every one seen; a repeated or older number, a request for a finished run and one for a
+      // confirmed run change nothing. A newer request while one is in flight supersedes it (the coordinator
+      // restarts a read after a writer change); the capture an offline read kept running stays running.
       if (
-        event.attempt !== state.authorityAttempt + 1
+        event.attempt <= state.authorityAttempt
         || state.run === null
         || state.run.status === 'finished'
         || state.authority.status === 'confirmed'
-        || state.authority.status === 'confirming'
       ) {
         return state;
       }
@@ -346,11 +353,20 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         ...state,
         authority: {
           attempt: event.attempt,
-          offlineCapture: state.authority.status === 'offline',
+          offlineCapture: state.authority.status === 'confirming'
+            ? state.authority.offlineCapture
+            : state.authority.status === 'offline',
           status: 'confirming',
         },
         authorityAttempt: event.attempt,
       };
+    case 'authority-refused':
+      // A definitive answer from an upload or a command rather than from a read. It is about one run, so a
+      // report for another run, or for none, changes nothing; otherwise it ends whatever read was in flight.
+      if (state.run?.runId !== event.runId) {
+        return state;
+      }
+      return { ...state, authority: { code: event.code, message: event.message, status: 'refused' } };
     case 'authority-confirmed':
       // Only the answer to the read in flight counts, and only for the run it was asked about. The merge is the
       // ordering rule, so an answer older than what is already known cannot move the lifecycle backwards.

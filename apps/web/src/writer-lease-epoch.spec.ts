@@ -44,7 +44,7 @@ function measurementAt(second: number) {
 }
 
 async function withRun(storage: IndexedDbRunnerStorage) {
-  await storage.saveRunSnapshot(userId, orgId, {
+  await storage.activateRunSnapshot(userId, orgId, {
     controlRevision: '0',
     dataRevision: '0',
     finishedAt: null,
@@ -309,5 +309,30 @@ describe('writer lease coordinator epoch', () => {
     await expect(storage.appendPointForWriter(scope, measurementAt(2), current)).resolves.toMatchObject({ seq: '1' });
     await expect(coordinator.assertOwned()).resolves.toBe(true);
     await coordinator.dispose();
+  });
+});
+
+describe('the capability a coordinator currently holds', () => {
+  it('is readable without storage I/O, follows each epoch and is gone after a release, a loss or a dispose', async () => {
+    const { advance, storage } = createFixture();
+    await withRun(storage);
+    const coordinator = new WriterLeaseCoordinator({ onState: () => undefined, ownerId: ownerA, presence: inertPresence, storage, userId });
+    expect(coordinator.currentLease()).toBeNull();
+
+    await coordinator.claim();
+    expect(coordinator.currentLease()).toMatchObject({ fencingToken: '1', ownerId: ownerA, userId });
+    await coordinator.release();
+    expect(coordinator.currentLease()).toBeNull();
+
+    await coordinator.claim();
+    expect(coordinator.currentLease()).toMatchObject({ fencingToken: '2', ownerId: ownerA });
+    // Lost: the lease ran out and another tab took over; the coordinator learns it on its next check.
+    advance(DURATION_MS + 1);
+    await storage.acquireWriterLease(userId, ownerB, DURATION_MS);
+    await expect(coordinator.assertOwned()).resolves.toBe(false);
+    expect(coordinator.currentLease()).toBeNull();
+
+    await coordinator.dispose();
+    expect(coordinator.currentLease()).toBeNull();
   });
 });

@@ -169,7 +169,7 @@ describe('writer lease', () => {
     const second = createStorage(factory, databaseName, clock.now);
     const initial = await first.acquireWriterLease(userId, firstOwner, 100);
     if (!initial.acquired) throw new Error('Expected the first owner to acquire the lease');
-    await first.saveRunSnapshot(userId, orgId, {
+    await first.activateRunSnapshot(userId, orgId, {
       controlRevision: '0',
       dataRevision: '0',
       finishedAt: null,

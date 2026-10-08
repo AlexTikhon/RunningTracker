@@ -54,7 +54,7 @@ describe('IndexedDbRunnerStorage', () => {
       if (uploadFirst) await storage.acknowledgePointBatch(scope, ['1'], '2');
       await storage.acknowledgeCommand(userId, request, recordingRun, { commandId: request.commandId, controlRevision: '1', dataRevision: '1', status: type === 'pause' ? 'paused' : 'finished', finishedAt: type === 'finish' ? '2026-09-26T08:01:00.000Z' : null });
       if (!uploadFirst) await storage.acknowledgePointBatch(scope, ['1'], '2');
-      await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, dataRevision: '3' });
+      await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, dataRevision: '3' });
       await storage.close();
       const reopened = createStorage(factory, databaseName);
       await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ request: null, pendingPointCount: 0, run: { controlRevision: '1', dataRevision: '3', status: type === 'pause' ? 'paused' : 'finished' } });
@@ -71,7 +71,7 @@ describe('IndexedDbRunnerStorage', () => {
     await storage.queueRequest(userId, pause, recordingRun);
     await storage.appendPoint(scope, measurement);
     // The server paused (control revision 1), then auto-finished: status and data revision change, control revision does not.
-    await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' });
+    await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '3', finishedAt: '2026-09-27T08:00:00.000Z', status: 'finished' });
     await storage.acknowledgeCommand(userId, pause, recordingRun, { commandId: pause.commandId, controlRevision: '1', dataRevision: '2', finishedAt: null, status: 'paused' });
     await storage.close();
 
@@ -92,7 +92,7 @@ describe('IndexedDbRunnerStorage', () => {
     await storage.appendPoint(scope, measurement);
     const otherScope = { ...scope, runId: crypto.randomUUID() };
     await storage.appendPoint(otherScope, measurement);
-    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT');
+    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT', (await storage.acquireWriterLease(userId, crypto.randomUUID(), 15_000)).lease);
     await storage.close();
     const reopened = createStorage(factory, name);
     await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ uploadRejection: 'RUN_POINT_LIMIT', pendingPointCount: 1 });
@@ -100,7 +100,7 @@ describe('IndexedDbRunnerStorage', () => {
     const acquisition = await reopened.acquireWriterLease(userId, crypto.randomUUID(), 15_000);
     const lease = acquisition.lease;
     await expect(reopened.discardRejectedRun(scope, lease)).rejects.toThrow('active rejected run');
-    await reopened.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', status: 'finished', finishedAt: '2026-09-26T08:01:00.000Z' });
+    await reopened.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', status: 'finished', finishedAt: '2026-09-26T08:01:00.000Z' });
     const request: CommandRequest = { kind: 'command', orgId, runId, commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'finish' };
     await reopened.queueRequest(userId, request, recordingRun);
     await expect(reopened.exportBufferedPoints(scope)).resolves.toMatchObject([{ seq: '1' }]);
@@ -164,7 +164,7 @@ describe('IndexedDbRunnerStorage', () => {
 
     await storage.acknowledgePointBatch(scope, ['1'], '4');
     await storage.acknowledgePointBatch(scope, ['1'], '3');
-    await storage.saveRunSnapshot(userId, orgId, recordingRun);
+    await storage.activateRunSnapshot(userId, orgId, recordingRun);
 
     await expect(storage.countPoints(scope)).resolves.toBe(1);
     await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
@@ -328,7 +328,7 @@ describe('IndexedDbRunnerStorage', () => {
       await storage.acknowledgeStart(userId, startRequest, recordingRun);
       await storage.saveCaptureSource(userId, 'simulator');
 
-      await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', status: 'paused' });
+      await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', status: 'paused' });
 
       await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
         captureSource: 'simulator',
@@ -566,8 +566,8 @@ describe('discardRefusedRun', () => {
 
   it('does not change what the ordinary discard of a rejected finished run does', async () => {
     const { storage, lease } = await refusedRun();
-    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT');
-    await storage.saveRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', finishedAt: '2026-09-26T08:01:00.000Z', status: 'finished' });
+    await storage.rejectUpload(scope, 'RUN_POINT_LIMIT', lease);
+    await storage.activateRunSnapshot(userId, orgId, { ...recordingRun, controlRevision: '1', dataRevision: '1', finishedAt: '2026-09-26T08:01:00.000Z', status: 'finished' });
     await storage.discardRejectedRun(scope, lease);
     await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 0, request: null, run: null });
   });

@@ -262,7 +262,7 @@ export function RunnerView({
         <StateCard
           detail={runner.run ? `control rev ${runner.run.controlRevision}` : 'No server revision yet'}
           label="Server state"
-          value={runner.error !== null ? 'error' : runner.authority.status === 'confirmed' ? 'confirmed' : runner.authority.status}
+          value={runner.error !== null && runner.authority.status !== 'refused' ? 'error' : runner.authority.status === 'confirmed' ? 'confirmed' : runner.authority.status}
         />
         <StateCard
           detail={writer.status === 'owned' ? `fence ${writer.fencingToken}` : 'Controls require the browser lease'}
