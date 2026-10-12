@@ -34,6 +34,8 @@ import {
   type LiveConnectionManager,
 } from './live/live-sse.js';
 import { createOrganizationRouter } from './organizations/organization.routes.js';
+import { createInterpretationService } from './runs/interpretation/interpretation-factory.js';
+import type { RunSearchInterpreter } from './runs/interpretation/interpretation-types.js';
 import { createRunRouter } from './runs/run.routes.js';
 import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 
@@ -49,6 +51,8 @@ export interface AppDependencies {
   archiveTilePipeline?: ArchiveTilePipeline;
   archiveTileScheduler?: ArchiveTileGenerationScheduler;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
+  /** Replaces the configured interpreter in tests, so that no test can reach a provider. */
+  testOnlyRunSearchInterpreter?: RunSearchInterpreter;
   testOnlyRouter?: Router;
 }
 
@@ -64,9 +68,13 @@ export function createApp({
   archiveTilePipeline,
   archiveTileScheduler,
   testOnlyFaultInjector,
+  testOnlyRunSearchInterpreter,
   testOnlyRouter,
 }: AppDependencies): Express {
-  if ((testOnlyFaultInjector || testOnlyRouter) && config.APP_ENV !== 'test') {
+  if (
+    (testOnlyFaultInjector || testOnlyRouter || testOnlyRunSearchInterpreter) &&
+    config.APP_ENV !== 'test'
+  ) {
     throw new Error('test-only app dependencies require APP_ENV=test');
   }
 
@@ -89,6 +97,14 @@ export function createApp({
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
     });
+  // Undefined unless RUN_SEARCH_AI_ENABLED: then no provider client exists and the route answers 503.
+  const interpretation = createInterpretationService({
+    clock,
+    config,
+    ...(testOnlyRunSearchInterpreter ? { interpreter: testOnlyRunSearchInterpreter } : {}),
+    logger,
+    metrics: metrics.interpretation,
+  });
   const archiveTiles = archiveTileCache ?? new ArchiveTileCache({ clock });
   const archiveTileGenerations =
     archiveTileScheduler ?? new ArchiveTileGenerationScheduler();
@@ -145,6 +161,7 @@ export function createApp({
     createRunRouter({
       clock,
       config,
+      ...(interpretation ? { interpretation } : {}),
       metrics: metrics.ingestion,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,

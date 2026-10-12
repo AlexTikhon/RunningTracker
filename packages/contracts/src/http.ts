@@ -4,10 +4,13 @@ import { pointInputSchema, runStatusSchema, runViewSchema, trackPageSchema } fro
 import {
   coordinatesSchema,
   cursorSchema,
+  ianaTimeZoneSchema,
   latitudeSchema,
+  localDateSchema,
   longitudeSchema,
   nonnegativeFiniteSchema,
   nonnegativeIntegerSchema,
+  parseLocalDate,
   revisionSchema,
   timestampSchema,
   uuidSchema,
@@ -142,6 +145,150 @@ export const runListResponseSchema = z.strictObject({
   items: z.array(runViewSchema).max(100),
   nextCursor: cursorSchema.nullable(),
 });
+
+// Search over the signed-in person's own finished runs. The owner is never a parameter: the server takes it from
+// the session (ADR-0056). A period is either a preset or an inclusive range of local calendar dates in a named
+// time zone; the server turns it into a half-open UTC interval over `started_at`.
+export const RUN_SEARCH_PAGE_MAX = 50;
+export const RUN_SEARCH_DISTANCE_MAX_UNITS = 100_000;
+export const runSearchPresetSchema = z.enum(['this-month', 'previous-month']);
+export const runSearchSortSchema = z.enum(['newest', 'longest', 'shortest']);
+export const distanceUnitSchema = z.enum(['km', 'mi']);
+export const gpsQualitySchema = z.enum(['good', 'poor', 'insufficient']);
+
+// A decimal in the chosen unit with at most three fraction digits, so the server converts it to metres exactly.
+// No sign, no exponent, no leading zero: one spelling per value.
+export const distanceBoundSchema = z
+  .string()
+  .regex(/^(?:0|[1-9]\d{0,5})(?:\.\d{1,3})?$/u)
+  .refine((value) => Number(value) <= RUN_SEARCH_DISTANCE_MAX_UNITS, {
+    message: `A distance bound must not exceed ${RUN_SEARCH_DISTANCE_MAX_UNITS}`,
+  });
+
+/**
+ * The checks shared by a search request and a proposed search: an ordered, inclusive range of at most
+ * `ARCHIVE_PERIOD_MAX_DAYS` days. Dates that are not real calendar dates are left to `localDateSchema`.
+ */
+export function validateInclusiveDateRange(
+  fromDate: string,
+  toDate: string,
+  context: z.RefinementCtx,
+): void {
+  const from = parseLocalDate(fromDate);
+  const to = parseLocalDate(toDate);
+  if (from === null || to === null) {
+    return;
+  }
+  const days =
+    (Date.UTC(to.year, to.month - 1, to.day) - Date.UTC(from.year, from.month - 1, from.day)) / 86_400_000 + 1;
+  if (days < 1) {
+    context.addIssue({ code: 'custom', message: '`fromDate` must not be after `toDate`' });
+  } else if (days > ARCHIVE_PERIOD_MAX_DAYS) {
+    context.addIssue({
+      code: 'custom',
+      message: `The period must not exceed ${ARCHIVE_PERIOD_MAX_DAYS} days`,
+    });
+  }
+}
+
+export const runSearchQuerySchema = z
+  .strictObject({
+    cursor: cursorSchema.optional(),
+    distanceUnit: distanceUnitSchema.optional(),
+    fromDate: localDateSchema.optional(),
+    limit: queryLimit(RUN_SEARCH_PAGE_MAX).optional(),
+    maxDistance: distanceBoundSchema.optional(),
+    minDistance: distanceBoundSchema.optional(),
+    preset: runSearchPresetSchema.optional(),
+    sort: runSearchSortSchema.optional(),
+    timeZone: ianaTimeZoneSchema,
+    toDate: localDateSchema.optional(),
+  })
+  .superRefine((value, context) => {
+    const hasDates = value.fromDate !== undefined || value.toDate !== undefined;
+    if (value.preset !== undefined && hasDates) {
+      context.addIssue({ code: 'custom', message: 'Give either a preset or dates, not both' });
+    } else if (value.preset === undefined) {
+      if (value.fromDate === undefined || value.toDate === undefined) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Give a preset, or both `fromDate` and `toDate`',
+        });
+      } else {
+        validateInclusiveDateRange(value.fromDate, value.toDate, context);
+      }
+    }
+    const hasBound = value.minDistance !== undefined || value.maxDistance !== undefined;
+    if (hasBound && value.distanceUnit === undefined) {
+      context.addIssue({ code: 'custom', message: 'A distance bound needs an explicit `distanceUnit`' });
+    }
+    if (!hasBound && value.distanceUnit !== undefined) {
+      context.addIssue({ code: 'custom', message: '`distanceUnit` needs a distance bound' });
+    }
+    if (
+      value.minDistance !== undefined &&
+      value.maxDistance !== undefined &&
+      Number(value.minDistance) > Number(value.maxDistance)
+    ) {
+      context.addIssue({ code: 'custom', message: '`minDistance` must not exceed `maxDistance`' });
+    }
+  });
+
+export const runSearchItemSchema = z.strictObject({
+  distanceM: nonnegativeFiniteSchema,
+  // Derived by the server from the summary's quality statistics; see ADR-0056 for the rule.
+  gpsQuality: gpsQualitySchema,
+  // The summary's `observedDurationS`: the sum of the durations of the run's accepted edges (ADR-0013). Time spent
+  // across rejected edges, gaps and pauses is not in it, so it is not the time between the first and the last
+  // measurement, and it is not moving time or workout time.
+  observedDurationS: nonnegativeFiniteSchema,
+  runId: uuidSchema,
+  startedAt: timestampSchema,
+});
+export const runSearchResponseSchema = z.strictObject({
+  // What the server actually applied: the resolved period and the distance bounds in metres.
+  applied: z.strictObject({
+    from: timestampSchema,
+    fromDate: localDateSchema,
+    maxDistanceM: nonnegativeFiniteSchema.nullable(),
+    minDistanceM: nonnegativeFiniteSchema.nullable(),
+    sort: runSearchSortSchema,
+    timeZone: ianaTimeZoneSchema,
+    to: timestampSchema,
+    toDate: localDateSchema,
+  }),
+  items: z.array(runSearchItemSchema).max(RUN_SEARCH_PAGE_MAX),
+  nextCursor: cursorSchema.nullable(),
+  // Finished runs of this person in the period that have no current summary yet, counted before any distance
+  // filter. They are not in `items` and nothing is claimed about whether they match.
+  pendingSummaryCount: nonnegativeIntegerSchema,
+});
+
+// The decoded content of `nextCursor`. Opaque to clients; documented so the server's checks are explicit. `context`
+// is a digest of the person, the organization and every filter that shapes the result set, so a cursor from a
+// different query is refused instead of silently paging a different set.
+export const runSearchCursorSchema = z
+  .strictObject({
+    context: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+    // `double precision::text` of the last item's distance; null when the sort is not by distance.
+    distanceKey: z
+      .string()
+      .regex(/^(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?$/u)
+      .nullable(),
+    runId: uuidSchema,
+    sort: runSearchSortSchema,
+    startedAt: timestampSchema,
+    version: z.literal(1),
+  })
+  .superRefine((cursor, context) => {
+    if ((cursor.sort === 'newest') !== (cursor.distanceKey === null)) {
+      context.addIssue({
+        code: 'custom',
+        message: '`distanceKey` is required exactly for the distance sorts',
+        path: ['distanceKey'],
+      });
+    }
+  });
 
 export const pointsQuerySchema = z.strictObject({
   cursor: cursorSchema.optional(),
@@ -321,6 +468,14 @@ export type UpsertRunShareRequest = z.infer<typeof upsertRunShareRequestSchema>;
 export type RunShareResponse = z.infer<typeof runShareResponseSchema>;
 export type RunListQuery = z.infer<typeof runListQuerySchema>;
 export type RunListResponse = z.infer<typeof runListResponseSchema>;
+export type RunSearchQuery = z.infer<typeof runSearchQuerySchema>;
+export type RunSearchResponse = z.infer<typeof runSearchResponseSchema>;
+export type RunSearchItem = z.infer<typeof runSearchItemSchema>;
+export type RunSearchCursor = z.infer<typeof runSearchCursorSchema>;
+export type RunSearchPreset = z.infer<typeof runSearchPresetSchema>;
+export type RunSearchSort = z.infer<typeof runSearchSortSchema>;
+export type DistanceUnit = z.infer<typeof distanceUnitSchema>;
+export type GpsQuality = z.infer<typeof gpsQualitySchema>;
 export type PointsQuery = z.infer<typeof pointsQuerySchema>;
 export type PointsResponse = z.infer<typeof pointsResponseSchema>;
 export type LiveTrackChangesQuery = z.infer<typeof liveTrackChangesQuerySchema>;

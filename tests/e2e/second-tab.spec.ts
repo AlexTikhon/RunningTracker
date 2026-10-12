@@ -13,6 +13,10 @@ test('second tab: a competing tab cannot record', async ({ context, environment,
   await first.start();
   await expect(first.card('Recording').value).toHaveText('recording');
   await expect(first.card('Writer').value).toHaveText('owned');
+  // The simulator takes 10 s over its six points, so the capture is in progress here with a wide margin. This is the
+  // only place the test relies on that window: the second tab below needs more than 3 s (the writer's takeover wait)
+  // plus its own page load to report a conflict, so by then the capture may or may not have finished.
+  await expect(first.card('Capture').value).toHaveText('capturing');
 
   const runId = await first.runId(api, scenario.orgId);
   await expect
@@ -30,10 +34,15 @@ test('second tab: a competing tab cannot record', async ({ context, environment,
   await second.openRestoredRun();
   await second.expectReadOnly();
 
-  // While the first tab is still capturing, the second tab is read-only and idle, and the first still owns the lease.
+  // The second tab is read-only and idle, and the first still owns the lease. Whether the first tab's capture is still
+  // running when the conflict shows depends on how fast the second tab loads (it was caught at about 8 of 10 s on an
+  // idle machine and is already finished on a loaded one), so the assertion is the invariant that does not: the
+  // competing tab did not interrupt the first tab's capture. A stopped, lost or restarted capture would read
+  // error, lost, starting or idle; the point count, the single run and the second tab's traffic below then show
+  // that exactly the first tab's six points were taken once.
   await expect(second.card('Writer').value).toHaveText('conflict');
   await expect(second.card('Capture').value).toHaveText('idle');
-  await expect(first.card('Capture').value).toHaveText('capturing');
+  await expect(first.card('Capture').value).toHaveText(/^(capturing|complete)$/);
   await expect(first.card('Writer').value).toHaveText('owned');
 
   // The first tab finishes the run alone.

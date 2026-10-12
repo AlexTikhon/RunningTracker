@@ -9,6 +9,12 @@ import {
   oidcEnvironmentFields,
   withoutOidcFields,
 } from './oidc-config.js';
+import {
+  buildRunSearchAiConfig,
+  checkRunSearchAiEnvironment,
+  runSearchAiEnvironmentFields,
+  withoutRunSearchAiFields,
+} from './run-search-ai-config.js';
 import { resolveSecretFiles } from './secret-files.js';
 
 const canonicalUuidPattern =
@@ -249,6 +255,7 @@ const environmentSchema = z
       .default(8 * 60 * 60 * 1_000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
     ...oidcEnvironmentFields,
+    ...runSearchAiEnvironmentFields,
   })
   .superRefine((environment, context) => {
     let runtime: ParsedDatabaseConnection | undefined;
@@ -368,12 +375,18 @@ const environmentSchema = z
       });
     }
     checkOidcEnvironment(environment, environment, context);
+    checkRunSearchAiEnvironment(environment, environment, context);
   })
-  // The raw OIDC_* variables (including the client secret) are replaced by one structured value.
+  // The raw OIDC_* and RUN_SEARCH_AI_* variables (including the secrets) are replaced by one structured value each.
   .transform((environment) => {
-    const application = withoutOidcFields(environment);
+    const application = withoutRunSearchAiFields(withoutOidcFields(environment));
     const oidc = buildOidcConfig(environment);
-    return { ...application, ...(oidc ? { OIDC: oidc } : {}) };
+    const runSearchAi = buildRunSearchAiConfig(environment);
+    return {
+      ...application,
+      ...(oidc ? { OIDC: oidc } : {}),
+      ...(runSearchAi ? { RUN_SEARCH_AI: runSearchAi } : {}),
+    };
   });
 
 export type Environment = z.infer<typeof environmentSchema>;
@@ -436,12 +449,23 @@ function environmentSource(options: LoadEnvironmentOptions): Record<string, stri
   };
 }
 
+/**
+ * The raw variables as the application sees them (`.env` files below the process environment), before any
+ * validation. For command-line tools that need a few settings and not the whole application configuration.
+ */
+export function loadEnvironmentSource(
+  options: LoadEnvironmentOptions = {},
+): Record<string, string | undefined> {
+  return environmentSource(options);
+}
+
 // Only credentials and key material may come from a mounted secret file.
 const secretFileVariables = [
   'DATABASE_URL',
   'MAINTENANCE_DATABASE_URL',
   'LIVE_TRACK_CURSOR_SIGNING_KEY',
   'OIDC_CLIENT_SECRET',
+  'OPENAI_API_KEY',
 ] as const;
 
 type ParsedIntegrationDatabaseConnection = ParsedDatabaseConnection;

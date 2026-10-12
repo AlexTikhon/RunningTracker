@@ -721,6 +721,7 @@ export function App() {
         session.status === 'ready' && selectedOrgId !== null ? (
           <ArchiveScreen
             accessToken={mapboxAccessToken}
+            csrf={session.session.csrf}
             orgId={selectedOrgId}
             userId={session.session.identity.userId}
           />

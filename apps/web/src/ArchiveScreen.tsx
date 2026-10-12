@@ -6,7 +6,8 @@ import {
   type ArchivePeriod,
   type ArchiveSourceSnapshot,
 } from './archive-source.js';
-import { loadArchiveMetadata } from './runner-api.js';
+import { RunSearchPanel } from './RunSearchPanel.js';
+import { loadArchiveMetadata, type CsrfCredentials } from './runner-api.js';
 
 const initialSnapshot: ArchiveSourceSnapshot = {
   checkedAt: null,
@@ -50,11 +51,12 @@ function periodIsValid(period: ArchivePeriod): boolean {
 
 export interface ArchiveScreenProps {
   accessToken: string | null;
+  csrf: CsrfCredentials;
   orgId: string;
   userId: string;
 }
 
-export function ArchiveScreen({ accessToken, orgId, userId }: ArchiveScreenProps) {
+export function ArchiveScreen({ accessToken, csrf, orgId, userId }: ArchiveScreenProps) {
   const defaults = useMemo(initialDates, []);
   const [fromDate, setFromDate] = useState(defaults.fromDate);
   const [toDate, setToDate] = useState(defaults.toDate);
@@ -172,6 +174,8 @@ export function ArchiveScreen({ accessToken, orgId, userId }: ArchiveScreenProps
         </span>
         <span>Metadata refreshes every 30 seconds and immediately on tab focus.</span>
       </footer>
+
+      <RunSearchPanel csrf={csrf} key={`${userId}/${orgId}`} orgId={orgId} userId={userId} />
     </section>
   );
 }

@@ -5,6 +5,8 @@ import {
   liveTrackResponseSchema,
   organizationListResponseSchema,
   runCommandResponseSchema,
+  runSearchInterpretationResponseSchema,
+  runSearchResponseSchema,
   runViewSchema,
   sessionResponseSchema,
   type ArchiveMetadataResponse,
@@ -13,6 +15,8 @@ import {
   type PointInput,
   type RunCommandResponse,
   type RunCommandType,
+  type RunSearchInterpretationResponse,
+  type RunSearchResponse,
   type RunView,
   type SessionResponse,
 } from '@running-tracker/contracts';
@@ -167,6 +171,44 @@ export async function loadArchiveMetadata(
     },
   );
   return archiveMetadataResponseSchema.parse(requireSuccess(response));
+}
+
+// "My runs" search: only the signed-in person's own finished runs. The owner is never sent; the server takes it
+// from the session. `params` are the validated query fields (see run-search.ts).
+export async function searchRuns(
+  input: { orgId: string; params: Record<string, string> },
+  signal: AbortSignal,
+): Promise<RunSearchResponse> {
+  const query = new URLSearchParams(input.params);
+  const response = await requestJson(
+    `/api/orgs/${encodeURIComponent(input.orgId)}/runs/search?${query.toString()}`,
+    {
+      credentials: 'same-origin',
+      signal,
+    },
+  );
+  return runSearchResponseSchema.parse(requireSuccess(response));
+}
+
+// Asks the server to turn a sentence into a filter proposal. Sends only the text and the zone; the owner comes from
+// the session. One call is one billable provider request, so nothing here retries, and the caller decides whether a
+// late answer is still wanted.
+export async function interpretRunSearch(
+  input: { orgId: string; text: string; timeZone: string },
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<RunSearchInterpretationResponse> {
+  const response = await requestJson(
+    `/api/orgs/${encodeURIComponent(input.orgId)}/runs/search/interpretations`,
+    {
+      body: JSON.stringify({ text: input.text, timeZone: input.timeZone }),
+      credentials: 'same-origin',
+      headers: mutationHeaders(csrf),
+      method: 'POST',
+      signal,
+    },
+  );
+  return runSearchInterpretationResponseSchema.parse(requireSuccess(response));
 }
 
 export async function createRun(

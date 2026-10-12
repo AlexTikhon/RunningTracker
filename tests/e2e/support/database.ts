@@ -163,6 +163,94 @@ export async function createExtraOrganization(
   return orgId;
 }
 
+export interface FinishedRunSeed {
+  // null: no summary at all, so the run is "still being processed" as far as search is concerned.
+  readonly distanceM: number | null;
+  readonly durationS?: number;
+  readonly quality?: 'good' | 'insufficient' | 'poor';
+  readonly startedAt: string;
+  readonly userId: string;
+}
+
+// Finished runs with a published summary, written directly as the owner role in the scenario's organization, so a
+// browser test does not wait for GPS ingestion and the summary worker. The summary carries the algorithm version the
+// worker itself would write, otherwise the worker would rebuild it from the (absent) points. A run without a
+// summary is marked purged so the worker, which only takes runs whose raw points are available, leaves it
+// pending for the whole test. Removed with the organization (cascades), like every other row here.
+export async function createFinishedRuns(
+  environment: E2eEnvironment,
+  orgId: string,
+  runs: readonly FinishedRunSeed[],
+): Promise<string[]> {
+  return withOwnerTransaction(environment, async (client) => {
+    const version = await client.query<{ version: string }>(
+      'SELECT app_private.current_track_algorithm_version() AS version',
+    );
+    const algorithmVersion = version.rows[0]?.version;
+    if (algorithmVersion === undefined) {
+      throw new Error('The current algorithm version is unknown');
+    }
+    const ids: string[] = [];
+    for (const run of runs) {
+      const id = randomUUID();
+      ids.push(id);
+      const durationS = run.durationS ?? 1_800;
+      const finishedAt = new Date(Date.parse(run.startedAt) + Math.max(durationS, 60) * 1_000).toISOString();
+      await client.query(
+        `INSERT INTO runs (org_id, id, user_id, status, started_at, created_at, finished_at, data_revision, raw_state)
+         VALUES ($1, $2, $3, 'finished', $4, $4, $5, 1, $6)`,
+        [orgId, id, run.userId, run.startedAt, finishedAt, run.distanceM === null ? 'purged' : 'available'],
+      );
+      if (run.distanceM !== null) {
+        const quality = run.quality ?? 'good';
+        const raw = quality === 'insufficient' ? 6 : Math.max(Math.round(durationS / 2), 2);
+        const accepted = quality === 'insufficient' ? 0 : quality === 'poor' ? Math.round(raw * 0.7) : raw;
+        await client.query(
+          `INSERT INTO run_summaries (
+             org_id, run_id, source_revision, algorithm_version, distance_m, observed_duration_s, quality_stats
+           ) VALUES ($1, $2, 1, $3, $4, $5, $6::jsonb)`,
+          [
+            orgId,
+            id,
+            algorithmVersion,
+            run.distanceM,
+            durationS,
+            JSON.stringify({
+              acceptedEdgeCount: Math.max(accepted - 1, 0),
+              acceptedPointCount: accepted,
+              excessiveSpeedCount: 0,
+              excessiveTimeGapCount: 0,
+              insufficientData: quality === 'insufficient',
+              nonpositiveTimeDeltaCount: 0,
+              poorAccuracyPointCount: raw - accepted,
+              rawPointCount: raw,
+              segmentBreakCount: 0,
+              seqGapCount: 0,
+            }),
+          ],
+        );
+      }
+    }
+    return ids;
+  });
+}
+
+// An ordinary history share, written directly so a test can make a run readable to someone who is not its owner.
+export async function shareRunHistory(
+  environment: E2eEnvironment,
+  orgId: string,
+  runId: string,
+  granteeUserId: string,
+): Promise<void> {
+  await withOwnerTransaction(environment, async (client) => {
+    await client.query(
+      `INSERT INTO run_shares (org_id, run_id, grantee_user_id, can_read_history, can_read_live)
+       VALUES ($1, $2, $3, true, false)`,
+      [orgId, runId, granteeUserId],
+    );
+  });
+}
+
 // Ends or restores one membership in place. The row is the scenario's own, so it is removed with the organization.
 export async function setMembershipActive(
   environment: E2eEnvironment,

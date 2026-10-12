@@ -1827,3 +1827,209 @@ new specs (`reject(request.error)`).
 
 **Not verified / limits:** `acknowledgeStart/Command/Reconciled` and `queueRequest` still check ownership just before, not
 inside, their transactions (ADR-0055); two real devices or browsers other than Chromium; a hosted CI run.
+
+## Owner-only archive search, first stage (2026-10-11)
+
+Scope: "Smart search through my runs", the deterministic part only. No language model, no natural-language parsing,
+no detail page, no new map. Design and limits: ADR-0056. No migration, no dependency, no change to an existing
+authorization, ingestion or lifecycle behaviour.
+
+**What works.** `GET /api/orgs/{orgId}/runs/search`: the session's own finished runs with a current published summary
+(`source_revision = data_revision`), by a preset or inclusive local dates in an IANA zone, converted by the server to
+`[from, to)` over `started_at` with DST-safe day boundaries; minimum/maximum distance in `km` or `mi` converted exactly
+to metres; `newest`/`longest`/`shortest` with keyset paging and a context-bound cursor; `pendingSummaryCount` for
+finished runs without a current summary, before the distance filter. Web: a "My runs" section under the archive map
+with an editable draft, a separate "Applied filters" block, cards (start in the selected zone, distance, observed
+duration, GPS data label), loading/empty/error-with-retry/next-page states and the pending notice. The general run list
+and the map are unchanged. `npm run demo:seed:search` adds 67 synthetic runs (additive, idempotent).
+
+**Red before green** (written first, failed for the expected reason): the 69 contract tests, the period, query and
+SQL-variant tests, the 41 endpoint tests (the route fell into `/:runId` and answered 400), the controller and component
+tests, the seed-plan tests. The helper tests of `run-search.ts` and the seed integration test were written together
+with their module and were not watched red; they were mutation-checked instead.
+
+**Executed (Node 24.11.1, npm 11.6.2, real PostGIS 17/3.5 test database, runtime role):**
+
+- `npm run verify`: exit 0. Scripts 48 (was 36), API 849 in 94 files (was 771), web 456 (was 390), contracts 87 (was
+  18), fixtures 14, simulator 3: **1457** (was 1232). Lint, typecheck, all builds.
+- `npm run test:integration`: 43 files, **426** tests (was 378 in 41): `run-search.integration.test.ts` (41) and
+  `demo-search-seed.integration.test.ts` (7). Reran the two files after the last edit: 48 pass.
+- `npm run test:e2e`: **79** passed in 5.3 minutes (was 74): `tests/e2e/run-search.spec.ts` (5) in the `chromium`
+  project; the deliberately failing harness test is the expected failure. The search spec alone was rerun after the
+  last source edit: 5 passed.
+- `git diff --check`: exit 0 (only the LF/CRLF working-copy notices).
+
+**Covered.** Timezone: Warsaw spring (23 h) and autumn (25 h), New York, Lord Howe (23.5 h), Sao Paulo (no midnight),
+Havana (two midnights), Asuncion (clocks back from 00:00), Apia (a skipped date), month/year/leap boundaries, and a
+tiling test that walks a year of days in eight zones; presets from an injected clock across a local month change.
+Units: kilometres and miles, exact conversion (a value where binary multiplication is off), inclusive bounds, display
+rounding never filtering (4999.96 m against 5 km), invalid and ambiguous inputs, unknown fields including an owner.
+Authorization under the runtime role: a shared run readable through the list but absent from search, another
+organization's runs, a teammate's own list, an organization the person is not in (403), an inactive member (403), 401.
+Summaries: missing and stale counted as pending before the distance filter, becoming items when published or
+republished. Paging: every sort, ties on start and distance across a page boundary, limits 1/2/4, cursors refused for
+another sort, bound, period, zone, organization, person, and for garbage. Browser: filters applied separately from the
+draft, a first page of 20 and a next page, an organization switch while the next page is held (the late answer changes
+nothing), error and retry, lost access, miles, and the owner-only list when a run is shared with the person.
+
+**Mutation checks** (temporary, reverted, files compared with backups afterwards): removing the owner filter by
+`$2::uuid IS NOT NULL` failed the owner, organization, period, order and paging endpoint tests and the browser's
+shared-run test; removing the summary revision match failed the stale and pending tests; counting without the
+`finished` filter failed 4; `<=` in the newest keyset predicate failed the newest paging test; removing the panel's
+person/organization key failed the browser organization-switch test. Two of my first mutations broke the SQL (an
+untyped parameter) instead of changing its meaning, so they proved less than they seemed; the owner mutation was
+redone cleanly.
+
+**Mistakes during the work.** Three expectations of mine were wrong and the code was right (13.1 mi is 21082.4064 m,
+`0.3 * 1609.344` happens to be exact so another value is used to show the binary error, m10/m11 fall inside 3.1-6.2 mi);
+the seed integration test counted the suite's own fixture runs; a quoted-heredoc patch script lost a regex backslash
+twice (caught by the specs at once); the first `npm run verify` failed on an unused constant in `scripts/` that my
+file-by-file lint had not covered; the formatter cache was keyed by the raw zone string, which `Intl` accepts in any
+letter case, so a client could have grown it without bound (now keyed by the lower-cased name, with a test).
+
+**Not verified / limits.** No measurement of the search statement on a production-size table (the ADR's index
+argument is a design argument); algorithm-version staleness is not considered (the rule given is existence plus source
+revision); browser and server may disagree about a very new zone name; Chromium only; the demo seed was exercised
+against the isolated test database and its plan by unit tests, not run against the developer's `running_tracker`
+database; the hosted CI job has not run these commits. Next stage: translate a natural-language request into this
+contract with a language model.
+
+## Natural-language filter proposals for My runs, second search stage (2026-10-12)
+
+Decision record: `docs/adr/0057-natural-language-filter-proposals.md`. Runbook: `docs/runbooks/run-search-ai.md`.
+
+**Starting point, checked.** The brief said stage 1 was uncommitted. It is not: `git status` was clean on
+`feat/browser-e2e` and the three stage-1 commits (`7d7bd25`, `cc082a8`, `9735e91`) hold it. Nothing had to be
+preserved beyond HEAD. The `observedDurationS` wording was verified as wrong: migration 0009 computes
+`sum(edge.duration_s) FILTER (WHERE edge.accepted)` (ADR-0013 says the same), not the time between the first and the
+last measurement. Corrected in `packages/contracts/src/http.ts`, the results screen's note, and ADR-0056; no
+algorithm or number changed.
+
+**What works.** An optional "Describe the runs you want" box above the My runs filters (English or Russian), an
+explicit **Interpret** button and the OpenAI disclosure before any send. `POST
+/api/orgs/{orgId}/runs/search/interpretations` answers `search` (a complete, validated replacement filter set),
+`clarify` or `unsupported` (bounded reason codes; the screen owns every sentence). A proposal only fills the draft;
+the existing "Apply filters" and endpoint search. Real adapter: one Responses API call (strict JSON schema,
+`store: false`, explicit model, no tools, no retries, bounded body, own deadline). Deterministic fake adapter for
+tests and demos. Per-process admission: rate per person, one in flight per person, global concurrency, rolling
+allowance. A strict distance bound, a place, a pace and other unsupported conditions are explained, never
+approximated or dropped. Off by default; disabled needs no credential.
+
+**Red before green.** Watched failing first: the 41 contract tests (module missing), the 20 configuration tests, the
+28 route tests (route and dependency missing), the observed-duration wording test, the pace/sort prompt test, the
+web client tests. **Written first but not watched red** (the first run was after the implementation, so they could
+only have failed on a missing import): admission, provider schema, normalizer, prompt, adapter, fake, service,
+evaluator and CLI tests, the web mapping, controller and component tests, and the integration and browser specs.
+The controller's stale-answer guard was mutation-checked instead (below).
+
+**Executed (Node 24.11.1, npm 11.6.2; PostgreSQL/PostGIS container `running-tracker-postgres-1`; Chromium).**
+
+- `npm run verify`: exit 0. Scripts 48; API **1075** in 103 files (was 849); web **520** in 44 (was 456); contracts
+  **128** (was 87); fixtures 14; simulator 3: **1788** (was 1457, +331). Lint, typecheck, all builds.
+- `npm run test:integration`: exit 0, 44 files, **433** tests (was 426 in 43): `run-search-interpretation.
+  integration.test.ts` (7): a member is answered and no run, summary, point, share or archive table is touched
+  (every statement recorded); no membership, an inactive membership and another organization's member get 403
+  before any provider call; the whole route on a **one-connection pool** stays usable while the provider is held;
+  a membership revoked mid-flight returns 403 and not the proposal.
+- `npm run test:e2e`: **85** tests, **84 passed, 1 failed** (was 79). The six new scenarios in
+  `tests/e2e/run-search-interpretation.spec.ts` pass (45 s alone, with the fake provider): proposal, review, apply
+  with the interpretation request body asserted to be the text and the zone only and no search made in between;
+  edit before apply; clarification and unsupported in fixed wording with manual filters still working; provider
+  failure with no automatic retry; a server without the feature (a 503 `INTERPRETATION_DISABLED` is information, the
+  button is disabled, manual search works); and a delayed answer arriving after a manual edit and after an
+  organization switch changing nothing. **The failure is `second-tab.spec.ts:6` ("a competing tab cannot
+  record"): the first tab's capture is `complete` where the test expects `capturing`.** It fails the same way alone
+  and on a clean checkout of HEAD with all of this work stashed (reproduced once each), so this change did not
+  cause it; it looks like Runner-simulator timing on a loaded machine (Docker Desktop had just been restarted) and
+  was not diagnosed further. The previous baseline of 79 passing tests was recorded on 2026-10-11 on the same suite.
+- `git diff --check`: exit 0 (only the LF/CRLF working-copy notices).
+- `npm run eval:run-search` without `--live` refuses; with `--dry-run` and no model or key it names the two
+  variables and stops (never a value). **It was not run with `--live`: no request has been made to OpenAI by any of
+  this.**
+
+**Mutation check** (temporary, reverted, file compared afterwards): making the interpretation controller's
+`#wanted` ignore its generation counter failed three tests (late answer after `invalidate`, late failure, newest
+interpretation wins) and the 27 tests pass again after restoring. No other mutation checks were done; in particular
+the browser scenarios were not mutation-checked, and the abort-ignoring transport is only exercised in unit tests.
+
+**Mistakes during the work.** `userStranger` in the tenant fixtures is an *active coach* of organization A, so my
+"no membership" integration case got a 200 for a correct reason; the test was wrong and now uses a user with no
+membership. Backticks inside a `node -e` string were command-substituted by the shell once more (the known gotcha),
+which emptied one assertion; fixed with the Edit tool. The new browser helper selected an organization in a picker
+that only exists with two or more memberships (five scenarios failed on that). A test stream pulled eagerly
+(`highWaterMark`). While writing the dataset I found that my prompt filed "fastest" under both `sort_order` and
+`pace_or_speed`; fixed with a test and the prompt version bumped. The ADR first quoted dataset counts I had not
+computed (60; 49 en / 11 ru) and the SDK's environment reads from memory; both were re-derived from the file and the
+installed SDK (65; 51 / 14; `OPENAI_BASE_URL`, `_ORG_ID`, `_PROJECT_ID`, `_ADMIN_KEY`, `_WEBHOOK_SECRET`, `_LOG`,
+`_CUSTOM_HEADERS`). The Docker engine was not running when the integration tests were first needed; I started
+Docker Desktop. Stash/pop (to test HEAD) rewrote line endings of new files to the working tree's CRLF; contents were
+compared to a backup and are identical.
+
+**Not verified / limits.**
+
+- **Live model behaviour: nothing is known.** Whether OpenAI accepts this strict schema, whether the model name
+  guard matches real availability, token use, latency, cost and the model's accuracy on the 65 cases are all
+  unmeasured. The fake adapter's rules and the evaluator's oracle say nothing about them.
+- Provider documentation was read on 2026-10-12 (Structured Outputs, migration to Responses) and the SDK's types used
+  for names; the service itself was not contacted. `openai` 7.22.0 is pinned (three weeks old when chosen).
+- Limits are per process, in memory, reset on restart and doubled by a second process; not a budget.
+- A very new zone name can differ between browser and server; Chromium only.
+- The pre-existing `second-tab` failure above.
+- Hosted CI has not run these changes.
+
+## Run-search interpreter: verification stage, offline complete, live unavailable (2026-10-12)
+
+Report: `docs/reports/run-search-interpretation-verification.md`. Runbook: `docs/runbooks/run-search-ai.md`. ADR-0057
+addendum. No new product feature.
+
+**Starting point, checked.** The brief said the interpreter changes were uncommitted; `git status` was clean and
+`d5f8b9f`, `59281ff`, `47b8e43` hold them. Nothing had to be preserved beyond HEAD.
+
+**The known browser failure, diagnosed.** `second-tab.spec.ts:6` asserted that the first tab was still `capturing`
+after the second tab had reached `conflict`. The simulator takes 10 s over six points (0, 2, ..., 10 s). A probe with
+timestamps showed the second tab needs about 6.5 s to report the conflict (page load plus the writer lease takeover
+wait of 3 s, ADR-0047/0053), so the assertion ran at about 8.1 s of 10 s: roughly 1.9 s of margin on an idle
+machine. Root cause: **a test depending on a transient state of the simulator**, not a fixture or an ownership
+defect. Reproduced deterministically by throttling only the second tab (CPU rate 6): the original assertion fails with
+the recorded message (expected `capturing`, received `complete`) while every later invariant holds. Fix: the test
+still asserts `capturing` once, at the start, where the margin is about 10 s, and after the conflict asserts the
+invariant that does not depend on speed: the first tab reads `capturing` or `complete` (not `error`, `lost`,
+`starting` or `idle`), owns the lease, ends with exactly six unique gap-free points, one run, no request of the second
+tab to a points endpoint and no non-GET. No timeout, sleep, retry or skip was added and no assertion removed.
+
+**Provider compatibility, by reading.** Request shape, strict-schema rules and the incomplete/refusal handling match
+the documentation read today and the installed SDK (7.22.0). Added tests: the documented schema limits and nullable
+form, the configured output cap with no `reasoning`/sampling parameter, a reasoning-model response, reasoning that
+exhausts the cap (incomplete), a tool call is not an answer, absent usage details are null not zero, a realistic echoed
+body stays under half the response limit. **The 800-token default was not changed**: no model is known and nothing is
+measured. The model-name guard wording (error, comment, `.env.example`, runbook) no longer implies it proves support.
+
+**Evaluator review and fixes.** Failed calls were already in every denominator and wrong outcomes already stayed in
+exact-filter accuracy; periods and distances were already compared by meaning. Gaps fixed, each with a test: no
+English/Russian split, no numerators/denominators, no explicit count of requests wrongly accepted as searches, a
+category of all-failed searches showed no figure, no cached/reasoning tokens, a partial run was only an "N of M" line,
+a bad key would spend the whole budget (now stops after 3 identical systemic failures), smoke selection was the first
+N of the file (now `--cases` by id, validated before any request). The run records SDK version and hashes of the
+instructions and the schema.
+
+**Executed.** `npm run verify`: exit 0. Scripts 48; API **1096** in 103 files (was 1075); web 520; contracts 128;
+fixtures 14; simulator 3: **1809** (was 1788, +21). `npm run test:integration`: 44 files, **433** (unchanged).
+`npm run test:e2e`: **85 passed, 0 failed** (7.0 min; the previously failing test passes). Both second-tab tests
+repeated 10 times serially after the fix: 20 of 20 passed. `git diff --check`: exit 0.
+
+**Live verification: unavailable.** `RUN_SEARCH_AI_MODEL` and `OPENAI_API_KEY` (or `_FILE`) exist nowhere in the
+process, user or machine environment or in `.env`. **Provider dispatches used: 0 of 75.** The fake adapter was not
+substituted. Dry runs (no request) were made with a placeholder model and key set only in that command, to check the
+selection and configuration paths. Real provider compatibility, the semantic baseline and the real-provider browser
+path are all **not verified**.
+
+**Mistakes during the work.** The first repeat command went through `npm run test:e2e -- ... --repeat-each` and the
+nested npm swallowed the flags; Playwright has to be run from `tests/e2e` with `npx` for flags. The failure could not
+be reproduced on an idle machine in 11 runs (1 + 10); it needed the throttled probe, so the diagnosis rests on the
+timing evidence and that reproduction, not on watching the original flake recur. The compatibility tests were written
+after the code and mostly pass without it, except the usage-detail ones; they are coverage, not a red-first proof.
+
+**Not verified / limits.** Everything under "Live verification". Reasoning models may need a larger output cap or
+more than the 12 s deadline cap allows; unknown until a run. Limits are still per process. Hosted CI has not run these
+changes. `packages/contracts/openapi/openapi.json` appears modified in `git status` after the build with no content
+difference (line endings only).

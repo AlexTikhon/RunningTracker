@@ -8,6 +8,7 @@ describe('ArchiveScreen', () => {
     const markup = renderToStaticMarkup(
       <ArchiveScreen
         accessToken={null}
+        csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }}
         orgId="11111111-1111-4111-8111-111111111111"
         userId="22222222-2222-4222-8222-222222222222"
       />,
@@ -18,5 +19,21 @@ describe('ArchiveScreen', () => {
     expect(markup).toContain('Refresh now');
     expect(markup).toContain('Map provider not configured');
     expect(markup).toContain('Metadata refreshes every 30 seconds');
+  });
+
+  it('keeps the map and its period apart from the owner-only search section', () => {
+    const markup = renderToStaticMarkup(
+      <ArchiveScreen
+        accessToken={null}
+        csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }}
+        orgId="11111111-1111-4111-8111-111111111111"
+        userId="22222222-2222-4222-8222-222222222222"
+      />,
+    );
+
+    expect(markup).toContain('Archive period');
+    expect(markup).toContain('My runs');
+    expect(markup).toMatch(/only runs you recorded/iu);
+    expect(markup.indexOf('Map provider not configured')).toBeLessThan(markup.indexOf('My runs'));
   });
 });

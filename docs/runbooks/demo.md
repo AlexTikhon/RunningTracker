@@ -100,6 +100,47 @@ about a minute. Then open the Archive tab; it uses the same organization. With a
 from revision-bound tiles; the view picks up the new archive revision by itself within 30 seconds or on tab focus.
 Without a token, the tab shows the token notice and nothing is drawn.
 
+## 5a. Search my runs
+
+The Archive tab has a **My runs** section under the map: a period (this month, previous month or custom dates), a
+minimum and maximum distance, kilometres or miles, and a sort. It lists only runs you recorded; the map above can
+also show routes other people shared with you, which is why the two can differ. This does not need a Mapbox token.
+
+Fill it with synthetic data (explicit, additive, idempotent; it refuses anything but the local development database
+and `APP_ENV=production`):
+
+```sh
+npm run demo:seed:search            # the current UTC month, the previous one and the one before
+npm run demo:seed:search -- --month 2026-09   # a specific month
+```
+
+It writes 67 runs for the demo runner (`…0001`, the same person you signed in as in step 3): 47 of the runner's own in
+organization `dddddddd-dddd-4ddd-8ddd-dddddddd1000`, eight by two teammates (four shared with the runner, which the
+search must not list), and a second organization `…1001` with the runner's long runs and a stranger's. Sign in as the
+runner (step 3 with `…0001`), open Archive and:
+
+1. Look at **My runs** with the defaults (this month, newest first). The browser's time zone is shown.
+2. Change the minimum to `5`, the maximum to `15`, the sort to *Longest first* and press **Apply filters**. The
+   "Applied filters" block changes only now; editing the fields before pressing the button changes nothing in the list.
+3. Press **Load more runs** for the next page. Equal distances stay in a fixed order across the page boundary.
+4. Switch units to *Miles* and apply: the same runs, shown in miles; a run of 4999.96 m (shown as 5.00 km) is not in a
+   5 km minimum, because the filter compares metres, not what is displayed.
+5. Choose the other organization in the picker: the list is cleared and starts from the defaults.
+
+Four of the runner's runs (three of them in the current month) have no current result yet and carry synthetic points.
+The notice "… still being processed" counts them; the API's summary worker (about once a minute, only while the API
+is running) processes them and they then appear in the list with a distance computed from the synthetic points. They
+are never treated as matching a distance filter while they are pending. Seeding the same month again changes
+nothing, including those runs after they were processed.
+
+**Describing the search in words (optional).** The box above the filters is off unless the API was started with
+`RUN_SEARCH_AI_ENABLED=true`. For a demo without a key, add `RUN_SEARCH_AI_PROVIDER=fake`: a few keyword rules answer
+in-process, with no network. Try `Show my runs of at least 5 km from last month, longest first.`, then press
+**Apply filters**; try `Runs of more than 5 km last month` to see why a strict bound is explained, not guessed. What
+the fake does says nothing about a real model; the real one needs a key and a model name, and its quality is only
+measured by the live evaluation. All of it, with the limits and the privacy notes, is in
+`docs/runbooks/run-search-ai.md`.
+
 ## 6. Sign out
 
 Press **Sign out** in the bar under the title. The page asks the server to end the session, and then shows "Sign in required". Anything the runner had not uploaded stays in this browser for the same person.

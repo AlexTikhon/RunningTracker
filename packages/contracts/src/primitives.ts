@@ -31,6 +31,54 @@ export const coordinatesSchema = z.tuple([longitudeSchema, latitudeSchema]);
 export const canonicalFiniteNumber = (value: number): number =>
   Object.is(value, -0) ? 0 : value;
 
+// A calendar date without a time or an offset, as a person reads it on a wall calendar. It is meaningful only
+// together with a time zone. The range keeps `Date.UTC` arithmetic and PostgreSQL timestamps far from their limits.
+export const LOCAL_DATE_MIN_YEAR = 1970;
+export const LOCAL_DATE_MAX_YEAR = 2100;
+
+export function parseLocalDate(value: string): { day: number; month: number; year: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < LOCAL_DATE_MIN_YEAR || year > LOCAL_DATE_MAX_YEAR) {
+    return null;
+  }
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    return null;
+  }
+  return { day, month, year };
+}
+
+export const localDateSchema = z
+  .string()
+  .refine((value) => parseLocalDate(value) !== null, 'Expected a calendar date as YYYY-MM-DD');
+
+// An IANA time zone name. Offsets such as "+01:00" and abbreviations are refused on purpose: they do not say
+// what a calendar day is in a place, which changes with daylight saving time. The platform's own database
+// decides which names exist, so the browser and the server may disagree about a very new one.
+const ianaNamePattern = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/u;
+
+export function isSupportedIanaTimeZone(value: string): boolean {
+  if (value.length === 0 || value.length > 64 || !ianaNamePattern.test(value)) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const ianaTimeZoneSchema = z
+  .string()
+  .refine(isSupportedIanaTimeZone, 'Expected an IANA time zone name such as Europe/Warsaw');
+
 export type UUID = z.infer<typeof uuidSchema>;
 export type Revision = z.infer<typeof revisionSchema>;
 export type Seq = z.infer<typeof seqSchema>;

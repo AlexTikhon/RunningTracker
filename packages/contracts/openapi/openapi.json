@@ -310,6 +310,110 @@
         }
       }
     },
+    "/api/orgs/{orgId}/runs/search": {
+      "get": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Search the signed-in person's own finished runs",
+        "description": "Owner-only: the owner is the session's identity and is not a parameter, and a run that was only shared with the person is never returned (unlike the run list). Only finished runs with a current published summary are items; a finished run in the period whose summary is missing or was computed from an older data revision is counted in `pendingSummaryCount` instead, before any distance filter. The period is a preset or an inclusive range of local calendar dates in the given IANA time zone, converted by the server to a half-open UTC interval over `started_at` (a local day is not always 24 hours). `this-month` and `previous-month` are whole calendar months in that zone, relative to the server clock. Distance bounds are decimals in `distanceUnit` (kilometres, or international miles of 1609.344 m), at most three fraction digits, and are compared inclusively with the stored metres, not with a rounded display value. Pages use a keyset cursor that is bound to the person, organization and every filter; a cursor from another query is a 400 INVALID_CURSOR. This path is registered before `/runs/{runId}`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/SearchTimeZone"
+          },
+          {
+            "$ref": "#/components/parameters/SearchPreset"
+          },
+          {
+            "$ref": "#/components/parameters/SearchFromDate"
+          },
+          {
+            "$ref": "#/components/parameters/SearchToDate"
+          },
+          {
+            "$ref": "#/components/parameters/SearchMinDistance"
+          },
+          {
+            "$ref": "#/components/parameters/SearchMaxDistance"
+          },
+          {
+            "$ref": "#/components/parameters/SearchDistanceUnit"
+          },
+          {
+            "$ref": "#/components/parameters/SearchSort"
+          },
+          {
+            "$ref": "#/components/parameters/Limit50"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSearchResponse"
+                }
+              }
+            },
+            "description": "One page of matching runs."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/search/interpretations": {
+      "post": {
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Propose \"My runs\" search filters from a sentence (English or Russian)",
+        "description": "Optional and off by default. Sends the text, and nothing else about the person, to the configured language model provider once; the answer is a proposal for the filter form, never a search: the caller reviews it and then calls the search endpoint above. `search` is a complete replacement filter set already checked against the search contract (the time zone is the request's, not the model's; a preset is resolved by the server clock when the search runs; the sort is `newest` when the text names none). `clarify` and `unsupported` carry only a bounded reason code, and the caller owns the wording. A condition that the search cannot express exactly (a strict distance bound, a place, a pace) is never dropped or approximated. Nothing is stored. Failures: 503 INTERPRETATION_DISABLED when the feature is off, 429 INTERPRETATION_RATE_LIMITED or INTERPRETATION_IN_PROGRESS (Retry-After where known), 503 INTERPRETATION_BUSY or INTERPRETATION_BUDGET_EXHAUSTED, 504 INTERPRETATION_TIMEOUT, and 502 INTERPRETATION_FAILED with `details.reason` for a refusal, an incomplete or invalid answer or a provider error. A provider refusal is a failure here, not an `unsupported` answer. The membership is checked before the provider is contacted and again before the answer is returned; no database connection is held while the provider works. Every accepted request that reaches the provider is billable, so clients must not retry automatically.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunSearchInterpretationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSearchInterpretationResponse"
+                }
+              }
+            },
+            "description": "A proposal, a clarification or an unsupported reason."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/runs/{runId}": {
       "put": {
         "tags": [
@@ -1012,6 +1116,16 @@
           "maximum": 100
         }
       },
+      "Limit50": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
       "Limit1000": {
         "name": "limit",
         "in": "query",
@@ -1020,6 +1134,97 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1000
+        }
+      },
+      "SearchTimeZone": {
+        "name": "timeZone",
+        "in": "query",
+        "required": true,
+        "description": "IANA time zone name, for example Europe/Warsaw. Offsets and abbreviations are refused.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "SearchPreset": {
+        "name": "preset",
+        "in": "query",
+        "required": false,
+        "description": "Whole calendar month in `timeZone`. Give either `preset` or both `fromDate` and `toDate`.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "this-month",
+            "previous-month"
+          ]
+        }
+      },
+      "SearchFromDate": {
+        "name": "fromDate",
+        "in": "query",
+        "required": false,
+        "description": "First local calendar date of the period, inclusive (YYYY-MM-DD).",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "SearchToDate": {
+        "name": "toDate",
+        "in": "query",
+        "required": false,
+        "description": "Last local calendar date of the period, inclusive (YYYY-MM-DD). At most 366 days from `fromDate`.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "SearchMinDistance": {
+        "name": "minDistance",
+        "in": "query",
+        "required": false,
+        "description": "Inclusive lower bound in `distanceUnit`. Needs `distanceUnit`.",
+        "schema": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9]\\d{0,5})(?:\\.\\d{1,3})?$"
+        }
+      },
+      "SearchMaxDistance": {
+        "name": "maxDistance",
+        "in": "query",
+        "required": false,
+        "description": "Inclusive upper bound in `distanceUnit`. Needs `distanceUnit`; not below `minDistance`.",
+        "schema": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9]\\d{0,5})(?:\\.\\d{1,3})?$"
+        }
+      },
+      "SearchDistanceUnit": {
+        "name": "distanceUnit",
+        "in": "query",
+        "required": false,
+        "description": "Required with a distance bound and refused without one. `mi` is the international mile, 1609.344 m.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "km",
+            "mi"
+          ]
+        }
+      },
+      "SearchSort": {
+        "name": "sort",
+        "in": "query",
+        "required": false,
+        "description": "Default `newest`. Ties on the sort key are ordered by newest start, then run id.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "newest",
+            "longest",
+            "shortest"
+          ]
         }
       },
       "AfterRevision": {
@@ -2273,6 +2478,340 @@
           "nextCursor"
         ],
         "additionalProperties": false
+      },
+      "RunSearchResponse": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "fromDate": {
+                "type": "string"
+              },
+              "maxDistanceM": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "minDistanceM": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sort": {
+                "type": "string",
+                "enum": [
+                  "newest",
+                  "longest",
+                  "shortest"
+                ]
+              },
+              "timeZone": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "toDate": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "fromDate",
+              "maxDistanceM",
+              "minDistanceM",
+              "sort",
+              "timeZone",
+              "to",
+              "toDate"
+            ],
+            "additionalProperties": false
+          },
+          "items": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "distanceM": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "gpsQuality": {
+                  "type": "string",
+                  "enum": [
+                    "good",
+                    "poor",
+                    "insufficient"
+                  ]
+                },
+                "observedDurationS": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "runId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "startedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                }
+              },
+              "required": [
+                "distanceM",
+                "gpsQuality",
+                "observedDurationS",
+                "runId",
+                "startedAt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pendingSummaryCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "applied",
+          "items",
+          "nextCursor",
+          "pendingSummaryCount"
+        ],
+        "additionalProperties": false
+      },
+      "RunSearchInterpretationRequest": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "timeZone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "timeZone"
+        ],
+        "additionalProperties": false
+      },
+      "RunSearchInterpretationResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "filters": {
+                "type": "object",
+                "properties": {
+                  "distanceUnit": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "km",
+                          "mi"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "maxDistance": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:0|[1-9]\\d{0,5})(?:\\.\\d{1,3})?$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "minDistance": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:0|[1-9]\\d{0,5})(?:\\.\\d{1,3})?$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "period": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "preset"
+                          },
+                          "preset": {
+                            "type": "string",
+                            "enum": [
+                              "this-month",
+                              "previous-month"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "preset"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "fromDate": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string",
+                            "const": "dates"
+                          },
+                          "toDate": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "fromDate",
+                          "kind",
+                          "toDate"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "sort": {
+                    "type": "string",
+                    "enum": [
+                      "newest",
+                      "longest",
+                      "shortest"
+                    ]
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "distanceUnit",
+                  "maxDistance",
+                  "minDistance",
+                  "period",
+                  "sort",
+                  "timeZone"
+                ],
+                "additionalProperties": false
+              },
+              "outcome": {
+                "type": "string",
+                "const": "search"
+              }
+            },
+            "required": [
+              "filters",
+              "outcome"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "clarify"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "period_missing",
+                  "period_ambiguous",
+                  "distance_unit_missing",
+                  "distance_unit_mixed",
+                  "distance_ambiguous",
+                  "distance_too_precise",
+                  "distance_boundary_strict",
+                  "conflicting_conditions"
+                ]
+              }
+            },
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "unsupported"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "location",
+                  "pace_or_speed",
+                  "duration",
+                  "workout_or_segments",
+                  "other_attributes",
+                  "comparison_or_analysis",
+                  "exclusion",
+                  "other_people",
+                  "sort_order",
+                  "not_a_run_search"
+                ]
+              }
+            },
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        ]
       },
       "PointsResponse": {
         "type": "object",
