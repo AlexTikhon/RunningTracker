@@ -9,6 +9,7 @@ import {
   runCommandRequestSchema,
   runListQuerySchema,
   runPathSchema,
+  runSearchQuerySchema,
   runSharePathSchema,
   upsertRunShareRequestSchema,
 } from '@running-tracker/contracts';
@@ -31,6 +32,7 @@ import type { ApiMetrics } from '../observability/api-metrics.js';
 import type { TestOnlyFaultInjector } from '../testing/fault-injection.js';
 import { measureIngestion } from './ingestion-metrics.js';
 import { LiveTrackCursorCodec } from './live-track-cursor.js';
+import { searchRuns } from './run-search-service.js';
 import {
   applyRunCommand,
   createRun,
@@ -112,6 +114,23 @@ export function createRunRouter({
         session,
         path.orgId.toLowerCase(),
         (client) => listRuns(client, path.orgId.toLowerCase(), query),
+      );
+      response.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Registered before '/:runId' on purpose: the static segment must never be read as a run id. It answers
+  // "my runs" only (the session's own finished runs); the list above keeps returning shared runs.
+  router.get('/search', authenticate, async (request, response, next) => {
+    try {
+      const path = parseContract(organizationPathSchema, request.params, 'organization path');
+      const query = parseContract(runSearchQuerySchema, request.query, 'run search query');
+      const session = getAuthenticatedSession(request);
+      const orgId = path.orgId.toLowerCase();
+      const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+        searchRuns(client, session, orgId, query, clock),
       );
       response.status(200).json(result);
     } catch (error) {
