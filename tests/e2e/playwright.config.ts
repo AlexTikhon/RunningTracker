@@ -54,6 +54,11 @@ export default defineConfig({
         LOCAL_AUTH_USER_IDS: `${environment.runnerUserId},${environment.coachUserId}`,
         MAINTENANCE_DATABASE_URL: environment.maintenanceDatabaseUrl,
         PORT: apiPort,
+        // The in-process deterministic interpreter: describing a search in words works with no provider and no
+        // network. The real provider is never configured here (APP_ENV=test refuses nothing, so keep it explicit).
+        RUN_SEARCH_AI_ENABLED: 'true',
+        RUN_SEARCH_AI_PROVIDER: 'fake',
+        RUN_SEARCH_AI_USER_RATE_PER_MINUTE: '60',
         SESSION_COOKIE_SECURE: 'false',
       },
       reuseExistingServer: false,

@@ -91,8 +91,12 @@ changes is promised, and the page and the pending count are two statements in on
 `insufficient` when `insufficientData`, `poor` when fewer than 80 % of the raw measurements were used
 (`acceptedPointCount * 5 < rawPointCount * 4`), otherwise `good`. The 80 % line is a presentation choice, not a
 property of the summary algorithm, and can be changed without touching stored data. `observedDurationS` is labelled
-"Observed duration" (time between the first and last accepted measurements); the screen offers no pace, no moving
-time and no recommendation.
+"Observed duration"; the screen offers no pace, no moving time and no recommendation. *Correction (2026-10-12, ADR-0057):*
+this section first described the value as the time between the first and last accepted measurements. It is not:
+`app_private.calculate_run_summary` (migration 0009) computes `sum(edge.duration_s) FILTER (WHERE edge.accepted)`, the
+sum of the durations of the accepted edges, as ADR-0013 already says. Time across rejected edges, gaps and pauses is
+not in it. The contract comment, the screen's note and this paragraph were corrected; the algorithm and its numbers
+were not touched.
 
 ### 8. The screen
 

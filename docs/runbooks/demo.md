@@ -133,6 +133,14 @@ is running) processes them and they then appear in the list with a distance comp
 are never treated as matching a distance filter while they are pending. Seeding the same month again changes
 nothing, including those runs after they were processed.
 
+**Describing the search in words (optional).** The box above the filters is off unless the API was started with
+`RUN_SEARCH_AI_ENABLED=true`. For a demo without a key, add `RUN_SEARCH_AI_PROVIDER=fake`: a few keyword rules answer
+in-process, with no network. Try `Show my runs of at least 5 km from last month, longest first.`, then press
+**Apply filters**; try `Runs of more than 5 km last month` to see why a strict bound is explained, not guessed. What
+the fake does says nothing about a real model; the real one needs a key and a model name, and its quality is only
+measured by the live evaluation. All of it, with the limits and the privacy notes, is in
+`docs/runbooks/run-search-ai.md`.
+
 ## 6. Sign out
 
 Press **Sign out** in the bar under the title. The page asks the server to end the session, and then shows "Sign in required". Anything the runner had not uploaded stays in this browser for the same person.

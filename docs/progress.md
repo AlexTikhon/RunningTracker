@@ -1893,3 +1893,86 @@ revision); browser and server may disagree about a very new zone name; Chromium 
 against the isolated test database and its plan by unit tests, not run against the developer's `running_tracker`
 database; the hosted CI job has not run these commits. Next stage: translate a natural-language request into this
 contract with a language model.
+
+## Natural-language filter proposals for My runs, second search stage (2026-10-12)
+
+Decision record: `docs/adr/0057-natural-language-filter-proposals.md`. Runbook: `docs/runbooks/run-search-ai.md`.
+
+**Starting point, checked.** The brief said stage 1 was uncommitted. It is not: `git status` was clean on
+`feat/browser-e2e` and the three stage-1 commits (`7d7bd25`, `cc082a8`, `9735e91`) hold it. Nothing had to be
+preserved beyond HEAD. The `observedDurationS` wording was verified as wrong: migration 0009 computes
+`sum(edge.duration_s) FILTER (WHERE edge.accepted)` (ADR-0013 says the same), not the time between the first and the
+last measurement. Corrected in `packages/contracts/src/http.ts`, the results screen's note, and ADR-0056; no
+algorithm or number changed.
+
+**What works.** An optional "Describe the runs you want" box above the My runs filters (English or Russian), an
+explicit **Interpret** button and the OpenAI disclosure before any send. `POST
+/api/orgs/{orgId}/runs/search/interpretations` answers `search` (a complete, validated replacement filter set),
+`clarify` or `unsupported` (bounded reason codes; the screen owns every sentence). A proposal only fills the draft;
+the existing "Apply filters" and endpoint search. Real adapter: one Responses API call (strict JSON schema,
+`store: false`, explicit model, no tools, no retries, bounded body, own deadline). Deterministic fake adapter for
+tests and demos. Per-process admission: rate per person, one in flight per person, global concurrency, rolling
+allowance. A strict distance bound, a place, a pace and other unsupported conditions are explained, never
+approximated or dropped. Off by default; disabled needs no credential.
+
+**Red before green.** Watched failing first: the 41 contract tests (module missing), the 20 configuration tests, the
+28 route tests (route and dependency missing), the observed-duration wording test, the pace/sort prompt test, the
+web client tests. **Written first but not watched red** (the first run was after the implementation, so they could
+only have failed on a missing import): admission, provider schema, normalizer, prompt, adapter, fake, service,
+evaluator and CLI tests, the web mapping, controller and component tests, and the integration and browser specs.
+The controller's stale-answer guard was mutation-checked instead (below).
+
+**Executed (Node 24.11.1, npm 11.6.2; PostgreSQL/PostGIS container `running-tracker-postgres-1`; Chromium).**
+
+- `npm run verify`: exit 0. Scripts 48; API **1075** in 103 files (was 849); web **520** in 44 (was 456); contracts
+  **128** (was 87); fixtures 14; simulator 3: **1788** (was 1457, +331). Lint, typecheck, all builds.
+- `npm run test:integration`: exit 0, 44 files, **433** tests (was 426 in 43): `run-search-interpretation.
+  integration.test.ts` (7): a member is answered and no run, summary, point, share or archive table is touched
+  (every statement recorded); no membership, an inactive membership and another organization's member get 403
+  before any provider call; the whole route on a **one-connection pool** stays usable while the provider is held;
+  a membership revoked mid-flight returns 403 and not the proposal.
+- `npm run test:e2e`: **85** tests, **84 passed, 1 failed** (was 79). The six new scenarios in
+  `tests/e2e/run-search-interpretation.spec.ts` pass (45 s alone, with the fake provider): proposal, review, apply
+  with the interpretation request body asserted to be the text and the zone only and no search made in between;
+  edit before apply; clarification and unsupported in fixed wording with manual filters still working; provider
+  failure with no automatic retry; a server without the feature (a 503 `INTERPRETATION_DISABLED` is information, the
+  button is disabled, manual search works); and a delayed answer arriving after a manual edit and after an
+  organization switch changing nothing. **The failure is `second-tab.spec.ts:6` ("a competing tab cannot
+  record"): the first tab's capture is `complete` where the test expects `capturing`.** It fails the same way alone
+  and on a clean checkout of HEAD with all of this work stashed (reproduced once each), so this change did not
+  cause it; it looks like Runner-simulator timing on a loaded machine (Docker Desktop had just been restarted) and
+  was not diagnosed further. The previous baseline of 79 passing tests was recorded on 2026-10-11 on the same suite.
+- `git diff --check`: exit 0 (only the LF/CRLF working-copy notices).
+- `npm run eval:run-search` without `--live` refuses; with `--dry-run` and no model or key it names the two
+  variables and stops (never a value). **It was not run with `--live`: no request has been made to OpenAI by any of
+  this.**
+
+**Mutation check** (temporary, reverted, file compared afterwards): making the interpretation controller's
+`#wanted` ignore its generation counter failed three tests (late answer after `invalidate`, late failure, newest
+interpretation wins) and the 27 tests pass again after restoring. No other mutation checks were done; in particular
+the browser scenarios were not mutation-checked, and the abort-ignoring transport is only exercised in unit tests.
+
+**Mistakes during the work.** `userStranger` in the tenant fixtures is an *active coach* of organization A, so my
+"no membership" integration case got a 200 for a correct reason; the test was wrong and now uses a user with no
+membership. Backticks inside a `node -e` string were command-substituted by the shell once more (the known gotcha),
+which emptied one assertion; fixed with the Edit tool. The new browser helper selected an organization in a picker
+that only exists with two or more memberships (five scenarios failed on that). A test stream pulled eagerly
+(`highWaterMark`). While writing the dataset I found that my prompt filed "fastest" under both `sort_order` and
+`pace_or_speed`; fixed with a test and the prompt version bumped. The ADR first quoted dataset counts I had not
+computed (60; 49 en / 11 ru) and the SDK's environment reads from memory; both were re-derived from the file and the
+installed SDK (65; 51 / 14; `OPENAI_BASE_URL`, `_ORG_ID`, `_PROJECT_ID`, `_ADMIN_KEY`, `_WEBHOOK_SECRET`, `_LOG`,
+`_CUSTOM_HEADERS`). The Docker engine was not running when the integration tests were first needed; I started
+Docker Desktop. Stash/pop (to test HEAD) rewrote line endings of new files to the working tree's CRLF; contents were
+compared to a backup and are identical.
+
+**Not verified / limits.**
+
+- **Live model behaviour: nothing is known.** Whether OpenAI accepts this strict schema, whether the model name
+  guard matches real availability, token use, latency, cost and the model's accuracy on the 65 cases are all
+  unmeasured. The fake adapter's rules and the evaluator's oracle say nothing about them.
+- Provider documentation was read on 2026-10-12 (Structured Outputs, migration to Responses) and the SDK's types used
+  for names; the service itself was not contacted. `openai` 7.22.0 is pinned (three weeks old when chosen).
+- Limits are per process, in memory, reset on restart and doubled by a second process; not a budget.
+- A very new zone name can differ between browser and server; Chromium only.
+- The pre-existing `second-tab` failure above.
+- Hosted CI has not run these changes.
