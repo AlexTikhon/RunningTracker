@@ -12,6 +12,8 @@ import { EVALUATION_MAX_CONCURRENCY, type EvaluationReport } from './run-search-
 export const EVALUATION_MAX_CASES = 200;
 
 export interface EvaluationArguments {
+  /** Run exactly these dataset cases (checked against the dataset before any call). */
+  caseIds: string[] | undefined;
   concurrency: number;
   dryRun: boolean;
   live: boolean;
@@ -33,6 +35,7 @@ function boundedInteger(name: string, value: string | undefined, minimum: number
  */
 export function parseEvaluationArguments(argv: readonly string[]): EvaluationArguments {
   const parsed: EvaluationArguments = {
+    caseIds: undefined,
     concurrency: 1,
     dryRun: false,
     live: false,
@@ -53,6 +56,22 @@ export function parseEvaluationArguments(argv: readonly string[]): EvaluationArg
         parsed.maxCases = boundedInteger('--max-cases', value, 1, EVALUATION_MAX_CASES);
         index += 1;
         break;
+      case '--cases': {
+        // Chosen by identity, so a smoke run can be one case of each kind instead of the first few of the file.
+        const ids = (value ?? '').split(',');
+        if (value === undefined || value.startsWith('--') || ids.some((id) => !/^[a-z][a-z0-9-]{2,60}$/u.test(id))) {
+          throw new Error('--cases needs a comma-separated list of dataset case ids');
+        }
+        if (new Set(ids).size !== ids.length) {
+          throw new Error('--cases lists a case id twice');
+        }
+        if (ids.length > EVALUATION_MAX_CASES) {
+          throw new Error(`--cases takes at most ${EVALUATION_MAX_CASES} ids`);
+        }
+        parsed.caseIds = ids;
+        index += 1;
+        break;
+      }
       case '--concurrency':
         parsed.concurrency = boundedInteger('--concurrency', value, 1, EVALUATION_MAX_CONCURRENCY);
         index += 1;
@@ -67,6 +86,9 @@ export function parseEvaluationArguments(argv: readonly string[]): EvaluationArg
       default:
         throw new Error(`Unknown argument: ${argument.slice(0, 40)}`);
     }
+  }
+  if (parsed.caseIds !== undefined && parsed.maxCases !== undefined) {
+    throw new Error('--cases and --max-cases select cases in different ways; use one of them');
   }
   if (!parsed.live && !parsed.dryRun) {
     throw new Error(
@@ -113,13 +135,41 @@ export function formatEvaluationReport(report: EvaluationReport): string {
   lines.push(`Model: ${report.model}`);
   lines.push(`Prompt: ${report.promptVersion}`);
   lines.push(`Data: dataset v${report.datasetVersion}, ${report.executedCount} of ${report.caseCount} cases run`);
+  if (report.aborted !== null) {
+    lines.push(
+      `PARTIAL, STOPPED EARLY: ${report.aborted.consecutive} identical failures in a row (${report.aborted.reason}) after ${report.aborted.afterCases} cases; the remaining calls were not made. This is a compatibility problem to fix, not a measurement.`,
+    );
+  } else if (report.partial) {
+    lines.push(
+      `PARTIAL: ${report.executedCount} of ${report.caseCount} cases. The percentages below describe only the cases that were run.`,
+    );
+  }
   lines.push('');
-  lines.push(`Outcome accuracy: ${percent(report.outcomeAccuracy)}`);
-  lines.push(`Reason accuracy: ${percent(report.reasonAccuracy)} (clarify and unsupported cases)`);
-  lines.push(`Exact filter accuracy: ${percent(report.exactFilterAccuracy)} (search cases)`);
+  const { counts } = report;
+  lines.push(`Outcome accuracy: ${percent(report.outcomeAccuracy)} (${counts.outcome.correct}/${counts.outcome.total})`);
+  lines.push(
+    `Reason accuracy: ${percent(report.reasonAccuracy)} (${counts.reason.correct}/${counts.reason.total}; clarify and unsupported cases)`,
+  );
+  lines.push(
+    `Exact filter accuracy: ${percent(report.exactFilterAccuracy)} (${counts.exactFilters.correct}/${counts.exactFilters.total}; search cases)`,
+  );
+  lines.push(
+    `Accepted as a search although a clarification or an unsupported answer was expected: ${report.incorrectAcceptances.total} of ${report.incorrectAcceptances.ofCases}${report.incorrectAcceptances.ids.length === 0 ? '' : ` (${report.incorrectAcceptances.ids.join(', ')})`}`,
+  );
   lines.push(
     `Field errors: ${FILTER_FIELDS.map((field) => `${field} ${report.fieldErrors[field]}`).join(', ')}`,
   );
+  lines.push('By language (outcome / reason / exact filters, failed calls included):');
+  for (const [language, entry] of Object.entries(report.byLanguage).sort(([a], [b]) => a.localeCompare(b))) {
+    lines.push(
+      `  ${language}: ${entry.cases} cases, outcome ${entry.outcome.correct}/${entry.outcome.total}, reason ${entry.reason.correct}/${entry.reason.total}, exact filters ${entry.exactFilters.correct}/${entry.exactFilters.total}, failures ${entry.failures}`,
+    );
+  }
+  lines.push('Expected -> got (search / clarify / unsupported / failed call):');
+  for (const expected of ['search', 'clarify', 'unsupported'] as const) {
+    const row = report.outcomeMatrix[expected];
+    lines.push(`  ${expected}: ${row.search} / ${row.clarify} / ${row.unsupported} / ${row.failure}`);
+  }
   const failureReasons = Object.entries(report.failures.byReason)
     .map(([reason, count]) => `${reason} ${count}`)
     .join(', ');
@@ -128,7 +178,7 @@ export function formatEvaluationReport(report: EvaluationReport): string {
     `Latency: mean ${Math.round(report.latencyMs.mean)} ms, p50 ${report.latencyMs.p50} ms, p95 ${report.latencyMs.p95} ms, max ${report.latencyMs.max} ms`,
   );
   lines.push(
-    `Tokens: input ${report.usage.inputTokens}, output ${report.usage.outputTokens} (${report.usage.callsWithUsage} calls reported usage)`,
+    `Tokens: input ${report.usage.inputTokens} (cached ${report.usage.cachedInputTokens}), output ${report.usage.outputTokens} (reasoning ${report.usage.reasoningTokens}; ${report.usage.callsWithReasoningDetail} calls reported it) over ${report.usage.callsWithUsage} calls that reported usage. Cost is not calculated.`,
   );
   lines.push('');
   lines.push('By category (outcome correct / cases, exact filters):');

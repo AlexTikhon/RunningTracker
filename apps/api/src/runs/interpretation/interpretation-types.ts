@@ -12,8 +12,12 @@ export interface InterpretationInput {
 }
 
 export interface InterpreterUsage {
+  /** Input tokens served from the provider's prompt cache; they are part of `inputTokens`. */
+  cachedInputTokens?: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Tokens spent on hidden reasoning; they are part of `outputTokens` and count against `max_output_tokens`. */
+  reasoningTokens?: number | null;
 }
 
 export interface InterpreterAnswer {

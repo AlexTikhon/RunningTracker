@@ -237,11 +237,45 @@ describe('evaluator', () => {
     expect(report.failures).toEqual({ byReason: {}, total: 0 });
     expect(report.fieldErrors).toEqual({ maxDistance: 0, minDistance: 0, period: 0, sort: 0 });
     expect(report.usage).toEqual({
+      cachedInputTokens: 0,
+      callsWithReasoningDetail: 0,
       callsWithUsage: dataset.cases.length,
       inputTokens: 100 * dataset.cases.length,
       outputTokens: 10 * dataset.cases.length,
+      reasoningTokens: 0,
     });
     expect(report.mismatches).toEqual([]);
+    expect(report).toMatchObject({ aborted: null, partial: false });
+    expect(report.executedIds).toEqual(dataset.cases.map((entry) => entry.id));
+    expect(report.incorrectAcceptances).toEqual({
+      ids: [],
+      ofCases: dataset.cases.filter((entry) => entry.expected.outcome !== 'search').length,
+      total: 0,
+    });
+  });
+
+  it('sums reasoning and cached tokens only where a call reported them', async () => {
+    const oracle = new OracleInterpreter();
+    let count = 0;
+    const interpreter: RunSearchInterpreter = {
+      interpret: async (input) => {
+        count += 1;
+        const answer = await oracle.interpret(input);
+        return count === 1
+          ? { ...answer, usage: { cachedInputTokens: 40, inputTokens: 100, outputTokens: 70, reasoningTokens: 60 } }
+          : { ...answer, usage: { cachedInputTokens: null, inputTokens: 100, outputTokens: 10, reasoningTokens: null } };
+      },
+      model: 'reasoner',
+    };
+    const report = await runEvaluation({ clock: new StepClock(), dataset, interpreter, maxCases: 3 });
+    expect(report.usage).toEqual({
+      cachedInputTokens: 40,
+      callsWithReasoningDetail: 1,
+      callsWithUsage: 3,
+      inputTokens: 300,
+      outputTokens: 90,
+      reasoningTokens: 60,
+    });
   });
 
   it('measures latency per call', async () => {
@@ -348,6 +382,181 @@ describe('evaluator', () => {
     expect(Object.values(report.byCategory).reduce((sum, entry) => sum + entry.cases, 0)).toBe(
       dataset.cases.length,
     );
+  });
+
+  it('reports numerators and denominators per language, the Russian cases apart from the English ones', async () => {
+    const report = await runEvaluation({ clock: new StepClock(), dataset, interpreter: new OracleInterpreter() });
+    for (const language of ['en', 'ru'] as const) {
+      const entries = dataset.cases.filter((entry) => entry.language === language);
+      const searches = entries.filter((entry) => entry.expected.outcome === 'search').length;
+      expect(report.byLanguage[language], language).toEqual({
+        cases: entries.length,
+        exactFilters: { correct: searches, total: searches },
+        failures: 0,
+        outcome: { correct: entries.length, total: entries.length },
+        reason: { correct: entries.length - searches, total: entries.length - searches },
+      });
+    }
+    expect(report.counts.outcome).toEqual({ correct: dataset.cases.length, total: dataset.cases.length });
+  });
+
+  it('keeps a failed call in every denominator, so a model that answers nothing scores zero and not "n/a"', async () => {
+    const interpreter: RunSearchInterpreter = {
+      interpret: () => Promise.reject(new InterpreterFailure('refusal')),
+      model: 'silent',
+    };
+    const report = await runEvaluation({ clock: new StepClock(), dataset, interpreter });
+    const searches = dataset.cases.filter((entry) => entry.expected.outcome === 'search').length;
+    expect(report.counts).toEqual({
+      exactFilters: { correct: 0, total: searches },
+      outcome: { correct: 0, total: dataset.cases.length },
+      reason: { correct: 0, total: dataset.cases.length - searches },
+    });
+    expect(report).toMatchObject({ exactFilterAccuracy: 0, outcomeAccuracy: 0, reasonAccuracy: 0 });
+    expect(report.failures.byReason).toEqual({ refusal: dataset.cases.length });
+    expect(report.byLanguage.ru!.failures).toBe(dataset.cases.filter((entry) => entry.language === 'ru').length);
+    // A category whose search cases all failed shows 0 exact filters, not an absent figure.
+    expect(report.byCategory['period-preset']).toMatchObject({ exactFilters: 0, outcomeCorrect: 0 });
+    // A refusal is measured, never a reason to stop spending calls.
+    expect(report.aborted).toBeNull();
+    expect(report.executedCount).toBe(dataset.cases.length);
+  });
+
+  it('keeps a wrong outcome in exact-filter accuracy instead of dropping the case', async () => {
+    const interpreter: RunSearchInterpreter = {
+      interpret: (input) => {
+        const found = dataset.cases.find((entry) => entry.text === input.text)!;
+        const proposal = proposalFor(found);
+        return Promise.resolve({
+          proposal:
+            found.expected.outcome === 'search'
+              ? { ...proposal, clarificationReason: 'period_missing', distanceUnit: null, fromDate: null, maxDistance: null, minDistance: null, outcome: 'clarify', period: null, sort: null, toDate: null }
+              : proposal,
+          usage: null,
+        });
+      },
+      model: 'over-cautious',
+    };
+    const report = await runEvaluation({ clock: new StepClock(), dataset, interpreter });
+    const searches = dataset.cases.filter((entry) => entry.expected.outcome === 'search').length;
+    expect(report.counts.exactFilters).toEqual({ correct: 0, total: searches });
+    expect(report.exactFilterAccuracy).toBe(0);
+    expect(report.outcomeMatrix.search).toEqual({ clarify: searches, failure: 0, search: 0, unsupported: 0 });
+    expect(report.incorrectAcceptances.total).toBe(0);
+  });
+
+  it('records a dropped unsupported condition as an incorrect acceptance, not as a lesser success', async () => {
+    const interpreter: RunSearchInterpreter = {
+      interpret: (input) => {
+        const found = dataset.cases.find((entry) => entry.text === input.text)!;
+        // Answers "this month's runs of at least 5 km, in Berlin" with the search and quietly forgets Berlin.
+        const droppedLocation = found.id === 'en-supported-plus-location';
+        return Promise.resolve({
+          proposal: droppedLocation
+            ? {
+                clarificationReason: null,
+                distanceUnit: 'km',
+                fromDate: null,
+                maxDistance: null,
+                minDistance: '5',
+                outcome: 'search',
+                period: 'this-month',
+                sort: null,
+                toDate: null,
+                unsupportedReason: null,
+              }
+            : proposalFor(found),
+          usage: null,
+        });
+      },
+      model: 'forgetful',
+    };
+    const report = await runEvaluation({ clock: new StepClock(), dataset, interpreter });
+    expect(report.incorrectAcceptances.ids).toEqual(['en-supported-plus-location']);
+    expect(report.incorrectAcceptances.total).toBe(1);
+    expect(report.outcomeMatrix.unsupported.search).toBe(1);
+    expect(report.counts.outcome.correct).toBe(dataset.cases.length - 1);
+    expect(report.mismatches).toEqual([
+      expect.objectContaining({
+        actualOutcome: 'search',
+        expectedOutcome: 'unsupported',
+        expectedReason: 'location',
+        id: 'en-supported-plus-location',
+      }),
+    ]);
+  });
+
+  it('runs exactly the cases asked for, in dataset order, and says the run is partial', async () => {
+    const interpreter = new OracleInterpreter();
+    const ids = ['ru-location', 'en-last-month-min-longest', 'en-strict-more-than'];
+    const report = await runEvaluation({ caseIds: ids, clock: new StepClock(), dataset, interpreter });
+    const expectedOrder = dataset.cases.map((entry) => entry.id).filter((id) => ids.includes(id));
+    expect(interpreter.calls).toBe(3);
+    expect(report.executedIds).toEqual(expectedOrder);
+    expect(report).toMatchObject({ aborted: null, caseCount: dataset.cases.length, executedCount: 3, partial: true });
+    expect(report.counts.outcome).toEqual({ correct: 3, total: 3 });
+  });
+
+  it('refuses an unknown case id before any call is made', async () => {
+    const interpreter = new OracleInterpreter();
+    await expect(
+      runEvaluation({ caseIds: ['en-last-month-min-longest', 'no-such-case'], clock: new StepClock(), dataset, interpreter }),
+    ).rejects.toThrow(/no-such-case/u);
+    expect(interpreter.calls).toBe(0);
+  });
+
+  it('stops after three identical systemic failures in a row and does not spend the rest of the budget', async () => {
+    let calls = 0;
+    const interpreter: RunSearchInterpreter = {
+      interpret: () => {
+        calls += 1;
+        return Promise.reject(new InterpreterFailure('provider_error'));
+      },
+      model: 'rejected-key',
+    };
+    const report = await runEvaluation({ clock: new StepClock(), dataset, interpreter });
+    expect(calls).toBe(3);
+    expect(report.aborted).toEqual({ afterCases: 3, consecutive: 3, reason: 'provider_error' });
+    expect(report).toMatchObject({ caseCount: dataset.cases.length, executedCount: 3, partial: true });
+    expect(report.failures).toEqual({ byReason: { provider_error: 3 }, total: 3 });
+  });
+
+  it('does not stop for failures that differ, that are interrupted by an answer, or that are measurements', async () => {
+    const oracle = new OracleInterpreter();
+    const script: Array<string | null> = [
+      'timeout', 'provider_error', 'timeout', // different reasons
+      'provider_error', 'provider_error', null, // interrupted by a good answer
+      'provider_error', 'provider_error', 'invalid_output', 'invalid_output', 'invalid_output', 'invalid_output', // measured
+    ];
+    let count = 0;
+    const interpreter: RunSearchInterpreter = {
+      interpret: (input) => {
+        const step = script[count] ?? null;
+        count += 1;
+        return step === null ? oracle.interpret(input) : Promise.reject(new InterpreterFailure(step as 'timeout'));
+      },
+      model: 'uneven',
+    };
+    const report = await runEvaluation({ clock: new StepClock(), dataset, interpreter, maxCases: script.length });
+    expect(report.aborted).toBeNull();
+    expect(report.executedCount).toBe(script.length);
+  });
+
+  it('starts nothing new once it has stopped, even with calls in flight', async () => {
+    let calls = 0;
+    const interpreter: RunSearchInterpreter = {
+      interpret: async () => {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new InterpreterFailure('timeout');
+      },
+      model: 'slow-and-broken',
+    };
+    const report = await runEvaluation({ clock: new StepClock(), concurrency: 4, dataset, interpreter });
+    expect(report.aborted).toMatchObject({ reason: 'timeout' });
+    // Three failed to reach the streak; at most the three other workers' calls were already in flight.
+    expect(calls).toBeLessThanOrEqual(3 + 3);
+    expect(report.executedCount).toBe(calls);
   });
 
   it('stops waiting for a call that never answers, and counts it as a timeout', async () => {

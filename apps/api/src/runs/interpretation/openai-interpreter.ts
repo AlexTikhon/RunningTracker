@@ -47,9 +47,14 @@ function usageOf(response: OpenAiResponse): InterpreterUsage | null {
   if (usage === undefined || usage === null) {
     return null;
   }
+  const count = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
   return {
-    inputTokens: Number.isFinite(usage.input_tokens) ? usage.input_tokens : null,
-    outputTokens: Number.isFinite(usage.output_tokens) ? usage.output_tokens : null,
+    // The details can be missing from a provider that predates them; that is "not reported", never zero.
+    cachedInputTokens: count(usage.input_tokens_details?.cached_tokens),
+    inputTokens: count(usage.input_tokens),
+    outputTokens: count(usage.output_tokens),
+    reasoningTokens: count(usage.output_tokens_details?.reasoning_tokens),
   };
 }
 
@@ -166,7 +171,8 @@ export class OpenAiInterpreter implements RunSearchInterpreter {
     const texts: string[] = [];
     for (const item of response.output ?? []) {
       if (item.type !== 'message') {
-        // Any other item (a tool call, reasoning) is not something this request can produce or accept.
+        // A reasoning model also returns reasoning items; they carry nothing this adapter uses. No tool is offered,
+        // so no other item is expected, and none can stand in for the one message that must hold the answer.
         continue;
       }
       for (const part of item.content) {

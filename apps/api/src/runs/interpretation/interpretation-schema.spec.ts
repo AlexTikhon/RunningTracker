@@ -81,6 +81,61 @@ describe('provider output JSON schema', () => {
   it('is JSON serializable and small', () => {
     expect(JSON.stringify(providerOutputJsonSchema).length).toBeLessThan(4_000);
   });
+
+  it('stays inside the documented strict-mode limits and uses only keywords the mode supports', () => {
+    // From the Structured Outputs guide, read 2026-10-12: at most 5,000 properties, 10 levels of nesting, 1,000 enum
+    // values and 120,000 characters of names and enum values; allOf, not, if/then/else and the dependent* keywords
+    // are refused; string constraints other than pattern and format are for fine-tuned models only.
+    let properties = 0;
+    let enumValues = 0;
+    let nameCharacters = 0;
+    let deepest = 0;
+    const measure = (node: unknown, depth: number): void => {
+      if (node === null || typeof node !== 'object') return;
+      deepest = Math.max(deepest, depth);
+      const record = node as Record<string, unknown>;
+      if (Array.isArray(record.enum)) {
+        enumValues += record.enum.length;
+        nameCharacters += record.enum.reduce<number>(
+          (sum, value) => sum + (typeof value === 'string' ? value.length : 0),
+          0,
+        );
+      }
+      for (const keyword of ['allOf', 'not', 'if', 'then', 'else', 'dependentRequired', 'dependentSchemas']) {
+        expect(record, keyword).not.toHaveProperty(keyword);
+      }
+      for (const keyword of ['minLength', 'maxLength', 'minItems', 'maxItems', 'minimum', 'maximum', 'multipleOf', 'patternProperties']) {
+        expect(record, keyword).not.toHaveProperty(keyword);
+      }
+      if (record.properties !== null && typeof record.properties === 'object') {
+        for (const [name, child] of Object.entries(record.properties as Record<string, unknown>)) {
+          properties += 1;
+          nameCharacters += name.length;
+          measure(child, depth + 1);
+        }
+      }
+    };
+    measure(providerOutputJsonSchema, 1);
+    expect(properties).toBeLessThanOrEqual(5_000);
+    expect(deepest).toBeLessThanOrEqual(10);
+    expect(enumValues).toBeLessThanOrEqual(1_000);
+    expect(nameCharacters).toBeLessThanOrEqual(120_000);
+  });
+
+  it('writes every nullable value as a type array with null among its values, as the guide shows', () => {
+    for (const [name, property] of Object.entries(providerOutputJsonSchema.properties)) {
+      const { type } = property as { enum?: unknown[]; type: string | string[] };
+      if (name === 'outcome') {
+        expect(type).toBe('string');
+        continue;
+      }
+      expect(type, name).toEqual(['string', 'null']);
+      const { enum: values } = property as { enum?: unknown[] };
+      if (values !== undefined) {
+        expect(values, name).toContain(null);
+      }
+    }
+  });
 });
 
 describe('provider proposal validation', () => {

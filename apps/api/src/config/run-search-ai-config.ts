@@ -57,10 +57,13 @@ const modelNamePattern = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const unusableModelParts = /(?:realtime|audio|transcribe|tts|embedding|image|moderation|search|instruct)/u;
 
 /**
- * Structured Outputs (`text.format` with a strict JSON schema) is available from gpt-4o-mini and gpt-4o-2024-08-06
- * onward, in the gpt-4.1, gpt-5 and later families and in the o-series. This is a guard against an obvious
- * misconfiguration, not a catalogue: a name that passes can still be refused by the provider, which then shows up as
- * a provider error and in the live evaluation, never as a silent fallback to another model.
+ * A NAME check, not a capability or access check. Structured Outputs (`text.format` with a strict JSON schema) is
+ * documented for gpt-4o-mini and gpt-4o-2024-08-06 onward; the patterns below also accept the gpt-4.1, gpt-5 and
+ * later families and the o-series by their naming scheme, which is an inference. It catches an obvious
+ * misconfiguration (an embedding, audio, search or pre-2024-08 model) and nothing more: a name that passes can still
+ * be unknown to the provider, unavailable to the account, or unable to follow the schema, which shows up as a
+ * provider error and in the live evaluation, never as a silent fallback to another model. It is also not a
+ * catalogue: a model whose name matches none of the patterns is refused here even if the provider would accept it.
  */
 export function isStructuredOutputsModel(model: string): boolean {
   if (!modelNamePattern.test(model) || unusableModelParts.test(model)) {
@@ -103,7 +106,7 @@ export function checkRunSearchAiEnvironment(
   } else if (!isStructuredOutputsModel(model)) {
     fail(
       'RUN_SEARCH_AI_MODEL',
-      `RUN_SEARCH_AI_MODEL "${model.slice(0, 64)}" is not a model that supports Structured Outputs through the Responses API`,
+      `RUN_SEARCH_AI_MODEL "${model.slice(0, 64)}" is not a name the local Structured Outputs check recognises (a name check only: it does not prove that a model supports the feature or that the account can use it)`,
     );
   }
 

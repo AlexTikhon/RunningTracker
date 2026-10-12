@@ -197,3 +197,24 @@ with an oracle and with deliberately wrong interpreters; **they say nothing abou
 - The prompt and the dataset are versioned together; a change to either should be followed by a live run.
 - A new filter in a later stage must be added to the contract, the schema, the instructions, the normalization and
   the dataset in the same change; a test fails if the reason lists and the schema drift apart.
+
+## Addendum: verification stage (2026-10-12)
+
+Changes made after the first implementation, none of which is a new product behaviour:
+
+- **The model-name check is a name pattern, not a capability or access check.** Its message, code comment,
+  `.env.example` and the runbook said or implied that a passing name "supports Structured Outputs". They now say what
+  it is, and that it can also refuse a name the provider would accept. Only a live request settles either.
+- **Reasoning tokens are reported.** `InterpreterUsage` gained optional `reasoningTokens` and `cachedInputTokens` (from
+  `output_tokens_details` and `input_tokens_details`); a response without them reports `null`, never zero. The
+  default `max_output_tokens` (800) was not changed: the documented behaviour (the cap includes reasoning, a response
+  can end `incomplete` with no visible text) depends on a model this repository does not know, and no measurement
+  exists. The adapter still sends no `reasoning` parameter.
+- **The evaluator** reports numerators and denominators, English and Russian separately, an expected-versus-got
+  table with the requests wrongly accepted as searches, `partial` for a run that did not cover the dataset, and
+  cached and reasoning tokens; a category whose search cases all failed reports 0. It stops after three identical
+  systemic failures in a row (`provider_error`, `provider_rate_limited`, `timeout`, `oversized`, `incomplete`);
+  refusals and contract-invalid answers are measured, not systemic. The runner selects cases by id (`--cases`),
+  validates them before any request and records the SDK version and hashes of the instructions and the schema.
+- **Still unmeasured**: provider acceptance of the schema, availability of the chosen model, token budget, latency,
+  accuracy and cost. See `docs/reports/run-search-interpretation-verification.md`.

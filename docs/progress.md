@@ -1976,3 +1976,60 @@ compared to a backup and are identical.
 - A very new zone name can differ between browser and server; Chromium only.
 - The pre-existing `second-tab` failure above.
 - Hosted CI has not run these changes.
+
+## Run-search interpreter: verification stage, offline complete, live unavailable (2026-10-12)
+
+Report: `docs/reports/run-search-interpretation-verification.md`. Runbook: `docs/runbooks/run-search-ai.md`. ADR-0057
+addendum. No new product feature.
+
+**Starting point, checked.** The brief said the interpreter changes were uncommitted; `git status` was clean and
+`d5f8b9f`, `59281ff`, `47b8e43` hold them. Nothing had to be preserved beyond HEAD.
+
+**The known browser failure, diagnosed.** `second-tab.spec.ts:6` asserted that the first tab was still `capturing`
+after the second tab had reached `conflict`. The simulator takes 10 s over six points (0, 2, ..., 10 s). A probe with
+timestamps showed the second tab needs about 6.5 s to report the conflict (page load plus the writer lease takeover
+wait of 3 s, ADR-0047/0053), so the assertion ran at about 8.1 s of 10 s: roughly 1.9 s of margin on an idle
+machine. Root cause: **a test depending on a transient state of the simulator**, not a fixture or an ownership
+defect. Reproduced deterministically by throttling only the second tab (CPU rate 6): the original assertion fails with
+the recorded message (expected `capturing`, received `complete`) while every later invariant holds. Fix: the test
+still asserts `capturing` once, at the start, where the margin is about 10 s, and after the conflict asserts the
+invariant that does not depend on speed: the first tab reads `capturing` or `complete` (not `error`, `lost`,
+`starting` or `idle`), owns the lease, ends with exactly six unique gap-free points, one run, no request of the second
+tab to a points endpoint and no non-GET. No timeout, sleep, retry or skip was added and no assertion removed.
+
+**Provider compatibility, by reading.** Request shape, strict-schema rules and the incomplete/refusal handling match
+the documentation read today and the installed SDK (7.22.0). Added tests: the documented schema limits and nullable
+form, the configured output cap with no `reasoning`/sampling parameter, a reasoning-model response, reasoning that
+exhausts the cap (incomplete), a tool call is not an answer, absent usage details are null not zero, a realistic echoed
+body stays under half the response limit. **The 800-token default was not changed**: no model is known and nothing is
+measured. The model-name guard wording (error, comment, `.env.example`, runbook) no longer implies it proves support.
+
+**Evaluator review and fixes.** Failed calls were already in every denominator and wrong outcomes already stayed in
+exact-filter accuracy; periods and distances were already compared by meaning. Gaps fixed, each with a test: no
+English/Russian split, no numerators/denominators, no explicit count of requests wrongly accepted as searches, a
+category of all-failed searches showed no figure, no cached/reasoning tokens, a partial run was only an "N of M" line,
+a bad key would spend the whole budget (now stops after 3 identical systemic failures), smoke selection was the first
+N of the file (now `--cases` by id, validated before any request). The run records SDK version and hashes of the
+instructions and the schema.
+
+**Executed.** `npm run verify`: exit 0. Scripts 48; API **1096** in 103 files (was 1075); web 520; contracts 128;
+fixtures 14; simulator 3: **1809** (was 1788, +21). `npm run test:integration`: 44 files, **433** (unchanged).
+`npm run test:e2e`: **85 passed, 0 failed** (7.0 min; the previously failing test passes). Both second-tab tests
+repeated 10 times serially after the fix: 20 of 20 passed. `git diff --check`: exit 0.
+
+**Live verification: unavailable.** `RUN_SEARCH_AI_MODEL` and `OPENAI_API_KEY` (or `_FILE`) exist nowhere in the
+process, user or machine environment or in `.env`. **Provider dispatches used: 0 of 75.** The fake adapter was not
+substituted. Dry runs (no request) were made with a placeholder model and key set only in that command, to check the
+selection and configuration paths. Real provider compatibility, the semantic baseline and the real-provider browser
+path are all **not verified**.
+
+**Mistakes during the work.** The first repeat command went through `npm run test:e2e -- ... --repeat-each` and the
+nested npm swallowed the flags; Playwright has to be run from `tests/e2e` with `npx` for flags. The failure could not
+be reproduced on an idle machine in 11 runs (1 + 10); it needed the throttled probe, so the diagnosis rests on the
+timing evidence and that reproduction, not on watching the original flake recur. The compatibility tests were written
+after the code and mostly pass without it, except the usage-detail ones; they are coverage, not a red-first proof.
+
+**Not verified / limits.** Everything under "Live verification". Reasoning models may need a larger output cap or
+more than the 12 s deadline cap allows; unknown until a run. Limits are still per process. Hosted CI has not run these
+changes. `packages/contracts/openapi/openapi.json` appears modified in `git status` after the build with no content
+difference (line endings only).

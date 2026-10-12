@@ -27,8 +27,11 @@ reach OpenAI.
 
 1. Create an API key in your OpenAI project. **Put a spending limit on that project**: the limits below are per
    process, in memory, and reset when the process restarts; they are not a budget.
-2. Choose a model that supports Structured Outputs through the Responses API, for example `gpt-4.1-mini` or a newer
-   model of your choice. There is deliberately no default: an unset or unsuitable model stops the server at startup.
+2. Choose a model that supports Structured Outputs through the Responses API and that your key may use. There is
+   deliberately no default and no fallback to another model: an unset model, or a name the local check does not
+   recognise, stops the server at startup. **That check is a name pattern, not proof**: a name it accepts can still be
+   unknown to OpenAI, unavailable to your project, or unable to follow the schema, and a model it refuses may in fact
+   work. Only a live request (the evaluation below) tells which.
 3. In your untracked `.env` (never `.env.example`, never a committed file):
 
    ```
@@ -83,7 +86,7 @@ Metrics: `run_search_interpretation_requests_total{outcome}`, `run_search_interp
 | `RUN_SEARCH_AI_ALLOWANCE` / `_ALLOWANCE_WINDOW_MS` | 100 / 86400000 | provider calls per rolling window, whole process; a failure after dispatch still counts |
 | `RUN_SEARCH_AI_LIMITER_MAX_USERS` | 1000 | people the limiter remembers; when full of limited people, newcomers get a "busy" answer |
 | `RUN_SEARCH_AI_TIMEOUT_MS` | 10000 (max 12000) | hard deadline for the whole provider call, body included; below the browser's 15 s |
-| `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS` | 800 | `max_output_tokens`; reasoning models spend it on reasoning too, so do not set it very low |
+| `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS` | 800 (64 to 4000) | `max_output_tokens`. For a reasoning model it also covers the reasoning tokens, which are billed as output and not visible; see below |
 | `RUN_SEARCH_AI_MAX_RESPONSE_BYTES` | 32768 | larger bodies are cut off and refused |
 | (contract) | 500 code points | request text; longer text is refused, never truncated |
 
@@ -91,6 +94,19 @@ Refusals: `429 INTERPRETATION_RATE_LIMITED` and `INTERPRETATION_IN_PROGRESS` (wi
 `503 INTERPRETATION_BUSY` and `INTERPRETATION_BUDGET_EXHAUSTED`, `504 INTERPRETATION_TIMEOUT`, `502
 INTERPRETATION_FAILED` (`details.reason`: `refusal`, `incomplete`, `invalid_output`, `oversized`, `provider_error`,
 `provider_rate_limited`).
+
+**Reasoning models and the output cap.** OpenAI's reasoning guide (read 2026-10-12) says `max_output_tokens` bounds
+"reasoning tokens, visible output tokens, and non-visible formatting tokens" together, that a response can end
+`incomplete` (reason `max_output_tokens`) before any visible text, and that it suggests reserving a generous budget
+(25,000 tokens) when first experimenting. The answer here is under 100 tokens, so 800 is plenty for a model that does
+not reason and may be too little for one that does; the server accepts at most 4000. Nothing in this repository
+knows which model you chose, so the default was **not** changed on a guess: the adapter sends no `reasoning`
+parameter (which values a model accepts differs by model, and some reject the lowest), and the evaluation reports
+`reasoning` tokens and `incomplete` failures so the first smoke run shows whether the cap is the problem. If it is,
+the evidence-based options are a higher `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS` (up to 4000) or a model or reasoning
+setting that spends less on reasoning; the second needs a small, tested change to the adapter and a new run. The
+deadline is a second constraint: `RUN_SEARCH_AI_TIMEOUT_MS` is capped at 12000 so the answer fits the browser's 15 s,
+and a reasoning model may not finish within it.
 
 **Limitations.** A restart resets all of it. Two API processes have twice the limits. It is not a distributed
 limiter and not a durable monetary budget. A transport that ignores cancellation frees its place at the deadline
@@ -120,38 +136,78 @@ CI, and it does nothing without `--live`.
 
 ```
 npm run eval:run-search -- --dry-run                      # validate dataset and configuration; no request
-npm run eval:run-search -- --live --max-cases 10          # a small first run
+npm run eval:run-search -- --dry-run --cases <id>,<id>    # the same, and print exactly which cases would be sent
+npm run eval:run-search -- --live --cases <id>,<id>       # a smoke run of cases chosen by identity
+npm run eval:run-search -- --live --max-cases 10          # the first 10 cases of the file (not a sample)
 npm run eval:run-search -- --live --out .local/eval-reports/run-search.json
 ```
 
 It reads `RUN_SEARCH_AI_MODEL`, `OPENAI_API_KEY` (or `_FILE`), and the same bounds as the server. Calls: one per
 case, no retries, concurrency 1 unless `--concurrency` (at most 4), each under `RUN_SEARCH_AI_TIMEOUT_MS`. The
 65-case dataset at 800 output tokens per call is bounded by 65 requests per run; read your provider's pricing
-before running it repeatedly.
+before running it repeatedly. Before any request it prints the model, the case ids, the call ceiling, the timeout
+and the output-token limit; an id the dataset does not have stops it before the client exists.
 
-The report states the model, the prompt version, the dataset version, the number of cases run, **outcome accuracy**
-(search / clarify / unsupported), **reason accuracy** (which reason code, for the last two), **exact filter
-accuracy** (every field right, for the search cases), per-field errors (`period`, `minDistance`, `maxDistance`,
-`sort`), failures by reason, latency (mean, p50, p95, max), token totals, a per-category breakdown, and every case
-that did not match with expected and actual codes. Matching is by meaning: the period as the instants the search
-would use, distances in metres, the sort with its default.
+**It stops itself** after three identical systemic failures in a row (`provider_error`, `provider_rate_limited`,
+`timeout`, `oversized`, `incomplete`: a bad key, a model the project cannot use, a schema the provider refuses, a
+transport problem, or an output cap that reasoning consumes). The report then says `STOPPED EARLY` and is not a
+measurement; fix the cause and run again. A refusal or an answer the contract rejects is what the model did with one
+request, so those are measured and never stop a run.
+
+**A first live check, in order** (one dispatch per case; keep a running total, the evaluation does not know what
+earlier commands spent):
+
+1. `--dry-run` with your configuration (no request).
+2. A smoke run of one case of each kind, chosen by identity: an English search, a Russian search, a clarification,
+   an unsupported request and an injection attempt:
+
+   ```text
+   npm run eval:run-search -- --live --cases en-last-month-min-longest,ru-last-month-min-longest,en-strict-more-than,en-location,en-injection-sql
+   ```
+
+3. Only if the smoke run shows no compatibility failure: `npm run eval:run-search -- --live --out
+   .local/eval-reports/run-search-baseline.json` for the whole dataset, **once**, with the prompt, schema, model and
+   limits unchanged. Keep that report as the baseline even if it is disappointing, and do not edit expected answers
+   to match the model, or add the baseline's examples to the instructions and call the same dataset's improved score
+   independent. A changed prompt is a new prompt version and a new, separately reported run.
+
+The report states the model, the OpenAI SDK version, the prompt version, hashes of the instructions and the schema,
+the limits, the dataset version, how many of the dataset's cases were run (a run that did not cover it says
+`PARTIAL`), **outcome accuracy** (search / clarify / unsupported), **reason accuracy** (which reason code, for the
+last two), **exact filter accuracy** (every field right, for the search cases), each with its numerator and
+denominator, the same three separately for English and for Russian, per-field errors (`period`, `minDistance`,
+`maxDistance`, `sort`), an expected-versus-got table, the requests that needed a clarification or are unsupported but
+were **accepted as a search**, failures by reason, latency (mean, p50, p95, max), tokens (input with cached,
+output with reasoning), a per-category breakdown, and every case that did not match with expected and actual codes.
+A failed call counts in every denominator it belongs to. Matching is by meaning: the period as the instants the
+search would use, distances in metres, the sort with its default. Cost is not calculated: it depends on the model's
+current pricing and on cached and reasoning token rates.
 
 How to read it: it is one model, one prompt, one day, 65 synthetic cases. A pass rate is evidence for that
 combination, not a guarantee, and a single mismatch of a "strict operator" case is more serious than one of a sort
 case, because it is a meaning the product promised not to change. Re-run after changing the instructions, the
 schema, the dataset or the model; the prompt version string changes with the instructions.
 
-**Status at the time of writing: no live evaluation has been run.** Any statement about how well a model performs
-here is unverified until a report exists.
+**Status at the time of writing (2026-10-12)**, kept apart on purpose:
+
+| What | State |
+|---|---|
+| Offline implementation (adapter, schema, evaluator, route, browser with the fake provider) | verified by tests |
+| Real provider compatibility (schema accepted, model reachable, refusal and incomplete handling, token budget) | **not verified: no model or key was configured**, so no request was made |
+| Semantic baseline (accuracy of a model on the 65 cases) | **not measured** |
+| Browser path with the real provider | **not verified** |
+
+Any statement about how well a model performs here is unverified until a report exists. See
+`docs/reports/run-search-interpretation-verification.md`.
 
 ## When something is wrong
 
 | Symptom | Likely cause |
 |---|---|
-| Server stops at startup naming `RUN_SEARCH_AI_MODEL` | enabled without a model, or a model name without Structured Outputs support |
+| Server stops at startup naming `RUN_SEARCH_AI_MODEL` | enabled without a model, or a name the local name check does not recognise (it is a pattern, not a capability test) |
 | Server stops at startup naming `OPENAI_API_KEY` | enabled without a key, or a key with whitespace |
 | Box says it is not turned on | `RUN_SEARCH_AI_ENABLED` is not `true` on the server the browser talks to |
 | Every request is `502` with `provider_error` | wrong key, model not available to the key, schema refused, network |
-| `502` with `incomplete` | `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS` too low for the model |
+| `502` with `incomplete` | `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS` too low for the model; on a reasoning model the evaluation's `reasoning` token total shows whether reasoning used it up |
 | `502` with `invalid_output` | the model answered something the contract refuses; check the live evaluation |
 | `503 INTERPRETATION_BUDGET_EXHAUSTED` | the process's rolling allowance is spent; it frees as the window moves |

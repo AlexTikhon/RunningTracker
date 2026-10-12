@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { INTERPRETATION_INSTRUCTIONS } from './interpretation-prompt.js';
+import { providerOutputJsonSchema } from './interpretation-schema.js';
 import { InterpreterFailure } from './interpretation-types.js';
 import { OpenAiInterpreter } from './openai-interpreter.js';
 
@@ -148,12 +149,89 @@ describe('OpenAI interpreter request', () => {
     const { interpreter } = create(() => json(completed(JSON.stringify(proposal))));
     const answer = await interpreter.interpret(input, { signal: signal() });
     expect(answer.proposal).toEqual(proposal);
-    expect(answer.usage).toEqual({ inputTokens: 812, outputTokens: 61 });
+    expect(answer.usage).toEqual({
+      cachedInputTokens: 0,
+      inputTokens: 812,
+      outputTokens: 61,
+      reasoningTokens: 0,
+    });
   });
 
   it('reports the configured model', () => {
     const { interpreter } = create(() => json({}));
     expect(interpreter.model).toBe('gpt-4.1-mini');
+  });
+
+  it('sends the configured output cap and no reasoning or sampling parameter', async () => {
+    // A reasoning model spends max_output_tokens on reasoning as well; which effort a model accepts differs by
+    // model, so the adapter sends none and the cap is whatever the operator configured, not a constant.
+    const { calls, interpreter } = create(() => json(completed(JSON.stringify(proposal))), {
+      maxOutputTokens: 1_500,
+    });
+    await interpreter.interpret(input, { signal: signal() });
+    expect(calls[0]!.body.max_output_tokens).toBe(1_500);
+    for (const forbidden of ['reasoning', 'temperature', 'top_p', 'max_tool_calls', 'truncation', 'include']) {
+      expect(calls[0]!.body, forbidden).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('accepts the answer of a reasoning model and reports what reasoning cost', async () => {
+    const { interpreter } = create(() =>
+      json(
+        completed(JSON.stringify(proposal), {
+          output: [
+            { id: 'rs_synthetic', summary: [], type: 'reasoning' },
+            {
+              content: [{ annotations: [], text: JSON.stringify(proposal), type: 'output_text' }],
+              id: 'msg_synthetic',
+              role: 'assistant',
+              status: 'completed',
+              type: 'message',
+            },
+          ],
+          usage: {
+            input_tokens: 900,
+            input_tokens_details: { cached_tokens: 512 },
+            output_tokens: 340,
+            output_tokens_details: { reasoning_tokens: 300 },
+            total_tokens: 1_240,
+          },
+        }),
+      ),
+    );
+    const answer = await interpreter.interpret(input, { signal: signal() });
+    expect(answer.proposal).toEqual(proposal);
+    expect(answer.usage).toEqual({
+      cachedInputTokens: 512,
+      inputTokens: 900,
+      outputTokens: 340,
+      reasoningTokens: 300,
+    });
+  });
+
+  it('treats usage details a response does not carry as not reported, never as zero', async () => {
+    const { interpreter } = create(() =>
+      json(completed(JSON.stringify(proposal), { usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } })),
+    );
+    const answer = await interpreter.interpret(input, { signal: signal() });
+    expect(answer.usage).toEqual({
+      cachedInputTokens: null,
+      inputTokens: 10,
+      outputTokens: 5,
+      reasoningTokens: null,
+    });
+  });
+
+  it('keeps a realistic response, which echoes the instructions and the schema, well inside the default limit', async () => {
+    const echoed = completed(JSON.stringify(proposal), {
+      instructions: INTERPRETATION_INSTRUCTIONS,
+      text: { format: { name: 'run_search_interpretation', schema: providerOutputJsonSchema, strict: true, type: 'json_schema' } },
+    });
+    // The default of RUN_SEARCH_AI_MAX_RESPONSE_BYTES is 32768; staying under half of it leaves room for the
+    // provider's own fields, which this synthetic body does not reproduce.
+    expect(Buffer.byteLength(JSON.stringify(echoed), 'utf8')).toBeLessThan(16_384);
+    const { interpreter } = create(() => json(echoed));
+    expect((await interpreter.interpret(input, { signal: signal() })).proposal).toEqual(proposal);
   });
 });
 
@@ -199,7 +277,46 @@ describe('OpenAI interpreter failures', () => {
     );
     const failure = await failureOf(interpreter.interpret(input, { signal: signal() }));
     expect(failure.reason).toBe('refusal');
-    expect(failure.usage).toEqual({ inputTokens: 812, outputTokens: 61 });
+    expect(failure.usage).toEqual({
+      cachedInputTokens: 0,
+      inputTokens: 812,
+      outputTokens: 61,
+      reasoningTokens: 0,
+    });
+  });
+
+  it('classifies reasoning that used up the output cap as incomplete, with the reasoning cost', async () => {
+    // The documented failure of a small cap on a reasoning model: status incomplete, no visible text at all.
+    const { interpreter } = create(() =>
+      json(
+        completed('', {
+          incomplete_details: { reason: 'max_output_tokens' },
+          output: [{ id: 'rs_synthetic', summary: [], type: 'reasoning' }],
+          status: 'incomplete',
+          usage: {
+            input_tokens: 900,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 800,
+            output_tokens_details: { reasoning_tokens: 800 },
+            total_tokens: 1_700,
+          },
+        }),
+      ),
+    );
+    const failure = await failureOf(interpreter.interpret(input, { signal: signal() }));
+    expect(failure.reason).toBe('incomplete');
+    expect(failure.usage).toMatchObject({ outputTokens: 800, reasoningTokens: 800 });
+  });
+
+  it('does not take a tool call for an answer', async () => {
+    const { interpreter } = create(() =>
+      json(
+        completed('', {
+          output: [{ arguments: '{}', call_id: 'call_1', id: 'fc_1', name: 'x', status: 'completed', type: 'function_call' }],
+        }),
+      ),
+    );
+    expect((await failureOf(interpreter.interpret(input, { signal: signal() }))).reason).toBe('invalid_output');
   });
 
   it('classifies an incomplete response as incomplete and never parses its partial text', async () => {
