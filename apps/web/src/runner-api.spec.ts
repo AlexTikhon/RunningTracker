@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createRun,
   endSession,
+  interpretRunSearch,
   loadArchiveMetadata,
   loadOrganizations,
   loadSession,
@@ -323,5 +324,72 @@ describe('runner API', () => {
       `/api/orgs/${orgId}/runs/${runId}/live-track/changes?afterRevision=4`,
       { credentials: 'same-origin', signal: expect.any(AbortSignal) as AbortSignal },
     );
+  });
+
+  describe('interpreting a search in words', () => {
+    const answer = {
+      filters: {
+        distanceUnit: 'km',
+        maxDistance: null,
+        minDistance: '5',
+        period: { kind: 'preset', preset: 'previous-month' },
+        sort: 'longest',
+        timeZone: 'Europe/Warsaw',
+      },
+      outcome: 'search',
+    };
+
+    it('posts only the text and the zone, with the CSRF header and no owner, and validates the answer', async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(answer)));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(
+        interpretRunSearch({ orgId, text: 'runs of at least 5 km', timeZone: 'Europe/Warsaw' }, csrf, new AbortController().signal),
+      ).resolves.toEqual(answer);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe(`/api/orgs/${orgId}/runs/search/interpretations`);
+      expect(init).toMatchObject({
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token },
+        method: 'POST',
+      });
+      expect(JSON.parse(init!.body as string)).toEqual({ text: 'runs of at least 5 km', timeZone: 'Europe/Warsaw' });
+    });
+
+    it('rejects an answer that does not match the contract', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ outcome: 'search', message: 'hi' }))),
+      );
+      await expect(
+        interpretRunSearch({ orgId, text: 'x', timeZone: 'UTC' }, csrf, new AbortController().signal),
+      ).rejects.toThrow();
+    });
+
+    it('surfaces the code, status, request id and Retry-After of a refusal', async () => {
+      const refusal = { error: { code: 'INTERPRETATION_RATE_LIMITED', message: 'Too many requests.', requestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' } };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>().mockResolvedValue(
+          new Response(JSON.stringify(refusal), { headers: { 'retry-after': '30' }, status: 429 }),
+        ),
+      );
+      await expect(
+        interpretRunSearch({ orgId, text: 'x', timeZone: 'UTC' }, csrf, new AbortController().signal),
+      ).rejects.toMatchObject({ code: 'INTERPRETATION_RATE_LIMITED', retryAfterMs: 30_000, status: 429 });
+    });
+
+    it('is attempted once: a failure is not retried by the client', async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ error: { code: 'INTERPRETATION_FAILED', message: 'x', requestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' } }), { status: 502 }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(
+        interpretRunSearch({ orgId, text: 'x', timeZone: 'UTC' }, csrf, new AbortController().signal),
+      ).rejects.toMatchObject({ status: 502 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 });

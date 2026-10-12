@@ -140,7 +140,8 @@ export function RunSearchResults({ filters, onLoadMore, onRetry, snapshot }: Run
     <div className="search-results">
       <PendingNotice count={snapshot.pendingSummaryCount} distanceFiltered={distanceFiltered} />
       <p className="search-results__note">
-        Observed duration is the time between the first and last accepted GPS measurements of a run.
+        Observed duration is the sum of the time between consecutive accepted GPS measurements of a run. Gaps,
+        pauses and stretches the GPS data could not confirm are not counted.
       </p>
       <ol aria-label="My runs" className="run-cards">
         {snapshot.items.map((item) => (

@@ -90,7 +90,10 @@ describe('RunSearchResults', () => {
 
   it('states the meaning of observed duration and does not call it moving time', () => {
     const markup = render(snapshot({ items: [runItem()] }));
-    expect(markup).toMatch(/accepted (GPS )?measurements/iu);
+    expect(markup).toMatch(/sum of the time between consecutive accepted GPS measurements/iu);
+    expect(markup).toMatch(/gaps/iu);
+    // The summary adds up accepted edges; it is not the span from the first to the last measurement.
+    expect(markup).not.toMatch(/between the first and (the )?last/iu);
     expect(markup).not.toMatch(/moving time|workout time|pace/iu);
   });
 

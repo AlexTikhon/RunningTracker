@@ -5,6 +5,7 @@ import {
   liveTrackResponseSchema,
   organizationListResponseSchema,
   runCommandResponseSchema,
+  runSearchInterpretationResponseSchema,
   runSearchResponseSchema,
   runViewSchema,
   sessionResponseSchema,
@@ -14,6 +15,7 @@ import {
   type PointInput,
   type RunCommandResponse,
   type RunCommandType,
+  type RunSearchInterpretationResponse,
   type RunSearchResponse,
   type RunView,
   type SessionResponse,
@@ -186,6 +188,27 @@ export async function searchRuns(
     },
   );
   return runSearchResponseSchema.parse(requireSuccess(response));
+}
+
+// Asks the server to turn a sentence into a filter proposal. Sends only the text and the zone; the owner comes from
+// the session. One call is one billable provider request, so nothing here retries, and the caller decides whether a
+// late answer is still wanted.
+export async function interpretRunSearch(
+  input: { orgId: string; text: string; timeZone: string },
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<RunSearchInterpretationResponse> {
+  const response = await requestJson(
+    `/api/orgs/${encodeURIComponent(input.orgId)}/runs/search/interpretations`,
+    {
+      body: JSON.stringify({ text: input.text, timeZone: input.timeZone }),
+      credentials: 'same-origin',
+      headers: mutationHeaders(csrf),
+      method: 'POST',
+      signal,
+    },
+  );
+  return runSearchInterpretationResponseSchema.parse(requireSuccess(response));
 }
 
 export async function createRun(
