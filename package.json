@@ -42,6 +42,7 @@
     "simulate:gps": "npm run simulate --workspace=@running-tracker/gps-simulator --",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
     "demo:seed": "node scripts/demo-seed.mjs",
+    "demo:seed:search": "node scripts/demo-search-seed.mjs",
     "demo:run": "node scripts/demo-run.mjs",
     "db:up": "docker compose -f infra/compose/docker-compose.yml up -d --wait",
     "db:down": "docker compose -f infra/compose/docker-compose.yml down",

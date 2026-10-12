@@ -1827,3 +1827,69 @@ new specs (`reject(request.error)`).
 
 **Not verified / limits:** `acknowledgeStart/Command/Reconciled` and `queueRequest` still check ownership just before, not
 inside, their transactions (ADR-0055); two real devices or browsers other than Chromium; a hosted CI run.
+
+## Owner-only archive search, first stage (2026-10-11)
+
+Scope: "Smart search through my runs", the deterministic part only. No language model, no natural-language parsing,
+no detail page, no new map. Design and limits: ADR-0056. No migration, no dependency, no change to an existing
+authorization, ingestion or lifecycle behaviour.
+
+**What works.** `GET /api/orgs/{orgId}/runs/search`: the session's own finished runs with a current published summary
+(`source_revision = data_revision`), by a preset or inclusive local dates in an IANA zone, converted by the server to
+`[from, to)` over `started_at` with DST-safe day boundaries; minimum/maximum distance in `km` or `mi` converted exactly
+to metres; `newest`/`longest`/`shortest` with keyset paging and a context-bound cursor; `pendingSummaryCount` for
+finished runs without a current summary, before the distance filter. Web: a "My runs" section under the archive map
+with an editable draft, a separate "Applied filters" block, cards (start in the selected zone, distance, observed
+duration, GPS data label), loading/empty/error-with-retry/next-page states and the pending notice. The general run list
+and the map are unchanged. `npm run demo:seed:search` adds 67 synthetic runs (additive, idempotent).
+
+**Red before green** (written first, failed for the expected reason): the 69 contract tests, the period, query and
+SQL-variant tests, the 41 endpoint tests (the route fell into `/:runId` and answered 400), the controller and component
+tests, the seed-plan tests. The helper tests of `run-search.ts` and the seed integration test were written together
+with their module and were not watched red; they were mutation-checked instead.
+
+**Executed (Node 24.11.1, npm 11.6.2, real PostGIS 17/3.5 test database, runtime role):**
+
+- `npm run verify`: exit 0. Scripts 48 (was 36), API 849 in 94 files (was 771), web 456 (was 390), contracts 87 (was
+  18), fixtures 14, simulator 3: **1457** (was 1232). Lint, typecheck, all builds.
+- `npm run test:integration`: 43 files, **426** tests (was 378 in 41): `run-search.integration.test.ts` (41) and
+  `demo-search-seed.integration.test.ts` (7). Reran the two files after the last edit: 48 pass.
+- `npm run test:e2e`: **79** passed in 5.3 minutes (was 74): `tests/e2e/run-search.spec.ts` (5) in the `chromium`
+  project; the deliberately failing harness test is the expected failure. The search spec alone was rerun after the
+  last source edit: 5 passed.
+- `git diff --check`: exit 0 (only the LF/CRLF working-copy notices).
+
+**Covered.** Timezone: Warsaw spring (23 h) and autumn (25 h), New York, Lord Howe (23.5 h), Sao Paulo (no midnight),
+Havana (two midnights), Asuncion (clocks back from 00:00), Apia (a skipped date), month/year/leap boundaries, and a
+tiling test that walks a year of days in eight zones; presets from an injected clock across a local month change.
+Units: kilometres and miles, exact conversion (a value where binary multiplication is off), inclusive bounds, display
+rounding never filtering (4999.96 m against 5 km), invalid and ambiguous inputs, unknown fields including an owner.
+Authorization under the runtime role: a shared run readable through the list but absent from search, another
+organization's runs, a teammate's own list, an organization the person is not in (403), an inactive member (403), 401.
+Summaries: missing and stale counted as pending before the distance filter, becoming items when published or
+republished. Paging: every sort, ties on start and distance across a page boundary, limits 1/2/4, cursors refused for
+another sort, bound, period, zone, organization, person, and for garbage. Browser: filters applied separately from the
+draft, a first page of 20 and a next page, an organization switch while the next page is held (the late answer changes
+nothing), error and retry, lost access, miles, and the owner-only list when a run is shared with the person.
+
+**Mutation checks** (temporary, reverted, files compared with backups afterwards): removing the owner filter by
+`$2::uuid IS NOT NULL` failed the owner, organization, period, order and paging endpoint tests and the browser's
+shared-run test; removing the summary revision match failed the stale and pending tests; counting without the
+`finished` filter failed 4; `<=` in the newest keyset predicate failed the newest paging test; removing the panel's
+person/organization key failed the browser organization-switch test. Two of my first mutations broke the SQL (an
+untyped parameter) instead of changing its meaning, so they proved less than they seemed; the owner mutation was
+redone cleanly.
+
+**Mistakes during the work.** Three expectations of mine were wrong and the code was right (13.1 mi is 21082.4064 m,
+`0.3 * 1609.344` happens to be exact so another value is used to show the binary error, m10/m11 fall inside 3.1-6.2 mi);
+the seed integration test counted the suite's own fixture runs; a quoted-heredoc patch script lost a regex backslash
+twice (caught by the specs at once); the first `npm run verify` failed on an unused constant in `scripts/` that my
+file-by-file lint had not covered; the formatter cache was keyed by the raw zone string, which `Intl` accepts in any
+letter case, so a client could have grown it without bound (now keyed by the lower-cased name, with a test).
+
+**Not verified / limits.** No measurement of the search statement on a production-size table (the ADR's index
+argument is a design argument); algorithm-version staleness is not considered (the rule given is existence plus source
+revision); browser and server may disagree about a very new zone name; Chromium only; the demo seed was exercised
+against the isolated test database and its plan by unit tests, not run against the developer's `running_tracker`
+database; the hosted CI job has not run these commits. Next stage: translate a natural-language request into this
+contract with a language model.
