@@ -6,6 +6,7 @@ import {
   type ArchivePeriod,
   type ArchiveSourceSnapshot,
 } from './archive-source.js';
+import { RunSearchPanel } from './RunSearchPanel.js';
 import { loadArchiveMetadata } from './runner-api.js';
 
 const initialSnapshot: ArchiveSourceSnapshot = {
@@ -172,6 +173,8 @@ export function ArchiveScreen({ accessToken, orgId, userId }: ArchiveScreenProps
         </span>
         <span>Metadata refreshes every 30 seconds and immediately on tab focus.</span>
       </footer>
+
+      <RunSearchPanel key={`${userId}/${orgId}`} orgId={orgId} userId={userId} />
     </section>
   );
 }

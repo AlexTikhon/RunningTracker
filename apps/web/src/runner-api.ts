@@ -5,6 +5,7 @@ import {
   liveTrackResponseSchema,
   organizationListResponseSchema,
   runCommandResponseSchema,
+  runSearchResponseSchema,
   runViewSchema,
   sessionResponseSchema,
   type ArchiveMetadataResponse,
@@ -13,6 +14,7 @@ import {
   type PointInput,
   type RunCommandResponse,
   type RunCommandType,
+  type RunSearchResponse,
   type RunView,
   type SessionResponse,
 } from '@running-tracker/contracts';
@@ -167,6 +169,23 @@ export async function loadArchiveMetadata(
     },
   );
   return archiveMetadataResponseSchema.parse(requireSuccess(response));
+}
+
+// "My runs" search: only the signed-in person's own finished runs. The owner is never sent; the server takes it
+// from the session. `params` are the validated query fields (see run-search.ts).
+export async function searchRuns(
+  input: { orgId: string; params: Record<string, string> },
+  signal: AbortSignal,
+): Promise<RunSearchResponse> {
+  const query = new URLSearchParams(input.params);
+  const response = await requestJson(
+    `/api/orgs/${encodeURIComponent(input.orgId)}/runs/search?${query.toString()}`,
+    {
+      credentials: 'same-origin',
+      signal,
+    },
+  );
+  return runSearchResponseSchema.parse(requireSuccess(response));
 }
 
 export async function createRun(
