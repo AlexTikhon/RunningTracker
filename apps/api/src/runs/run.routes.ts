@@ -9,6 +9,7 @@ import {
   runCommandRequestSchema,
   runListQuerySchema,
   runPathSchema,
+  runSearchInterpretationRequestSchema,
   runSearchQuerySchema,
   runSharePathSchema,
   upsertRunShareRequestSchema,
@@ -28,9 +29,11 @@ import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { ApiError } from '../http/errors.js';
+import { getRequestId } from '../http/request-id.js';
 import type { ApiMetrics } from '../observability/api-metrics.js';
 import type { TestOnlyFaultInjector } from '../testing/fault-injection.js';
 import { measureIngestion } from './ingestion-metrics.js';
+import type { InterpretationService } from './interpretation/interpretation-service.js';
 import { LiveTrackCursorCodec } from './live-track-cursor.js';
 import { searchRuns } from './run-search-service.js';
 import {
@@ -50,6 +53,8 @@ import {
 interface RunRouterDependencies {
   clock: Clock;
   config: Environment;
+  /** Absent when the natural-language interpreter is not enabled: the route then answers 503. */
+  interpretation?: InterpretationService;
   metrics?: ApiMetrics['ingestion'];
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
@@ -91,6 +96,7 @@ function shareRouteInput(request: Request): { orgId: string; runId: string; user
 export function createRunRouter({
   clock,
   config,
+  interpretation,
   metrics,
   pool,
   sessionManager,
@@ -137,6 +143,69 @@ export function createRunRouter({
       next(error);
     }
   });
+
+  // Natural language in, a filter proposal out (ADR-0057). It reads no run, summary or point: the only database
+  // question is "is this person an active member", asked before the provider is contacted and again before the
+  // answer is returned, each in its own short transaction, so no connection is held while the provider works.
+  router.post(
+    '/search/interpretations',
+    ...mutationProtection,
+    requireJson,
+    async (request, response, next) => {
+      try {
+        const path = parseContract(organizationPathSchema, request.params, 'organization path');
+        const body = parseContract(
+          runSearchInterpretationRequestSchema,
+          request.body,
+          'interpretation request',
+        );
+        const session = getAuthenticatedSession(request);
+        const orgId = path.orgId.toLowerCase();
+        if (interpretation === undefined) {
+          throw new ApiError(
+            503,
+            'INTERPRETATION_DISABLED',
+            'Natural-language search is not enabled on this server',
+          );
+        }
+
+        const verifyAccess = async (): Promise<void> => {
+          await withAuthenticatedTenantTransaction(pool, session, orgId, () => Promise.resolve());
+        };
+        await verifyAccess();
+
+        // A client that goes away ends the request; the provider call is abandoned and its place freed.
+        const clientGone = new AbortController();
+        response.once('close', () => {
+          if (!response.writableFinished) {
+            clientGone.abort();
+          }
+        });
+
+        const result = await interpretation.interpret({
+          requestId: getRequestId(request),
+          revalidate: async () => {
+            if (!sessionManager.isActive(session)) {
+              throw new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required');
+            }
+            await verifyAccess();
+          },
+          signal: clientGone.signal,
+          text: body.text,
+          timeZone: body.timeZone,
+          userId: session.userId,
+        });
+        response.setHeader('Cache-Control', 'no-store');
+        response.status(200).json(result);
+      } catch (error) {
+        const retryAfter = (error as ApiError | undefined)?.details?.retryAfterSeconds;
+        if (typeof retryAfter === 'number') {
+          response.setHeader('Retry-After', String(retryAfter));
+        }
+        next(error);
+      }
+    },
+  );
 
   router.get('/:runId', authenticate, async (request, response, next) => {
     try {

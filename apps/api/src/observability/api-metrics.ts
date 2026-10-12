@@ -83,6 +83,27 @@ export function createApiMetrics(registry: MetricsRegistry = new MetricsRegistry
         name: 'point_ingest_rejections_total',
       }),
     },
+    interpretation: {
+      durationSeconds: registry.histogram({
+        buckets: latency,
+        help: 'Time from admission to answer of a "My runs" interpretation, by outcome.',
+        labelNames: ['outcome'],
+        maxSeries: 32,
+        name: 'run_search_interpretation_seconds',
+      }),
+      requests: registry.counter({
+        help: 'Interpretation requests by bounded outcome (answers, provider failures, admission refusals).',
+        labelNames: ['outcome'],
+        maxSeries: 32,
+        name: 'run_search_interpretation_requests_total',
+      }),
+      tokens: registry.counter({
+        help: 'Provider tokens reported for interpretations, by direction.',
+        labelNames: ['direction'],
+        maxSeries: 4,
+        name: 'run_search_interpretation_tokens_total',
+      }),
+    },
     live: {
       backpressureCloses: registry.counter({
         help: 'Event streams closed because a client stayed blocked past the timeout.',

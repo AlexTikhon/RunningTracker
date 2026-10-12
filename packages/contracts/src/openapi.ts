@@ -22,6 +22,10 @@ import {
   upsertRunShareRequestSchema,
 } from './http.js';
 import {
+  runSearchInterpretationRequestSchema,
+  runSearchInterpretationResponseSchema,
+} from './run-search-interpretation.js';
+import {
   pointInputSchema,
   qualityStatsSchema,
   rawStateSchema,
@@ -219,6 +223,20 @@ export const openApiDocument = {
           parameterRef('Cursor'),
         ],
         responses: { '200': jsonResponse('One page of matching runs.', 'RunSearchResponse'), ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/runs/search/interpretations': {
+      post: {
+        tags: ['Runs'],
+        summary: 'Propose "My runs" search filters from a sentence (English or Russian)',
+        description:
+          "Optional and off by default. Sends the text, and nothing else about the person, to the configured language model provider once; the answer is a proposal for the filter form, never a search: the caller reviews it and then calls the search endpoint above. `search` is a complete replacement filter set already checked against the search contract (the time zone is the request's, not the model's; a preset is resolved by the server clock when the search runs; the sort is `newest` when the text names none). `clarify` and `unsupported` carry only a bounded reason code, and the caller owns the wording. A condition that the search cannot express exactly (a strict distance bound, a place, a pace) is never dropped or approximated. Nothing is stored. Failures: 503 INTERPRETATION_DISABLED when the feature is off, 429 INTERPRETATION_RATE_LIMITED or INTERPRETATION_IN_PROGRESS (Retry-After where known), 503 INTERPRETATION_BUSY or INTERPRETATION_BUDGET_EXHAUSTED, 504 INTERPRETATION_TIMEOUT, and 502 INTERPRETATION_FAILED with `details.reason` for a refusal, an incomplete or invalid answer or a provider error. A provider refusal is a failure here, not an `unsupported` answer. The membership is checked before the provider is contacted and again before the answer is returned; no database connection is held while the provider works. Every accepted request that reaches the provider is billable, so clients must not retry automatically.",
+        parameters: [parameterRef('OrgId'), ...csrfParameters],
+        requestBody: requestBody('RunSearchInterpretationRequest'),
+        responses: {
+          '200': jsonResponse('A proposal, a clarification or an unsupported reason.', 'RunSearchInterpretationResponse'),
+          ...defaultErrors,
+        },
       },
     },
     '/api/orgs/{orgId}/runs/{runId}': {
@@ -526,6 +544,8 @@ export const openApiDocument = {
       RunShareResponse: jsonSchema(runShareResponseSchema),
       RunListResponse: jsonSchema(runListResponseSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
+      RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),
+      RunSearchInterpretationResponse: jsonSchema(runSearchInterpretationResponseSchema),
       PointsResponse: jsonSchema(pointsResponseSchema),
       ArchiveTrackResponse: jsonSchema(archiveTrackResponseSchema),
       NearbyResponse: jsonSchema(nearbyResponseSchema),

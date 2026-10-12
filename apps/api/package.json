@@ -7,6 +7,7 @@
     "prebuild": "npm run build --workspace=@running-tracker/contracts",
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --watch --import tsx src/entrypoint.ts",
+    "eval:run-search": "node --import tsx src/evaluation/run-search-evaluation-main.ts",
     "gps:analyze": "node --import tsx src/gps-traces/analyze-main.ts",
     "gps:report": "node --import tsx src/gps-traces/report-main.ts",
     "gps:sanitize": "node --import tsx src/gps-traces/sanitize-main.ts",
@@ -30,6 +31,7 @@
   "dependencies": {
     "@running-tracker/contracts": "0.1.0",
     "express": "5.2.1",
+    "openai": "7.22.0",
     "openid-client": "6.8.8",
     "pg": "8.23.0",
     "zod": "4.6.5"

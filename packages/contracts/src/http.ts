@@ -158,12 +158,38 @@ export const gpsQualitySchema = z.enum(['good', 'poor', 'insufficient']);
 
 // A decimal in the chosen unit with at most three fraction digits, so the server converts it to metres exactly.
 // No sign, no exponent, no leading zero: one spelling per value.
-const distanceBoundSchema = z
+export const distanceBoundSchema = z
   .string()
   .regex(/^(?:0|[1-9]\d{0,5})(?:\.\d{1,3})?$/u)
   .refine((value) => Number(value) <= RUN_SEARCH_DISTANCE_MAX_UNITS, {
     message: `A distance bound must not exceed ${RUN_SEARCH_DISTANCE_MAX_UNITS}`,
   });
+
+/**
+ * The checks shared by a search request and a proposed search: an ordered, inclusive range of at most
+ * `ARCHIVE_PERIOD_MAX_DAYS` days. Dates that are not real calendar dates are left to `localDateSchema`.
+ */
+export function validateInclusiveDateRange(
+  fromDate: string,
+  toDate: string,
+  context: z.RefinementCtx,
+): void {
+  const from = parseLocalDate(fromDate);
+  const to = parseLocalDate(toDate);
+  if (from === null || to === null) {
+    return;
+  }
+  const days =
+    (Date.UTC(to.year, to.month - 1, to.day) - Date.UTC(from.year, from.month - 1, from.day)) / 86_400_000 + 1;
+  if (days < 1) {
+    context.addIssue({ code: 'custom', message: '`fromDate` must not be after `toDate`' });
+  } else if (days > ARCHIVE_PERIOD_MAX_DAYS) {
+    context.addIssue({
+      code: 'custom',
+      message: `The period must not exceed ${ARCHIVE_PERIOD_MAX_DAYS} days`,
+    });
+  }
+}
 
 export const runSearchQuerySchema = z
   .strictObject({
@@ -189,22 +215,7 @@ export const runSearchQuerySchema = z
           message: 'Give a preset, or both `fromDate` and `toDate`',
         });
       } else {
-        const from = parseLocalDate(value.fromDate);
-        const to = parseLocalDate(value.toDate);
-        if (from !== null && to !== null) {
-          const days =
-            (Date.UTC(to.year, to.month - 1, to.day) - Date.UTC(from.year, from.month - 1, from.day)) /
-              86_400_000 +
-            1;
-          if (days < 1) {
-            context.addIssue({ code: 'custom', message: '`fromDate` must not be after `toDate`' });
-          } else if (days > ARCHIVE_PERIOD_MAX_DAYS) {
-            context.addIssue({
-              code: 'custom',
-              message: `The period must not exceed ${ARCHIVE_PERIOD_MAX_DAYS} days`,
-            });
-          }
-        }
+        validateInclusiveDateRange(value.fromDate, value.toDate, context);
       }
     }
     const hasBound = value.minDistance !== undefined || value.maxDistance !== undefined;
@@ -227,7 +238,9 @@ export const runSearchItemSchema = z.strictObject({
   distanceM: nonnegativeFiniteSchema,
   // Derived by the server from the summary's quality statistics; see ADR-0056 for the rule.
   gpsQuality: gpsQualitySchema,
-  // Time between the first and last accepted measurements of the run: not moving time, not workout time.
+  // The summary's `observedDurationS`: the sum of the durations of the run's accepted edges (ADR-0013). Time spent
+  // across rejected edges, gaps and pauses is not in it, so it is not the time between the first and the last
+  // measurement, and it is not moving time or workout time.
   observedDurationS: nonnegativeFiniteSchema,
   runId: uuidSchema,
   startedAt: timestampSchema,
