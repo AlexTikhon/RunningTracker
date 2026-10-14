@@ -3,8 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Clock } from '../../clock.js';
 import { createLogger } from '../../observability/logger.js';
 import { InterpretationAdmission } from './interpretation-admission.js';
-import { INTERPRETATION_INSTRUCTIONS } from './interpretation-prompt.js';
+import { INTERPRETATION_INSTRUCTIONS, OLLAMA_INTERPRETATION_INSTRUCTIONS } from './interpretation-prompt.js';
 import { providerOutputJsonSchema, type ProviderProposal } from './interpretation-schema.js';
+import { ollamaOutputJsonSchema } from './ollama-output-schema.js';
 import { InterpretationService } from './interpretation-service.js';
 import { InterpreterFailure, type InterpretationInput } from './interpretation-types.js';
 import {
@@ -55,8 +56,20 @@ const unsupported: ProviderProposal = {
   unsupportedReason: 'location',
 };
 
+// What the model writes under the Ollama wire schema (one shape per outcome), and what it maps to above.
+const wireSearch = {
+  outcome: 'search',
+  period: 'previous-month',
+  minDistance: '5',
+  maxDistance: null,
+  distanceUnit: 'km',
+  sort: 'longest',
+};
+const wireClarify = { outcome: 'clarify', clarificationReason: 'distance_boundary_strict' };
+const wireUnsupported = { outcome: 'unsupported', unsupportedReason: 'location' };
+
 // What Ollama's /api/chat answers with stream:false, in the fields this adapter relies on.
-function envelope(overrides: Record<string, unknown> = {}, content: unknown = search): Record<string, unknown> {
+function envelope(overrides: Record<string, unknown> = {}, content: unknown = wireSearch): Record<string, unknown> {
   return {
     created_at: '2026-10-15T12:00:00.000Z',
     done: true,
@@ -154,8 +167,9 @@ describe('ollama interpreter: the request', () => {
     const body = JSON.parse(calls[0]!.init.body as string) as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual(['format', 'messages', 'model', 'options', 'stream', 'think']);
     expect(body).toMatchObject({ model: 'qwen3:8b', stream: false, think: false });
-    // The exact schema the OpenAI adapter sends, not a copy of it.
-    expect(body.format).toEqual(JSON.parse(JSON.stringify(providerOutputJsonSchema)));
+    // The outcome-dependent Ollama schema, and not the flat one the OpenAI adapter sends.
+    expect(body.format).toEqual(JSON.parse(JSON.stringify(ollamaOutputJsonSchema)));
+    expect(body.format).not.toEqual(JSON.parse(JSON.stringify(providerOutputJsonSchema)));
     expect(body.options).toEqual({ num_ctx: 4_096, num_predict: 800, temperature: 0 });
     expect(OLLAMA_GENERATION).toEqual({ numCtx: 4_096, temperature: 0, think: false });
   });
@@ -168,7 +182,8 @@ describe('ollama interpreter: the request', () => {
       messages: Array<{ content: string; role: string }>;
     };
     expect(messages.map((message) => message.role)).toEqual(['system', 'user']);
-    expect(messages[0]!.content.startsWith(INTERPRETATION_INSTRUCTIONS)).toBe(true);
+    expect(messages[0]!.content.startsWith(OLLAMA_INTERPRETATION_INSTRUCTIONS)).toBe(true);
+    expect(messages[0]!.content.startsWith(INTERPRETATION_INSTRUCTIONS)).toBe(false);
     expect(messages[0]!.content).toContain('Time zone: Europe/Warsaw');
     expect(messages[0]!.content).toContain('2026-10-15');
     expect(messages[1]!.content).toBe(input.text);
@@ -195,13 +210,53 @@ describe('ollama interpreter: the request', () => {
 
 describe('ollama interpreter: answers', () => {
   it.each([
-    ['search', search],
-    ['clarify', clarify],
-    ['unsupported', unsupported],
-  ])('returns a valid %s proposal', async (_name, proposal) => {
-    const { interpreter } = adapter(answers(envelope({}, proposal)));
+    ['search', wireSearch, search],
+    ['clarify', wireClarify, clarify],
+    ['unsupported', wireUnsupported, unsupported],
+    [
+      'search over explicit dates',
+      {
+        outcome: 'search',
+        period: 'dates',
+        fromDate: '2026-03-01',
+        toDate: '2026-03-31',
+        minDistance: null,
+        maxDistance: '10',
+        distanceUnit: 'mi',
+        sort: null,
+      },
+      {
+        ...search,
+        distanceUnit: 'mi',
+        fromDate: '2026-03-01',
+        maxDistance: '10',
+        minDistance: null,
+        period: 'dates',
+        sort: null,
+        toDate: '2026-03-31',
+      },
+    ],
+  ])('maps a wire %s answer to the domain proposal', async (_name, wire, proposal) => {
+    const { interpreter } = adapter(answers(envelope({}, wire)));
     const result = await interpreter.interpret(input, { signal: new AbortController().signal });
     expect(result.proposal).toEqual(proposal);
+  });
+
+  it('refuses the flat ten-field shape the OpenAI adapter uses: it is not the wire contract of this adapter', async () => {
+    for (const flat of [search, clarify, unsupported]) {
+      const { interpreter } = adapter(answers(envelope({}, flat)));
+      const failure = await failureOf(interpreter.interpret(input, { signal: new AbortController().signal }));
+      expect(failure.reason).toBe('invalid_output');
+    }
+  });
+
+  it('maps a wire-valid answer that the domain will refuse later as it is, without repairing it', async () => {
+    // A minimum above the maximum, and a bound with no unit: both are the normaliser's to reject, after this
+    // adapter, exactly as for an OpenAI answer. Nothing is corrected, inferred or dropped on the way.
+    const wire = { ...wireSearch, minDistance: '5', maxDistance: '2', distanceUnit: null };
+    const { interpreter } = adapter(answers(envelope({}, wire)));
+    const result = await interpreter.interpret(input, { signal: new AbortController().signal });
+    expect(result.proposal).toEqual({ ...search, distanceUnit: null, maxDistance: '2', minDistance: '5' });
   });
 
   it('maps the usage Ollama reports and leaves what it does not report null', async () => {
@@ -229,7 +284,7 @@ describe('ollama interpreter: answers', () => {
     const withTrace = adapter(
       answers({
         ...envelope(),
-        message: { content: JSON.stringify(search), role: 'assistant', thinking: SENTINEL_THOUGHT },
+        message: { content: JSON.stringify(wireSearch), role: 'assistant', thinking: SENTINEL_THOUGHT },
       }),
     );
     const result = await withTrace.interpreter.interpret(input, { signal: new AbortController().signal });
@@ -239,7 +294,7 @@ describe('ollama interpreter: answers', () => {
     const traceOnly = adapter(
       answers({
         ...envelope(),
-        message: { content: '', role: 'assistant', thinking: JSON.stringify(search) },
+        message: { content: '', role: 'assistant', thinking: JSON.stringify(wireSearch) },
       }),
     );
     const failure = await failureOf(traceOnly.interpreter.interpret(input, { signal: new AbortController().signal }));
@@ -255,13 +310,22 @@ describe('ollama interpreter: output that cannot be used is a provider failure',
   it.each([
     ['content that is not JSON', envelope({}, 'Sure! Here are your filters')],
     ['content cut in the middle of the object', envelope({}, '{"outcome":"search","period":"previous-mon')],
-    ['content with a code fence around the object', envelope({}, `\`\`\`json\n${JSON.stringify(search)}\n\`\`\``)],
+    ['content with a code fence around the object', envelope({}, `\`\`\`json\n${JSON.stringify(wireSearch)}\n\`\`\``)],
     ['empty content', envelope({}, '')],
-    ['an array instead of the object', envelope({}, [search])],
-    ['an extra field', envelope({}, { ...search, timeZone: 'UTC' })],
-    ['a value outside the enumeration', envelope({}, { ...search, sort: 'oldest' })],
-    ['a search without a period', envelope({}, { ...search, period: null })],
-    ['a clarification that proposes filters', envelope({}, { ...clarify, sort: 'longest' })],
+    ['an array instead of the object', envelope({}, [wireSearch])],
+    ['an extra field', envelope({}, { ...wireSearch, timeZone: 'UTC' })],
+    ['a value outside the enumeration', envelope({}, { ...wireSearch, sort: 'oldest' })],
+    ['a search without a period', envelope({}, { ...wireSearch, period: null })],
+    ['a search with the period missing', envelope({}, { ...wireSearch, period: undefined })],
+    ['explicit dates with one end missing', envelope({}, { ...wireSearch, fromDate: '2026-03-01', period: 'dates' })],
+    ['a preset period that carries dates', envelope({}, { ...wireSearch, fromDate: '2026-03-01', toDate: '2026-03-31' })],
+    ['a clarification that proposes filters', envelope({}, { ...wireClarify, sort: 'longest' })],
+    ['a clarification that proposes a period', envelope({}, { ...wireClarify, period: 'this-month' })],
+    ['a clarification with an unsupported reason', envelope({}, { ...wireClarify, clarificationReason: 'location' })],
+    ['a clarification with no reason', envelope({}, { outcome: 'clarify' })],
+    ['an unsupported answer that proposes filters', envelope({}, { ...wireUnsupported, minDistance: '5' })],
+    ['an unsupported answer with a clarification reason', envelope({}, { ...wireUnsupported, unsupportedReason: 'period_missing' })],
+    ['an unsupported answer carrying both reasons', envelope({}, { ...wireUnsupported, clarificationReason: 'period_missing' })],
   ])('maps %s to invalid_output, not to an unsupported answer', async (_name, body) => {
     const failure = await failureOf(run(answers(body)));
     expect(failure).toBeInstanceOf(InterpreterFailure);
@@ -277,7 +341,7 @@ describe('ollama interpreter: output that cannot be used is a provider failure',
     ['a done flag that is not a boolean', JSON.stringify(envelope({ done: 'yes' }))],
     ['a token count that is not a number', JSON.stringify(envelope({ eval_count: 'many' }))],
     ['no completion reason', JSON.stringify(envelope({ done_reason: undefined }))],
-    ['a tool call nobody asked for', JSON.stringify(envelope({ message: { content: JSON.stringify(search), role: 'assistant', tool_calls: [{ function: { name: 'x' } }] } }))],
+    ['a tool call nobody asked for', JSON.stringify(envelope({ message: { content: JSON.stringify(wireSearch), role: 'assistant', tool_calls: [{ function: { name: 'x' } }] } }))],
   ])('maps %s to invalid_output', async (_name, body) => {
     const failure = await failureOf(run(() => Promise.resolve(json(body))));
     expect(failure.reason).toBe('invalid_output');

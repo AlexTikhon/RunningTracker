@@ -90,10 +90,16 @@ and container networking are out of scope for this stage.
    No `OPENAI_API_KEY` is needed or read, and `OPENAI_API_KEY_FILE` is not opened in this mode. Ollama serves one
    request at a time by default, so `RUN_SEARCH_AI_MAX_CONCURRENT=1` is the honest local setting.
 
-What is sent to the local model is the same as to OpenAI (instructions, zone, local date, the person's text; see
-below), to `127.0.0.1` only. Generation is fixed: `temperature 0`, `think false` (Qwen3's reasoning off, and a thinking
-trace is never read or logged), `num_ctx 4096`, `num_predict` = `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS`, `stream false`, the
-existing JSON Schema as `format`. A redirect, a non-2xx answer, a cut answer (`done_reason: length`), invalid JSON or a
+What is sent to the local model is the same information as to OpenAI (instructions, zone, local date, the person's
+text; see below), to `127.0.0.1` only. The interpretation rules and the reason precedence are the same text; only the
+output-format lines differ, because the local model is given its own outcome-dependent output schema: `search` (a
+preset period, or `dates` with both ends), `clarify` (only `clarificationReason`) and `unsupported` (only
+`unsupportedReason`), `outcome` first, so a clarification cannot carry filters. The reply is checked against that
+schema, mapped field for field into the same proposal the OpenAI adapter returns, and then checked and normalised
+exactly as before. An evaluation report for an Ollama run hashes these instructions and this schema
+(`run-search-interpreter-ollama/...`), not the OpenAI ones. Generation is fixed: `temperature 0`, `think false`
+(Qwen3's reasoning off, and a thinking trace is never read or logged), `num_ctx 4096`, `num_predict` =
+`RUN_SEARCH_AI_MAX_OUTPUT_TOKENS`, `stream false`. A redirect, a non-2xx answer, a cut answer (`done_reason: length`), invalid JSON or a
 proposal that breaks the contract is a failure (`502 INTERPRETATION_FAILED`), never an "unsupported" answer; manual
 search keeps working. When Ollama is not running the box reports a failure; nothing falls back to another provider.
 

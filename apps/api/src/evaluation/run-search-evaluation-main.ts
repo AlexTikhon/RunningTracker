@@ -7,16 +7,12 @@ import { systemClock } from '../clock.js';
 import { loadEnvironmentSource } from '../config/environment.js';
 import { runSearchAiSecretVariables } from '../config/run-search-ai-config.js';
 import { resolveSecretFiles } from '../config/secret-files.js';
-import {
-  INTERPRETATION_INSTRUCTIONS,
-  INTERPRETATION_PROMPT_VERSION,
-} from '../runs/interpretation/interpretation-prompt.js';
 import { createInterpreter } from '../runs/interpretation/interpretation-factory.js';
-import { providerOutputJsonSchema } from '../runs/interpretation/interpretation-schema.js';
 import { readOllamaVersion } from '../runs/interpretation/ollama-interpreter.js';
 import { loadEvaluationDataset } from './run-search-evaluation-dataset.js';
 import {
   describeEvaluationRun,
+  evaluationWireContract,
   formatEvaluationReport,
   loadLiveEvaluationConfig,
   parseEvaluationArguments,
@@ -42,12 +38,14 @@ async function main(): Promise<void> {
   const config = loadLiveEvaluationConfig(source);
   // Throws on an unknown id here, before the interpreter exists, so a typo costs nothing.
   const selected = selectEvaluationCases(dataset, args.caseIds, args.maxCases);
+  // What this provider's adapter actually sends: its own wording version, not the other provider's.
+  const wire = evaluationWireContract(config.provider);
 
   console.info(
     [
       `Dataset v${dataset.datasetVersion}: ${dataset.cases.length} cases (${selected.length} to run)`,
       `Cases: ${selected.map((entry) => entry.id).join(', ')}`,
-      `Prompt: ${INTERPRETATION_PROMPT_VERSION}`,
+      `Prompt: ${wire.promptVersion}`,
       `Provider: ${config.provider}`,
       `Model: ${config.model}`,
       `Calls: at most ${selected.length}, one per case, no retries; at most ${args.concurrency} at a time; ${config.timeoutMs} ms each; stops early after 3 identical systemic failures in a row`,
@@ -75,16 +73,15 @@ async function main(): Promise<void> {
     onCase: ({ done, total }) => {
       process.stderr.write(`\r${done}/${total}`);
     },
+    promptVersion: wire.promptVersion,
   });
   process.stderr.write('\n');
 
   const run = describeEvaluationRun({
     args,
     config,
-    instructions: INTERPRETATION_INSTRUCTIONS,
     openaiSdkVersion: OPENAI_SDK_VERSION,
     runtimeVersion,
-    schema: providerOutputJsonSchema,
   });
   console.info(formatEvaluationReport(report, run));
 

@@ -1,7 +1,24 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import {
+  INTERPRETATION_INSTRUCTIONS,
+  INTERPRETATION_PROMPT_VERSION,
+  OLLAMA_INTERPRETATION_INSTRUCTIONS,
+  OLLAMA_INTERPRETATION_PROMPT_VERSION,
+} from '../runs/interpretation/interpretation-prompt.js';
+import {
+  INTERPRETATION_SCHEMA_NAME,
+  providerOutputJsonSchema,
+} from '../runs/interpretation/interpretation-schema.js';
+import {
+  OLLAMA_OUTPUT_SCHEMA_NAME,
+  ollamaOutputJsonSchema,
+} from '../runs/interpretation/ollama-output-schema.js';
+import {
   describeEvaluationRun,
+  evaluationWireContract,
   formatEvaluationReport,
   loadLiveEvaluationConfig,
   parseEvaluationArguments,
@@ -147,10 +164,50 @@ describe('live evaluation configuration', () => {
 describe('what a run is described by', () => {
   const common = {
     args: { caseIds: ['en-location'], concurrency: 1, dryRun: false, live: true, maxCases: undefined, out: undefined },
-    instructions: 'fixed instructions',
     openaiSdkVersion: '7.22.0',
-    schema: { type: 'object' },
   };
+  const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
+  const openaiConfig = (): ReturnType<typeof loadLiveEvaluationConfig> =>
+    loadLiveEvaluationConfig({
+      OPENAI_API_KEY: 'sk-test-synthetic-sentinel-key-2b7e',
+      RUN_SEARCH_AI_MODEL: 'gpt-4.1-mini',
+    });
+  const ollamaConfig = (): ReturnType<typeof loadLiveEvaluationConfig> =>
+    loadLiveEvaluationConfig({ RUN_SEARCH_AI_MODEL: 'qwen3:8b', RUN_SEARCH_AI_PROVIDER: 'ollama' });
+
+  it('hashes the instructions and schema the Ollama adapter sends, and names them as its own', () => {
+    const run = describeEvaluationRun({ ...common, config: ollamaConfig(), runtimeVersion: '0.35.1' });
+    expect(run.instructionsSha256).toBe(sha256(OLLAMA_INTERPRETATION_INSTRUCTIONS));
+    expect(run.schemaSha256).toBe(sha256(JSON.stringify(ollamaOutputJsonSchema)));
+    expect(run.schemaName).toBe(OLLAMA_OUTPUT_SCHEMA_NAME);
+    expect(run.promptVersion).toBe(OLLAMA_INTERPRETATION_PROMPT_VERSION);
+    // Not the unchanged OpenAI wire contract.
+    expect(run.instructionsSha256).not.toBe(sha256(INTERPRETATION_INSTRUCTIONS));
+    expect(run.schemaSha256).not.toBe(sha256(JSON.stringify(providerOutputJsonSchema)));
+    expect(run.schemaName).not.toBe(INTERPRETATION_SCHEMA_NAME);
+  });
+
+  it('hashes the OpenAI instructions and schema for OpenAI, unchanged', () => {
+    const run = describeEvaluationRun({ ...common, config: openaiConfig(), runtimeVersion: null });
+    expect(run.instructionsSha256).toBe(sha256(INTERPRETATION_INSTRUCTIONS));
+    expect(run.schemaSha256).toBe(sha256(JSON.stringify(providerOutputJsonSchema)));
+    expect(run.schemaName).toBe(INTERPRETATION_SCHEMA_NAME);
+    expect(run.promptVersion).toBe(INTERPRETATION_PROMPT_VERSION);
+  });
+
+  it('takes the wire contract from the provider alone, so a run cannot be described with the other one', () => {
+    expect(evaluationWireContract('ollama')).toMatchObject({
+      instructions: OLLAMA_INTERPRETATION_INSTRUCTIONS,
+      promptVersion: OLLAMA_INTERPRETATION_PROMPT_VERSION,
+      schema: ollamaOutputJsonSchema,
+    });
+    expect(evaluationWireContract('openai')).toMatchObject({
+      instructions: INTERPRETATION_INSTRUCTIONS,
+      promptVersion: INTERPRETATION_PROMPT_VERSION,
+      schema: providerOutputJsonSchema,
+    });
+    expect(OLLAMA_INTERPRETATION_PROMPT_VERSION).not.toBe(INTERPRETATION_PROMPT_VERSION);
+  });
 
   it('names the local runtime and its generation settings for Ollama, and no OpenAI SDK', () => {
     const run = describeEvaluationRun({
@@ -346,10 +403,8 @@ describe('report text', () => {
     const local = describeEvaluationRun({
       args: { caseIds: undefined, concurrency: 1, dryRun: false, live: true, maxCases: 5, out: undefined },
       config: loadLiveEvaluationConfig({ RUN_SEARCH_AI_MODEL: 'qwen3:8b', RUN_SEARCH_AI_PROVIDER: 'ollama' }),
-      instructions: 'fixed instructions',
       openaiSdkVersion: '7.22.0',
       runtimeVersion: '0.35.1',
-      schema: { type: 'object' },
     });
     const text = formatEvaluationReport({ ...report, model: 'qwen3:8b' }, local);
     expect(text).toContain('Provider: ollama (local runtime ollama 0.35.1)');

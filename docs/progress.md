@@ -2131,3 +2131,50 @@ accuracy figure is claimed. Reports: `apps/api/.local/eval-reports/ollama-smoke-
 other model or Ollama version, and `think:false` for a model without thinking capability (only `qwen3:8b` was
 installed); container or production use (out of scope, refused in production); whether Ollama stops computing after a
 disconnect beyond one log observation. Hosted CI has not run these changes.
+
+## Run-search interpreter: an outcome-dependent output contract for Ollama (2026-10-14)
+
+ADR-0057 addendum "an outcome-dependent output contract for Ollama"; runbook "Running it on a local model". Builds on
+commit `1a2aac0` (the Ollama provider). The OpenAI wire schema and wording (SHA-256 pinned, byte for byte), the
+domain contract, the public API, UI, SQL, authorization, admission accounting, cancellation, the response size limit,
+the loopback-only transport and the deadlines are unchanged. OpenAI was not called; no model was downloaded.
+
+**Why.** The flat ten-field schema accepted `clarify` + `conflicting_conditions` with a period and a distance set,
+which `qwen3:8b` produced and the local check then refused (`invalid_output`).
+
+**What.** New `ollama-output-schema.ts`: a zod schema (the authority for the reply) and the JSON Schema sent as
+`format`, the same contract in two forms: a root `oneOf` of search over a preset, search over `dates` (both ends
+required), clarify (`outcome`, `clarificationReason`) and unsupported (`outcome`, `unsupportedReason`), `outcome`
+first, closed objects, the contract's own reason enums. `proposalFromOllamaWire` maps a wire answer field for field
+into `ProviderProposal` (absent fields `null`; nothing repaired, inferred or dropped), and the existing
+`providerProposalSchema` and normaliser follow. `interpretation-prompt.ts`: the Ollama instructions replace only the
+output-format lines under OUTCOMES (version `run-search-interpreter-ollama/2026-10-14.1`); the evaluator now takes the
+instructions, schema, schema name and prompt version from the provider (`evaluationWireContract`), so an Ollama
+report hashes the Ollama wire contract and cannot be described with the OpenAI one.
+
+**Offline checks.** `ollama-output-schema.spec.ts` (new, 57) validates the sent schema with a small validator of
+exactly its keywords (unknown keyword = error) against the zod schema over a generated corpus of damaged answers
+(more than 800, both must agree), asserts every accepted answer maps to a canonically valid proposal, and checks
+outcome-first, closed objects and the reason families. A mutation (the clarify branch opened to extra keys) fails 10
+tests; restored. `npm run verify`: exit 0; API **1260** in 106 files (was 1184), web 520, contracts 128, fixtures 14,
+simulator 3. `run-search-interpretation.integration.test.ts`: 9 passed.
+
+**Real local inference.** Ollama 0.35.1 started by me with `OLLAMA_NO_CLOUD=1` on 127.0.0.1 ("Ollama cloud disabled:
+true"), `qwen3:8b`, CPU only; model preloaded with an empty `/api/generate` (no inference); five cases, serial, no
+deadline changed (10 s).
+
+| Case | Result |
+|---|---|
+| `en-last-month-min-longest`, `ru-last-month-min-longest`, `en-strict-more-than` | `timeout` x3 at 10.0 s; the evaluator stopped itself (3 identical failures); the server log shows each request cancelled at 10 s |
+| `en-location` (run separately, so the stop rule did not apply) | answered inside the deadline: **`search`, expected `unsupported`/`location`** (wrong) |
+| `en-injection-sql` | answered inside the deadline: `unsupported`, expected `unsupported`/`not_a_run_search` (correct reason) |
+
+The runtime accepted the `oneOf` schema (no 4xx on any of the five requests); both answers that arrived were
+wire-valid; no answer was refused as `invalid_output` and no contradictory answer occurred. Mean latency of the two
+answered calls 5.9 s (3.7 s and 8.0 s; output 74 tokens in total). **What this does not show:** whether the shorter
+non-search answers are why these two met the deadline (not isolated), the semantic answers of the three timed-out
+cases (unknown), or any accuracy (2 answers read, 1 wrong). Schema validity is not interpretation accuracy.
+
+**Not verified / limits.** The three search cases still do not complete in 10 s on this CPU, so the local model is
+still not usable for searches here; no deadline or model was changed. Other runtimes or versions converting `oneOf`;
+GPU behaviour; the full 65-case dataset; hosted CI.

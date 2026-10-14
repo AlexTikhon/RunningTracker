@@ -1,9 +1,13 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   buildInterpretationMessages,
   INTERPRETATION_INSTRUCTIONS,
   INTERPRETATION_PROMPT_VERSION,
+  OLLAMA_INTERPRETATION_INSTRUCTIONS,
+  OLLAMA_INTERPRETATION_PROMPT_VERSION,
 } from './interpretation-prompt.js';
 
 const input = { text: 'Show my runs of at least 5 km from last month, longest first.', timeZone: 'Europe/Warsaw', today: '2026-10-15' };
@@ -60,5 +64,45 @@ describe('interpretation prompt', () => {
 
   it('is of a size that is cheap to send on every request', () => {
     expect(INTERPRETATION_INSTRUCTIONS.length).toBeLessThan(6_000);
+  });
+});
+
+describe('Ollama instructions', () => {
+  const outcomeBlock = (text: string): string => /\nOUTCOMES\n([\s\S]*?)\nNever drop/u.exec(text)?.[1] ?? '';
+  const withoutOutcomeBlock = (text: string): string => text.replace(outcomeBlock(text), '');
+
+  it('leaves the OpenAI instructions byte for byte as they were', () => {
+    // SHA-256 of the instructions before the Ollama variant existed (commit 1a2aac0).
+    expect(createHash('sha256').update(INTERPRETATION_INSTRUCTIONS).digest('hex')).toBe(
+      '063b78201e62628abb944675de44faf67cccde32c315a776cafee502bf8ddfd4',
+    );
+    expect(INTERPRETATION_PROMPT_VERSION).toBe('run-search-interpreter/2026-10-12.2');
+  });
+
+  it('differs from the OpenAI instructions in the output-format lines of OUTCOMES and nowhere else', () => {
+    expect(OLLAMA_INTERPRETATION_INSTRUCTIONS).not.toBe(INTERPRETATION_INSTRUCTIONS);
+    expect(outcomeBlock(OLLAMA_INTERPRETATION_INSTRUCTIONS)).not.toBe(outcomeBlock(INTERPRETATION_INSTRUCTIONS));
+    expect(withoutOutcomeBlock(OLLAMA_INTERPRETATION_INSTRUCTIONS)).toBe(
+      withoutOutcomeBlock(INTERPRETATION_INSTRUCTIONS),
+    );
+  });
+
+  it('keeps the reason precedence and the interpretation rules, and states the per-outcome shapes', () => {
+    expect(OLLAMA_INTERPRETATION_INSTRUCTIONS).toContain(
+      'an unsupported reason wins over a clarification, and a clarification uses the first applicable reason in this order: conflicting_conditions, period_missing, period_ambiguous, distance_unit_mixed, distance_unit_missing, distance_boundary_strict, distance_too_precise, distance_ambiguous.',
+    );
+    const block = outcomeBlock(OLLAMA_INTERPRETATION_INSTRUCTIONS);
+    expect(block).toContain('exactly two keys: outcome and clarificationReason');
+    expect(block).toContain('exactly two keys: outcome and unsupportedReason');
+    expect(block).toContain('outcome, period');
+    // The OpenAI wording asks for nulls in a flat object; this wire shape has no such fields to fill.
+    expect(block).not.toContain('Set clarificationReason and');
+  });
+
+  it('keeps the person\'s text out of the instructions and has its own version', () => {
+    expect(OLLAMA_INTERPRETATION_INSTRUCTIONS).not.toContain('Europe/Warsaw');
+    expect(OLLAMA_INTERPRETATION_INSTRUCTIONS).not.toContain('2026-10-15');
+    expect(OLLAMA_INTERPRETATION_PROMPT_VERSION).toMatch(/^run-search-interpreter-ollama\/\d{4}-\d{2}-\d{2}\.\d+$/u);
+    expect(OLLAMA_INTERPRETATION_PROMPT_VERSION).not.toBe(INTERPRETATION_PROMPT_VERSION);
   });
 });

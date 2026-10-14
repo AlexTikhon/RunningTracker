@@ -310,9 +310,10 @@ message as `fake`. The model name is checked as a *name*: a local reference such
 model (`:cloud`, `-cloud`, `ollama.com`). The runbook says to start Ollama with `OLLAMA_NO_CLOUD=1`; the check
 of the name and the loopback address are the application's part, and the local server's setting is the operator's.
 
-**Adapter (`ollama-interpreter.ts`).** One non-streaming `POST /api/chat`: the existing instructions plus the
-server's calendar facts as one `system` message, the person's text byte for byte as the `user` message, the existing
-JSON Schema as `format`, `think: false` (Qwen3 reasons otherwise), `temperature: 0`, `num_predict` from the output
+**Adapter (`ollama-interpreter.ts`).** One non-streaming `POST /api/chat`: the instructions (the OpenAI wording with
+only its output-format lines replaced, see the addendum "an outcome-dependent output contract for Ollama") plus the
+server's calendar facts as one `system` message, the person's text byte for byte as the `user` message, the
+outcome-dependent Ollama JSON Schema as `format`, `think: false` (Qwen3 reasons otherwise), `temperature: 0`, `num_predict` from the output
 limit, `num_ctx: 4096` written down (Ollama truncates an over-long prompt silently, from the front, where the
 instructions are; a prompt that filled the window is refused as `incomplete`). No tools, no images, no keep-alive
 override, no retries, no credential, no identity. Only `message.content` is parsed; `message.thinking`, if present,
@@ -364,3 +365,33 @@ decision and was not made.
 capability is unverified (only `qwen3:8b` was installed). Whether the Ollama runtime keeps computing after the
 client drops the connection was not measured here; the server log showed the task cancelled and its slot idle
 after the 10 s deadline, which is what the service's fail-closed accounting assumes, but a single observation.
+
+### Addendum (2026-10-14): an outcome-dependent output contract for Ollama
+
+**Problem.** The one wire schema (flat, ten required nullable fields) is legal for answers that contradict
+themselves. Measured with `qwen3:8b`: `clarify` with `conflicting_conditions` and a period and a distance set, which
+the local check then refused as `invalid_output`. OpenAI's Structured Outputs force that flat shape (a root object,
+no composition); Ollama's `format` accepts a full JSON Schema.
+
+**Decision.** Ollama has its own wire schema (`ollama-output-schema.ts`): a root `oneOf` of four closed objects,
+`outcome` first in each: a search over a preset period, a search over `dates` (both ends required), a clarification
+(only `clarificationReason`) and an unsupported answer (only `unsupportedReason`). Reasons are the contract's own
+enumerations; a reason of the other family, a filter next to a non-search outcome, a null or missing period, dates
+with one end, and any unknown key are not representable. The zod schema that checks the reply and the JSON Schema
+that is sent are the same contract, and a specification validates both against a generated corpus of damaged answers.
+
+**What does not change.** The domain contract, the OpenAI wire schema and wording (byte for byte; its SHA-256 is
+pinned), the public API, UI, SQL and authorization. The wire answer is mapped by `proposalFromOllamaWire` field for
+field into `ProviderProposal` (fields the shape lacks are `null`; nothing is computed, defaulted, repaired or dropped)
+and then goes through `providerProposalSchema` and the normaliser exactly as an OpenAI answer. Operation-lifetime
+admission, cancellation, the response size limit, the loopback-only transport and disabled cloud access are untouched.
+
+**Prompt.** The Ollama instructions equal the OpenAI ones except for the output-format lines under OUTCOMES; the
+rules and the reason precedence are the same text (a test compares everything outside that block). It has its own
+version, `run-search-interpreter-ollama/2026-10-14.1`, and an evaluation report hashes the instructions and schema of
+the provider that ran.
+
+**Limits.** A valid shape is not a correct interpretation: distance bound and unit consistency, decimal and date
+syntax and semantics are still the normaliser's. The hand-written schema uses only `type`, `enum`, `properties`,
+`required`, `additionalProperties` and `oneOf`; whether another runtime or version converts `oneOf` to a grammar is
+unverified beyond Ollama 0.35.1.

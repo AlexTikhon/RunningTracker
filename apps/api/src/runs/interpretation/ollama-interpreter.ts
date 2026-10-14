@@ -3,9 +3,14 @@ import { z } from 'zod';
 import { boundedFetch, causedByOversizedResponse } from './bounded-fetch.js';
 import {
   buildInterpretationMessages,
-  INTERPRETATION_INSTRUCTIONS,
+  OLLAMA_INTERPRETATION_INSTRUCTIONS,
 } from './interpretation-prompt.js';
-import { providerOutputJsonSchema, providerProposalSchema } from './interpretation-schema.js';
+import { providerProposalSchema } from './interpretation-schema.js';
+import {
+  ollamaOutputJsonSchema,
+  ollamaWireSchema,
+  proposalFromOllamaWire,
+} from './ollama-output-schema.js';
 import {
   InterpreterFailure,
   type InterpretationInput,
@@ -195,12 +200,12 @@ export class OllamaInterpreter implements RunSearchInterpreter {
   #payload(input: InterpretationInput): Record<string, unknown> {
     const messages = buildInterpretationMessages(input);
     const system = [
-      INTERPRETATION_INSTRUCTIONS,
+      OLLAMA_INTERPRETATION_INSTRUCTIONS,
       ...messages.filter((message) => message.role === 'developer').map((message) => message.content),
     ].join('\n\n');
     return {
-      // The schema is the existing one, sent as `format`; it is not interpolated into the prompt.
-      format: providerOutputJsonSchema,
+      // The outcome-dependent wire schema, sent as `format`; it is not interpolated into the prompt.
+      format: ollamaOutputJsonSchema,
       messages: [
         { content: system, role: 'system' },
         ...messages
@@ -270,7 +275,13 @@ export class OllamaInterpreter implements RunSearchInterpreter {
     } catch {
       throw new InterpreterFailure('invalid_output', usage);
     }
-    const proposal = providerProposalSchema.safeParse(parsedContent);
+    // Wire shape first, then the mapping into the domain's ProviderProposal, then the canonical check: the same
+    // `providerProposalSchema` the OpenAI adapter's answers go through, and normalisation after it.
+    const wire = ollamaWireSchema.safeParse(parsedContent);
+    if (!wire.success) {
+      throw new InterpreterFailure('invalid_output', usage);
+    }
+    const proposal = providerProposalSchema.safeParse(proposalFromOllamaWire(wire.data));
     if (!proposal.success) {
       throw new InterpreterFailure('invalid_output', usage);
     }

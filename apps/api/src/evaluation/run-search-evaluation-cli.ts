@@ -8,8 +8,21 @@ import {
   runSearchAiEnvironmentFields,
   type RealRunSearchAiConfig,
 } from '../config/run-search-ai-config.js';
+import {
+  INTERPRETATION_INSTRUCTIONS,
+  INTERPRETATION_PROMPT_VERSION,
+  OLLAMA_INTERPRETATION_INSTRUCTIONS,
+  OLLAMA_INTERPRETATION_PROMPT_VERSION,
+} from '../runs/interpretation/interpretation-prompt.js';
+import {
+  INTERPRETATION_SCHEMA_NAME,
+  providerOutputJsonSchema,
+} from '../runs/interpretation/interpretation-schema.js';
 import { OLLAMA_GENERATION } from '../runs/interpretation/ollama-interpreter.js';
-import { INTERPRETATION_SCHEMA_NAME } from '../runs/interpretation/interpretation-schema.js';
+import {
+  OLLAMA_OUTPUT_SCHEMA_NAME,
+  ollamaOutputJsonSchema,
+} from '../runs/interpretation/ollama-output-schema.js';
 import { FILTER_FIELDS } from './run-search-scoring.js';
 import { EVALUATION_MAX_CONCURRENCY, type EvaluationReport } from './run-search-evaluator.js';
 
@@ -135,6 +148,36 @@ export function loadLiveEvaluationConfig(source: Record<string, string | undefin
   return config;
 }
 
+/**
+ * The instructions, output schema and wording version the configured provider's adapter actually sends. Chosen by
+ * the provider alone, so a report can never describe one provider's run with the other's wire contract.
+ */
+export function evaluationWireContract(provider: RealRunSearchAiConfig['provider']): {
+  instructions: string;
+  promptVersion: string;
+  schema: unknown;
+  schemaName: string;
+} {
+  switch (provider) {
+    case 'ollama':
+      return {
+        instructions: OLLAMA_INTERPRETATION_INSTRUCTIONS,
+        promptVersion: OLLAMA_INTERPRETATION_PROMPT_VERSION,
+        schema: ollamaOutputJsonSchema,
+        schemaName: OLLAMA_OUTPUT_SCHEMA_NAME,
+      };
+    case 'openai':
+      return {
+        instructions: INTERPRETATION_INSTRUCTIONS,
+        promptVersion: INTERPRETATION_PROMPT_VERSION,
+        schema: providerOutputJsonSchema,
+        schemaName: INTERPRETATION_SCHEMA_NAME,
+      };
+    default:
+      return unsupportedEvaluationProvider(provider);
+  }
+}
+
 export interface EvaluationRunDescription {
   concurrency: number;
   /** The settings that shape what a model produces, as the provider receives them. */
@@ -143,6 +186,7 @@ export interface EvaluationRunDescription {
   maxOutputTokens: number;
   maxResponseBytes: number;
   model: string;
+  promptVersion: string;
   provider: 'ollama' | 'openai';
   /** What served the requests: the local runtime for Ollama, the client library for OpenAI. */
   runtime: { name: string; version: string | null };
@@ -163,21 +207,22 @@ const sha256 = (value: string): string => createHash('sha256').update(value).dig
 export function describeEvaluationRun(options: {
   args: EvaluationArguments;
   config: RealRunSearchAiConfig;
-  instructions: string;
   openaiSdkVersion: string;
   /** The local runtime's reported version; null when it was not asked (a dry run) or for OpenAI. */
   runtimeVersion: string | null;
-  schema: unknown;
 }): EvaluationRunDescription {
   const { args, config } = options;
+  // The wire contract is taken from the provider here and not passed in: what is hashed is what the adapter sends.
+  const wire = evaluationWireContract(config.provider);
   const common = {
     concurrency: args.concurrency,
-    instructionsSha256: sha256(options.instructions),
+    instructionsSha256: sha256(wire.instructions),
     maxOutputTokens: config.maxOutputTokens,
     maxResponseBytes: config.maxResponseBytes,
     model: config.model,
-    schemaName: INTERPRETATION_SCHEMA_NAME,
-    schemaSha256: sha256(JSON.stringify(options.schema)),
+    promptVersion: wire.promptVersion,
+    schemaName: wire.schemaName,
+    schemaSha256: sha256(JSON.stringify(wire.schema)),
     selection: args.caseIds !== undefined ? ('ids' as const) : args.maxCases !== undefined ? ('first-n' as const) : ('all' as const),
     timeoutMs: config.timeoutMs,
   };
@@ -207,8 +252,8 @@ export function describeEvaluationRun(options: {
   }
 }
 
-function unsupportedEvaluationProvider(config: never): never {
-  throw new Error(`Unsupported evaluation provider: ${String((config as { provider?: unknown }).provider).slice(0, 32)}`);
+function unsupportedEvaluationProvider(provider: never): never {
+  throw new Error(`Unsupported evaluation provider: ${String(provider).slice(0, 32)}`);
 }
 
 function percent(value: number | null): string {

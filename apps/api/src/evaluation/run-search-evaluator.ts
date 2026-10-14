@@ -50,6 +50,8 @@ export interface EvaluationOptions {
   /** Run only the first N of the selected cases: the call budget of one evaluation. */
   maxCases?: number;
   onCase?: (progress: { done: number; id: string; total: number }) => void;
+  /** The wording version the interpreter under test was given; the OpenAI one when omitted. */
+  promptVersion?: string;
   /** Stop starting cases after this many identical systemic failures in a row. */
   stopAfterSystemicFailures?: number;
 }
@@ -491,7 +493,7 @@ export async function runEvaluation(options: EvaluationOptions): Promise<Evaluat
     outcomeAccuracy: executed.length === 0 ? 0 : outcome.correct / executed.length,
     outcomeMatrix,
     partial: executed.length < dataset.cases.length || unsettledInDatasetOrder.length > 0,
-    promptVersion: INTERPRETATION_PROMPT_VERSION,
+    promptVersion: options.promptVersion ?? INTERPRETATION_PROMPT_VERSION,
     reasonAccuracy: ratio(reason.correct, reason.total),
     unsettled: { caseIds: unsettledInDatasetOrder, count: unsettledInDatasetOrder.length },
     usage,
