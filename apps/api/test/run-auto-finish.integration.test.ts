@@ -6,7 +6,7 @@ import { loadIntegrationTestConfiguration } from '../src/config/environment.js';
 import { withTenantTransaction } from '../src/database/tenant-transaction.js';
 import { ApiError } from '../src/http/errors.js';
 import { runAutoFinishOnce } from '../src/maintenance/run-auto-finish.js';
-import { applyRunCommand, createRun } from '../src/runs/run-service.js';
+import { applyRunCommand, createRun, ingestRunPoints } from '../src/runs/run-service.js';
 import {
   prepareTenantIsolationFixtures,
   tenantIsolationIds as ids,
@@ -387,6 +387,100 @@ describe('P03.5 clock-driven run auto-finish', () => {
         ],
       ),
     ).rejects.toMatchObject({ code: '23514', constraint: 'runs_start_within_auto_finish_window' });
+  });
+
+  describe('a Start requested ahead of the server clock', () => {
+    function startThroughService(id: string, userId: string, startedAt: string, serverTime: string) {
+      return withTenantTransaction(runtimePool, { orgId: ids.orgA, userId }, (client) =>
+        createRun(client, { userId }, ids.orgA, id, { startedAt }, new FixedClock(serverTime)),
+      );
+    }
+
+    it('still auto-finishes by server creation time, neither earlier nor later than a past start', async () => {
+      const ahead = await startThroughService(
+        runIds.old,
+        ids.userDual,
+        '2031-01-01T05:00:00.000Z',
+        oldCreatedAt,
+      );
+      expect(ahead.created).toBe(true);
+      const young = await startThroughService(
+        runIds.young,
+        ids.userOrgA,
+        '2031-01-02T00:00:00.000Z',
+        youngCreatedAt,
+      );
+      expect(young.created).toBe(true);
+
+      await expect(runAutoFinishOnce(maintenancePool, maintenanceClock)).resolves.toBe(1);
+      expect(await readRun(runIds.old)).toMatchObject({
+        control_revision: '0',
+        data_revision: '1',
+        finished_at: new Date(effectiveNow),
+        status: 'finished',
+      });
+      expect(await readRun(runIds.young)).toMatchObject({
+        data_revision: '0',
+        finished_at: null,
+        status: 'recording',
+      });
+    });
+
+    it('keeps the 24-hour upload window anchored to the server finish time', async () => {
+      const serverTime = '2031-01-01T10:00:00.000Z';
+      const afterWindow = '2031-01-02T10:00:00.001Z';
+      await startThroughService(runIds.exact, ids.userDual, '2031-01-01T10:05:00.000Z', serverTime);
+      await withTenantTransaction(
+        runtimePool,
+        { orgId: ids.orgA, userId: ids.userDual },
+        (client) =>
+          applyRunCommand(
+            client,
+            { userId: ids.userDual },
+            ids.orgA,
+            runIds.exact,
+            { commandId: commandIds.finish, expectedControlRevision: '0', type: 'finish' },
+            new FixedClock(serverTime),
+          ),
+      );
+      expect(await readRun(runIds.exact)).toMatchObject({
+        finished_at: new Date(serverTime),
+        status: 'finished',
+      });
+
+      const upload = (seq: string, receivedAt: string) =>
+        withTenantTransaction(
+          runtimePool,
+          { orgId: ids.orgA, userId: ids.userDual },
+          (client) =>
+            ingestRunPoints(
+              client,
+              { userId: ids.userDual },
+              ids.orgA,
+              runIds.exact,
+              {
+                points: [
+                  {
+                    accuracyM: 4.5,
+                    latitude: 52.2297,
+                    longitude: 21.0122,
+                    recordedAt: '2031-01-01T10:00:01.000Z',
+                    segmentId: 0,
+                    seq,
+                  },
+                ],
+              },
+              new FixedClock(receivedAt),
+            ),
+        );
+      await expect(upload('1', '2031-01-02T10:00:00.000Z')).resolves.toMatchObject({
+        insertedCount: 1,
+      });
+      await expect(upload('2', afterWindow)).rejects.toMatchObject({
+        code: 'UPLOAD_WINDOW_CLOSED',
+        statusCode: 409,
+      });
+    });
   });
 
   it('grants only the function capability and no direct runs access', async () => {

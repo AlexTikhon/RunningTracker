@@ -176,7 +176,7 @@ const runViewJoin = `
 
 const ownedRunViewSelect = `
   SELECT ${runViewProjection},
-         run.started_at = $4::timestamptz AS creation_payload_matches
+         run.requested_started_at = $4::timestamptz AS creation_payload_matches
   ${runViewJoin}
   WHERE run.org_id = $1 AND run.id = $2 AND run.user_id = $3`;
 
@@ -1164,11 +1164,13 @@ export async function createRun(
     );
   }
 
+  // The requested start is the creation identity. The effective start is clamped to server creation time by
+  // PostgreSQL so a fast client clock cannot make a later server-time Finish precede it.
   let inserted: boolean;
   try {
     const result = await client.query(
-      `INSERT INTO runs (org_id, id, user_id, started_at, created_at)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO runs (org_id, id, user_id, started_at, requested_started_at, created_at)
+       VALUES ($1, $2, $3, LEAST($4::timestamptz, $5::timestamptz), $4::timestamptz, $5::timestamptz)
        ON CONFLICT (org_id, id) DO NOTHING
        RETURNING id`,
       [orgId, runId, session.userId, startedAt, createdAt.toISOString()],

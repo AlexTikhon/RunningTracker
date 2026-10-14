@@ -105,7 +105,7 @@ D01 canonical `PointInput` resolved in P04.1. The object is strict and contains 
 | users | id, external identity identifier |
 | organizations | id, archive_revision |
 | memberships | org_id, user_id, role, active |
-| runs | org_id, id, user_id, status, started_at, created_at, finished_at, data_revision, control_revision, raw_state |
+| runs | org_id, id, user_id, status, started_at, requested_started_at, created_at, finished_at, data_revision, control_revision, raw_state |
 | run_commands | org_id, run_id, command_id, canonical_payload, response, received_at |
 | run_points | org_id, run_id, seq, segment_id, recorded_at, received_at, geom, accuracy_m, ingested_revision |
 | run_summaries | org_id, run_id, source_revision, algorithm_version, display_geom, distance_m, observed_duration_s, quality_stats, computed_at |
@@ -445,7 +445,7 @@ TypeScript does not replace runtime validation at either boundary.
 
 | Method and path | Request | Success |
 |---|---|---|
-| PUT /runs/{runId} | { startedAt } | 201 RunView; retry 200 RunView |
+| PUT /runs/{runId} | { startedAt } (at most 24 hours after server creation time; a start ahead of the server clock is accepted and the run view's `startedAt` is the server creation time) | 201 RunView; retry with the same `startedAt` 200 RunView |
 | POST /runs/{runId}/commands | { commandId, type: pause/resume/finish, expectedControlRevision } | 200 { commandId, status, controlRevision, dataRevision, finishedAt } |
 | POST /runs/{runId}/points | { points: PointInput[] } | 200 { dataRevision, insertedCount, duplicateCount } |
 | DELETE /runs/{runId} | — | 204, cascading delete + archive revision |

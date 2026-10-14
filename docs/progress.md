@@ -2178,3 +2178,36 @@ cases (unknown), or any accuracy (2 answers read, 1 wrong). Schema validity is n
 **Not verified / limits.** The three search cases still do not complete in 10 s on this CPU, so the local model is
 still not usable for searches here; no deadline or model was changed. Other runtimes or versions converting `oneOf`;
 GPU behaviour; the full 65-case dataset; hosted CI.
+
+## Run Start: a requested start ahead of the server clock (2026-10-14)
+
+**Defect (F04).** Creation accepted a requested `startedAt` up to 24 hours after server creation time and stored it
+as `started_at`, while Finish, upload windows, auto-finish and retention use server time. With the server clock at
+08:00 and a Start requesting 08:05, creation succeeded and an immediate Finish set `finished_at` 08:00, violating
+`finished_at >= started_at` (`runs_finished_state_consistent`), so the browser's Finish failed with no way to recover.
+
+**Policy.**
+
+- Finish, upload windows, auto-finish and retention are unchanged and remain governed by server time.
+- A new column `requested_started_at` keeps exactly what the client requested. It is the creation identity: an
+  equivalent PUT replay compares against it (so a replay with the same body is still 200 and a changed body is
+  409 `ACTIVE_RUN_EXISTS`), and the existing 24-hour admission bound applies to it
+  (`runs_start_within_auto_finish_window` now constrains `requested_started_at`).
+- `started_at` is the effective lifecycle start: `LEAST(requested, created_at)`, computed by PostgreSQL at its
+  microsecond precision (a start 0.4 ms ahead of a millisecond server clock is normalized; the JavaScript
+  comparison used to truncate it). A past start is stored unchanged.
+- The run view, ordering and search keep reading `started_at`, so the view shows the server creation time for a
+  start that was ahead of the clock. The browser needed no change: it reads the returned view and never compares
+  it with the requested value.
+
+**Migration `0023_normalize_future_run_start.sql`** (forward-only). It adds `requested_started_at`, backfills it
+from the stored `started_at` (the value the client requested) before anything is repaired, clamps `started_at` to
+`created_at` only for runs still `recording` or `paused`, then makes the column `NOT NULL`. Finished archives keep
+their `started_at` and `finished_at`; `run_commands` rows are untouched. A `BEFORE INSERT` trigger defaults
+`requested_started_at` to `started_at` so direct inserts (restore drill, seed tooling, fixtures) are unchanged.
+`auto_finish_runs` is unchanged.
+
+**Tests.** `run-lifecycle.integration.test.ts` (future Start then immediate Finish, exact replay and changed
+payload, microsecond precision both sides, the 24-hour bound, and a legacy active-run migration inside a rolled-back
+transaction that replays and finishes the repaired runs through the service) and `run-auto-finish.integration.test.ts`
+(auto-finish still keyed to creation time; the 24-hour upload window still keyed to the server finish time).

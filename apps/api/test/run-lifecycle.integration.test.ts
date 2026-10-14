@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import {
   apiErrorResponseSchema,
   runCommandResponseSchema,
@@ -18,6 +20,7 @@ import {
   type Environment,
 } from '../src/config/environment.js';
 import { createDatabasePool } from '../src/database/database.js';
+import { applyRunCommand, createRun } from '../src/runs/run-service.js';
 import {
   prepareTenantIsolationFixtures,
   tenantIsolationIds as ids,
@@ -26,6 +29,13 @@ import {
 const allowedOrigin = 'http://127.0.0.1:5173';
 const startedAt = '2029-09-22T10:00:00.000Z';
 const finishedAt = '2030-09-22T10:00:00.000Z';
+// The server clock never moves in this file: every run is created and finished at `finishedAt`.
+const serverNow = finishedAt;
+const fiveMinutesAhead = '2030-09-22T10:05:00.000Z';
+const subMillisecondAhead = '2030-09-22T10:00:00.000400Z';
+const oneMicrosecondBehind = '2030-09-22T09:59:59.999999Z';
+const exactlyOneDayAhead = '2030-09-23T10:00:00.000Z';
+const justPastOneDayAhead = '2030-09-23T10:00:00.000400Z';
 
 const testIds = {
   commandA: 'c3300000-0000-4000-8000-000000000001',
@@ -462,5 +472,309 @@ describe('P03.3 run creation and lifecycle commands', () => {
       [ids.orgA, testIds.runB],
     );
     expect(commandCount.rows[0]?.count).toBe('0');
+  });
+
+  describe('a Start requested ahead of the server clock', () => {
+    const microsecondText = (column: string) =>
+      `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+    async function storedTimes(runId: string) {
+      const result = await ownerPool.query<{
+        created_at: string;
+        finished_at: string | null;
+        requested_started_at: string;
+        started_at: string;
+      }>(
+        `SELECT ${microsecondText('created_at')} AS created_at,
+                ${microsecondText('started_at')} AS started_at,
+                ${microsecondText('requested_started_at')} AS requested_started_at,
+                ${microsecondText('finished_at')} AS finished_at
+         FROM runs WHERE org_id = $1 AND id = $2`,
+        [ids.orgA, runId],
+      );
+      return result.rows[0];
+    }
+
+    it('accepts the Start and then lets an immediate Finish succeed at server time', async () => {
+      const created = await create(testIds.runA, { startedAt: fiveMinutesAhead }).expect(201);
+      expect(runViewSchema.parse(objectBody(created))).toMatchObject({
+        finishedAt: null,
+        startedAt: serverNow,
+        status: 'recording',
+      });
+
+      const finish = await command(testIds.runA, {
+        commandId: testIds.commandA,
+        expectedControlRevision: '0',
+        type: 'finish',
+      }).expect(200);
+      expect(runCommandResponseSchema.parse(objectBody(finish))).toMatchObject({
+        controlRevision: '1',
+        dataRevision: '1',
+        finishedAt: serverNow,
+        status: 'finished',
+      });
+
+      const read = await request(app)
+        .get(`/api/orgs/${ids.orgA}/runs/${testIds.runA}`)
+        .set('Cookie', authentication.cookie)
+        .expect(200);
+      expect(runViewSchema.parse(objectBody(read))).toMatchObject({
+        finishedAt: serverNow,
+        startedAt: serverNow,
+        status: 'finished',
+      });
+    });
+
+    it('keeps the requested timestamp separate and uses it for exact replay and changed-payload rejection', async () => {
+      const created = await create(testIds.runA, { startedAt: fiveMinutesAhead }).expect(201);
+      expect(await storedTimes(testIds.runA)).toEqual({
+        created_at: '2030-09-22T10:00:00.000000Z',
+        finished_at: null,
+        requested_started_at: '2030-09-22T10:05:00.000000Z',
+        started_at: '2030-09-22T10:00:00.000000Z',
+      });
+
+      const replay = await create(testIds.runA, { startedAt: fiveMinutesAhead }).expect(200);
+      expect(runViewSchema.parse(objectBody(replay))).toEqual(objectBody(created));
+
+      await command(testIds.runA, {
+        commandId: testIds.commandA,
+        expectedControlRevision: '0',
+        type: 'finish',
+      }).expect(200);
+      const replayAfterFinish = await create(testIds.runA, { startedAt: fiveMinutesAhead }).expect(200);
+      expect(runViewSchema.parse(objectBody(replayAfterFinish))).toMatchObject({
+        finishedAt: serverNow,
+        startedAt: serverNow,
+        status: 'finished',
+      });
+
+      for (const different of ['2030-09-22T10:05:00.001Z', serverNow]) {
+        const conflict = await create(testIds.runA, { startedAt: different }).expect(409);
+        expect(apiErrorResponseSchema.parse(objectBody(conflict)).error.code).toBe(
+          'ACTIVE_RUN_EXISTS',
+        );
+      }
+    });
+
+    it('normalizes and compares at PostgreSQL microsecond precision', async () => {
+      const ahead = await create(testIds.runA, { startedAt: subMillisecondAhead }).expect(201);
+      expect(runViewSchema.parse(objectBody(ahead))).toMatchObject({ startedAt: serverNow });
+      expect(await storedTimes(testIds.runA)).toMatchObject({
+        requested_started_at: '2030-09-22T10:00:00.000400Z',
+        started_at: '2030-09-22T10:00:00.000000Z',
+      });
+      await create(testIds.runA, { startedAt: subMillisecondAhead }).expect(200);
+      const conflict = await create(testIds.runA, { startedAt: serverNow }).expect(409);
+      expect(apiErrorResponseSchema.parse(objectBody(conflict)).error.code).toBe(
+        'ACTIVE_RUN_EXISTS',
+      );
+      await command(testIds.runA, {
+        commandId: testIds.commandA,
+        expectedControlRevision: '0',
+        type: 'finish',
+      }).expect(200);
+
+      const behind = await create(testIds.runB, { startedAt: oneMicrosecondBehind }).expect(201);
+      expect(runViewSchema.parse(objectBody(behind))).toMatchObject({
+        startedAt: oneMicrosecondBehind,
+      });
+      expect(await storedTimes(testIds.runB)).toMatchObject({
+        requested_started_at: '2030-09-22T09:59:59.999999Z',
+        started_at: '2030-09-22T09:59:59.999999Z',
+      });
+    });
+
+    it('keeps the 24-hour admission bound on the requested timestamp', async () => {
+      const edge = await create(testIds.runA, { startedAt: exactlyOneDayAhead }).expect(201);
+      expect(runViewSchema.parse(objectBody(edge))).toMatchObject({ startedAt: serverNow });
+      await command(testIds.runA, {
+        commandId: testIds.commandA,
+        expectedControlRevision: '0',
+        type: 'finish',
+      }).expect(200);
+
+      const beyond = await create(testIds.runB, { startedAt: justPastOneDayAhead }).expect(400);
+      expect(apiErrorResponseSchema.parse(objectBody(beyond)).error.code).toBe('INVALID_REQUEST');
+      const stored = await ownerPool.query('SELECT 1 FROM runs WHERE org_id = $1 AND id = $2', [
+        ids.orgA,
+        testIds.runB,
+      ]);
+      expect(stored.rowCount).toBe(0);
+    });
+
+    it('repairs legacy active runs in the migration and replays and finishes them', async () => {
+      const migration = await readFile(
+        new URL('../../../db/migrations/0023_normalize_future_run_start.sql', import.meta.url),
+        'utf8',
+      );
+      const legacyRows = [
+        { id: testIds.runA, status: 'recording', user: ids.userDual, startedAt: fiveMinutesAhead },
+        { id: testIds.runB, status: 'paused', user: ids.userPausedOwner, startedAt: subMillisecondAhead },
+        { id: testIds.runC, status: 'recording', user: ids.userOrgA, startedAt: oneMicrosecondBehind },
+      ];
+      const client = await ownerPool.connect();
+      const snapshot = async (runId: string) => {
+        const result = await client.query(
+          `SELECT status, data_revision, control_revision,
+                  ${microsecondText('created_at')} AS created_at,
+                  ${microsecondText('started_at')} AS started_at,
+                  ${microsecondText('finished_at')} AS finished_at
+           FROM runs WHERE org_id = $1 AND id = $2`,
+          [ids.orgA, runId],
+        );
+        return result.rows[0] as unknown;
+      };
+      const storedCommand = async () => {
+        const result = await client.query(
+          `SELECT command_id, canonical_payload, response
+           FROM run_commands WHERE org_id = $1 AND run_id = $2`,
+          [ids.orgA, testIds.runB],
+        );
+        return result.rows as unknown;
+      };
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `DROP TRIGGER IF EXISTS runs_default_requested_started_at ON runs;
+           DROP FUNCTION IF EXISTS app_private.default_requested_started_at();
+           ALTER TABLE runs DROP COLUMN IF EXISTS requested_started_at;
+           ALTER TABLE runs DROP CONSTRAINT IF EXISTS runs_start_within_auto_finish_window;
+           ALTER TABLE runs ADD CONSTRAINT runs_start_within_auto_finish_window
+             CHECK (started_at <= created_at + INTERVAL '24 hours');`,
+        );
+        await client.query(
+          `DELETE FROM runs WHERE org_id = $1 AND user_id = ANY($2::uuid[])
+             AND status IN ('recording', 'paused')`,
+          [ids.orgA, legacyRows.map((row) => row.user)],
+        );
+        for (const row of legacyRows) {
+          await client.query(
+            `INSERT INTO runs (org_id, id, user_id, status, started_at, created_at,
+                               data_revision, control_revision)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              ids.orgA,
+              row.id,
+              row.user,
+              row.status,
+              row.startedAt,
+              serverNow,
+              row.status === 'paused' ? 1 : 0,
+              row.status === 'paused' ? 1 : 0,
+            ],
+          );
+        }
+        await client.query(
+          `INSERT INTO runs (org_id, id, user_id, status, started_at, created_at, finished_at,
+                             data_revision, control_revision)
+           VALUES ($1, $2, $3, 'finished', $4, $5, $6, 1, 1)`,
+          [ids.orgA, testIds.runD, ids.userDual, fiveMinutesAhead, serverNow, '2030-09-22T10:30:00.000Z'],
+        );
+        await client.query(
+          `INSERT INTO run_commands (org_id, run_id, command_id, canonical_payload, response)
+           VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)`,
+          [
+            ids.orgA,
+            testIds.runB,
+            testIds.commandA,
+            JSON.stringify({ expectedControlRevision: '0', type: 'pause' }),
+            JSON.stringify({
+              commandId: testIds.commandA,
+              controlRevision: '1',
+              dataRevision: '1',
+              finishedAt: null,
+              status: 'paused',
+            }),
+          ],
+        );
+        const before = {
+          command: await storedCommand(),
+          past: await snapshot(testIds.runC),
+          archive: await snapshot(testIds.runD),
+          paused: await snapshot(testIds.runB),
+        };
+
+        await client.query(migration);
+
+        expect(await storedCommand()).toEqual(before.command);
+        expect(await snapshot(testIds.runC)).toEqual(before.past);
+        expect(await snapshot(testIds.runD)).toEqual(before.archive);
+        expect(await snapshot(testIds.runB)).toEqual({
+          ...(before.paused as Record<string, unknown>),
+          started_at: '2030-09-22T10:00:00.000000Z',
+        });
+        const requested = await client.query<{ id: string; requested_started_at: string }>(
+          `SELECT id, ${microsecondText('requested_started_at')} AS requested_started_at
+           FROM runs WHERE org_id = $1 AND id = ANY($2::uuid[]) ORDER BY id`,
+          [ids.orgA, [testIds.runA, testIds.runB, testIds.runC, testIds.runD]],
+        );
+        expect(requested.rows).toEqual([
+          { id: testIds.runA, requested_started_at: '2030-09-22T10:05:00.000000Z' },
+          { id: testIds.runB, requested_started_at: '2030-09-22T10:00:00.000400Z' },
+          { id: testIds.runC, requested_started_at: '2030-09-22T09:59:59.999999Z' },
+          { id: testIds.runD, requested_started_at: '2030-09-22T10:05:00.000000Z' },
+        ]);
+
+        const clock = new FixedClock();
+        const replay = await createRun(
+          client,
+          { userId: ids.userDual },
+          ids.orgA,
+          testIds.runA,
+          { startedAt: fiveMinutesAhead },
+          clock,
+        );
+        expect(replay).toMatchObject({ created: false, run: { startedAt: serverNow } });
+        await expect(
+          createRun(
+            client,
+            { userId: ids.userDual },
+            ids.orgA,
+            testIds.runA,
+            { startedAt: serverNow },
+            clock,
+          ),
+        ).rejects.toMatchObject({ code: 'ACTIVE_RUN_EXISTS', statusCode: 409 });
+        const archived = await createRun(
+          client,
+          { userId: ids.userDual },
+          ids.orgA,
+          testIds.runD,
+          { startedAt: fiveMinutesAhead },
+          clock,
+        );
+        expect(archived.run).toMatchObject({
+          finishedAt: '2030-09-22T10:30:00.000Z',
+          startedAt: fiveMinutesAhead,
+          status: 'finished',
+        });
+
+        await expect(
+          applyRunCommand(
+            client,
+            { userId: ids.userDual },
+            ids.orgA,
+            testIds.runA,
+            { commandId: testIds.commandB, expectedControlRevision: '0', type: 'finish' },
+            clock,
+          ),
+        ).resolves.toMatchObject({ finishedAt: serverNow, status: 'finished' });
+        await expect(
+          applyRunCommand(
+            client,
+            { userId: ids.userPausedOwner },
+            ids.orgA,
+            testIds.runB,
+            { commandId: testIds.commandC, expectedControlRevision: '1', type: 'finish' },
+            clock,
+          ),
+        ).resolves.toMatchObject({ finishedAt: serverNow, status: 'finished' });
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    });
   });
 });
