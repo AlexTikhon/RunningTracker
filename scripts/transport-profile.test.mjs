@@ -36,6 +36,16 @@ test('P08.5 Compose publishes only the TLS proxy', () => {
   assert.match(compose, /SESSION_COOKIE_SECURE: "true"/u);
 });
 
+test('transport Compose passes the optional public Mapbox token to the web build, empty by default', () => {
+  const compose = readFileSync(
+    resolve(root, 'infra/compose/docker-compose.transport.yml'),
+    'utf8',
+  );
+  const proxy = compose.slice(compose.indexOf('\n  proxy:\n'));
+  assert.match(proxy, /target: transport\s+args:\s+(?:#.*\n\s+)*VITE_MAPBOX_ACCESS_TOKEN: \$\{VITE_MAPBOX_ACCESS_TOKEN:-\}/u);
+  assert.doesNotMatch(compose.split('\n  proxy:')[0], /MAPBOX/u, 'the API service takes no map token');
+});
+
 // F01: the local TLS profile has to log the same way as the production one: method, path and protocol, never
 // the raw request line, because the OIDC callback carries a one-time code and state in its query string.
 test('F01 transport proxy: the access log format carries no query string and keeps its diagnostics', () => {

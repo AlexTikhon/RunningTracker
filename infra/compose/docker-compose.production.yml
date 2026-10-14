@@ -160,6 +160,9 @@ services:
       context: ../..
       dockerfile: infra/proxy/Dockerfile
       target: production
+      args:
+        # Optional public token, baked into the browser bundle at build time (runbook).
+        VITE_MAPBOX_ACCESS_TOKEN: ${VITE_MAPBOX_ACCESS_TOKEN:-}
     depends_on:
       api:
         condition: service_healthy

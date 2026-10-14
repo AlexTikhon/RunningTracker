@@ -13,6 +13,9 @@ COPY tsconfig.base.json ./
 COPY apps/web apps/web
 COPY packages/contracts packages/contracts
 COPY packages/fixtures packages/fixtures
+# Optional, public, browser-visible Mapbox token. Vite inlines it at build time, so it ships in the
+# bundle; empty keeps the tokenless fallback. Declared after npm ci so it never invalidates that layer.
+ARG VITE_MAPBOX_ACCESS_TOKEN=
 RUN npm run build --workspace=@running-tracker/web
 
 # Deployment profile (P12.2): operator-supplied certificate, one configured public host name, HTTP redirect.

@@ -65,6 +65,17 @@ updates the four logins and PostGIS, applies pending migrations, exits), then th
 proxy. `db-init` is idempotent, so an update is the same command: it migrates first, then replaces
 the API. It holds the administrator credential; no other service mounts it.
 
+### Optional archive map token
+
+`VITE_MAPBOX_ACCESS_TOKEN` (in the env file or the shell that runs Compose) is passed to the proxy
+image build and inlined into the frontend bundle by Vite. It is **browser-visible by design**: every
+visitor can read it, so use only a Mapbox public (`pk.`) token, restrict its scopes at Mapbox to the
+minimum, and restrict its allowed URLs to `PUBLIC_ORIGIN`. Never put a secret token here. There is no
+runtime configuration: a new or changed value takes effect only after an image rebuild
+(`up -d --build`). Unset or empty builds fine and the Archive tab shows its "Map provider not
+configured" notice. The same variable works for the local transport profile. `.env` files stay out of
+the build context, so only this one value is passed.
+
 An API restart ends every open live stream and every session (the store is
 in-memory; people sign in again). Clients reconnect and recover from stored data.
 

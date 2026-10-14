@@ -128,6 +128,43 @@ test('P12.2 images: build targets keep the historical defaults', () => {
   assert.ok(stages('infra/proxy/Dockerfile').includes('production'));
 });
 
+// The optional public Mapbox token is baked into the browser bundle at image build time. These are structural
+// guards; the propagation proof is a real image build inspected for a unique fake token (see the task report).
+test('Mapbox token: the web-build stage declares an empty-default build arg before the Vite build', () => {
+  const dockerfile = read('infra/proxy/Dockerfile');
+  const webBuild = dockerfile.slice(0, dockerfile.indexOf('\nFROM ', 1));
+  const arg = webBuild.search(/^ARG VITE_MAPBOX_ACCESS_TOKEN=$/mu);
+  const build = webBuild.indexOf('RUN npm run build --workspace=@running-tracker/web');
+  assert.ok(arg >= 0, 'the build arg must default to empty so an omitted token keeps the fallback');
+  assert.ok(build > arg, 'the arg must be declared before the Vite build runs');
+  assert.ok(arg > webBuild.indexOf('RUN npm ci'), 'the arg must not invalidate the dependency layer');
+  assert.doesNotMatch(dockerfile, /^ENV VITE_MAPBOX_ACCESS_TOKEN/mu, 'the token must not become runtime image config');
+});
+
+test('Mapbox token: both Compose profiles pass it to the proxy build only, with an empty default', () => {
+  for (const [path, text] of [
+    ['production', compose],
+    ['transport', read('infra/compose/docker-compose.transport.yml')],
+  ]) {
+    const block = text.slice(text.indexOf('\n  proxy:\n'));
+    assert.match(
+      block,
+      /build:[\s\S]*?args:\s+(?:#.*\n\s+)*VITE_MAPBOX_ACCESS_TOKEN: \$\{VITE_MAPBOX_ACCESS_TOKEN:-\}/u,
+      `${path} proxy build must pass the token`,
+    );
+    assert.equal(text.match(/VITE_MAPBOX_ACCESS_TOKEN: /gu).length, 1, `${path} passes it exactly once`);
+    assert.doesNotMatch(text, /VITE_MAPBOX_ACCESS_TOKEN: (?!\$\{VITE_MAPBOX_ACCESS_TOKEN:-\})\S/u);
+  }
+  assert.doesNotMatch(serviceBlock('api'), /MAPBOX/u, 'the token is a build input of the proxy image only');
+});
+
+test('Mapbox token: .env files stay out of the build context and the example documents the variable', () => {
+  const ignore = read('.dockerignore').split(/\r?\n/u);
+  assert.ok(ignore.includes('.env') && ignore.includes('.env.*'));
+  assert.match(read('infra/compose/production.env.example'), /^# VITE_MAPBOX_ACCESS_TOKEN=$/mu);
+  assert.doesNotMatch(read('infra/compose/production.env.example'), /^VITE_MAPBOX_ACCESS_TOKEN=\S/mu);
+});
+
 // F01: the OIDC callback carries a one-time code and state in its query string. The access log must name the
 // method, the path and the protocol, never the raw request line. This is structural; the proof that no value
 // reaches a log is the canary probe in verify-production-profile.mjs.
