@@ -383,16 +383,29 @@ describe('POST /runs/search/interpretations', () => {
       expect(JSON.stringify(response.body)).not.toContain(SENTINEL);
     });
 
-    it('answers 504 at its own deadline although the provider never answers', async () => {
+    it('answers 504 at its own deadline although the provider never answers, and keeps its place until it does', async () => {
       const slow = await harness({ RUN_SEARCH_AI_TIMEOUT_MS: '1000' });
-      slow.interpreter.behaviour = () => new Promise(() => undefined);
+      let settle!: () => void;
+      slow.interpreter.behaviour = () =>
+        new Promise((resolve) => {
+          settle = () => resolve({ proposal: search, usage: null });
+        });
       const started = Date.now();
       const response = await post(slow).expect(504);
       expect(errorOf(response).code).toBe('INTERPRETATION_TIMEOUT');
       expect(Date.now() - started).toBeLessThan(5_000);
-      // The place is free again.
+
+      // The request is over, the provider operation is not: the person's one reservation is still taken, so
+      // submitting again cannot start a second call (ADR-0057, addendum).
+      const again = await post(slow).expect(429);
+      expect(errorOf(again).code).toBe('INTERPRETATION_IN_PROGRESS');
+      expect(slow.interpreter.calls).toHaveLength(1);
+
+      // Once the operation settles, the place is free again.
+      settle();
       slow.interpreter.behaviour = answerWith();
       await post(slow).expect(200);
+      expect(slow.interpreter.calls).toHaveLength(2);
     });
 
     describe('when the client disconnects', () => {
@@ -405,8 +418,18 @@ describe('POST /runs/search/interpretations', () => {
         }
       });
 
-      it('frees the place even though the provider never reacts', async () => {
-        h.interpreter.behaviour = () => new Promise(() => undefined);
+      it('passes the cancellation on, and keeps the place until the provider that ignored it settles', async () => {
+        let settle!: () => void;
+        let cancelled!: () => void;
+        const cancellationSeen = new Promise<void>((resolve) => {
+          cancelled = resolve;
+        });
+        h.interpreter.behaviour = (_input, options) => {
+          options.signal.addEventListener('abort', () => cancelled(), { once: true });
+          return new Promise((resolve) => {
+            settle = () => resolve({ proposal: search, usage: null });
+          });
+        };
         server = h.app.listen(0, '127.0.0.1');
         await once(server, 'listening');
         const { port } = server.address() as AddressInfo;
@@ -431,8 +454,15 @@ describe('POST /runs/search/interpretations', () => {
         }
         expect(h.interpreter.calls).toHaveLength(1);
         outgoing.destroy();
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        // The server saw the client leave and asked the provider to stop; this one ignores that.
+        await cancellationSeen;
 
+        // The request has ended, the operation has not: the same person is still "in progress".
+        const refused = await post(h).expect(429);
+        expect(errorOf(refused).code).toBe('INTERPRETATION_IN_PROGRESS');
+        expect(h.interpreter.calls).toHaveLength(1);
+
+        settle();
         h.interpreter.behaviour = answerWith();
         await post(h).expect(200);
       });

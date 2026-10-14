@@ -73,6 +73,29 @@ Smoke cases: an English search, a Russian search, a clarification (`more than 5 
 place) and an injection attempt (an SQL command). Ceiling: 5 dispatches for the smoke run and 65 for the full
 dataset, 70 of the 75 permitted; the evaluator does not know what earlier commands spent, so keep the running total.
 
+## Addendum: operation lifetime (2026-10-14)
+
+A defect in the offline path, found by review and fixed (ADR-0057, "request lifetime versus operation lifetime"):
+the admission place was released when the HTTP request ended, not when the provider call settled, so a call that
+ignored cancellation could be joined by a second one under `maxConcurrent = 1`, and a person could time out and
+submit again. Admission now follows the operation. Offline only; no provider was contacted and none of the 75
+permitted dispatches was used.
+
+| Check | Result |
+|---|---|
+| New service tests (started-but-unsettled calls counted, deadlines fired by a manual clock) against the old service | 8 fail, among them 12 operations started under a limit of 2 |
+| The same tests with the fix | 38 of 38 in `interpretation-service.spec.ts` pass |
+| Route tests with a held provider on PostgreSQL (`maxConcurrent = 1`), old / new service | 2 fail (`503` expected, a second call was started) / 9 of 9 pass |
+| Two route-spec tests that asserted "the place is free again" | rewritten to the new rule; both fail on the old service |
+| `npm run verify` | exit 0: scripts 48, API 1111, web 520, contracts 128, fixtures 14, simulator 3 |
+| `npm run test:integration` | 44 files, 435 passed |
+| `npm run test:e2e -- run-search-interpretation` (fake provider) | 6 passed |
+
+Still true after this change: the fake provider honours cancellation and settles within its delay, so no browser
+scenario is slower or different; the evidence for the new rule is the API tests above. An interpreter that never
+settles keeps its place until the process restarts (fail-closed, by design); a remote provider that keeps computing
+after a dropped connection is not observable here.
+
 ## Not claimed
 
 Nothing here says how well any model interprets these requests, that the provider accepts the schema, that 800

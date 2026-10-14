@@ -103,7 +103,9 @@ returned and the proposal is dropped.
 
 The provider call has a hard deadline (default 10 s, at most 12 s, below the browser's 15 s) that covers the
 response body, is raced against the provider promise so that a transport that ignores `AbortSignal` is still
-answered on time, and aborts the signal. A client that disconnects aborts it too and frees its place at once.
+answered on time, and aborts the signal. A client that disconnects aborts it too and its request is answered at
+once. That ends the *request*, not the *operation*: the places stay taken until the provider call settles (see the
+lifetime addendum below, which replaces the original "frees its place at the deadline" behaviour).
 
 ### 6. Cost and abuse controls (single process, in memory)
 
@@ -121,7 +123,8 @@ answered on time, and aborts the signal. A client that disconnects aborts it too
 
 `admit()` checks and reserves in one synchronous step, so simultaneous requests cannot take the last place. A
 request that reached the provider keeps its charge whatever happened afterwards; one admitted and never dispatched
-is refunded. Refused requests are not charged. A table full of people who are still limited refuses newcomers
+is refunded. "Concurrent provider calls" and "in-flight per person" count **provider operations that have not
+settled**, not HTTP requests (see the lifetime addendum). Refused requests are not charged. A table full of people who are still limited refuses newcomers
 rather than forgetting someone. These limits **reset when the process restarts, are per process and are not a
 distributed limiter or a durable monetary budget**; a provider-side spending limit is the real budget. No Redis and
 no quota table were added.
@@ -218,3 +221,69 @@ Changes made after the first implementation, none of which is a new product beha
   validates them before any request and records the SDK version and hashes of the instructions and the schema.
 - **Still unmeasured**: provider acceptance of the schema, availability of the chosen model, token budget, latency,
   accuracy and cost. See `docs/reports/run-search-interpretation-verification.md`.
+
+## Addendum: request lifetime versus operation lifetime (2026-10-14)
+
+**Defect.** The service released its admission ticket in a `finally` after `Promise.race([providerCall, deadline])`.
+The race ends the *request* on time, but the provider promise may still be pending, so the place was freed while the
+call it stood for was still running. With `maxConcurrent = 1`: admit A; A ignores `AbortSignal` and passes the
+deadline; the request answers `504` and A's ticket is released; B is admitted while A is unsettled; two provider
+operations are outstanding under a limit of one. The same person could time out and submit again, which defeated the
+one-in-flight rule. The original ADR text ("frees its place at the deadline") and two tests asserted exactly this; it
+was a design error, not an accepted trade-off, because the limits exist to bound outstanding provider calls.
+
+**Decision: two lifetimes, and the ticket follows the operation.**
+
+| | Request | Operation |
+|---|---|---|
+| What it is | the HTTP request awaiting an answer | the interpreter's promise |
+| Ends | at the deadline, when the client leaves, or on an answer | when that promise resolves or rejects |
+| Owns | the response, the metrics and log line of the request, the access re-check | the global concurrency place, the person's in-flight reservation, the allowance charge |
+
+- An admission ticket stands for an admitted provider *operation*. It is released in exactly one place: attached to
+  the settlement of the interpreter's promise. It is not released by the deadline, by client cancellation, by an
+  unrelated error, or by any timer or lease. Releasing it twice is impossible by construction (and the ticket is
+  idempotent as a second line).
+- A request that never reached the interpreter (cancelled before admission, or its input could not be built) is
+  refunded as before. A synchronous throw from `interpret()` is a dispatched operation that settled at once: the
+  charge stays and nothing is held.
+- On a normal answer the ticket is released by the settlement itself, before normalization and before the access
+  re-check, so a slow membership transaction never holds provider capacity.
+- The request still ends promptly and with the same codes: `504 INTERPRETATION_TIMEOUT` at the deadline, `499
+  INTERPRETATION_ABORTED` when the client is gone. The signal is aborted at both, and again when the request ends.
+- An operation that outlives its request gets terminal handlers, so a late rejection is never an unhandled
+  rejection. Its late result is dropped: not normalized, not re-validated against the session or membership, not
+  counted as another outcome, and no second `run_search.interpretation` line or request counter increment.
+- One bounded line is added for operators: `run_search.interpretation.operation_settled` with `reason`
+  (`fulfilled` or `rejected`), `durationMs` since dispatch, `model` and `requestId`, emitted only when an
+  abandoned operation settles. Without it, "busy" cannot be told from "stuck". No text, identifier, token count or
+  provider body is carried, and no metric was added.
+
+**Uncooperative interpreters: fail closed, by design.** If an interpreter never settles, its place stays occupied.
+This is intentional. A lease, expiry or "cleanup" timer that gave the place back while the original call may still be
+running would recreate the defect, only later. The consequence is bounded and visible: up to `maxConcurrent`
+interpretations can become unavailable (`503 INTERPRETATION_BUSY` for others, `429 INTERPRETATION_IN_PROGRESS` for the
+person whose call is stuck) while manual search, which never touches this module, keeps working. Recovery is the
+operation settling or a process restart (which also resets the in-memory limits). The real adapter bounds its own call
+with a transport timeout and honours the signal, so in production a place is held for about the provider deadline at
+most; a different `RunSearchInterpreter` must meet the contract in `interpretation-types.ts`.
+
+**What this does and does not establish.**
+
+- Completing or ending a request does not establish that its operation completed.
+- An `AbortSignal` is a cancellation *request*, not proof of termination.
+- Operation settlement bounds the **locally tracked** calls: the number of unsettled interpreter promises in this
+  process never exceeds `maxConcurrent`. It does not prove that a remote provider stopped computing, or stopped
+  billing, for a call whose connection was dropped.
+- State is in memory and per process. A restart forgets outstanding operations (they no longer exist in the new
+  process, but the provider may still be working on them), and two processes each have their own limit.
+- Not built, deliberately: process supervision, worker termination, durable quotas, provider-side cancellation
+  APIs, a queue, a distributed semaphore.
+
+**Verification.** Deterministic, offline, with a deferred interpreter that ignores the signal and counts calls that
+started and have not settled (not HTTP requests), and a timer clock that only fires when told. Fifteen tests in
+`interpretation-service.spec.ts` plus two through the real route on PostgreSQL
+(`run-search-interpretation.integration.test.ts`); the two route-spec tests that encoded the old behaviour were
+rewritten. Each new test was run against the unchanged service and fails there (the repeated-attempt test shows 12
+operations started under a limit of 2). Unrelated limits (per-person rate, allowance, tracked people) are set far
+above anything the tests do, so another limiter cannot mask a leaked place.

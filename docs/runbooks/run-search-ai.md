@@ -81,8 +81,8 @@ Metrics: `run_search_interpretation_requests_total{outcome}`, `run_search_interp
 | Variable | Default | Meaning |
 |---|---|---|
 | `RUN_SEARCH_AI_USER_RATE_PER_MINUTE` | 5 | admitted requests per person per rolling minute, across sessions and organizations |
-| (fixed) | 1 | in-flight interpretations per person |
-| `RUN_SEARCH_AI_MAX_CONCURRENT` | 4 | provider calls at once, whole process |
+| (fixed) | 1 | unsettled provider calls per person (held until the call settles, even after the request timed out) |
+| `RUN_SEARCH_AI_MAX_CONCURRENT` | 4 | unsettled provider calls at once, whole process (same rule) |
 | `RUN_SEARCH_AI_ALLOWANCE` / `_ALLOWANCE_WINDOW_MS` | 100 / 86400000 | provider calls per rolling window, whole process; a failure after dispatch still counts |
 | `RUN_SEARCH_AI_LIMITER_MAX_USERS` | 1000 | people the limiter remembers; when full of limited people, newcomers get a "busy" answer |
 | `RUN_SEARCH_AI_TIMEOUT_MS` | 10000 (max 12000) | hard deadline for the whole provider call, body included; below the browser's 15 s |
@@ -109,8 +109,27 @@ deadline is a second constraint: `RUN_SEARCH_AI_TIMEOUT_MS` is capped at 12000 s
 and a reasoning model may not finish within it.
 
 **Limitations.** A restart resets all of it. Two API processes have twice the limits. It is not a distributed
-limiter and not a durable monetary budget. A transport that ignores cancellation frees its place at the deadline
-while the underlying call may still be running; the real adapter honours cancellation.
+limiter and not a durable monetary budget.
+
+**What "in flight" means (request lifetime versus operation lifetime).** A request ends at its deadline or when the
+browser goes away, and is answered then (`504` / `499`). The provider call it started ends only when it settles, and
+**the concurrency place and the person's one in-flight slot are held until then**, not until the request ends. So:
+
+- After a `504`, the person gets `429 INTERPRETATION_IN_PROGRESS` if they try again before that call settles, and
+  other people get `503 INTERPRETATION_BUSY` if every place is held. Waiting is the remedy; nothing retries.
+- A call that never settles holds its place until the API process restarts. This is deliberate and fail-closed:
+  there is no lease or timer that frees a place while the call may still be running. At most
+  `RUN_SEARCH_AI_MAX_CONCURRENT` places can be lost this way; manual search is unaffected.
+- The real adapter honours the cancellation signal and has its own transport timeout, so a place is normally held
+  for about the provider deadline at most. Aborting a request is a request to stop, not proof that the provider
+  stopped; the server cannot see what a remote provider does after the connection is dropped.
+- A late answer is discarded: it is not returned, not re-checked and not counted as another outcome.
+
+Telling the cases apart in the logs: every request writes one `run_search.interpretation` line with its outcome
+(`timeout`, `aborted`, `rejected_busy`, ...). When a call that outlived its request finally settles, one more line,
+`run_search.interpretation.operation_settled` (`reason` `fulfilled` or `rejected`, `durationMs` since dispatch,
+`model`, `requestId`), says that its place is back. Repeated `rejected_busy` or `rejected_in_progress` with no such
+line for a long time means a call is stuck: restart the API process, which clears the in-memory state.
 
 ## Demonstrating it
 
@@ -211,3 +230,4 @@ Any statement about how well a model performs here is unverified until a report 
 | `502` with `incomplete` | `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS` too low for the model; on a reasoning model the evaluation's `reasoning` token total shows whether reasoning used it up |
 | `502` with `invalid_output` | the model answered something the contract refuses; check the live evaluation |
 | `503 INTERPRETATION_BUDGET_EXHAUSTED` | the process's rolling allowance is spent; it frees as the window moves |
+| `503 INTERPRETATION_BUSY` or `429 INTERPRETATION_IN_PROGRESS` that does not clear | a provider call outlived its request and has not settled (see "What in flight means"); its place is held until it settles or the process restarts |

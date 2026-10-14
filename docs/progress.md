@@ -2033,3 +2033,42 @@ after the code and mostly pass without it, except the usage-detail ones; they ar
 more than the 12 s deadline cap allows; unknown until a run. Limits are still per process. Hosted CI has not run these
 changes. `packages/contracts/openapi/openapi.json` appears modified in `git status` after the build with no content
 difference (line endings only).
+
+## Run-search interpreter: request lifetime separated from operation lifetime (2026-10-14)
+
+ADR-0057 addendum; runbook `docs/runbooks/run-search-ai.md`; report addendum. No contract, schema, error-code or
+product change. Offline only: no provider was called and no credential was needed.
+
+**Defect (reproduced first).** `InterpretationService` released the admission ticket in a `finally` once the race
+between the provider promise and the deadline/cancellation ended. The race answers the request on time, but the
+provider promise can still be pending, so the place was freed under it. With `maxConcurrent = 1`: admit A; A ignores
+`AbortSignal`; the deadline passes, `504`, A's ticket released; B admitted while A is unsettled: two outstanding
+provider operations under a limit of one. The same person could time out and submit again. Two service tests and one
+route test, and a sentence in the ADR, asserted this as intended.
+
+**Ownership, before and after.** Before: ticket owned by the request (`finally` of `interpret`). After: the ticket is
+passed to the operation and released in exactly one place, attached to the settlement of the interpreter's promise,
+before normalization and before the access re-check. The request's own lifetime is unchanged (deadline `504`, client
+gone `499`, signal aborted, same codes). An abandoned operation has terminal handlers; its late result is not
+normalized, re-validated or counted as another outcome. A request that never dispatched is refunded as before; a
+synchronous interpreter throw is a dispatched operation that settled at once (charge kept, nothing held). Policy for
+an interpreter that never settles: **its place stays taken until the process restarts**, no lease or timer, because
+that would recreate the defect; manual search is unaffected. One bounded log event was added,
+`run_search.interpretation.operation_settled`, only when an abandoned operation settles.
+
+**Changed files.** `interpretation-service.ts` (lifecycle), `interpretation-admission.ts` (ticket contract comment),
+`interpretation-types.ts` (interpreter lifetime contract), `interpretation-service.spec.ts` (15 new tests, two
+rewritten), `apps/api/test/run-search-interpretation.spec.ts` (two rewritten),
+`apps/api/test/run-search-interpretation.integration.test.ts` (two new, own app with `maxConcurrent = 1`), the ADR,
+the runbook, the verification report and this file.
+
+**Executed.** Red first: the new service tests against the HEAD service: 8 failed (the repeated-attempt test saw 12
+operations started under a limit of 2); the two route-integration tests: 2 failed with a second provider call; the two
+rewritten route-spec tests: 2 failed. With the fix: all pass. `npm run verify`: exit 0; scripts 48; API **1111** (was
+1096, +15); web 520; contracts 128; fixtures 14; simulator 3. `npm run test:integration`: 44 files, **435** (was 433,
++2). `npm run test:e2e -- run-search-interpretation`: 6 passed. The full browser suite was not rerun: the fake provider
+settles within its delay and honours cancellation, so no browser-reachable path changed.
+
+**Not verified / limits.** Settlement bounds only locally tracked calls; whether a remote provider stopped computing
+is unknown. Limits are per process and reset on restart, which also forgets outstanding operations. The real adapter's
+behaviour on abort is covered by its existing offline tests only; the live provider has still never been called.

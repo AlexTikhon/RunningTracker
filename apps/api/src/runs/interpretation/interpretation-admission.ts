@@ -35,6 +35,14 @@ export interface AdmissionOptions {
   userRate: WindowLimit;
 }
 
+/**
+ * An admitted provider OPERATION: one global place and the person's one in-flight reservation.
+ *
+ * The owner releases it when the operation has settled, not when the HTTP request that started it has ended. A
+ * request ends at a deadline or when its client leaves; an interpreter may keep running after either, and while it
+ * does, the place must stay taken or the concurrency limit stops bounding anything. There is deliberately no lease
+ * or expiry here: a place held by an operation that never settles stays held until the process restarts.
+ */
 export interface AdmissionTicket {
   /**
    * Gives the place back. A request that reached the provider keeps its charge (the provider may have done billable

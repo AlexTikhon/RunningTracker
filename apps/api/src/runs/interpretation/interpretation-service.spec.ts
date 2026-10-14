@@ -2,8 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { Clock } from '../../clock.js';
 import { ApiError } from '../../http/errors.js';
+import { createApiMetrics } from '../../observability/api-metrics.js';
 import { createLogger } from '../../observability/logger.js';
-import { InterpretationAdmission } from './interpretation-admission.js';
+import {
+  AdmissionRejectedError,
+  InterpretationAdmission,
+  type AdmissionRejection,
+  type AdmissionTicket,
+} from './interpretation-admission.js';
 import { InterpretationService, type InterpretationRequest } from './interpretation-service.js';
 import type { ProviderProposal } from './interpretation-schema.js';
 import {
@@ -71,6 +77,107 @@ const answer = (proposal: ProviderProposal = search): Behaviour => () =>
 // Ignores cancellation completely, like a transport that does not honour AbortSignal.
 const hangsForever: Behaviour = () => new Promise(() => undefined);
 
+// Timers that only fire when a test says so: a deadline is an event here, never a wait.
+class ManualTimerClock extends TestClock {
+  readonly #timers = new Map<number, () => void>();
+  #next = 1;
+
+  public override clearTimeout(handle: ReturnType<typeof setTimeout>): void {
+    this.#timers.delete(handle as unknown as number);
+  }
+
+  public override setTimeout(callback: () => void): ReturnType<typeof setTimeout> {
+    const handle = this.#next;
+    this.#next += 1;
+    this.#timers.set(handle, callback);
+    return handle as unknown as ReturnType<typeof setTimeout>;
+  }
+
+  /** Fires every pending deadline. */
+  public fireDeadlines(): void {
+    const due = [...this.#timers.values()];
+    this.#timers.clear();
+    for (const callback of due) callback();
+  }
+}
+
+interface HeldOperation {
+  reject(error: Error): void;
+  resolve(value?: InterpreterAnswer): void;
+  readonly signal: AbortSignal;
+  settled: boolean;
+}
+
+// One deferred promise per call. It ignores AbortSignal unless `cooperative`, and it counts the calls that started
+// and have not settled: the number the admission limits are meant to bound, whatever the HTTP side did meanwhile.
+class DeferredInterpreter implements RunSearchInterpreter {
+  public readonly model = 'test-model';
+  public cooperative = false;
+  public maxOutstanding = 0;
+  public readonly operations: HeldOperation[] = [];
+
+  public get outstanding(): number {
+    return this.operations.filter((operation) => !operation.settled).length;
+  }
+
+  public interpret(_input: InterpretationInput, options: InterpretCallOptions): Promise<InterpreterAnswer> {
+    return new Promise<InterpreterAnswer>((resolve, reject) => {
+      const operation: HeldOperation = {
+        reject: (error) => {
+          operation.settled = true;
+          reject(error);
+        },
+        resolve: (value = { proposal: search, usage: { inputTokens: 700, outputTokens: 40 } }) => {
+          operation.settled = true;
+          resolve(value);
+        },
+        settled: false,
+        signal: options.signal,
+      };
+      this.operations.push(operation);
+      this.maxOutstanding = Math.max(this.maxOutstanding, this.outstanding);
+      if (this.cooperative) {
+        options.signal.addEventListener('abort', () => operation.reject(new InterpreterFailure('aborted')), {
+          once: true,
+        });
+      }
+    });
+  }
+}
+
+// The real admission, plus a record of how each ticket was released and a probe that asks "would a request be
+// admitted now?" without leaving a charge behind.
+class RecordingAdmission extends InterpretationAdmission {
+  public readonly tickets: Array<{ releases: Array<boolean | undefined> }> = [];
+
+  public override admit(userId: string): AdmissionTicket {
+    const ticket = super.admit(userId);
+    const record = { releases: [] as Array<boolean | undefined> };
+    this.tickets.push(record);
+    return {
+      release: (options) => {
+        record.releases.push(options?.dispatched);
+        ticket.release(options);
+      },
+    };
+  }
+
+  public probe(userId: string): 'admitted' | AdmissionRejection {
+    try {
+      super.admit(userId).release({ dispatched: false });
+      return 'admitted';
+    } catch (error) {
+      if (error instanceof AdmissionRejectedError) {
+        return error.reason;
+      }
+      throw error;
+    }
+  }
+}
+
+// Lets promise reactions and Node's unhandled-rejection check run; it measures nothing.
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 function setup(
   behaviour: Behaviour,
   options: { allowance?: number; timeoutMs?: number; maxConcurrent?: number } = {},
@@ -97,6 +204,40 @@ function setup(
     timeoutMs: options.timeoutMs ?? 40,
   });
   return { admission, clock, interpreter, lines, service };
+}
+
+// A service whose only limit that can bind is the one under test: the per-person rate, the allowance and the
+// tracked-person table are set far above anything a test does, so no other limiter can mask a leaked slot.
+function setupHeld(
+  options: { allowance?: number; interpreter?: RunSearchInterpreter; maxConcurrent?: number } = {},
+) {
+  const clock = new ManualTimerClock();
+  const lines: Array<Record<string, unknown>> = [];
+  const logger = createLogger({
+    clock,
+    write: (_level, line) => lines.push(JSON.parse(line) as Record<string, unknown>),
+  });
+  const interpreter = new DeferredInterpreter();
+  const admission = new RecordingAdmission({
+    allowance: { perWindow: options.allowance ?? 1_000, windowMs: 86_400_000 },
+    clock,
+    maxConcurrent: options.maxConcurrent ?? 1,
+    maxUsers: 1_000,
+    userRate: { perWindow: 1_000, windowMs: 60_000 },
+  });
+  const metrics = createApiMetrics().interpretation;
+  const outcomes = vi.spyOn(metrics.requests, 'inc');
+  const service = new InterpretationService({
+    admission,
+    clock,
+    interpreter: options.interpreter ?? interpreter,
+    logger,
+    metrics,
+    timeoutMs: 10_000,
+  });
+  const requestLines = (): Array<Record<string, unknown>> =>
+    lines.filter((line) => line.event === 'run_search.interpretation');
+  return { admission, clock, interpreter, lines, outcomes, requestLines, service };
 }
 
 function request(overrides: Partial<InterpretationRequest> = {}): InterpretationRequest {
@@ -198,25 +339,23 @@ describe('interpretation service: failures', () => {
     expect(interpreter.calls).toHaveLength(1);
   });
 
-  it('enforces its own deadline when the transport ignores cancellation, and frees the place', async () => {
-    const { admission, interpreter, service } = setup(hangsForever, { maxConcurrent: 1, timeoutMs: 30 });
+  // The deadline and cancellation end the REQUEST. They do not end the operation, so they must not free its place:
+  // that is asserted in 'interpretation service: operation lifetime' below (ADR-0057, addendum).
+  it('enforces its own deadline when the transport ignores cancellation', async () => {
+    const { interpreter, service } = setup(hangsForever, { maxConcurrent: 1, timeoutMs: 30 });
     const started = Date.now();
     const failure = await failureOf(service.interpret(request()));
     expect(failure).toMatchObject({ code: 'INTERPRETATION_TIMEOUT', statusCode: 504 });
     expect(Date.now() - started).toBeLessThan(500);
     expect(interpreter.calls[0]!.signal.aborted).toBe(true);
-    // The concurrency place is back although the provider call never settled.
-    expect(() => admission.admit(OTHER)).not.toThrow();
   });
 
-  it('answers a client that went away and frees the place even if the transport ignores it', async () => {
-    const { admission, service } = setup(hangsForever, { maxConcurrent: 1, timeoutMs: 5_000 });
+  it('answers a client that went away even if the transport ignores the cancellation', async () => {
+    const { service } = setup(hangsForever, { maxConcurrent: 1, timeoutMs: 5_000 });
     const controller = new AbortController();
     const pending = failureOf(service.interpret(request({ signal: controller.signal })));
-    await new Promise((resolve) => setTimeout(resolve, 5));
     controller.abort();
     expect(await pending).toMatchObject({ code: 'INTERPRETATION_ABORTED' });
-    expect(() => admission.admit(OTHER)).not.toThrow();
   });
 
   it('does not charge or dispatch a request that was already cancelled', async () => {
@@ -269,6 +408,291 @@ describe('interpretation service: failures', () => {
       }),
     );
     expect(admittedDuringRevalidate).toBe(true);
+  });
+});
+
+// The invariant (ADR-0057, addendum): an admission ticket stands for an admitted provider OPERATION. It is held until
+// the underlying interpreter promise settles, not until the HTTP request ends. So, whatever requests did, the number
+// of started-but-unsettled interpreter calls never exceeds maxConcurrent, and a person never has two.
+describe('interpretation service: operation lifetime', () => {
+  const THIRD = '33333333-3333-4333-8333-333333333333';
+
+  it('answers at the deadline at once, while the unsettled operation keeps its slot', async () => {
+    const { admission, clock, interpreter, service } = setupHeld();
+    const pending = failureOf(service.interpret(request()));
+    expect(interpreter.outstanding).toBe(1);
+
+    clock.fireDeadlines();
+    expect(await pending).toMatchObject({ code: 'INTERPRETATION_TIMEOUT', statusCode: 504 });
+
+    expect(interpreter.operations[0]!.signal.aborted).toBe(true);
+    expect(interpreter.outstanding).toBe(1);
+    expect(admission.probe(OTHER)).toBe('busy');
+    expect(admission.tickets[0]!.releases).toEqual([]);
+  });
+
+  it('answers a cancelled client at once, while the unsettled operation keeps its slot', async () => {
+    const { admission, interpreter, service } = setupHeld();
+    const controller = new AbortController();
+    const pending = failureOf(service.interpret(request({ signal: controller.signal })));
+
+    controller.abort();
+    expect(await pending).toMatchObject({ code: 'INTERPRETATION_ABORTED', statusCode: 499 });
+
+    expect(interpreter.outstanding).toBe(1);
+    expect(admission.probe(OTHER)).toBe('busy');
+    expect(admission.tickets[0]!.releases).toEqual([]);
+  });
+
+  it('refuses another person, without calling the provider, while global capacity is occupied', async () => {
+    const { clock, interpreter, service } = setupHeld({ maxConcurrent: 1 });
+    const first = failureOf(service.interpret(request({ userId: USER })));
+    clock.fireDeadlines();
+    await first;
+
+    const second = await failureOf(service.interpret(request({ userId: OTHER })));
+    expect(second).toMatchObject({ code: 'INTERPRETATION_BUSY', statusCode: 503 });
+    expect(interpreter.operations).toHaveLength(1);
+    expect(interpreter.maxOutstanding).toBe(1);
+  });
+
+  it('refuses the same person while their operation is unsettled, although global capacity is free', async () => {
+    const { admission, clock, interpreter, service } = setupHeld({ maxConcurrent: 4 });
+    const first = failureOf(service.interpret(request({ userId: USER })));
+    clock.fireDeadlines();
+    await first;
+
+    // Capacity is not what stops this: another person is admitted. The person's own reservation is.
+    expect(admission.probe(OTHER)).toBe('admitted');
+    const again = await failureOf(service.interpret(request({ userId: USER })));
+    expect(again).toMatchObject({ code: 'INTERPRETATION_IN_PROGRESS', statusCode: 429 });
+    expect(interpreter.operations).toHaveLength(1);
+  });
+
+  it('releases capacity exactly once when the abandoned operation resolves late, and delivers nothing', async () => {
+    const { admission, clock, interpreter, outcomes, requestLines, service } = setupHeld();
+    const revalidate = vi.fn(() => Promise.resolve());
+    const pending = failureOf(service.interpret(request({ revalidate })));
+    clock.fireDeadlines();
+    await pending;
+    expect(admission.probe(OTHER)).toBe('busy');
+    expect(requestLines()).toHaveLength(1);
+    expect(outcomes).toHaveBeenCalledTimes(1);
+
+    interpreter.operations[0]!.resolve();
+    await flush();
+
+    expect(interpreter.outstanding).toBe(0);
+    expect(admission.probe(OTHER)).toBe('admitted');
+    // Dispatched and charged once; released once, as a dispatched operation.
+    expect(admission.tickets).toHaveLength(1);
+    expect(admission.tickets[0]!.releases).toEqual([true]);
+    expect(admission.allowanceInUse()).toBe(1);
+    // The request is over: no access check, no second outcome in the log or the counters.
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(requestLines()).toHaveLength(1);
+    expect(requestLines()[0]).toMatchObject({ outcome: 'timeout' });
+    expect(outcomes).toHaveBeenCalledTimes(1);
+    expect(outcomes).toHaveBeenCalledWith({ outcome: 'timeout' });
+  });
+
+  it('releases capacity exactly once when the abandoned operation rejects late, without an unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { admission, clock, interpreter, outcomes, requestLines, service } = setupHeld();
+      const pending = failureOf(service.interpret(request()));
+      clock.fireDeadlines();
+      await pending;
+      expect(admission.probe(OTHER)).toBe('busy');
+
+      interpreter.operations[0]!.reject(new Error(`provider body echoing ${SENTINEL_TEXT}`));
+      await flush();
+      await flush();
+
+      expect(unhandled).toEqual([]);
+      expect(interpreter.outstanding).toBe(0);
+      expect(admission.probe(OTHER)).toBe('admitted');
+      expect(admission.tickets[0]!.releases).toEqual([true]);
+      expect(requestLines()).toHaveLength(1);
+      expect(outcomes).toHaveBeenCalledTimes(1);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('releases capacity once an interpreter that honours cancellation settles', async () => {
+    const { admission, clock, interpreter, service } = setupHeld();
+    interpreter.cooperative = true;
+    const pending = failureOf(service.interpret(request()));
+    clock.fireDeadlines();
+    expect(await pending).toMatchObject({ code: 'INTERPRETATION_TIMEOUT' });
+    await flush();
+
+    expect(interpreter.outstanding).toBe(0);
+    expect(admission.probe(OTHER)).toBe('admitted');
+    expect(admission.tickets[0]!.releases).toEqual([true]);
+  });
+
+  it('releases provider capacity before the access check when the operation completes normally', async () => {
+    const { admission, interpreter, service } = setupHeld();
+    const seenByRevalidate: Array<{ probe: string; releases: Array<boolean | undefined> }> = [];
+    const pending = service.interpret(
+      request({
+        revalidate: () => {
+          seenByRevalidate.push({
+            probe: admission.probe(OTHER),
+            releases: [...admission.tickets[0]!.releases],
+          });
+          return Promise.resolve();
+        },
+      }),
+    );
+    interpreter.operations[0]!.resolve();
+    await expect(pending).resolves.toMatchObject({ outcome: 'search' });
+
+    expect(seenByRevalidate).toEqual([{ probe: 'admitted', releases: [true] }]);
+    expect(admission.tickets[0]!.releases).toEqual([true]);
+  });
+
+  it('neither dispatches nor charges a request that was cancelled before admission', async () => {
+    const { admission, interpreter, requestLines, service } = setupHeld({ allowance: 1 });
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(await failureOf(service.interpret(request({ signal: controller.signal })))).toMatchObject({
+      code: 'INTERPRETATION_ABORTED',
+    });
+
+    expect(interpreter.operations).toHaveLength(0);
+    expect(admission.tickets).toHaveLength(0);
+    expect(admission.allowanceInUse()).toBe(0);
+    expect(admission.probe(USER)).toBe('admitted');
+    expect(requestLines()).toHaveLength(1);
+  });
+
+  it('cleans up a synchronous interpreter failure: slot freed once, charge kept, no operation left', async () => {
+    const throwing = new ScriptedInterpreter(() => {
+      throw new Error('synchronous failure');
+    });
+    const { admission, requestLines, service } = setupHeld({ allowance: 1, interpreter: throwing });
+
+    const failure = await failureOf(service.interpret(request()));
+    expect(failure).toMatchObject({ code: 'INTERNAL_ERROR', statusCode: 500 });
+    expect(throwing.calls).toHaveLength(1);
+    // The interpreter was called, so the allowance is charged (as for any dispatched failure), and nothing is held.
+    expect(admission.tickets).toHaveLength(1);
+    expect(admission.tickets[0]!.releases).toEqual([true]);
+    expect(admission.allowanceInUse()).toBe(1);
+    expect(admission.probe(USER)).toBe('budget_exhausted');
+    expect(requestLines()).toHaveLength(1);
+    expect(requestLines()[0]).toMatchObject({ outcome: 'provider_error' });
+  });
+
+  it('keeps a dispatched operation\'s allowance charge when it is abandoned and then fails late', async () => {
+    const { admission, clock, interpreter, service } = setupHeld({ allowance: 1 });
+    const pending = failureOf(service.interpret(request()));
+    clock.fireDeadlines();
+    await pending;
+    expect(interpreter.outstanding).toBe(1);
+    interpreter.operations[0]!.reject(new InterpreterFailure('provider_error'));
+    await flush();
+
+    // The place is back, the charge is not.
+    expect(interpreter.outstanding).toBe(0);
+    expect(admission.allowanceInUse()).toBe(1);
+    expect(admission.probe(OTHER)).toBe('budget_exhausted');
+  });
+
+  it('keeps a dispatched failure\'s allowance charge when the provider fails inside the request', async () => {
+    const { admission, interpreter, service } = setupHeld({ allowance: 1 });
+    const pending = failureOf(service.interpret(request()));
+    interpreter.operations[0]!.reject(new InterpreterFailure('refusal'));
+    expect(await pending).toMatchObject({ code: 'INTERPRETATION_FAILED' });
+
+    expect(admission.tickets[0]!.releases).toEqual([true]);
+    expect(admission.probe(OTHER)).toBe('budget_exhausted');
+  });
+
+  it('never has more unsettled operations than the configured concurrency, however often requests end', async () => {
+    const { admission, clock, interpreter, service } = setupHeld({ maxConcurrent: 2 });
+    const people = Array.from(
+      { length: 12 },
+      (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    );
+    const codes: string[] = [];
+
+    for (const [index, userId] of people.entries()) {
+      const controller = new AbortController();
+      const attempt = failureOf(service.interpret(request({ signal: controller.signal, userId })));
+      if (index % 2 === 0) {
+        clock.fireDeadlines();
+      } else {
+        controller.abort();
+      }
+      codes.push((await attempt).code);
+    }
+
+    expect(codes).toEqual([
+      'INTERPRETATION_TIMEOUT',
+      'INTERPRETATION_ABORTED',
+      ...Array<string>(10).fill('INTERPRETATION_BUSY'),
+    ]);
+    expect(interpreter.operations).toHaveLength(2);
+    expect(interpreter.maxOutstanding).toBeLessThanOrEqual(2);
+
+    // The same person trying again and again does not get past their own unsettled operation either.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const again = await failureOf(service.interpret(request({ userId: people[0]! })));
+      expect(again.code).toBe('INTERPRETATION_IN_PROGRESS');
+    }
+    expect(interpreter.maxOutstanding).toBeLessThanOrEqual(2);
+
+    // Settling one operation frees exactly one place.
+    interpreter.operations[0]!.resolve();
+    await flush();
+    expect(admission.probe(THIRD)).toBe('admitted');
+    expect(admission.probe(THIRD)).toBe('admitted');
+    const start = failureOf(service.interpret(request({ userId: THIRD })));
+    expect(interpreter.outstanding).toBe(2);
+    expect(await failureOf(service.interpret(request({ userId: OTHER })))).toMatchObject({
+      code: 'INTERPRETATION_BUSY',
+    });
+    clock.fireDeadlines();
+    await start;
+    expect(interpreter.maxOutstanding).toBeLessThanOrEqual(2);
+  });
+
+  it('reports a late settlement once, with bounded fields and no text or provider body', async () => {
+    const { clock, interpreter, lines, service } = setupHeld();
+    const pending = failureOf(service.interpret(request({ text: `near ${SENTINEL_TEXT}` })));
+    clock.fireDeadlines();
+    await pending;
+    interpreter.operations[0]!.reject(new Error(`provider body echoing ${SENTINEL_TEXT}`));
+    await flush();
+
+    const settled = lines.filter((line) => line.event === 'run_search.interpretation.operation_settled');
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({
+      model: 'test-model',
+      reason: 'rejected',
+      requestId: '99999999-9999-4999-8999-999999999999',
+    });
+    expect(typeof settled[0]!.durationMs).toBe('number');
+    expect(JSON.stringify(lines)).not.toContain(SENTINEL_TEXT);
+    expect(JSON.stringify(lines)).not.toContain(USER);
+  });
+
+  it('says nothing extra when the operation settles while its request is still waiting', async () => {
+    const { interpreter, lines, service } = setupHeld();
+    const pending = service.interpret(request());
+    interpreter.operations[0]!.resolve();
+    await pending;
+
+    expect(lines.map((line) => line.event)).toEqual(['run_search.interpretation']);
   });
 });
 
