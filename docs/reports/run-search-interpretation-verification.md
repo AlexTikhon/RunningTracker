@@ -73,7 +73,50 @@ Smoke cases: an English search, a Russian search, a clarification (`more than 5 
 place) and an injection attempt (an SQL command). Ceiling: 5 dispatches for the smoke run and 65 for the full
 dataset, 70 of the 75 permitted; the evaluator does not know what earlier commands spent, so keep the running total.
 
+## Addendum: operation lifetime (2026-10-14)
+
+A defect in the offline path, found by review and fixed (ADR-0057, "request lifetime versus operation lifetime"):
+the admission place was released when the HTTP request ended, not when the provider call settled, so a call that
+ignored cancellation could be joined by a second one under `maxConcurrent = 1`, and a person could time out and
+submit again. Admission now follows the operation. Offline only; no provider was contacted and none of the 75
+permitted dispatches was used.
+
+| Check | Result |
+|---|---|
+| New service tests (started-but-unsettled calls counted, deadlines fired by a manual clock) against the old service | 8 fail, among them 12 operations started under a limit of 2 |
+| The same tests with the fix | 38 of 38 in `interpretation-service.spec.ts` pass |
+| Route tests with a held provider on PostgreSQL (`maxConcurrent = 1`), old / new service | 2 fail (`503` expected, a second call was started) / 9 of 9 pass |
+| Two route-spec tests that asserted "the place is free again" | rewritten to the new rule; both fail on the old service |
+| `npm run verify` | exit 0: scripts 48, API 1111, web 520, contracts 128, fixtures 14, simulator 3 |
+| `npm run test:integration` | 44 files, 435 passed |
+| `npm run test:e2e -- run-search-interpretation` (fake provider) | 6 passed |
+
+Still true after this change: the fake provider honours cancellation and settles within its delay, so no browser
+scenario is slower or different; the evidence for the new rule is the API tests above. An interpreter that never
+settles keeps its place until the process restarts (fail-closed, by design); a remote provider that keeps computing
+after a dropped connection is not observable here.
+
+## Addendum: a local Ollama run (2026-10-14)
+
+The first real inference this feature has seen, with a **local** model; OpenAI is still unreached (0 of 75
+dispatches used). Ollama 0.35.1 (`OLLAMA_NO_CLOUD=1`, loopback), `qwen3:8b` Q4_K_M, CPU only, Windows 11.
+
+| What | Result |
+|---|---|
+| Request accepted by the real runtime (schema with nullable and enum-with-null properties, `think:false`, `stream:false`) | yes, status 200, `done_reason` `stop`, no thinking trace |
+| Cold load | 12.5 s (wall 12.9 s) |
+| Warm request | 11.2 s, 11.5 s, 13.2 s |
+| Within the 10 s deadline (12 s maximum) | **no**, 4 of 4 evaluator calls timed out |
+| Answers seen | 2 of 2 wrong: `clarify` + `conflicting_conditions` where `search` and where `unsupported` / `not_a_run_search` were expected; one carried filters next to `clarify` and was refused locally as `invalid_output` |
+| Cases that produced no answer inside the deadline | 3 (`ru-last-month-min-longest`, `en-strict-more-than`, `en-location`) |
+| Accuracy on the dataset | **not measured** (5 of 65 cases touched; 2 answers read) |
+
+The evaluator's report for an Ollama run states the provider, the model, the runtime and its version, and the
+generation settings (`num_ctx 4096`, `num_predict 800`, `temperature 0`, `think false`, `stream false`); it does not
+attach the OpenAI SDK version. The report files are untracked (`apps/api/.local/eval-reports/`).
+
 ## Not claimed
 
 Nothing here says how well any model interprets these requests, that the provider accepts the schema, that 800
-output tokens or 10 s are enough for a given model, or what a request costs.
+output tokens or 10 s are enough for a given model, or what a request costs. The Ollama figures above describe one
+machine, one model and five cases; they are a smoke test, not a baseline.

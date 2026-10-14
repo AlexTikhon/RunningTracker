@@ -5,7 +5,7 @@ import OpenAI, {
 } from 'openai';
 import type { Response as OpenAiResponse } from 'openai/resources/responses/responses';
 
-import { boundedFetch, ResponseTooLargeError } from './bounded-fetch.js';
+import { boundedFetch, causedByOversizedResponse } from './bounded-fetch.js';
 import {
   buildInterpretationMessages,
   INTERPRETATION_INSTRUCTIONS,
@@ -56,18 +56,6 @@ function usageOf(response: OpenAiResponse): InterpreterUsage | null {
     outputTokens: count(usage.output_tokens),
     reasoningTokens: count(usage.output_tokens_details?.reasoning_tokens),
   };
-}
-
-// The SDK may wrap a failure that happened while reading the body; look a few levels down the cause chain.
-function causedByOversizedResponse(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
-    if (current instanceof ResponseTooLargeError) {
-      return true;
-    }
-    current = current.cause;
-  }
-  return false;
 }
 
 // Provider error text is never kept: it can echo parts of the request, and nothing in it is needed to act.

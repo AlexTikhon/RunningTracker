@@ -103,7 +103,9 @@ returned and the proposal is dropped.
 
 The provider call has a hard deadline (default 10 s, at most 12 s, below the browser's 15 s) that covers the
 response body, is raced against the provider promise so that a transport that ignores `AbortSignal` is still
-answered on time, and aborts the signal. A client that disconnects aborts it too and frees its place at once.
+answered on time, and aborts the signal. A client that disconnects aborts it too and its request is answered at
+once. That ends the *request*, not the *operation*: the places stay taken until the provider call settles (see the
+lifetime addendum below, which replaces the original "frees its place at the deadline" behaviour).
 
 ### 6. Cost and abuse controls (single process, in memory)
 
@@ -121,7 +123,8 @@ answered on time, and aborts the signal. A client that disconnects aborts it too
 
 `admit()` checks and reserves in one synchronous step, so simultaneous requests cannot take the last place. A
 request that reached the provider keeps its charge whatever happened afterwards; one admitted and never dispatched
-is refunded. Refused requests are not charged. A table full of people who are still limited refuses newcomers
+is refunded. "Concurrent provider calls" and "in-flight per person" count **provider operations that have not
+settled**, not HTTP requests (see the lifetime addendum). Refused requests are not charged. A table full of people who are still limited refuses newcomers
 rather than forgetting someone. These limits **reset when the process restarts, are per process and are not a
 distributed limiter or a durable monetary budget**; a provider-side spending limit is the real budget. No Redis and
 no quota table were added.
@@ -218,3 +221,177 @@ Changes made after the first implementation, none of which is a new product beha
   validates them before any request and records the SDK version and hashes of the instructions and the schema.
 - **Still unmeasured**: provider acceptance of the schema, availability of the chosen model, token budget, latency,
   accuracy and cost. See `docs/reports/run-search-interpretation-verification.md`.
+
+## Addendum: request lifetime versus operation lifetime (2026-10-14)
+
+**Defect.** The service released its admission ticket in a `finally` after `Promise.race([providerCall, deadline])`.
+The race ends the *request* on time, but the provider promise may still be pending, so the place was freed while the
+call it stood for was still running. With `maxConcurrent = 1`: admit A; A ignores `AbortSignal` and passes the
+deadline; the request answers `504` and A's ticket is released; B is admitted while A is unsettled; two provider
+operations are outstanding under a limit of one. The same person could time out and submit again, which defeated the
+one-in-flight rule. The original ADR text ("frees its place at the deadline") and two tests asserted exactly this; it
+was a design error, not an accepted trade-off, because the limits exist to bound outstanding provider calls.
+
+**Decision: two lifetimes, and the ticket follows the operation.**
+
+| | Request | Operation |
+|---|---|---|
+| What it is | the HTTP request awaiting an answer | the interpreter's promise |
+| Ends | at the deadline, when the client leaves, or on an answer | when that promise resolves or rejects |
+| Owns | the response, the metrics and log line of the request, the access re-check | the global concurrency place, the person's in-flight reservation, the allowance charge |
+
+- An admission ticket stands for an admitted provider *operation*. It is released in exactly one place: attached to
+  the settlement of the interpreter's promise. It is not released by the deadline, by client cancellation, by an
+  unrelated error, or by any timer or lease. Releasing it twice is impossible by construction (and the ticket is
+  idempotent as a second line).
+- A request that never reached the interpreter (cancelled before admission, or its input could not be built) is
+  refunded as before. A synchronous throw from `interpret()` is a dispatched operation that settled at once: the
+  charge stays and nothing is held.
+- On a normal answer the ticket is released by the settlement itself, before normalization and before the access
+  re-check, so a slow membership transaction never holds provider capacity.
+- The request still ends promptly and with the same codes: `504 INTERPRETATION_TIMEOUT` at the deadline, `499
+  INTERPRETATION_ABORTED` when the client is gone. The signal is aborted at both, and again when the request ends.
+- An operation that outlives its request gets terminal handlers, so a late rejection is never an unhandled
+  rejection. Its late result is dropped: not normalized, not re-validated against the session or membership, not
+  counted as another outcome, and no second `run_search.interpretation` line or request counter increment.
+- One bounded line is added for operators: `run_search.interpretation.operation_settled` with `reason`
+  (`fulfilled` or `rejected`), `durationMs` since dispatch, `model` and `requestId`, emitted only when an
+  abandoned operation settles. Without it, "busy" cannot be told from "stuck". No text, identifier, token count or
+  provider body is carried, and no metric was added.
+
+**Uncooperative interpreters: fail closed, by design.** If an interpreter never settles, its place stays occupied.
+This is intentional. A lease, expiry or "cleanup" timer that gave the place back while the original call may still be
+running would recreate the defect, only later. The consequence is bounded and visible: up to `maxConcurrent`
+interpretations can become unavailable (`503 INTERPRETATION_BUSY` for others, `429 INTERPRETATION_IN_PROGRESS` for the
+person whose call is stuck) while manual search, which never touches this module, keeps working. Recovery is the
+operation settling or a process restart (which also resets the in-memory limits). The real adapter bounds its own call
+with a transport timeout and honours the signal, so in production a place is held for about the provider deadline at
+most; a different `RunSearchInterpreter` must meet the contract in `interpretation-types.ts`.
+
+**What this does and does not establish.**
+
+- Completing or ending a request does not establish that its operation completed.
+- An `AbortSignal` is a cancellation *request*, not proof of termination.
+- Operation settlement bounds the **locally tracked** calls: the number of unsettled interpreter promises in this
+  process never exceeds `maxConcurrent`. It does not prove that a remote provider stopped computing, or stopped
+  billing, for a call whose connection was dropped.
+- State is in memory and per process. A restart forgets outstanding operations (they no longer exist in the new
+  process, but the provider may still be working on them), and two processes each have their own limit.
+- Not built, deliberately: process supervision, worker termination, durable quotas, provider-side cancellation
+  APIs, a queue, a distributed semaphore.
+
+**Verification.** Deterministic, offline, with a deferred interpreter that ignores the signal and counts calls that
+started and have not settled (not HTTP requests), and a timer clock that only fires when told. Fifteen tests in
+`interpretation-service.spec.ts` plus two through the real route on PostgreSQL
+(`run-search-interpretation.integration.test.ts`); the two route-spec tests that encoded the old behaviour were
+rewritten. Each new test was run against the unchanged service and fails there (the repeated-attempt test shows 12
+operations started under a limit of 2). Unrelated limits (per-person rate, allowance, tracked people) are set far
+above anything the tests do, so another limiter cannot mask a leaked place.
+
+## Addendum: a local Ollama interpreter (2026-10-14)
+
+**Goal.** Run the real interpretation path on a developer machine without an OpenAI key and without spending money.
+The product, the contract, the prompt, the schema, admission, the operation-lifetime rule and the evaluator are
+unchanged; a third `RunSearchInterpreter` was added and the configuration learned about it.
+
+**Configuration is a discriminated union.** `RUN_SEARCH_AI_PROVIDER` is `openai` (default), `ollama` or `fake`, and
+the validated configuration is `OpenAiRunSearchAiConfig` (carries `apiKey`), `OllamaRunSearchAiConfig` (model only)
+or `FakeRunSearchAiConfig`, told apart by `provider`. An Ollama configuration has no credential field and no
+URL or host field, so there is nothing to cast and no invalid combination to represent. `createInterpreter` is an
+exhaustive `switch` over the union: a new provider does not compile until handled, nothing falls back to another
+provider, and the OpenAI client is constructed only for the OpenAI configuration (a test counts constructions).
+In Ollama mode `OPENAI_API_KEY` is never read or validated and `OPENAI_API_KEY_FILE` is not opened. AI stays
+disabled unless `RUN_SEARCH_AI_ENABLED=true`.
+
+**Local development and test only.** The destination is the constant `http://127.0.0.1:11434`. It is not a setting,
+and no request field can change it, so container networking (where loopback is the container itself), a remote
+Ollama, authentication and TLS are **outside this stage**. `APP_ENV=production` refuses the provider with the same
+message as `fake`. The model name is checked as a *name*: a local reference such as `qwen3:8b`, and never a cloud
+model (`:cloud`, `-cloud`, `ollama.com`). The runbook says to start Ollama with `OLLAMA_NO_CLOUD=1`; the check
+of the name and the loopback address are the application's part, and the local server's setting is the operator's.
+
+**Adapter (`ollama-interpreter.ts`).** One non-streaming `POST /api/chat`: the instructions (the OpenAI wording with
+only its output-format lines replaced, see the addendum "an outcome-dependent output contract for Ollama") plus the
+server's calendar facts as one `system` message, the person's text byte for byte as the `user` message, the
+outcome-dependent Ollama JSON Schema as `format`, `think: false` (Qwen3 reasons otherwise), `temperature: 0`, `num_predict` from the output
+limit, `num_ctx: 4096` written down (Ollama truncates an over-long prompt silently, from the front, where the
+instructions are; a prompt that filled the window is refused as `incomplete`). No tools, no images, no keep-alive
+override, no retries, no credential, no identity. Only `message.content` is parsed; `message.thinking`, if present,
+is never read, returned or logged. The envelope, `done`, `done_reason` (`stop` only), the absence of tool calls, the
+JSON and the proposal schema are all checked locally: a cut, malformed or inconsistent answer is a provider failure
+(`incomplete`, `invalid_output`, `provider_error`), never an `unsupported` application result. `eval_count` and
+`prompt_eval_count` map to output and input tokens, `prompt_eval_cached_count` to cached; reasoning tokens are `null`.
+Redirects are refused (`redirect: 'manual'`, 3xx is a failure and nothing is followed), error bodies are not read,
+and the response body is size-limited while it is read (the same `boundedFetch` as the OpenAI adapter).
+
+**Lifetime.** The adapter's promise is the operation: it passes cancellation to the transport (`fetch` signal, which
+also ends the body read) and settles when the transport does. It never races the signal, so while its own local
+transport work is outstanding it has not settled, and the service keeps the admission place (checked once by hand:
+with the adapter changed to race the signal, two of its tests fail). A transport that ignores cancellation is simply waited for; its late
+result is `aborted`. The adapter has its own deadline on the transport as well. Because Ollama serves one request
+at a time by default (`OLLAMA_NUM_PARALLEL=1`) and keeps working after a client disconnects only until it notices,
+`RUN_SEARCH_AI_MAX_CONCURRENT=1` is the sensible local value; this is documentation, not a default change.
+
+**Evaluator.** `RUN_SEARCH_AI_PROVIDER` selects `openai` or `ollama` for `npm run eval:run-search`; `fake` is
+refused rather than replaced by a paid provider, because a measurement of a stand-in is worthless. The dataset,
+scoring, case selection, failure accounting, early stop, hashes and partial-run reporting are reused unchanged. A
+report now carries `provider`, `model`, `runtime` (for Ollama: `ollama` and the version read once from `/api/version`
+before any inference; for OpenAI: the SDK and its version, which are never attached to a local run) and the
+generation settings. `--live` is still required; `npm test`, the integration suite and the browser suite need no
+Ollama.
+
+**Measured on this machine (2026-10-14; a smoke, not a baseline).** Ollama 0.35.1 with `OLLAMA_NO_CLOUD=1`,
+`qwen3:8b` (8.2B, Q4_K_M, 5.2 GB), **CPU only** (`size_vram` 0). Raw, by direct calls:
+
+| What | Result |
+|---|---|
+| Cold load (model unloaded, one-token request) | **12.5 s** load, 12.9 s wall |
+| Evaluator, cold, 10 s deadline | `timeout` at 10.03 s (the load finished in the background) |
+| Evaluator, warm, 10 s deadline, 3 cases | `timeout` x3 at 10.0 s; stopped early by its own rule |
+| Warm, long adapter limit, `en-last-month-min-longest` | 11.2 s and 13.2 s: valid JSON in the schema's shape, but `clarify` with `conflicting_conditions` **and** filters set; refused locally as `invalid_output`. Expected: `search` |
+| Warm, long adapter limit, `en-injection-sql` | 11.5 s: `clarify` / `conflicting_conditions`. Expected `unsupported` / `not_a_run_search` |
+
+What this establishes: the request shape works against the real runtime (Ollama accepted the schema with nullable
+and enum-with-null properties, `think: false` produced no thinking trace, `done_reason` is `stop`, and `length`
+for a `num_predict` cut, which the documentation does not define); **the application's deadline (10 s, at most 12 s)
+cannot be met by this model on this hardware, even warm, and a cold start alone exceeds it**; and this model, with
+this prompt, answered two of two readable cases wrongly. What it does not establish: accuracy on the dataset (three
+of the five cases produced no answer within the deadline and were not re-run with a long limit), behaviour on a GPU,
+another model, or another version. **The deadlines were not changed.** Making local inference usable here needs
+hardware or a smaller model, or an explicit decision about a longer, local-only deadline; that is a separate
+decision and was not made.
+
+**Limits, restated.** Windows 11, one machine, one model, CPU. `think: false` for a model that has no thinking
+capability is unverified (only `qwen3:8b` was installed). Whether the Ollama runtime keeps computing after the
+client drops the connection was not measured here; the server log showed the task cancelled and its slot idle
+after the 10 s deadline, which is what the service's fail-closed accounting assumes, but a single observation.
+
+### Addendum (2026-10-14): an outcome-dependent output contract for Ollama
+
+**Problem.** The one wire schema (flat, ten required nullable fields) is legal for answers that contradict
+themselves. Measured with `qwen3:8b`: `clarify` with `conflicting_conditions` and a period and a distance set, which
+the local check then refused as `invalid_output`. OpenAI's Structured Outputs force that flat shape (a root object,
+no composition); Ollama's `format` accepts a full JSON Schema.
+
+**Decision.** Ollama has its own wire schema (`ollama-output-schema.ts`): a root `oneOf` of four closed objects,
+`outcome` first in each: a search over a preset period, a search over `dates` (both ends required), a clarification
+(only `clarificationReason`) and an unsupported answer (only `unsupportedReason`). Reasons are the contract's own
+enumerations; a reason of the other family, a filter next to a non-search outcome, a null or missing period, dates
+with one end, and any unknown key are not representable. The zod schema that checks the reply and the JSON Schema
+that is sent are the same contract, and a specification validates both against a generated corpus of damaged answers.
+
+**What does not change.** The domain contract, the OpenAI wire schema and wording (byte for byte; its SHA-256 is
+pinned), the public API, UI, SQL and authorization. The wire answer is mapped by `proposalFromOllamaWire` field for
+field into `ProviderProposal` (fields the shape lacks are `null`; nothing is computed, defaulted, repaired or dropped)
+and then goes through `providerProposalSchema` and the normaliser exactly as an OpenAI answer. Operation-lifetime
+admission, cancellation, the response size limit, the loopback-only transport and disabled cloud access are untouched.
+
+**Prompt.** The Ollama instructions equal the OpenAI ones except for the output-format lines under OUTCOMES; the
+rules and the reason precedence are the same text (a test compares everything outside that block). It has its own
+version, `run-search-interpreter-ollama/2026-10-14.1`, and an evaluation report hashes the instructions and schema of
+the provider that ran.
+
+**Limits.** A valid shape is not a correct interpretation: distance bound and unit consistency, decimal and date
+syntax and semantics are still the normaliser's. The hand-written schema uses only `type`, `enum`, `properties`,
+`required`, `additionalProperties` and `oneOf`; whether another runtime or version converts `oneOf` to a grammar is
+unverified beyond Ollama 0.35.1.

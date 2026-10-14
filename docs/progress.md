@@ -2033,3 +2033,148 @@ after the code and mostly pass without it, except the usage-detail ones; they ar
 more than the 12 s deadline cap allows; unknown until a run. Limits are still per process. Hosted CI has not run these
 changes. `packages/contracts/openapi/openapi.json` appears modified in `git status` after the build with no content
 difference (line endings only).
+
+## Run-search interpreter: request lifetime separated from operation lifetime (2026-10-14)
+
+ADR-0057 addendum; runbook `docs/runbooks/run-search-ai.md`; report addendum. No contract, schema, error-code or
+product change. Offline only: no provider was called and no credential was needed.
+
+**Defect (reproduced first).** `InterpretationService` released the admission ticket in a `finally` once the race
+between the provider promise and the deadline/cancellation ended. The race answers the request on time, but the
+provider promise can still be pending, so the place was freed under it. With `maxConcurrent = 1`: admit A; A ignores
+`AbortSignal`; the deadline passes, `504`, A's ticket released; B admitted while A is unsettled: two outstanding
+provider operations under a limit of one. The same person could time out and submit again. Two service tests and one
+route test, and a sentence in the ADR, asserted this as intended.
+
+**Ownership, before and after.** Before: ticket owned by the request (`finally` of `interpret`). After: the ticket is
+passed to the operation and released in exactly one place, attached to the settlement of the interpreter's promise,
+before normalization and before the access re-check. The request's own lifetime is unchanged (deadline `504`, client
+gone `499`, signal aborted, same codes). An abandoned operation has terminal handlers; its late result is not
+normalized, re-validated or counted as another outcome. A request that never dispatched is refunded as before; a
+synchronous interpreter throw is a dispatched operation that settled at once (charge kept, nothing held). Policy for
+an interpreter that never settles: **its place stays taken until the process restarts**, no lease or timer, because
+that would recreate the defect; manual search is unaffected. One bounded log event was added,
+`run_search.interpretation.operation_settled`, only when an abandoned operation settles.
+
+**Changed files.** `interpretation-service.ts` (lifecycle), `interpretation-admission.ts` (ticket contract comment),
+`interpretation-types.ts` (interpreter lifetime contract), `interpretation-service.spec.ts` (15 new tests, two
+rewritten), `apps/api/test/run-search-interpretation.spec.ts` (two rewritten),
+`apps/api/test/run-search-interpretation.integration.test.ts` (two new, own app with `maxConcurrent = 1`), the ADR,
+the runbook, the verification report and this file.
+
+**Executed.** Red first: the new service tests against the HEAD service: 8 failed (the repeated-attempt test saw 12
+operations started under a limit of 2); the two route-integration tests: 2 failed with a second provider call; the two
+rewritten route-spec tests: 2 failed. With the fix: all pass. `npm run verify`: exit 0; scripts 48; API **1111** (was
+1096, +15); web 520; contracts 128; fixtures 14; simulator 3. `npm run test:integration`: 44 files, **435** (was 433,
++2). `npm run test:e2e -- run-search-interpretation`: 6 passed. The full browser suite was not rerun: the fake provider
+settles within its delay and honours cancellation, so no browser-reachable path changed.
+
+**Not verified / limits.** Settlement bounds only locally tracked calls; whether a remote provider stopped computing
+is unknown. Limits are per process and reset on restart, which also forgets outstanding operations. The real adapter's
+behaviour on abort is covered by its existing offline tests only; the live provider has still never been called.
+
+## Run-search interpreter: a local Ollama provider (2026-10-14)
+
+ADR-0057 addendum "a local Ollama interpreter"; runbook "Running it on a local model"; `.env.example`. Builds on the
+operation-lifetime fix (commit `c146b7d`, branch `fix/interpretation-operation-lifetime`), which it preserves. No
+contract, search, authorization, SQL, browser or timeout change. OpenAI was not called; no model was downloaded.
+
+**Architecture.** `RUN_SEARCH_AI_PROVIDER` is `openai` (default), `ollama` or `fake`; the configuration is a
+discriminated union (`OpenAiRunSearchAiConfig` with `apiKey`, `OllamaRunSearchAiConfig`, `FakeRunSearchAiConfig`) so
+there is no optional credential to cast, and `createInterpreter` is an exhaustive switch that builds the OpenAI client
+only for the OpenAI configuration. Ollama mode neither reads nor validates `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`,
+requires an explicit local model name (cloud names refused), and is refused in production. New
+`ollama-interpreter.ts`: native `/api/chat` at the constant `http://127.0.0.1:11434`, `stream:false`, the existing JSON
+Schema as `format`, `think:false`, `temperature 0`, `num_ctx 4096`, `num_predict` from the output limit, no tools, no
+retries, `redirect:'manual'` (3xx refused), size-bounded body (`boundedFetch`), only `message.content` parsed, local
+validation of envelope, `done_reason`, JSON and proposal. It never races the signal, so the service keeps holding
+capacity for a call that ignores cancellation. The evaluator selects the configured real provider through the same
+factory, refuses `fake`, and writes a run description with provider, model, runtime and version, and generation
+settings. `readOllamaVersion` is the one extra local request, made before any inference.
+
+**Changed files.** `run-search-ai-config.ts`, `environment.ts` (secret-file names per provider),
+`interpretation-factory.ts`, new `ollama-interpreter.ts`, `bounded-fetch.ts` + `openai-interpreter.ts` (the
+oversized-cause helper is shared, same behaviour), `run-search-evaluation-cli.ts`, `run-search-evaluation-main.ts`,
+`.env.example`, ADR, runbook, report, this file. Tests: `ollama-interpreter.spec.ts` (new, 52),
+`interpretation-factory.spec.ts` (new, 6), additions to `environment-run-search-ai.spec.ts` and
+`run-search-evaluation-cli.spec.ts`; one existing test changed on purpose (a `fake` provider is now refused by the
+evaluator instead of silently becoming OpenAI).
+
+**Offline checks.** Red first (the modules and exports did not exist). Mutation check: with the adapter changed to
+settle on abort, the two lifetime tests fail; restored. `npm run verify`: exit 0; scripts 48; API **1184** in 105 files
+(was 1111, +73); web 520; contracts 128; fixtures 14; simulator 3: **1897** (was 1824). `npm run test:integration`: 44
+files, **435** (unchanged). `npm run test:e2e -- run-search-interpretation` (fake provider): 6 passed; the full
+browser suite was not rerun (no browser-reachable path changed). `git diff --check`: exit 0.
+
+**Real local inference: it ran.** Ollama 0.35.1 started by me with `OLLAMA_NO_CLOUD=1`, `OLLAMA_HOST=127.0.0.1:11434`
+(log: "Ollama cloud disabled: true"), `qwen3:8b` already installed (8.2B, Q4_K_M, 5.2 GB; capabilities completion,
+tools, thinking), CPU only (`size_vram` 0). Stopped again afterwards. Five representative cases from the runbook's
+smoke list; **no deadline was changed**.
+
+| Step | Result |
+|---|---|
+| Cold-load probe (unloaded, trivial one-token request, not an evaluation case) | load 12.5 s, wall 12.9 s; `done_reason` `length` for a `num_predict` cut |
+| Evaluator, `en-last-month-min-longest`, cold, 10 s deadline | `timeout` at 10.03 s |
+| Evaluator, 3 further cases warm (`ru-last-month-min-longest`, `en-strict-more-than`, `en-location`) | `timeout` x3 at 10.01 s; stopped itself after 3 identical failures, so `en-injection-sql` was not run by it |
+| Diagnostic, `en-last-month-min-longest`, 180 s adapter limit, twice | 11.2 s and 13.2 s (input 1602 tokens of which 1573 cached, output 80); valid JSON of the schema's shape, `clarify` + `conflicting_conditions` with filters set: refused as `invalid_output`; expected `search` |
+| Diagnostic, `en-injection-sql`, 180 s adapter limit | 11.5 s; `clarify` / `conflicting_conditions`; expected `unsupported` / `not_a_run_search` |
+
+Requests made to Ollama: 1 probe + 4 through the evaluator + 3 diagnostics = 8, all to 127.0.0.1. Cases 2 to 4 only
+timed out, so their answers are unknown. **Conclusions limited to what was measured:** the request is accepted by the
+real runtime (schema with nullable and enum-with-null properties, `think:false` yields no thinking trace, `stop` on
+completion); the application's 10 s deadline (12 s maximum) is **not met on this hardware even warm, and a cold start
+alone is 12.5 s**; `qwen3:8b` answered the two cases it was given wrongly. This is a smoke test, not the baseline: no
+accuracy figure is claimed. Reports: `apps/api/.local/eval-reports/ollama-smoke-cold.json` and `...-warm.json`
+(untracked).
+
+**Not verified / limits.** Accuracy on the 65 cases (the full dataset was not run, by instruction); GPU behaviour, any
+other model or Ollama version, and `think:false` for a model without thinking capability (only `qwen3:8b` was
+installed); container or production use (out of scope, refused in production); whether Ollama stops computing after a
+disconnect beyond one log observation. Hosted CI has not run these changes.
+
+## Run-search interpreter: an outcome-dependent output contract for Ollama (2026-10-14)
+
+ADR-0057 addendum "an outcome-dependent output contract for Ollama"; runbook "Running it on a local model". Builds on
+commit `1a2aac0` (the Ollama provider). The OpenAI wire schema and wording (SHA-256 pinned, byte for byte), the
+domain contract, the public API, UI, SQL, authorization, admission accounting, cancellation, the response size limit,
+the loopback-only transport and the deadlines are unchanged. OpenAI was not called; no model was downloaded.
+
+**Why.** The flat ten-field schema accepted `clarify` + `conflicting_conditions` with a period and a distance set,
+which `qwen3:8b` produced and the local check then refused (`invalid_output`).
+
+**What.** New `ollama-output-schema.ts`: a zod schema (the authority for the reply) and the JSON Schema sent as
+`format`, the same contract in two forms: a root `oneOf` of search over a preset, search over `dates` (both ends
+required), clarify (`outcome`, `clarificationReason`) and unsupported (`outcome`, `unsupportedReason`), `outcome`
+first, closed objects, the contract's own reason enums. `proposalFromOllamaWire` maps a wire answer field for field
+into `ProviderProposal` (absent fields `null`; nothing repaired, inferred or dropped), and the existing
+`providerProposalSchema` and normaliser follow. `interpretation-prompt.ts`: the Ollama instructions replace only the
+output-format lines under OUTCOMES (version `run-search-interpreter-ollama/2026-10-14.1`); the evaluator now takes the
+instructions, schema, schema name and prompt version from the provider (`evaluationWireContract`), so an Ollama
+report hashes the Ollama wire contract and cannot be described with the OpenAI one.
+
+**Offline checks.** `ollama-output-schema.spec.ts` (new, 57) validates the sent schema with a small validator of
+exactly its keywords (unknown keyword = error) against the zod schema over a generated corpus of damaged answers
+(more than 800, both must agree), asserts every accepted answer maps to a canonically valid proposal, and checks
+outcome-first, closed objects and the reason families. A mutation (the clarify branch opened to extra keys) fails 10
+tests; restored. `npm run verify`: exit 0; API **1260** in 106 files (was 1184), web 520, contracts 128, fixtures 14,
+simulator 3. `run-search-interpretation.integration.test.ts`: 9 passed.
+
+**Real local inference.** Ollama 0.35.1 started by me with `OLLAMA_NO_CLOUD=1` on 127.0.0.1 ("Ollama cloud disabled:
+true"), `qwen3:8b`, CPU only; model preloaded with an empty `/api/generate` (no inference); five cases, serial, no
+deadline changed (10 s).
+
+| Case | Result |
+|---|---|
+| `en-last-month-min-longest`, `ru-last-month-min-longest`, `en-strict-more-than` | `timeout` x3 at 10.0 s; the evaluator stopped itself (3 identical failures); the server log shows each request cancelled at 10 s |
+| `en-location` (run separately, so the stop rule did not apply) | answered inside the deadline: **`search`, expected `unsupported`/`location`** (wrong) |
+| `en-injection-sql` | answered inside the deadline: `unsupported`, expected `unsupported`/`not_a_run_search` (correct reason) |
+
+The runtime accepted the `oneOf` schema (no 4xx on any of the five requests); both answers that arrived were
+wire-valid; no answer was refused as `invalid_output` and no contradictory answer occurred. Mean latency of the two
+answered calls 5.9 s (3.7 s and 8.0 s; output 74 tokens in total). **What this does not show:** whether the shorter
+non-search answers are why these two met the deadline (not isolated), the semantic answers of the three timed-out
+cases (unknown), or any accuracy (2 answers read, 1 wrong). Schema validity is not interpretation accuracy.
+
+**Not verified / limits.** The three search cases still do not complete in 10 s on this CPU, so the local model is
+still not usable for searches here; no deadline or model was changed. Other runtimes or versions converting `oneOf`;
+GPU behaviour; the full 65-case dataset; hosted CI.

@@ -8,11 +8,13 @@ import { localDateOf } from '../run-search-period.js';
 import {
   AdmissionRejectedError,
   type AdmissionRejection,
+  type AdmissionTicket,
   type InterpretationAdmission,
 } from './interpretation-admission.js';
 import { normalizeProposal, ProposalRejectedError } from './interpretation-normalizer.js';
 import {
   InterpreterFailure,
+  type InterpretationInput,
   type InterpreterAnswer,
   type InterpreterUsage,
   type RunSearchInterpreter,
@@ -123,6 +125,13 @@ function toError(error: unknown): ApiError {
  * One interpretation: admission, one provider call under a hard deadline, normalization against the search
  * contract, and a last access check before the answer leaves. It owns no HTTP and no database: the route has
  * already verified access, and `revalidate` is how it asks again.
+ *
+ * Two lifetimes, kept apart. The REQUEST ends at the deadline or when the client leaves, and is answered then. The
+ * OPERATION (the interpreter's promise) ends when that promise settles, and only then are its admission places
+ * released. So after a timeout the call may still be running and still counts against `maxConcurrent` and against
+ * the person's one in-flight reservation: outstanding provider calls stay bounded by the configured limits, and an
+ * interpreter that never settles keeps its place until the process restarts (fail-closed; manual search is not
+ * involved). A late result is dropped: it is not normalized, not revalidated and not counted as another outcome.
  */
 export class InterpretationService {
   readonly #options: InterpretationServiceOptions;
@@ -153,22 +162,18 @@ export class InterpretationService {
         throw error;
       }
 
+      // The ticket now belongs to the operation, not to this request: #run hands it to the interpreter call and it
+      // is released when that call settles, which on a normal answer is before the line below continues. The
+      // request may end sooner (deadline, client gone) and does not release anything.
       let answer: InterpreterAnswer;
-      let dispatched = false;
       try {
-        answer = await this.#dispatch(request, () => {
-          dispatched = true;
-        });
+        answer = await this.#run(request, ticket);
       } catch (error) {
         if (error instanceof InterpreterFailure) {
           outcome = error.reason;
           usage = error.usage;
         }
         throw error;
-      } finally {
-        // The place is given back as soon as the provider is done with, or given up on, and before any further
-        // work. A provider that ignores cancellation can still be running; it is bounded by its own limits.
-        ticket.release({ dispatched });
       }
       usage = answer.usage;
 
@@ -216,12 +221,79 @@ export class InterpretationService {
     }
   }
 
-  async #dispatch(request: InterpretationRequest, onDispatch: () => void): Promise<InterpreterAnswer> {
-    const { clock, interpreter, timeoutMs } = this.#options;
+  /**
+   * Starts the one interpreter call and waits for it, for as long as the REQUEST may wait. Two lifetimes meet here
+   * and are kept apart:
+   *
+   * - the request's ends at the deadline or when the client leaves: the promise returned rejects then, at once;
+   * - the operation's ends when the interpreter's own promise settles, and only then is `ticket` released.
+   *
+   * An interpreter that ignores the abort signal and never settles therefore keeps its place for good. That is the
+   * intended fail-closed behaviour (ADR-0057, addendum): a place is never given back on a timer while the call
+   * that holds it may still be running, because that would allow more unsettled calls than the limits say.
+   */
+  async #run(request: InterpretationRequest, ticket: AdmissionTicket): Promise<InterpreterAnswer> {
+    const { clock, interpreter, logger, timeoutMs } = this.#options;
     const controller = new AbortController();
 
-    // One promise that rejects when the deadline passes or the client leaves. It is raced against the provider
-    // call, so the request ends on time even when the transport never reacts to the abort signal.
+    // Nothing has reached the interpreter yet, so a failure to build its input is refunded.
+    let input: InterpretationInput;
+    try {
+      input = {
+        text: request.text.trim(),
+        timeZone: request.timeZone,
+        today: localDateOf(clock.utcNow().getTime(), request.timeZone),
+      };
+    } catch (error) {
+      ticket.release({ dispatched: false });
+      throw error;
+    }
+
+    const dispatchedAt = clock.monotonicNow();
+    let call: Promise<InterpreterAnswer>;
+    try {
+      call = Promise.resolve(interpreter.interpret(input, { signal: controller.signal }));
+    } catch (error) {
+      // The interpreter was called, so the allowance stays charged; no promise exists, so nothing is outstanding.
+      ticket.release({ dispatched: true });
+      throw error;
+    }
+
+    // The operation: the interpreter's promise, with the ticket's release attached to ITS settlement. This is the
+    // only place a dispatched ticket is released, which is what makes "released exactly once" and "released before
+    // any later step of the request" true.
+    let requestEnded = false;
+    const reportLateSettlement = (reason: 'fulfilled' | 'rejected'): void => {
+      if (!requestEnded) {
+        return;
+      }
+      // The request was answered already and has its own outcome; this only tells an operator that the place is
+      // back. Bounded fields, no text, no identifiers, no provider body.
+      logger.info('run_search.interpretation.operation_settled', {
+        durationMs: Math.max(0, Math.round(clock.monotonicNow() - dispatchedAt)),
+        model: interpreter.model,
+        reason,
+        requestId: request.requestId,
+      });
+    };
+    const operation = call.then(
+      (answer) => {
+        ticket.release({ dispatched: true });
+        reportLateSettlement('fulfilled');
+        return answer;
+      },
+      (error: unknown) => {
+        ticket.release({ dispatched: true });
+        reportLateSettlement('rejected');
+        throw error;
+      },
+    );
+    // If the request stops waiting, a later failure of the operation is not an error of anything: it must not
+    // become an unhandled rejection.
+    operation.catch(() => undefined);
+
+    // One promise that rejects when the deadline passes or the client leaves. It is raced against the operation,
+    // so the request ends on time even when the transport never reacts to the abort signal.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onClientAbort: (() => void) | undefined;
     const interrupted = new Promise<never>((_resolve, reject) => {
@@ -239,26 +311,17 @@ export class InterpretationService {
     interrupted.catch(() => undefined);
 
     try {
-      onDispatch();
-      const call = interpreter.interpret(
-        {
-          text: request.text.trim(),
-          timeZone: request.timeZone,
-          today: localDateOf(clock.utcNow().getTime(), request.timeZone),
-        },
-        { signal: controller.signal },
-      );
-      // Same reason: a call that loses the race and fails later is not an error of this request.
-      call.catch(() => undefined);
-      return await Promise.race([call, interrupted]);
+      return await Promise.race([operation, interrupted]);
     } finally {
+      // From here on the request is over, whether or not the operation is: a late settlement delivers nothing.
+      requestEnded = true;
       if (timer !== undefined) {
         clock.clearTimeout(timer);
       }
       if (onClientAbort !== undefined) {
         request.signal.removeEventListener('abort', onClientAbort);
       }
-      // Whatever ended the race, nothing should keep working for a request that is over.
+      // A cancellation request, not a termination: an interpreter may ignore it, and then its place stays taken.
       controller.abort();
     }
   }

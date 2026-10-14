@@ -19,9 +19,10 @@ existing deterministic, owner-only search.
 | **Off** (default) | nothing | The server starts without a key. The route answers `503 INTERPRETATION_DISABLED`; the box explains that it is not turned on and the filters work. | The product without the feature. |
 | **Fake** (tests, browser suite, demo) | `RUN_SEARCH_AI_ENABLED=true` `RUN_SEARCH_AI_PROVIDER=fake`; refused when `APP_ENV=production` | A few keyword rules in the API process answer. No network, no key, no cost. Control words in the text: `[delay=MS]`, `[fail]`, `[refuse]`, `[invalid]`. | The route, limits, screen and every state. **Nothing about a real model.** |
 | **OpenAI** | below | One real Responses API request per click. | Only the live evaluation says how well. |
+| **Ollama** (local development and test only) | `RUN_SEARCH_AI_PROVIDER=ollama` and a local model, see "Running it on a local model" | One real chat request per click to the Ollama on this machine. No key, no cost, no data leaves the machine. | Only the live evaluation says how well; and see the measured limits there. |
 
 `npm test`, `npm run test:integration` and `npm run test:e2e` use only the first two. No test, build or CI step can
-reach OpenAI.
+reach OpenAI, and none needs a running Ollama.
 
 ## Turning it on (local)
 
@@ -60,6 +61,57 @@ other deployment inputs:
 `RUN_SEARCH_AI_PROVIDER=fake` is refused in production. Outbound HTTPS to `api.openai.com` must be allowed from the
 API container. Review the privacy section below with whoever owns your privacy notice before switching it on.
 
+## Running it on a local model (Ollama)
+
+For development and test on one machine, without an OpenAI key. **Not for production or containers**: the address is
+the constant `http://127.0.0.1:11434`, which inside a container is the container itself, and a production
+configuration with `RUN_SEARCH_AI_PROVIDER=ollama` is refused at startup. Remote Ollama servers, authentication, TLS
+and container networking are out of scope for this stage.
+
+1. Install Ollama and pull a model yourself (nothing here downloads one): `ollama pull qwen3:8b`.
+2. Start the server in local-only mode, bound to loopback, with cloud features off:
+
+   ```text
+   OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11434 ollama serve
+   ```
+
+   (PowerShell: `$env:OLLAMA_NO_CLOUD='1'; $env:OLLAMA_HOST='127.0.0.1:11434'; ollama serve`.) The server log should
+   say `Ollama cloud disabled: true`. Never select a cloud model (`...:cloud`, `...-cloud`): the configuration refuses
+   such names, and a name check is the application's whole part in this; the server setting is yours.
+3. In your untracked `.env`, or the environment of the command:
+
+   ```text
+   RUN_SEARCH_AI_ENABLED=true
+   RUN_SEARCH_AI_PROVIDER=ollama
+   RUN_SEARCH_AI_MODEL=qwen3:8b
+   RUN_SEARCH_AI_MAX_CONCURRENT=1
+   ```
+
+   No `OPENAI_API_KEY` is needed or read, and `OPENAI_API_KEY_FILE` is not opened in this mode. Ollama serves one
+   request at a time by default, so `RUN_SEARCH_AI_MAX_CONCURRENT=1` is the honest local setting.
+
+What is sent to the local model is the same information as to OpenAI (instructions, zone, local date, the person's
+text; see below), to `127.0.0.1` only. The interpretation rules and the reason precedence are the same text; only the
+output-format lines differ, because the local model is given its own outcome-dependent output schema: `search` (a
+preset period, or `dates` with both ends), `clarify` (only `clarificationReason`) and `unsupported` (only
+`unsupportedReason`), `outcome` first, so a clarification cannot carry filters. The reply is checked against that
+schema, mapped field for field into the same proposal the OpenAI adapter returns, and then checked and normalised
+exactly as before. An evaluation report for an Ollama run hashes these instructions and this schema
+(`run-search-interpreter-ollama/...`), not the OpenAI ones. Generation is fixed: `temperature 0`, `think false`
+(Qwen3's reasoning off, and a thinking trace is never read or logged), `num_ctx 4096`, `num_predict` =
+`RUN_SEARCH_AI_MAX_OUTPUT_TOKENS`, `stream false`. A redirect, a non-2xx answer, a cut answer (`done_reason: length`), invalid JSON or a
+proposal that breaks the contract is a failure (`502 INTERPRETATION_FAILED`), never an "unsupported" answer; manual
+search keeps working. When Ollama is not running the box reports a failure; nothing falls back to another provider.
+
+**Measured limits (2026-10-14, Windows 11, CPU only, Ollama 0.35.1, `qwen3:8b` Q4_K_M).** Cold load 12.5 s; warm
+requests 11 to 13 s. The application's deadline is 10 s (at most 12 s): **on this machine every request exceeded it**,
+so the box shows the timeout message and no proposal. The deadlines were deliberately not raised. A GPU, a smaller
+model or an explicit decision about a longer local-only deadline is needed before this is usable interactively; the
+numbers and the two readable answers (both wrong) are in ADR-0057's addendum. That is a smoke, not a baseline.
+
+**After a timeout the place is still held** (see "What in flight means" below): Ollama keeps working on, or loading
+for, that request until it notices the disconnect, and the service counts the call until its promise settles.
+
 ## What is sent, what is kept
 
 Sent to OpenAI, per click: the fixed instructions and schema, the zone name and the local date (both from the
@@ -81,8 +133,8 @@ Metrics: `run_search_interpretation_requests_total{outcome}`, `run_search_interp
 | Variable | Default | Meaning |
 |---|---|---|
 | `RUN_SEARCH_AI_USER_RATE_PER_MINUTE` | 5 | admitted requests per person per rolling minute, across sessions and organizations |
-| (fixed) | 1 | in-flight interpretations per person |
-| `RUN_SEARCH_AI_MAX_CONCURRENT` | 4 | provider calls at once, whole process |
+| (fixed) | 1 | unsettled provider calls per person (held until the call settles, even after the request timed out) |
+| `RUN_SEARCH_AI_MAX_CONCURRENT` | 4 | unsettled provider calls at once, whole process (same rule) |
 | `RUN_SEARCH_AI_ALLOWANCE` / `_ALLOWANCE_WINDOW_MS` | 100 / 86400000 | provider calls per rolling window, whole process; a failure after dispatch still counts |
 | `RUN_SEARCH_AI_LIMITER_MAX_USERS` | 1000 | people the limiter remembers; when full of limited people, newcomers get a "busy" answer |
 | `RUN_SEARCH_AI_TIMEOUT_MS` | 10000 (max 12000) | hard deadline for the whole provider call, body included; below the browser's 15 s |
@@ -109,8 +161,27 @@ deadline is a second constraint: `RUN_SEARCH_AI_TIMEOUT_MS` is capped at 12000 s
 and a reasoning model may not finish within it.
 
 **Limitations.** A restart resets all of it. Two API processes have twice the limits. It is not a distributed
-limiter and not a durable monetary budget. A transport that ignores cancellation frees its place at the deadline
-while the underlying call may still be running; the real adapter honours cancellation.
+limiter and not a durable monetary budget.
+
+**What "in flight" means (request lifetime versus operation lifetime).** A request ends at its deadline or when the
+browser goes away, and is answered then (`504` / `499`). The provider call it started ends only when it settles, and
+**the concurrency place and the person's one in-flight slot are held until then**, not until the request ends. So:
+
+- After a `504`, the person gets `429 INTERPRETATION_IN_PROGRESS` if they try again before that call settles, and
+  other people get `503 INTERPRETATION_BUSY` if every place is held. Waiting is the remedy; nothing retries.
+- A call that never settles holds its place until the API process restarts. This is deliberate and fail-closed:
+  there is no lease or timer that frees a place while the call may still be running. At most
+  `RUN_SEARCH_AI_MAX_CONCURRENT` places can be lost this way; manual search is unaffected.
+- The real adapter honours the cancellation signal and has its own transport timeout, so a place is normally held
+  for about the provider deadline at most. Aborting a request is a request to stop, not proof that the provider
+  stopped; the server cannot see what a remote provider does after the connection is dropped.
+- A late answer is discarded: it is not returned, not re-checked and not counted as another outcome.
+
+Telling the cases apart in the logs: every request writes one `run_search.interpretation` line with its outcome
+(`timeout`, `aborted`, `rejected_busy`, ...). When a call that outlived its request finally settles, one more line,
+`run_search.interpretation.operation_settled` (`reason` `fulfilled` or `rejected`, `durationMs` since dispatch,
+`model`, `requestId`), says that its place is back. Repeated `rejected_busy` or `rejected_in_progress` with no such
+line for a long time means a call is stuck: restart the API process, which clears the in-memory state.
 
 ## Demonstrating it
 
@@ -131,8 +202,12 @@ With a key: the same sentences go to the real model, and the `[...]` control wor
 
 ## Measuring a model: the live evaluation
 
-`npm run eval:run-search` is the only thing that sends the dataset to OpenAI. It is not part of `verify`, tests or
-CI, and it does nothing without `--live`.
+`npm run eval:run-search` is the only thing that sends the dataset to a model: to OpenAI, or to the local Ollama when
+`RUN_SEARCH_AI_PROVIDER=ollama` (it never uses the fake provider, and refuses `fake` instead of switching to a paid
+one). It is not part of `verify`, tests or CI, and it does nothing without `--live`. An Ollama run needs the server to
+be running (it asks `/api/version` once, before any inference, and stops with one clear message if nothing answers);
+the report then names the provider, the local runtime and its version, and the generation settings, and never an
+OpenAI SDK version.
 
 ```
 npm run eval:run-search -- --dry-run                      # validate dataset and configuration; no request
@@ -142,7 +217,16 @@ npm run eval:run-search -- --live --max-cases 10          # the first 10 cases o
 npm run eval:run-search -- --live --out .local/eval-reports/run-search.json
 ```
 
-It reads `RUN_SEARCH_AI_MODEL`, `OPENAI_API_KEY` (or `_FILE`), and the same bounds as the server. Calls: one per
+It reads `RUN_SEARCH_AI_PROVIDER`, `RUN_SEARCH_AI_MODEL`, `OPENAI_API_KEY` (or `_FILE`; OpenAI only), and the same
+bounds as the server. Local, no key and no cost:
+
+```text
+RUN_SEARCH_AI_PROVIDER=ollama RUN_SEARCH_AI_MODEL=qwen3:8b npm run eval:run-search -- --dry-run --cases en-last-month-min-longest,en-location
+RUN_SEARCH_AI_PROVIDER=ollama RUN_SEARCH_AI_MODEL=qwen3:8b npm run eval:run-search -- --live --cases en-last-month-min-longest,en-location --out .local/eval-reports/ollama-smoke.json
+```
+
+A local model that needs longer than `RUN_SEARCH_AI_TIMEOUT_MS` (see the measured limits above) will report `timeout`
+and stop itself after three in a row, which is the evaluator working as designed, not a model score. Calls: one per
 case, no retries, concurrency 1 unless `--concurrency` (at most 4), each under `RUN_SEARCH_AI_TIMEOUT_MS`. The
 65-case dataset at 800 output tokens per call is bounded by 65 requests per run; read your provider's pricing
 before running it repeatedly. Before any request it prints the model, the case ids, the call ceiling, the timeout
@@ -196,6 +280,9 @@ schema, the dataset or the model; the prompt version string changes with the ins
 | Real provider compatibility (schema accepted, model reachable, refusal and incomplete handling, token budget) | **not verified: no model or key was configured**, so no request was made |
 | Semantic baseline (accuracy of a model on the 65 cases) | **not measured** |
 | Browser path with the real provider | **not verified** |
+| Local Ollama adapter against the real runtime (2026-10-14: request accepted, schema accepted, output validated locally) | **verified once**, on one machine, with `qwen3:8b` |
+| Local model within the 10 s deadline | **not met**: cold load 12.5 s, warm 11 to 13 s on a CPU-only Windows machine |
+| Local model accuracy | **not measured**: two readable answers, both wrong; three cases timed out |
 
 Any statement about how well a model performs here is unverified until a report exists. See
 `docs/reports/run-search-interpretation-verification.md`.
@@ -211,3 +298,4 @@ Any statement about how well a model performs here is unverified until a report 
 | `502` with `incomplete` | `RUN_SEARCH_AI_MAX_OUTPUT_TOKENS` too low for the model; on a reasoning model the evaluation's `reasoning` token total shows whether reasoning used it up |
 | `502` with `invalid_output` | the model answered something the contract refuses; check the live evaluation |
 | `503 INTERPRETATION_BUDGET_EXHAUSTED` | the process's rolling allowance is spent; it frees as the window moves |
+| `503 INTERPRETATION_BUSY` or `429 INTERPRETATION_IN_PROGRESS` that does not clear | a provider call outlived its request and has not settled (see "What in flight means"); its place is held until it settles or the process restarts |
