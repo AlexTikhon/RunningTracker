@@ -334,6 +334,75 @@ try {
   assert.ok(!apiEnvironment.some((entry) => entry.startsWith('OIDC_CLIENT_SECRET=')), 'client secret is an environment value');
   results.signIn = 'no dev login (404); unreachable provider returns 503; login burst returns 429 despite forged IP headers and alternate route spellings; API stays ready';
 
+  // 9c. F01: the OIDC callback's one-time code and state must not reach the proxy access log. Unique canaries go
+  // through the real edge on both listeners, then the proxy's own streams are read: stdout is the access log and
+  // stderr is the error log (docker keeps them apart). The path and status must stay observable.
+  const canaryCode = `canary-code-${randomBytes(16).toString('hex')}`;
+  const canaryState = `canary-state-${randomBytes(16).toString('hex')}`;
+  const callbackQuery = `code=${canaryCode}&state=${canaryState}`;
+  const callback = await http2Request(`/api/auth/callback?${callbackQuery}`);
+  assert.ok(callback.status >= 300 && callback.status < 600, `callback answered ${callback.status}`);
+  const plainCallback = await plainHttp(`/api/auth/callback?${callbackQuery}`, hostname);
+  assert.equal(plainCallback.status, 301);
+  // The redirect itself legitimately carries the query back to the browser; only the logs are in question.
+  assert.equal(plainCallback.headers.location, `${origin}/api/auth/callback?${callbackQuery}`);
+
+  const proxyStreams = () => {
+    const logged = spawnSync('docker', ['logs', containerId('proxy')], { encoding: 'utf8', maxBuffer: 64 * 1024 ** 2 });
+    assert.equal(logged.status, 0, `docker logs failed: ${logged.stderr}`);
+    return { access: logged.stdout, error: logged.stderr };
+  };
+  const accessLines = (text) => text.split('\n').filter((line) => line.includes('/api/auth/callback'));
+  const tlsLine = new RegExp(
+    `^\\S+ - ${hostname} \\[[^\\]]+\\] "GET /api/auth/callback HTTP/2\\.0" ${callback.status} \\d+ upstream=\\S+ request_time=[\\d.]+$`,
+    'u',
+  );
+  const plainLine = /^\S+ - \S+ \[[^\]]+\] "GET \/api\/auth\/callback HTTP\/1\.1" 301 \d+ upstream=\S+ request_time=[\d.]+$/u;
+  const observed = await waitFor('the callback requests in the proxy access log', () => {
+    const lines = accessLines(proxyStreams().access);
+    return lines.some((line) => tlsLine.test(line)) && lines.some((line) => plainLine.test(line)) ? lines : false;
+  }, 15_000);
+  const afterProbe = proxyStreams();
+  const canaries = [canaryCode, canaryState, callbackQuery];
+  const accessLogCanariesFound = canaries.filter((canary) => afterProbe.access.includes(canary)).length;
+  const errorLogCanariesDuringProbe = canaries.filter((canary) => afterProbe.error.includes(canary)).length;
+  assert.equal(accessLogCanariesFound, 0, 'an OIDC callback query value is in the proxy access log');
+  assert.equal(errorLogCanariesDuringProbe, 0, 'an OIDC callback query value is in the proxy error log');
+  assert.ok(observed.every((line) => !line.includes('?')), 'a callback log line still has a query separator');
+
+  // The error log has its own, fixed request-line format that no log_format reaches: when nginx itself fails a
+  // request it writes `request: "<method> <uri>?<query> ..."`. That cannot be proven absent from the access log
+  // alone, so one nginx-generated error (a body over client_max_body_size) is provoked on purpose and reported.
+  const oversized = 'x'.repeat(256 * 1024);
+  // nginx may reset the stream while the body is still being sent, so the answer is not required to arrive intact:
+  // what matters is the log entry, which is waited for below.
+  const refused = await http2Request(
+    `/api/auth/callback?code=${canaryCode}-413&state=${canaryState}-413`,
+    { 'content-length': String(oversized.length), 'content-type': 'application/octet-stream', origin },
+    { body: oversized, method: 'POST' },
+  ).catch((error) => ({ error: error.message, status: undefined }));
+  assert.ok(refused.status === undefined || refused.status === 413, `the oversized callback answered ${refused.status}`);
+  const errorLines = await waitFor('the proxy error log entry for the oversized request', () => {
+    const lines = proxyStreams().error.split('\n').filter((line) => line.includes('/api/auth/callback'));
+    return lines.length > 0 ? lines : false;
+  }, 15_000);
+  const afterError = proxyStreams();
+  assert.ok(!afterError.access.includes(`${canaryCode}-413`), 'the refused request leaked into the access log');
+  const errorLogExposure = errorLines.some((line) => line.includes(`${canaryCode}-413`));
+  const apiLogged = compose(['logs', '--no-color', 'api'], { quiet: true });
+  results.callbackLogging = {
+    accessLogCanariesFound,
+    accessLogLine: observed.find((line) => tlsLine.test(line)),
+    // Informational: the API's own log is outside this check's assertions.
+    apiLogCanariesFound: [canaryCode, canaryState].filter((canary) => apiLogged.includes(canary)).length,
+    errorLogCanariesDuringProbe,
+    oversizedRequestAnswer: refused.status ?? `no answer (${refused.error})`,
+    // Known limitation, reported rather than hidden: an nginx error entry keeps the request line and the upstream
+    // URI, so a request that nginx itself fails can still expose its query in the error stream.
+    errorLogQueryExposedOnNginxError: errorLogExposure,
+    errorLogSample: errorLines[0]?.replaceAll(canaryCode, '<code>').replaceAll(canaryState, '<state>'),
+  };
+
   // 10. Restart and redeploy behaviour: the API returns, the one-shot job is idempotent.
   compose(['restart', 'api']);
   await waitFor('API readiness after restart', async () => (await http2Request('/api/health/ready')).status === 200);

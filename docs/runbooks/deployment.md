@@ -100,7 +100,15 @@ query shape (the set of readable runs built per statement, ADR-0042) holds a has
 one. Raise limits with the environment variables; do not remove them.
 
 Every container's log is rotated at 10 MiB x 5 files. The proxy access log records client address,
-host, request line and status; tile URLs contain tile coordinates and period, never GPS points.
+host, method, path and protocol (never the query string), status, response bytes, upstream address and
+request time. The query string is left out because the OIDC callback carries a one-time `code` and
+`state` in it; tile URLs contain tile coordinates and period, never GPS points.
+
+The proxy **error log** (stderr) is a different format that cannot be configured: when nginx itself
+fails a request (for example a body over `client_max_body_size`, or an upstream error) the entry keeps
+the request line and the upstream URI, query string included. `npm run deploy:verify` provokes one such
+entry on purpose and reports it as `errorLogQueryExposedOnNginxError`; treat the error log as holding
+the same sensitivity as the callback query.
 
 ## Metrics
 

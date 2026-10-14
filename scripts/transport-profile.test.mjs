@@ -35,3 +35,31 @@ test('P08.5 Compose publishes only the TLS proxy', () => {
   assert.doesNotMatch(apiService, /ports:/u);
   assert.match(compose, /SESSION_COOKIE_SECURE: "true"/u);
 });
+
+// F01: the local TLS profile has to log the same way as the production one: method, path and protocol, never
+// the raw request line, because the OIDC callback carries a one-time code and state in its query string.
+test('F01 transport proxy: the access log format carries no query string and keeps its diagnostics', () => {
+  const nginx = readFileSync(resolve(root, 'infra/proxy/nginx.conf'), 'utf8');
+  const formats = [...nginx.matchAll(/log_format\s+(\w+)\s+((?:'[^']*'\s*)+);/gu)];
+  assert.equal(formats.length, 1, 'exactly one log_format is expected');
+  const body = formats[0][2].replaceAll(/'\s*'/gu, '');
+  assert.doesNotMatch(body, /\$request(?![\w])/u, 'the raw request line is logged');
+  assert.doesNotMatch(body, /\$(?:request_uri|args|query_string|is_args|http_referer|request_body)\b/u);
+  for (const field of [
+    '$request_method',
+    '$log_request_path',
+    '$server_protocol',
+    '$status',
+    '$body_bytes_sent',
+    '$upstream_addr',
+    '$request_time',
+  ]) {
+    assert.ok(body.includes(field), `${field} is missing from the access log format`);
+  }
+  assert.ok(
+    nginx.includes(`access_log /var/log/nginx/access.log ${formats[0][1]};`),
+    'the access log must use the query-free format',
+  );
+  assert.match(nginx, /map \$request_uri \$log_request_path \{[^}]*\(\?(?:P)?<\w+>\[\^\?\]\*\)/u);
+  assert.doesNotMatch(nginx, /access_log\s+(?!\/var\/log\/nginx\/access\.log proxy;)/u);
+});

@@ -127,3 +127,36 @@ test('P12.2 images: build targets keep the historical defaults', () => {
   assert.equal(stages('infra/proxy/Dockerfile').at(-1), 'transport');
   assert.ok(stages('infra/proxy/Dockerfile').includes('production'));
 });
+
+// F01: the OIDC callback carries a one-time code and state in its query string. The access log must name the
+// method, the path and the protocol, never the raw request line. This is structural; the proof that no value
+// reaches a log is the canary probe in verify-production-profile.mjs.
+function accessLogFormat(config) {
+  const formats = [...config.matchAll(/log_format\s+(\w+)\s+((?:'[^']*'\s*)+);/gu)];
+  assert.equal(formats.length, 1, 'exactly one log_format is expected');
+  return { name: formats[0][1], body: formats[0][2].replaceAll(/'\s*'/gu, '') };
+}
+
+test('F01 proxy: the access log format carries no query string and keeps its diagnostics', () => {
+  const config = read('infra/proxy/nginx.production.conf');
+  const { body, name } = accessLogFormat(config);
+  assert.doesNotMatch(body, /\$request(?![\w])/u, 'the raw request line is logged');
+  assert.doesNotMatch(body, /\$(?:request_uri|args|query_string|is_args|http_referer|request_body)\b/u);
+  for (const field of [
+    '$request_method',
+    '$log_request_path',
+    '$server_protocol',
+    '$status',
+    '$body_bytes_sent',
+    '$upstream_addr',
+    '$request_time',
+  ]) {
+    assert.ok(body.includes(field), `${field} is missing from the access log format`);
+  }
+  assert.match(config, new RegExp(`access_log /dev/stdout ${name};`, 'u'));
+  // The path variable is the raw request URI cut at the first question mark.
+  assert.match(config, /map \$request_uri \$log_request_path \{[^}]*\(\?(?:P)?<\w+>\[\^\?\]\*\)/u);
+  // No site may switch to another format or log the request elsewhere.
+  assert.doesNotMatch(site, /access_log\s+(?!off;)/u, 'a site overrides the access log');
+  assert.doesNotMatch(site, /log_format/u);
+});
