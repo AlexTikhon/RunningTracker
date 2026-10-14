@@ -8,6 +8,7 @@ import {
   runnerReducer,
   type RunnerEvent,
   type RunnerState,
+  type StartRequest,
 } from './runner-state.js';
 import type { WriterOwnershipState } from './writer-lease.js';
 
@@ -37,7 +38,15 @@ function refusedWith(code: string): RunnerState {
   );
 }
 
-function render(runner: RunnerState, writer: WriterOwnershipState = owned): string {
+function render(
+  runner: RunnerState,
+  writer: WriterOwnershipState = owned,
+  rejectedStart: { canAbandon: boolean; failure: string | null; onAbandon: () => void } = {
+    canAbandon: true,
+    failure: null,
+    onAbandon: () => undefined,
+  },
+): string {
   const noop = () => undefined;
   return renderToStaticMarkup(
     <RunnerView
@@ -55,6 +64,7 @@ function render(runner: RunnerState, writer: WriterOwnershipState = owned): stri
       onStart={noop}
       organizationNote="note"
       refused={{ canDiscard: true, onDiscard: noop }}
+      rejectedStart={rejectedStart}
       rejected={{ canDiscard: true, canExport: true, onDiscard: noop, onExport: noop }}
       runner={runner}
       sessionReady
@@ -135,6 +145,81 @@ describe('RunnerView for a run the server refuses', () => {
     expect(markup).not.toMatch(/<button[^>]*disabled=""[^>]*>Start run/u);
     expect(markup).not.toContain('Run not confirmed by the server');
     expect(markup).not.toContain('Discard local recovery');
+    expect(markup).toContain('No active run');
+  });
+});
+
+// A Start the server definitively rejected has no run, so the refused-run notice cannot apply. The ordinary
+// "Request not confirmed" notice carries its explicit local way out instead (ADR-0058).
+describe('RunnerView for a Start the server rejected', () => {
+  const start: StartRequest = {
+    kind: 'start',
+    orgId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    runId,
+    startedAt: '2026-10-06T08:00:00.000Z',
+  };
+  const message = 'The current identity cannot access this organization (ORG_ACCESS_DENIED).';
+  const rejected = apply(
+    createInitialRunnerState('online'),
+    { request: start, type: 'request-started' },
+    { message, rejection: { code: 'ORG_ACCESS_DENIED' }, request: start, type: 'request-failed' },
+  );
+  const abandonButton = /<button[^>]*>Abandon this Start/u;
+  const disabledAbandon = /<button[^>]*disabled=""[^>]*>Abandon this Start/u;
+
+  it('offers the retry of the same request and the explicit abandonment, with what it does and does not do', () => {
+    const markup = render(rejected);
+    expect(markup).toContain('Request not confirmed');
+    expect(markup).toContain('Retry same request');
+    expect(markup).toMatch(abandonButton);
+    expect(markup).not.toMatch(disabledAbandon);
+    expect(markup).toContain('only removes the saved Start request from this browser');
+    expect(markup).toContain('does not create, finish or delete anything on the server');
+  });
+
+  it('offers nothing destructive for a Start whose outcome is unknown', () => {
+    const unknown = apply(
+      createInitialRunnerState('online'),
+      { request: start, type: 'request-started' },
+      { message: 'Failed to fetch', request: start, type: 'request-failed' },
+    );
+    const markup = render(unknown);
+    expect(markup).toContain('Retry same request');
+    expect(markup).not.toContain('Abandon this Start');
+  });
+
+  it('offers nothing destructive for a request restored after a reload: the answer must be asked for again', () => {
+    const restored = apply(createInitialRunnerState('online'), {
+      pendingPointCount: 0,
+      request: start,
+      run: null,
+      type: 'storage-restored',
+    });
+    const markup = render(restored);
+    expect(markup).toContain('Retry same request');
+    expect(markup).not.toContain('Abandon this Start');
+  });
+
+  it('is disabled for a tab that does not own the writer lease, and while the page cannot act', () => {
+    expect(render(rejected, { expiresAt: '2026-10-07T08:00:00.000Z', status: 'conflict' })).toMatch(disabledAbandon);
+    expect(render(rejected, { status: 'acquiring' })).toMatch(disabledAbandon);
+    expect(render(rejected, owned, { canAbandon: false, failure: null, onAbandon: () => undefined })).toMatch(disabledAbandon);
+  });
+
+  it('says that a failed abandonment left the Start saved, and keeps both ways out', () => {
+    const markup = render(rejected, owned, { canAbandon: true, failure: 'disk failure', onAbandon: () => undefined });
+    expect(markup).toContain('The Start was not abandoned and is still saved: disk failure');
+    expect(markup).toContain('Retry same request');
+    expect(markup).toMatch(abandonButton);
+  });
+
+  it('after the abandonment the runner is idle and Start is available again', () => {
+    const idle = apply(rejected, { request: start, type: 'start-abandoned' });
+    const markup = render(idle, { status: 'unclaimed' });
+    expect(markup).toContain('Start run');
+    expect(markup).not.toMatch(/<button[^>]*disabled=""[^>]*>Start run/u);
+    expect(markup).not.toContain('Request not confirmed');
+    expect(markup).not.toContain('Abandon this Start');
     expect(markup).toContain('No active run');
   });
 });

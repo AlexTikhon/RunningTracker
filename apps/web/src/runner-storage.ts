@@ -105,6 +105,12 @@ export type StorageWriteOutcome =
   | { outcome: 'applied' }
   | { outcome: 'obsolete'; reason: 'not-active' | 'writer-lost' };
 
+// The result of abandoning a queued Start. `obsolete` means nothing was written: the writer is no longer the live
+// epoch, the exact request is no longer queued, or a run is active. None of these is an error.
+export type StartAbandonOutcome =
+  | { outcome: 'abandoned' }
+  | { outcome: 'obsolete'; reason: 'not-queued' | 'run-active' | 'writer-lost' };
+
 export type WriterLeaseAcquisition =
   | { acquired: true; lease: WriterLease }
   | { acquired: false; lease: WriterLease };
@@ -908,6 +914,61 @@ export class IndexedDbRunnerStorage {
       }
       profiles.put({ ...profile, activeRunId: null, activeOrgId: null });
       await done;
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
+  }
+
+  // The local way out of a Start the server definitively rejected (ADR-0058). Such a Start never became a run, so
+  // there is no run record, no points and no pointer: only the queued request, which would otherwise be retried for
+  // ever. In one writer-fenced transaction this deletes exactly that request (same user, run id and start time) and
+  // nothing else. A stale call is an outcome, not a failure: a writer that was lost, a request that is no longer
+  // queued (acknowledged, already abandoned, replaced) and a run that is active all leave every store untouched.
+  // It never talks to the server and never says anything about a server run.
+  public async abandonQueuedStart(
+    userIdInput: string,
+    requestInput: StartRequest,
+    leaseInput: WriterLease,
+  ): Promise<StartAbandonOutcome> {
+    const userId = uuidSchema.parse(userIdInput);
+    const request = parseRunnerRequest(requestInput);
+    if (request.kind !== 'start') {
+      throw new Error('Abandoning a Start requires a start request');
+    }
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    if (lease.userId !== userId) throw new Error('Writer lease does not match the request');
+    const database = await this.#open();
+    const transaction = database.transaction([STORES.leases, STORES.profiles, STORES.requests], 'readwrite');
+    const done = transactionDone(transaction);
+    try {
+      if (!await this.#holdsCurrentLease(transaction, lease)) {
+        await done;
+        return { outcome: 'obsolete', reason: 'writer-lost' };
+      }
+      const requests = transaction.objectStore(STORES.requests);
+      const storageKey = requestStorageKey(userId, request);
+      const queued = (await requestResult(requests.get(storageKey))) as RequestRecord | undefined;
+      const stored = queued === undefined ? null : parseRunnerRequest(queued.request);
+      if (
+        stored === null
+        || stored.kind !== 'start'
+        || stored.orgId !== request.orgId
+        || stored.runId !== request.runId
+        || stored.startedAt !== request.startedAt
+      ) {
+        await done;
+        return { outcome: 'obsolete', reason: 'not-queued' };
+      }
+      const profile = (await requestResult(transaction.objectStore(STORES.profiles).get(userId))) as ProfileRecord | undefined;
+      if (profile?.activeRunId !== null && profile?.activeRunId !== undefined) {
+        await done;
+        return { outcome: 'obsolete', reason: 'run-active' };
+      }
+      requests.delete(storageKey);
+      await done;
+      return { outcome: 'abandoned' };
     } catch (error) {
       abortTransaction(transaction);
       await done.catch(() => undefined);

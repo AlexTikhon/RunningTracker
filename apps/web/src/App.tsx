@@ -9,7 +9,7 @@ import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-sour
 import type { CaptureSourceKind } from './capture-source-kind.js';
 import { organizationLabel, organizationPrompt } from './organization-selection.js';
 import { OrganizationPicker } from './OrganizationPicker.js';
-import { executeRunnerRequest } from './runner-requests.js';
+import { definitiveStartRejectionOf, executeRunnerRequest } from './runner-requests.js';
 import { RunnerView, type StorageState } from './RunnerView.js';
 import { SessionBar } from './SessionBar.js';
 import { unsentWorkNote } from './unsent-work.js';
@@ -30,6 +30,7 @@ import {
   createInitialRunnerState,
   needsAuthoritativeRead,
   refusedRunMayBeDetached,
+  rejectedStartMayBeAbandoned,
   runnerReducer,
   type CommandRequest,
   type RunnerRequest,
@@ -93,6 +94,10 @@ export function App() {
   const uploadWorker = useRef<PointUploadWorker | null>(null);
   const writerCoordinator = useRef<WriterLeaseCoordinator | null>(null);
   const latestUpload = useRef<UploadState>({ message: null, pendingCount: 0, status: 'idle' });
+  // While the abandonment of a rejected Start is being stored no other request may begin, so the page cannot be
+  // asked to restore durable state underneath a request in flight.
+  const abandoningStart = useRef(false);
+  const [abandonFailure, setAbandonFailure] = useState<string | null>(null);
   const suspendRunner = useCallback(() => {
     captureController.current?.stop();
     uploadWorker.current?.stop();
@@ -362,12 +367,13 @@ export function App() {
 
   const executeRequest = useCallback(
     async (request: RunnerRequest) => {
-      if (session.status !== 'ready' || storage.status !== 'ready') {
+      if (session.status !== 'ready' || storage.status !== 'ready' || abandoningStart.current) {
         return;
       }
       if (!await writerCoordinator.current?.assertOwned()) {
         return;
       }
+      setAbandonFailure(null);
       dispatch({ request, type: 'request-started' });
       try {
         const outcome = await executeRunnerRequest({
@@ -391,7 +397,15 @@ export function App() {
         // The request stays exactly as it was, queued under its own identity. A definitive refusal of the run also
         // stops the capture and opens the explicit discard; a network failure, a 5xx or any unknown outcome is
         // only a failed request.
-        dispatch({ message: errorMessage(error), request, type: 'request-failed' });
+        // Only a Start answered by the definitive rejection may later be abandoned; any other failure keeps the
+        // exact request for the retry and offers nothing destructive.
+        const rejection = request.kind === 'start' ? definitiveStartRejectionOf(error) : null;
+        dispatch({
+          message: errorMessage(error),
+          ...(rejection === null ? {} : { rejection }),
+          request,
+          type: 'request-failed',
+        });
         const refusal = request.kind === 'command' ? unrecoverableRefusalOf(error) : null;
         if (refusal !== null) {
           captureController.current?.stop();
@@ -612,6 +626,55 @@ export function App() {
     } catch (error) { setStorage({ message: errorMessage(error), status: 'error' }); }
   };
 
+  // The local way out of a Start the server definitively rejected (ADR-0058). It never calls the API: no run was
+  // created, so there is nothing to finish or delete. Only the exact queued Start is removed, inside a transaction
+  // that checks the writer lease itself; what that transaction finds is what the page then follows.
+  const abandonRejectedStart = async () => {
+    const request = runner.error?.request;
+    if (
+      session.status !== 'ready'
+      || request?.kind !== 'start'
+      || busy
+      || abandoningStart.current
+      || !rejectedStartMayBeAbandoned(runner)
+    ) {
+      return;
+    }
+    const userId = session.session.identity.userId;
+    abandoningStart.current = true;
+    setAbandonFailure(null);
+    try {
+      const lease = await writerCoordinator.current?.assertOwnedLease();
+      if (!lease) return;
+      const runnerStorage = getBrowserRunnerStorage();
+      const outcome = await runnerStorage.abandonQueuedStart(userId, request, lease);
+      if (outcome.outcome === 'abandoned') {
+        dispatch({ request, type: 'start-abandoned' });
+        setRunOrgId(null);
+        await writerCoordinator.current?.release();
+        // A rejection that came from a lost membership: the next Start follows what the server lists now.
+        reloadOrganizations();
+        return;
+      }
+      // The queue is no longer what this page showed (another tab, a newer request, a lost writer). Follow the
+      // durable state, whatever it is, instead of acting on a screen that is out of date.
+      const recovery = await runnerStorage.loadRecovery(userId);
+      setRunOrgId(recovery.orgId);
+      authority.current?.invalidate();
+      dispatch({
+        pendingPointCount: recovery.pendingPointCount,
+        request: recovery.request,
+        run: recovery.run,
+        type: 'storage-restored',
+        uploadRejection: recovery.uploadRejection,
+      });
+    } catch (error) {
+      setAbandonFailure(errorMessage(error));
+    } finally {
+      abandoningStart.current = false;
+    }
+  };
+
   const viewPrerequisite = (what: string) =>
     session.status === 'ready'
       ? needsOrganization ?? ''
@@ -691,6 +754,11 @@ export function App() {
           refused={{
             canDiscard: rejectedScope !== null,
             onDiscard: () => void discardRefusedRecovery(),
+          }}
+          rejectedStart={{
+            canAbandon: session.status === 'ready',
+            failure: abandonFailure,
+            onAbandon: () => void abandonRejectedStart(),
           }}
           rejected={{
             canDiscard: rejectedScope !== null,

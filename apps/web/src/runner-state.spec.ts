@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   availableCommands,
   createInitialRunnerState,
+  rejectedStartMayBeAbandoned,
   runnerPhase,
   runnerReducer,
   type CommandRequest,
@@ -267,5 +268,118 @@ describe('runnerReducer', () => {
     };
 
     expect(runnerPhase(runnerReducer(finished, { type: 'finished-run-cleared' }))).toBe('idle');
+  });
+});
+
+// A Start the server definitively rejected has no run to discard, so it needs its own local way out. Only the
+// answer of this page lifetime can offer it: a restored request carries no answer, and nothing else qualifies.
+describe('a Start the server definitively rejected', () => {
+  const rejection = { code: 'ORG_ACCESS_DENIED' } as const;
+  const denied = (state = createInitialRunnerState('online')) => {
+    const pending = runnerReducer(state, { request: startRequest, type: 'request-started' });
+    return runnerReducer(pending, {
+      message: 'The current identity cannot access this organization (ORG_ACCESS_DENIED).',
+      rejection,
+      request: startRequest,
+      type: 'request-failed',
+    });
+  };
+
+  it('keeps the request queued as the error and records that the answer was definitive', () => {
+    const state = denied();
+    expect(state.error?.message).toContain('ORG_ACCESS_DENIED');
+    expect(state.error?.rejection).toEqual(rejection);
+    expect(state.error?.request).toEqual(startRequest);
+    expect(state.run).toBeNull();
+    expect(state.pendingRequest).toBeNull();
+    expect(runnerPhase(state)).toBe('error');
+    expect(rejectedStartMayBeAbandoned(state)).toBe(true);
+  });
+
+  it('is not offered for a failure without a definitive answer, whatever the message says', () => {
+    const pending = runnerReducer(createInitialRunnerState('online'), { request: startRequest, type: 'request-started' });
+    const unknown = runnerReducer(pending, {
+      message: 'The current identity cannot access this organization (ORG_ACCESS_DENIED).',
+      request: startRequest,
+      type: 'request-failed',
+    });
+    expect(unknown.error?.request).toEqual(startRequest);
+    expect(unknown.error?.rejection).toBeUndefined();
+    expect(rejectedStartMayBeAbandoned(unknown)).toBe(false);
+  });
+
+  it('is not offered for a request restored from storage: the answer must be asked for again', () => {
+    const restored = runnerReducer(createInitialRunnerState('online'), {
+      pendingPointCount: 0,
+      request: startRequest,
+      run: null,
+      type: 'storage-restored',
+    });
+    expect(restored.error?.request).toEqual(startRequest);
+    expect(rejectedStartMayBeAbandoned(restored)).toBe(false);
+  });
+
+  it('is withdrawn by the retry, so only the newest answer can offer it', () => {
+    const retrying = runnerReducer(denied(), { request: startRequest, type: 'request-started' });
+    expect(retrying.error).toBeNull();
+    expect(rejectedStartMayBeAbandoned(retrying)).toBe(false);
+    const unreachable = runnerReducer(retrying, { message: 'network', request: startRequest, type: 'request-failed' });
+    expect(rejectedStartMayBeAbandoned(unreachable)).toBe(false);
+  });
+
+  it('is never accepted for a command, or for a code outside the narrow allowlist', () => {
+    const active = startRecording();
+    const command: CommandRequest = {
+      commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      expectedControlRevision: '0',
+      kind: 'command',
+      orgId: startRequest.orgId,
+      runId: startRequest.runId,
+      type: 'pause',
+    };
+    const failedCommand = runnerReducer(runnerReducer(active, { request: command, type: 'request-started' }), {
+      message: 'denied',
+      rejection,
+      request: command,
+      type: 'request-failed',
+    });
+    expect(failedCommand.error?.rejection).toBeUndefined();
+    expect(rejectedStartMayBeAbandoned(failedCommand)).toBe(false);
+
+    const pending = runnerReducer(createInitialRunnerState('online'), { request: startRequest, type: 'request-started' });
+    const otherCode = runnerReducer(pending, {
+      message: 'no',
+      rejection: { code: 'RUN_DELETED' } as never,
+      request: startRequest,
+      type: 'request-failed',
+    });
+    expect(rejectedStartMayBeAbandoned(otherCode)).toBe(false);
+  });
+
+  it('is not offered while a request is in flight or when a run is shown', () => {
+    const rejected = denied();
+    expect(rejectedStartMayBeAbandoned({ ...rejected, pendingRequest: startRequest })).toBe(false);
+    expect(rejectedStartMayBeAbandoned({ ...rejected, run: recordingRun })).toBe(false);
+  });
+
+  it('abandonment returns the page to idle without a run, an error or an upload, and keeps the connection', () => {
+    const offline = runnerReducer(denied(), { connectivity: 'offline', type: 'connectivity-changed' });
+    const idle = runnerReducer(offline, { request: startRequest, type: 'start-abandoned' });
+    expect(idle).toEqual(createInitialRunnerState('offline'));
+    expect(runnerPhase(idle)).toBe('idle');
+  });
+
+  it('abandonment of another request, or while one is in flight, changes nothing', () => {
+    const rejected = denied();
+    const other = { ...startRequest, runId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' };
+    expect(runnerReducer(rejected, { request: other, type: 'start-abandoned' })).toBe(rejected);
+    expect(runnerReducer(rejected, { request: { ...startRequest, startedAt: '2026-09-26T08:00:01.000Z' }, type: 'start-abandoned' })).toBe(rejected);
+    const retrying = runnerReducer(rejected, { request: startRequest, type: 'request-started' });
+    expect(runnerReducer(retrying, { request: startRequest, type: 'start-abandoned' })).toBe(retrying);
+  });
+
+  it('a late abandonment cannot clear an active run that replaced the request', () => {
+    const active = startRecording();
+    expect(runnerReducer(active, { request: startRequest, type: 'start-abandoned' })).toBe(active);
   });
 });

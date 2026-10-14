@@ -50,6 +50,41 @@ export async function readDurableRunnerState(page: Page, userId: string): Promis
   );
 }
 
+export interface QueuedStart {
+  readonly orgId: string;
+  readonly runId: string;
+  readonly startedAt: string;
+}
+
+// The Start requests queued for this user and not yet acknowledged, with the identity that a retry would send. A
+// separate read so the shape of DurableRunnerState, which many tests compare whole, does not change.
+export async function readQueuedStarts(page: Page, userId: string): Promise<QueuedStart[]> {
+  return page.evaluate(
+    async ({ name, user }) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error ?? new Error('Unable to open IndexedDB'));
+      });
+      try {
+        const entries = await new Promise<Array<{ request: { kind: string; orgId: string; runId: string; startedAt: string }; userId: string }>>(
+          (resolve, reject) => {
+            const request = database.transaction('requests', 'readonly').objectStore('requests').getAll();
+            request.onsuccess = () => resolve(request.result as never);
+            request.onerror = () => reject(request.error ?? new Error('Unable to read requests'));
+          },
+        );
+        return entries
+          .filter((entry) => entry.userId === user && entry.request.kind === 'start')
+          .map((entry) => ({ orgId: entry.request.orgId, runId: entry.request.runId, startedAt: entry.request.startedAt }));
+      } finally {
+        database.close();
+      }
+    },
+    { name: databaseName, user: userId },
+  );
+}
+
 // The lifecycle status stored for the run the profile points at, or null when none is. A separate read so the
 // shape of DurableRunnerState, which many tests compare whole, does not change.
 export async function readDurableRunStatus(page: Page, userId: string): Promise<string | null> {

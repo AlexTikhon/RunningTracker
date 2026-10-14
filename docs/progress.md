@@ -2211,3 +2211,33 @@ their `started_at` and `finished_at`; `run_commands` rows are untouched. A `BEFO
 payload, microsecond precision both sides, the 24-hour bound, and a legacy active-run migration inside a rolled-back
 transaction that replays and finishes the repaired runs through the service) and `run-auto-finish.integration.test.ts`
 (auto-finish still keyed to creation time; the 24-hour upload window still keyed to the server finish time).
+
+## Runner: explicit local abandonment of a Start the server rejected (2026-10-14)
+
+Design and limits: ADR-0058. `apps/web` only; no API, SQL, auth, dependency, upload or state-machine change.
+
+**Defect.** A valid 403 `ORG_ACCESS_DENIED` on Start left the request durable, Start disabled and the same error after
+a reload; "Retry same request" could only repeat the answer, and the refused-run discard (ADR-0052) needs a run.
+
+**Change.** `definitiveStartRejectionOf` accepts only a readable 403 `ORG_ACCESS_DENIED`; the reducer keeps it as
+`RunnerFailure.rejection` for this page lifetime only (a restored request must be answered again before anything is
+offered). `abandonQueuedStart` deletes exactly the queued Start inside a writer-fenced transaction (stale writer,
+missing or different request, active run: an outcome, nothing written). The notice offers "Abandon this Start"; on
+success the page is idle, the writer lease is released and organization discovery is reloaded. Unknown outcomes (network,
+timeout, abort, unreadable body, 5xx, 408/425/429, 401, other codes) keep the identical request.
+
+**Executed.** Regressions written first and run red (45 failing, 77 already passing as pre-existing behaviour), then
+green. `npm run verify`: exit 0 (API 1298, web 568, contracts 128, fixtures 14, simulator 3, build). A throwaway
+Chromium run of the built app with the API mocked at the network layer, native IndexedDB: 403, reload, identical retry,
+abandonment, reload, new Start: passed.
+
+**Not run.** `tests/e2e/rejected-start-recovery.spec.ts` (real API and database) and the existing
+`refused-run-recovery.spec.ts`: the test database on 127.0.0.1:5433 is not running (Docker daemon unavailable), the API
+never became ready. `test:integration` was not run (nothing outside `apps/web` changed).
+
+**Real-stack run (after integration onto this branch, 2026-10-14).** `rejected-start-recovery.spec.ts` and
+`refused-run-recovery.spec.ts` ran against the real API, the `_test` database on 127.0.0.1:5433, Chromium and native
+IndexedDB: 6 passed. The 403 `ORG_ACCESS_DENIED` is the real server's answer (membership deactivated in the test
+database); the unknown outcomes (refused connection, 503, 429 carrying the membership code) are injected at the
+browser network layer. Stale-writer and changed-state fencing is exercised in `runner-storage.spec.ts` against
+`fake-indexeddb`, not in a browser.

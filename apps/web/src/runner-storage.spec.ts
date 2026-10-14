@@ -572,3 +572,174 @@ describe('discardRefusedRun', () => {
     await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 0, request: null, run: null });
   });
 });
+
+// A Start the server definitively rejected leaves only a queued request: no run, no points, no pointer. Abandoning
+// it deletes exactly that record, inside the writer-fenced transaction, and nothing that belongs to anyone else.
+describe('abandonQueuedStart', () => {
+  const otherUserId = '22222222-2222-4222-8222-222222222222';
+  const newerRunId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const newerStart: StartRequest = { ...startRequest, runId: newerRunId, startedAt: '2026-09-26T08:05:00.000Z' };
+
+  async function rejectedStart() {
+    const factory = new IDBFactory();
+    const name = crypto.randomUUID();
+    const storage = createStorage(factory, name);
+    await storage.queueRequest(userId, startRequest, null);
+    const { lease } = await storage.acquireWriterLease(userId, crypto.randomUUID(), 15_000);
+    return { factory, lease, name, storage };
+  }
+
+  it('deletes the exact queued Start and nothing else, and reports it as abandoned', async () => {
+    const { storage, lease } = await rejectedStart();
+    await storage.saveCaptureSource(userId, 'simulator');
+    await storage.queueRequest(otherUserId, startRequest, null);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest, run: null });
+
+    await expect(storage.abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'abandoned' });
+
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
+      captureSource: 'simulator',
+      orgId: null,
+      pendingPointCount: 0,
+      request: null,
+      run: null,
+    });
+    // The same request id of another identity is another record.
+    await expect(storage.loadRecovery(otherUserId)).resolves.toMatchObject({ request: startRequest });
+  });
+
+  it('survives a reload: the abandoned Start is not recovered', async () => {
+    const { factory, name, storage, lease } = await rejectedStart();
+    await storage.abandonQueuedStart(userId, startRequest, lease);
+    await storage.close();
+    const reopened = createStorage(factory, name);
+    await expect(reopened.loadRecovery(userId)).resolves.toMatchObject({ request: null, run: null });
+  });
+
+  it('lets a new Start be queued and acknowledged afterwards', async () => {
+    const { storage, lease } = await rejectedStart();
+    await storage.abandonQueuedStart(userId, startRequest, lease);
+    await storage.queueRequest(userId, newerStart, null);
+    await storage.acknowledgeStart(userId, newerStart, { ...recordingRun, runId: newerRunId, startedAt: newerStart.startedAt });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: null, run: { runId: newerRunId } });
+  });
+
+  it('removes only the Start it is given when a newer request is queued beside it', async () => {
+    const { storage, lease } = await rejectedStart();
+    await storage.queueRequest(userId, newerStart, null);
+    await expect(storage.abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'abandoned' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: newerStart });
+  });
+
+  it('a stale abandonment of the old Start leaves the newer request, and its active run and points, untouched', async () => {
+    const { storage, lease } = await rejectedStart();
+    await storage.abandonQueuedStart(userId, startRequest, lease);
+    const newerScope = { ...scope, runId: newerRunId };
+    await storage.queueRequest(userId, newerStart, null);
+    await storage.acknowledgeStart(userId, newerStart, { ...recordingRun, runId: newerRunId, startedAt: newerStart.startedAt });
+    await storage.appendPoint(newerScope, measurement);
+    const pause: CommandRequest = { ...newerScope, kind: 'command', commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'pause' };
+    await storage.queueRequest(userId, pause, { ...recordingRun, runId: newerRunId });
+
+    // The same callback fires a second time, late.
+    await expect(storage.abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'obsolete', reason: 'not-queued' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
+      pendingPointCount: 1,
+      request: { commandId: pause.commandId },
+      run: { runId: newerRunId },
+    });
+  });
+
+  it('a Start that was acknowledged meanwhile is not abandoned, and the run it became stays active', async () => {
+    const { storage, lease } = await rejectedStart();
+    await storage.acknowledgeStart(userId, startRequest, recordingRun);
+    await storage.appendPoint(scope, measurement);
+    await expect(storage.abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'obsolete', reason: 'not-queued' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ pendingPointCount: 1, run: { runId } });
+  });
+
+  it('a queued Start is not abandoned while any run is active, and nothing changes', async () => {
+    const { storage, lease } = await rejectedStart();
+    await storage.acknowledgeStart(userId, newerStart, { ...recordingRun, runId: newerRunId });
+    await expect(storage.abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'obsolete', reason: 'run-active' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest, run: { runId: newerRunId } });
+  });
+
+  it('a record with the same run id but another identity (startedAt) is not the request that was rejected', async () => {
+    const { storage, lease } = await rejectedStart();
+    const different = { ...startRequest, startedAt: '2026-09-26T09:00:00.000Z' };
+    await expect(storage.abandonQueuedStart(userId, different, lease)).resolves.toEqual({ outcome: 'obsolete', reason: 'not-queued' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+  });
+
+  it('a command request is not abandoned through this operation', async () => {
+    const { storage, lease } = await rejectedStart();
+    const pause: CommandRequest = { ...scope, kind: 'command', commandId: crypto.randomUUID(), expectedControlRevision: '0', type: 'pause' };
+    await expect(storage.abandonQueuedStart(userId, pause as unknown as StartRequest, lease)).rejects.toThrow('requires a start request');
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+  });
+
+  it('a stale or foreign writer cannot abandon, and nothing changes', async () => {
+    const { storage, lease } = await rejectedStart();
+    for (const stale of [
+      { ...lease, fencingToken: '0' },
+      { ...lease, ownerId: crypto.randomUUID() },
+    ]) {
+      await expect(storage.abandonQueuedStart(userId, startRequest, stale)).resolves.toEqual({ outcome: 'obsolete', reason: 'writer-lost' });
+    }
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+  });
+
+  it('a tab that lost the lease to another tab cannot abandon, while the new owner can', async () => {
+    const { storage, lease: tabA } = await rejectedStart();
+    const tabB = (await storage.acquireWriterLease(userId, crypto.randomUUID(), 15_000, [tabA.ownerId])).lease;
+    await expect(storage.abandonQueuedStart(userId, startRequest, tabA)).resolves.toEqual({ outcome: 'obsolete', reason: 'writer-lost' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+    await expect(storage.abandonQueuedStart(userId, startRequest, tabB)).resolves.toEqual({ outcome: 'abandoned' });
+  });
+
+  it('a released lease cannot abandon', async () => {
+    const { storage, lease } = await rejectedStart();
+    await storage.releaseWriterLease(lease);
+    await expect(storage.abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'obsolete', reason: 'writer-lost' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+  });
+
+  it('an expired lease cannot abandon', async () => {
+    const factory = new IDBFactory();
+    let now = new Date('2026-09-26T08:00:01.000Z');
+    const storage = new IndexedDbRunnerStorage({ databaseName: crypto.randomUUID(), factory, keyRange: IDBKeyRange, now: () => now });
+    await storage.queueRequest(userId, startRequest, null);
+    const { lease } = await storage.acquireWriterLease(userId, crypto.randomUUID(), 1_000);
+    now = new Date('2026-09-26T08:00:03.000Z');
+    await expect(storage.abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'obsolete', reason: 'writer-lost' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+  });
+
+  it('a lease of another user cannot abandon this user Start', async () => {
+    const { storage } = await rejectedStart();
+    const foreign = (await storage.acquireWriterLease(otherUserId, crypto.randomUUID(), 15_000)).lease;
+    await expect(storage.abandonQueuedStart(userId, startRequest, foreign)).rejects.toThrow('does not match');
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+  });
+
+  it('a transaction failure leaves the exact Start queued and recoverable', async () => {
+    const { factory, name, storage, lease } = await rejectedStart();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called back with the store as this below
+    const original = IDBObjectStore.prototype.delete;
+    const failing = vi.spyOn(IDBObjectStore.prototype, 'delete').mockImplementation(function (this: IDBObjectStore, key: IDBValidKey | IDBKeyRange) {
+      if (this.name === 'requests') throw new Error('disk failure');
+      return original.call(this, key);
+    });
+    try {
+      await expect(storage.abandonQueuedStart(userId, startRequest, lease)).rejects.toThrow('disk failure');
+    } finally {
+      failing.mockRestore();
+    }
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: startRequest, run: null });
+    await storage.close();
+    await expect(createStorage(factory, name).loadRecovery(userId)).resolves.toMatchObject({ request: startRequest });
+    // The same operation then succeeds: the failure left nothing half-done.
+    await expect(createStorage(factory, name).abandonQueuedStart(userId, startRequest, lease)).resolves.toEqual({ outcome: 'abandoned' });
+  });
+});

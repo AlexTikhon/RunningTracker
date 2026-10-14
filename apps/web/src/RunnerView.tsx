@@ -9,7 +9,13 @@ import {
 } from './capture-source-kind.js';
 import { RefusedRunNotice } from './RefusedRunNotice.js';
 import { RejectedBufferNotice } from './RejectedBufferNotice.js';
-import { availableCommands, refusedRunMayBeDetached, runnerPhase, type RunnerState } from './runner-state.js';
+import {
+  availableCommands,
+  refusedRunMayBeDetached,
+  rejectedStartMayBeAbandoned,
+  runnerPhase,
+  type RunnerState,
+} from './runner-state.js';
 import type { WriterOwnershipState } from './writer-lease.js';
 
 export type StorageState =
@@ -29,6 +35,9 @@ interface RunnerViewProps {
   rejected: { canDiscard: boolean; canExport: boolean; onDiscard: () => void; onExport: () => void };
   // The local discard of a run the server refuses (ADR-0052); the export is the same as for rejected points.
   refused: { canDiscard: boolean; onDiscard: () => void };
+  // The local abandonment of a Start the server definitively rejected (ADR-0058). `failure` is why the last attempt
+  // to abandon it did not complete; the Start is then still queued.
+  rejectedStart: { canAbandon: boolean; failure: string | null; onAbandon: () => void };
   runner: RunnerState;
   sessionReady: boolean;
   storage: StorageState;
@@ -53,6 +62,7 @@ export function RunnerView({
   organizationNote,
   rejected,
   refused,
+  rejectedStart,
   runner,
   sessionReady,
   storage,
@@ -236,14 +246,39 @@ export function RunnerView({
 
       {runner.error !== null && (
         <section className="notice notice--error" role="alert">
-          <div><strong>Request not confirmed</strong><span>{runner.error.message}</span></div>
-          <button
-            disabled={runner.connectivity === 'offline' || !sessionReady || writer.status !== 'owned'}
-            onClick={onRetryRequest}
-            type="button"
-          >
-            Retry same request
-          </button>
+          <div>
+            <strong>Request not confirmed</strong>
+            <span>{runner.error.message}</span>
+            {rejectedStartMayBeAbandoned(runner) && (
+              <span>
+                The server refused this Start: this account has no active access to the organization, and the same
+                request gets the same answer while that is so. Abandoning only removes the saved Start request from
+                this browser. It does not create, finish or delete anything on the server.
+              </span>
+            )}
+            {rejectedStart.failure !== null && rejectedStartMayBeAbandoned(runner) && (
+              <span>The Start was not abandoned and is still saved: {rejectedStart.failure}</span>
+            )}
+          </div>
+          <div className="notice__actions">
+            <button
+              disabled={runner.connectivity === 'offline' || !sessionReady || writer.status !== 'owned'}
+              onClick={onRetryRequest}
+              type="button"
+            >
+              Retry same request
+            </button>
+            {rejectedStartMayBeAbandoned(runner) && (
+              <button
+                className="finish-action"
+                disabled={!rejectedStart.canAbandon || busy || writer.status !== 'owned'}
+                onClick={rejectedStart.onAbandon}
+                type="button"
+              >
+                Abandon this Start
+              </button>
+            )}
+          </div>
         </section>
       )}
 

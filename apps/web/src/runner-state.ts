@@ -29,8 +29,24 @@ export interface CommandRequest {
 
 export type RunnerRequest = StartRequest | CommandRequest;
 
+// The one server answer that a Start can never recover from: the membership that would let it in is gone (403
+// ORG_ACCESS_DENIED), so the same request gets the same answer for as long as that is true. It is kept apart from
+// every unknown outcome, which keeps the exact request for a retry and never opens the local abandonment (ADR-0058).
+const DEFINITIVE_START_REJECTION_CODES: ReadonlySet<string> = new Set(['ORG_ACCESS_DENIED']);
+
+export interface StartRejection {
+  code: 'ORG_ACCESS_DENIED';
+}
+
+export function isDefinitiveStartRejectionCode(code: string): code is StartRejection['code'] {
+  return DEFINITIVE_START_REJECTION_CODES.has(code);
+}
+
 export interface RunnerFailure {
   message: string;
+  // Present only on a Start, and only while the newest answer to it was that definitive rejection. Never stored: a
+  // request restored after a reload has none, so the answer has to be asked for again before anything is offered.
+  rejection?: StartRejection;
   request: RunnerRequest;
 }
 
@@ -86,7 +102,10 @@ export type RunnerEvent =
   | { request: StartRequest; run: RunView; type: 'start-succeeded' }
   | { request: CommandRequest; result: RunCommandResponse; type: 'command-succeeded' }
   | { request: CommandRequest; run: RunView; type: 'request-reconciled' }
-  | { message: string; request: RunnerRequest; type: 'request-failed' }
+  | { message: string; rejection?: StartRejection; request: RunnerRequest; type: 'request-failed' }
+  // The queued Start was removed from this browser on purpose after the server definitively rejected it. Local
+  // only: no run existed, and nothing about the server is implied.
+  | { request: StartRequest; type: 'start-abandoned' }
   | { runId: string; type: 'point-buffered' }
   | { dataRevision: string; runId: string; type: 'point-batch-acknowledged' }
   | { run: RunView; type: 'run-reconciled' }
@@ -160,6 +179,17 @@ export function refusedRunMayBeDetached(state: RunnerState): boolean {
   return state.run !== null
     && state.authority.status === 'refused'
     && isUnrecoverableRunCode(state.authority.code);
+}
+
+// Whether the person may be offered the explicit local abandonment of the Start: the newest answer to it, in this
+// page lifetime, was the definitive rejection. A restored request, an unknown outcome, a command and a request in
+// flight never qualify.
+export function rejectedStartMayBeAbandoned(state: RunnerState): boolean {
+  return state.pendingRequest === null
+    && state.run === null
+    && state.error?.request.kind === 'start'
+    && state.error.rejection !== undefined
+    && isDefinitiveStartRejectionCode(state.error.rejection.code);
 }
 
 // Whether the run must be asked about now: a restored or offline-recorded lifecycle, once the browser is online.
@@ -271,8 +301,32 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       }
       return {
         ...state,
-        error: { message: event.message, request: event.request },
+        error: {
+          message: event.message,
+          ...(event.request.kind === 'start'
+            && event.rejection !== undefined
+            && isDefinitiveStartRejectionCode(event.rejection.code)
+            ? { rejection: { code: event.rejection.code } }
+            : {}),
+          request: event.request,
+        },
         pendingRequest: null,
+      };
+    case 'start-abandoned':
+      // Storage already removed the request, so the page follows it; the only things ignored are a report about a
+      // request that is not the one shown, and anything while a request is in flight or a run is shown.
+      if (
+        state.pendingRequest !== null
+        || state.run !== null
+        || !isSameRequest(state.error?.request ?? null, event.request)
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        authority: { status: 'confirmed' },
+        error: null,
+        upload: { message: null, pendingCount: 0, status: 'idle' },
       };
     case 'point-buffered':
       if (state.run?.runId !== event.runId) {

@@ -1,10 +1,10 @@
 import type { RunCommandResponse, RunView } from '@running-tracker/contracts';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { unrecoverableRefusalOf } from './run-authority.js';
-import { RunnerApiError } from './runner-api.js';
-import { executeRunnerRequest } from './runner-requests.js';
+import { createRun, RunnerApiError } from './runner-api.js';
+import { definitiveStartRejectionOf, executeRunnerRequest } from './runner-requests.js';
 import type { CommandRequest, StartRequest } from './runner-state.js';
 import { IndexedDbRunnerStorage } from './runner-storage.js';
 
@@ -117,5 +117,106 @@ describe('a command whose outcome is unknown', () => {
       [pause.commandId, '3'],
     ]);
     await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: null, run: { controlRevision: '4', status: 'paused' } });
+  });
+});
+
+// A Start has no run to read back, so the only definitive answer that leaves nothing to retry is the server saying
+// the membership behind it is gone. Everything else, including the same code with another status or an unreadable
+// body, is an unknown outcome and keeps the identical request for the retry (ADR-0058).
+describe('a Start the server definitively rejects', () => {
+  function setupStart() {
+    const storage = new IndexedDbRunnerStorage({ databaseName: crypto.randomUUID(), factory: new IDBFactory(), keyRange: IDBKeyRange });
+    const sent: StartRequest[] = [];
+    const run = (createRun: (request: StartRequest) => Promise<RunView>, signal: AbortSignal = new AbortController().signal) =>
+      executeRunnerRequest({
+        api: {
+          createRun: (input) => { sent.push(input as StartRequest); return createRun(input as StartRequest); },
+          readRun: () => Promise.reject(new Error('unexpected read')),
+          sendRunCommand: () => Promise.reject(new Error('unexpected command')),
+        },
+        assertOwned: () => Promise.resolve(true),
+        csrf,
+        online: true,
+        request: start,
+        run: null,
+        signal,
+        storage,
+        userId,
+      });
+    return { run, sent, storage };
+  }
+
+  it('a valid 403 ORG_ACCESS_DENIED is classified, and the exact Start stays queued with no run', async () => {
+    const { run, storage } = setupStart();
+    const error = await run(() => Promise.reject(apiError(403, 'ORG_ACCESS_DENIED'))).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(RunnerApiError);
+    expect(definitiveStartRejectionOf(error)).toEqual({ code: 'ORG_ACCESS_DENIED' });
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: start, run: null });
+  });
+
+  it.each([
+    ['a network failure', new TypeError('Failed to fetch')],
+    ['the request deadline', new DOMException('Request deadline exceeded', 'TimeoutError')],
+    ['an abort', new DOMException('The operation was aborted', 'AbortError')],
+    ['an unreadable body', new SyntaxError('Unexpected end of JSON input')],
+    ['a 403 whose body was not the error envelope', apiError(403, 'HTTP_ERROR')],
+    ['a 403 for another reason', apiError(403, 'ORIGIN_DENIED')],
+    ['an expired session', apiError(401, 'UNAUTHENTICATED')],
+    ['a 404', apiError(404, 'ORG_ACCESS_DENIED')],
+    ['a 409 active run', apiError(409, 'ACTIVE_RUN_EXISTS')],
+    ['a 408', apiError(408, 'ORG_ACCESS_DENIED')],
+    ['a 425', apiError(425, 'ORG_ACCESS_DENIED')],
+    ['a 429', apiError(429, 'ORG_ACCESS_DENIED')],
+    ['a 500', apiError(500, 'ORG_ACCESS_DENIED')],
+    ['a 503', apiError(503, 'HTTP_ERROR')],
+  ])('%s is not definitive, and the retry sends the very same Start identity', async (_name, failure) => {
+    const { run, sent, storage } = setupStart();
+    const error = await run(() => Promise.reject(failure)).catch((caught: unknown) => caught);
+    expect(definitiveStartRejectionOf(error)).toBeNull();
+    const recovered = (await storage.loadRecovery(userId)).request;
+    expect(recovered).toEqual(start);
+
+    const outcome = await run(() => Promise.resolve(recording));
+    expect(outcome).toEqual({ kind: 'start', run: recording });
+    expect(sent.map((request) => [request.runId, request.startedAt, request.orgId])).toEqual([
+      [runId, startedAt, orgId],
+      [runId, startedAt, orgId],
+    ]);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: null, run: { runId } });
+  });
+
+  it('an abort before the answer keeps the Start queued and is not definitive', async () => {
+    const { run, sent, storage } = setupStart();
+    const controller = new AbortController();
+    const aborted = new DOMException('The operation was aborted', 'AbortError');
+    const error = await run(() => { controller.abort(aborted); return Promise.reject(aborted); }, controller.signal)
+      .catch((caught: unknown) => caught);
+    expect(definitiveStartRejectionOf(error)).toBeNull();
+    expect(sent).toHaveLength(1);
+    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({ request: start, run: null });
+  });
+
+  it('an unreadable 403 produced by the real API client is not definitive', async () => {
+    const fetched = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('<html>blocked</html>', { status: 403 }));
+    try {
+      const error = await createRun(start, csrf).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: 'HTTP_ERROR', status: 403 });
+      expect(definitiveStartRejectionOf(error)).toBeNull();
+    } finally {
+      fetched.mockRestore();
+    }
+  });
+
+  it('a valid 403 envelope produced by the real API client is definitive', async () => {
+    const body = { error: { code: 'ORG_ACCESS_DENIED', message: 'The current identity cannot access this organization', requestId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' } };
+    const fetched = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' }, status: 403 }),
+    );
+    try {
+      const error = await createRun(start, csrf).catch((caught: unknown) => caught);
+      expect(definitiveStartRejectionOf(error)).toEqual({ code: 'ORG_ACCESS_DENIED' });
+    } finally {
+      fetched.mockRestore();
+    }
   });
 });
