@@ -215,6 +215,7 @@ npm run eval:run-search -- --dry-run --cases <id>,<id>    # the same, and print 
 npm run eval:run-search -- --live --cases <id>,<id>       # a smoke run of cases chosen by identity
 npm run eval:run-search -- --live --max-cases 10          # the first 10 cases of the file (not a sample)
 npm run eval:run-search -- --live --out .local/eval-reports/run-search.json
+npm run eval:run-search -- --live --cases <id>,<id> --fail-on-mismatch   # the same, and exit 2 unless all matched
 ```
 
 It reads `RUN_SEARCH_AI_PROVIDER`, `RUN_SEARCH_AI_MODEL`, `OPENAI_API_KEY` (or `_FILE`; OpenAI only), and the same
@@ -237,6 +238,30 @@ and the output-token limit; an id the dataset does not have stops it before the 
 transport problem, or an output cap that reasoning consumes). The report then says `STOPPED EARLY` and is not a
 measurement; fix the cause and run again. A refusal or an answer the contract rejects is what the model did with one
 request, so those are measured and never stop a run.
+
+**Gating a run: `--fail-on-mismatch`** (opt-in; without it nothing changes and the exit code stays 0 for a run that
+finished, whatever it measured). The run is judged against the cases that were **selected** (`--cases`,
+`--max-cases` or all), not against the dataset, so five selected cases that all ran can pass although the report says
+`PARTIAL` relative to the 65. It passes only when every selected case was executed exactly once and no other was, every
+outcome, reason and filter set matched, and there was no provider failure (a `timeout` included), no operation
+left unsettled after cancellation, and no early stop. A search that drops a condition the form cannot express, such
+as `en-location`, is a wrong outcome and fails.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Without the flag: the run finished. With it: the selected cases all matched. |
+| 2 | With the flag only: the run finished but the selected cases did not all match. |
+| 1 | The run or its report could not happen: configuration, an unknown case id, an unreachable runtime, a report that could not be written. |
+
+The report is written before exit 2 is returned. With the flag it gains an `acceptance` object
+(`passed`, `scope: "selected-synthetic-cases"`, `selectedIds`, at most ten short `failures` naming case ids, and a
+`statement`); the console prints `ACCEPTANCE PASSED` or `ACCEPTANCE FAILED` and the reasons. `--dry-run` with the
+flag is refused (exit 1): a dry run makes no request, so it can never be accepted, and it never prints an acceptance
+line. **What a pass means:** the model produced exactly the expected answer for those synthetic cases in that run.
+It is not a statement about general model quality, other wording, other models or prompts, or production readiness,
+and a different prompt, schema or model is a new run to be judged again. The offline subprocess test
+(`apps/api/test/run-search-evaluation-acceptance.spec.ts`) exercises the exit codes with a mocked loopback transport;
+it needs no model and runs inside `npm test`.
 
 **A first live check, in order** (one dispatch per case; keep a running total, the evaluation does not know what
 earlier commands spent):

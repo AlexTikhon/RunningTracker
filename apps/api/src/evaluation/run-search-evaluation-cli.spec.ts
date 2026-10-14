@@ -36,10 +36,25 @@ describe('evaluation arguments', () => {
       caseIds: undefined,
       concurrency: 1,
       dryRun: false,
+      failOnMismatch: false,
       live: true,
       maxCases: undefined,
       out: undefined,
     });
+  });
+
+  it('gates on the acceptance verdict only when --fail-on-mismatch is given', () => {
+    expect(parseEvaluationArguments(['--live', '--cases', 'en-location']).failOnMismatch).toBe(false);
+    expect(
+      parseEvaluationArguments(['--live', '--cases', 'en-location', '--fail-on-mismatch']).failOnMismatch,
+    ).toBe(true);
+    expect(parseEvaluationArguments(['--fail-on-mismatch', '--live']).failOnMismatch).toBe(true);
+  });
+
+  it('refuses --fail-on-mismatch on a dry run, which makes no request and so can never be accepted', () => {
+    expect(() => parseEvaluationArguments(['--dry-run', '--fail-on-mismatch'])).toThrow(/dry run/iu);
+    expect(() => parseEvaluationArguments(['--live', '--dry-run', '--fail-on-mismatch'])).toThrow(/dry run/iu);
+    expect(() => parseEvaluationArguments(['--fail-on-mismatch'])).toThrow(/--live/u);
   });
 
   it('allows a dry run without --live, which makes no call', () => {
@@ -163,7 +178,15 @@ describe('live evaluation configuration', () => {
 
 describe('what a run is described by', () => {
   const common = {
-    args: { caseIds: ['en-location'], concurrency: 1, dryRun: false, live: true, maxCases: undefined, out: undefined },
+    args: {
+      caseIds: ['en-location'],
+      concurrency: 1,
+      dryRun: false,
+      failOnMismatch: false,
+      live: true,
+      maxCases: undefined,
+      out: undefined,
+    },
     openaiSdkVersion: '7.22.0',
   };
   const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -401,7 +424,15 @@ describe('report text', () => {
 
   it('says the provider, runtime and generation settings when it is given the run description', () => {
     const local = describeEvaluationRun({
-      args: { caseIds: undefined, concurrency: 1, dryRun: false, live: true, maxCases: 5, out: undefined },
+      args: {
+        caseIds: undefined,
+        concurrency: 1,
+        dryRun: false,
+        failOnMismatch: false,
+        live: true,
+        maxCases: 5,
+        out: undefined,
+      },
       config: loadLiveEvaluationConfig({ RUN_SEARCH_AI_MODEL: 'qwen3:8b', RUN_SEARCH_AI_PROVIDER: 'ollama' }),
       openaiSdkVersion: '7.22.0',
       runtimeVersion: '0.35.1',

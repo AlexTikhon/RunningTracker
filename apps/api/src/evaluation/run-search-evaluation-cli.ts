@@ -33,6 +33,8 @@ export interface EvaluationArguments {
   caseIds: string[] | undefined;
   concurrency: number;
   dryRun: boolean;
+  /** Exit 2 unless every selected case was executed once and matched exactly (see evaluateAcceptance). */
+  failOnMismatch: boolean;
   live: boolean;
   maxCases: number | undefined;
   out: string | undefined;
@@ -55,6 +57,7 @@ export function parseEvaluationArguments(argv: readonly string[]): EvaluationArg
     caseIds: undefined,
     concurrency: 1,
     dryRun: false,
+    failOnMismatch: false,
     live: false,
     maxCases: undefined,
     out: undefined,
@@ -68,6 +71,9 @@ export function parseEvaluationArguments(argv: readonly string[]): EvaluationArg
         break;
       case '--dry-run':
         parsed.dryRun = true;
+        break;
+      case '--fail-on-mismatch':
+        parsed.failOnMismatch = true;
         break;
       case '--max-cases':
         parsed.maxCases = boundedInteger('--max-cases', value, 1, EVALUATION_MAX_CASES);
@@ -106,6 +112,12 @@ export function parseEvaluationArguments(argv: readonly string[]): EvaluationArg
   }
   if (parsed.caseIds !== undefined && parsed.maxCases !== undefined) {
     throw new Error('--cases and --max-cases select cases in different ways; use one of them');
+  }
+  if (parsed.dryRun && parsed.failOnMismatch) {
+    // A dry run answers nothing, so there is nothing to accept; exiting 0 here would read as "accepted".
+    throw new Error(
+      '--fail-on-mismatch needs answers to judge: a dry run makes no request and can never be accepted. Use --live.',
+    );
   }
   if (!parsed.live && !parsed.dryRun) {
     throw new Error(
@@ -258,6 +270,149 @@ function unsupportedEvaluationProvider(provider: never): never {
 
 function percent(value: number | null): string {
   return value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`;
+}
+
+/**
+ * The verdict of `--fail-on-mismatch`: whether a run matched every case that was SELECTED. It is a statement about
+ * those synthetic cases and nothing wider. It is recorded in the report file next to the numbers it was derived from.
+ */
+export interface EvaluationAcceptance {
+  /** Why not, at most ten short entries; empty when passed. Case ids are listed, never request texts. */
+  failures: string[];
+  passed: boolean;
+  scope: 'selected-synthetic-cases';
+  selectedIds: string[];
+  statement: string;
+}
+
+const ACCEPTANCE_STATEMENT =
+  'Acceptance is a statement about the selected synthetic cases only: it does not describe general model quality or production readiness.';
+const ACCEPTANCE_MAX_FAILURES = 10;
+const ACCEPTANCE_MAX_LISTED = 5;
+const ACCEPTANCE_MAX_FAILURE_LENGTH = 300;
+
+function listed(ids: readonly string[]): string {
+  const shown = ids.slice(0, ACCEPTANCE_MAX_LISTED).join(', ');
+  return ids.length > ACCEPTANCE_MAX_LISTED ? `${shown} and ${ids.length - ACCEPTANCE_MAX_LISTED} more` : shown;
+}
+
+/**
+ * Pure: the report and the ids that were selected, nothing else. Completeness is judged against the SELECTION, not the
+ * dataset, so five selected cases that all ran can pass although `report.partial` is true relative to the dataset.
+ *
+ * Passes only when every selected case was executed exactly once, no other case was, the run did not stop early, no
+ * operation is unsettled, no call failed, and every outcome, reason and filter set matched. Nothing is repaired or
+ * discounted: a failed call is a failure, not a skipped case.
+ */
+export function evaluateAcceptance(report: EvaluationReport, selectedIds: readonly string[]): EvaluationAcceptance {
+  const failures: string[] = [];
+  const selected = [...selectedIds];
+  const selectedSet = new Set(selected);
+
+  if (selected.length === 0) {
+    failures.push('No cases were selected, so there is nothing to accept.');
+  }
+  if (selectedSet.size !== selected.length) {
+    failures.push('The selection lists a case more than once.');
+  }
+
+  const timesExecuted = new Map<string, number>();
+  for (const id of report.executedIds) {
+    timesExecuted.set(id, (timesExecuted.get(id) ?? 0) + 1);
+  }
+  const notExecuted = selected.filter((id) => !timesExecuted.has(id));
+  if (notExecuted.length > 0) {
+    failures.push(`${notExecuted.length} selected case(s) not executed: ${listed(notExecuted)}.`);
+  }
+  const notSelected = [...timesExecuted.keys()].filter((id) => !selectedSet.has(id));
+  if (notSelected.length > 0) {
+    failures.push(`${notSelected.length} executed case(s) were not selected: ${listed(notSelected)}.`);
+  }
+  const repeated = [...timesExecuted].filter(([, count]) => count > 1).map(([id]) => id);
+  if (repeated.length > 0) {
+    failures.push(`${repeated.length} case(s) were executed more than once: ${listed(repeated)}.`);
+  }
+  if (report.executedCount !== report.executedIds.length) {
+    failures.push('The report is inconsistent: its executed count does not match its executed case ids.');
+  }
+
+  if (report.aborted !== null) {
+    failures.push(
+      `The run stopped early: ${report.aborted.consecutive} identical failures in a row (${report.aborted.reason}) after ${report.aborted.afterCases} cases.`,
+    );
+  }
+  if (report.unsettled.count > 0) {
+    failures.push(
+      `${report.unsettled.count} interpreter operation(s) unsettled after cancellation: ${listed(report.unsettled.caseIds)}.`,
+    );
+  }
+  if (report.failures.total > 0) {
+    const reasons = Object.entries(report.failures.byReason)
+      .map(([reason, count]) => `${reason} ${count}`)
+      .join(', ');
+    failures.push(`${report.failures.total} provider failure(s): ${reasons}.`);
+  }
+
+  // A failed call is reported above; this is what the model answered and got wrong.
+  const wrong = report.mismatches.filter((entry) => !entry.actualOutcome.startsWith('failure:'));
+  if (wrong.length > 0) {
+    const detail = wrong
+      .slice(0, ACCEPTANCE_MAX_LISTED)
+      .map((entry) => {
+        const expected = `${entry.expectedOutcome}${entry.expectedReason === null ? '' : `/${entry.expectedReason}`}`;
+        const actual = `${entry.actualOutcome}${entry.actualReason === null ? '' : `/${entry.actualReason}`}`;
+        const fields = entry.fieldErrors.length === 0 ? '' : `, fields ${entry.fieldErrors.join('+')}`;
+        return `${entry.id} (expected ${expected}, got ${actual}${fields})`;
+      })
+      .join('; ');
+    const more = wrong.length > ACCEPTANCE_MAX_LISTED ? ` and ${wrong.length - ACCEPTANCE_MAX_LISTED} more` : '';
+    failures.push(`${wrong.length} case(s) did not match: ${detail}${more}.`);
+  }
+  if (report.incorrectAcceptances.total > 0) {
+    failures.push(
+      `${report.incorrectAcceptances.total} request(s) that needed a clarification or are unsupported were answered as a search: ${listed(report.incorrectAcceptances.ids)}.`,
+    );
+  }
+
+  // A backstop for a report whose list of mismatches is empty while its tallies are not complete.
+  if (failures.length === 0) {
+    const { exactFilters, outcome, reason } = report.counts;
+    const complete =
+      outcome.total === selected.length &&
+      outcome.correct === outcome.total &&
+      reason.correct === reason.total &&
+      exactFilters.correct === exactFilters.total;
+    if (!complete) {
+      failures.push(
+        `The scoring tallies are not complete: outcome ${outcome.correct}/${outcome.total}, reason ${reason.correct}/${reason.total}, exact filters ${exactFilters.correct}/${exactFilters.total} for ${selected.length} selected case(s).`,
+      );
+    }
+  }
+
+  return {
+    failures: failures
+      .slice(0, ACCEPTANCE_MAX_FAILURES)
+      .map((entry) => entry.slice(0, ACCEPTANCE_MAX_FAILURE_LENGTH)),
+    passed: failures.length === 0,
+    scope: 'selected-synthetic-cases',
+    selectedIds: selected,
+    statement: ACCEPTANCE_STATEMENT,
+  };
+}
+
+export function formatAcceptance(acceptance: EvaluationAcceptance): string {
+  const count = acceptance.selectedIds.length;
+  if (acceptance.passed) {
+    return [
+      `ACCEPTANCE PASSED: all ${count} selected synthetic case(s) were executed once and matched their expected outcome, reason and filters.`,
+      acceptance.statement,
+    ].join('\n');
+  }
+  return [
+    `ACCEPTANCE FAILED for ${count} selected synthetic case(s):`,
+    ...acceptance.failures.map((failure) => `  - ${failure}`),
+    acceptance.statement,
+  ].join('\n');
 }
 
 export function formatEvaluationReport(report: EvaluationReport, run?: EvaluationRunDescription): string {

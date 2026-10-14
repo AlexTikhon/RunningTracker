@@ -12,7 +12,9 @@ import { readOllamaVersion } from '../runs/interpretation/ollama-interpreter.js'
 import { loadEvaluationDataset } from './run-search-evaluation-dataset.js';
 import {
   describeEvaluationRun,
+  evaluateAcceptance,
   evaluationWireContract,
+  formatAcceptance,
   formatEvaluationReport,
   loadLiveEvaluationConfig,
   parseEvaluationArguments,
@@ -28,6 +30,11 @@ import { runEvaluation, selectEvaluationCases } from './run-search-evaluator.js'
 //   npm run eval:run-search -- --dry-run --cases en-last-month-min-longest,ru-last-month-min-longest
 //   npm run eval:run-search -- --live --cases en-last-month-min-longest,ru-last-month-min-longest
 //   npm run eval:run-search -- --live --out .local/eval-reports/run-search.json
+//   npm run eval:run-search -- --live --cases en-last-month-min-longest,en-location --fail-on-mismatch
+//
+// Exit codes: 0 the run finished (with --fail-on-mismatch: and every selected case matched), 2 only with
+// --fail-on-mismatch and the selected cases did not all match (the report is written first), 1 anything that
+// prevented a run or its report: configuration, an unreachable runtime, a report that could not be written.
 
 async function main(): Promise<void> {
   const args = parseEvaluationArguments(process.argv.slice(2));
@@ -85,16 +92,41 @@ async function main(): Promise<void> {
   });
   console.info(formatEvaluationReport(report, run));
 
+  // Judged against the cases that were selected, not against the dataset: a complete subset can pass.
+  const acceptance = args.failOnMismatch
+    ? evaluateAcceptance(
+        report,
+        selected.map((entry) => entry.id),
+      )
+    : null;
+  if (acceptance !== null) {
+    console.info(formatAcceptance(acceptance));
+  }
+
   const out = resolve(
     args.out ?? `.local/eval-reports/run-search-${new Date().toISOString().replace(/[:.]/gu, '-')}.json`,
   );
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(
     out,
-    `${JSON.stringify({ ...report, recordedAt: new Date().toISOString(), run }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        ...(acceptance === null ? {} : { acceptance }),
+        ...report,
+        recordedAt: new Date().toISOString(),
+        run,
+      },
+      null,
+      2,
+    )}\n`,
     'utf8',
   );
   console.info(`Report written to ${out}`);
+
+  // Only after the report is on disk. A failure to write it above is an error (exit 1), never a quality verdict.
+  if (acceptance !== null && !acceptance.passed) {
+    process.exitCode = 2;
+  }
 }
 
 main().catch((error: unknown) => {

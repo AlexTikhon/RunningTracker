@@ -17,6 +17,7 @@ import {
   loadEvaluationDataset,
   type EvaluationCase,
 } from './run-search-evaluation-dataset.js';
+import { evaluateAcceptance, formatAcceptance } from './run-search-evaluation-cli.js';
 import { runEvaluation } from './run-search-evaluator.js';
 import { scoreCase } from './run-search-scoring.js';
 
@@ -813,5 +814,190 @@ describe('evaluator operation lifetime', () => {
     expect(result.failures.byReason).toEqual({ timeout: 1 });
     expect(result.executedCount).toBe(1);
     expect(result.unsettled.count).toBe(1);
+  });
+
+  it('does not accept a run with an operation that outlived its cancellation, even for a one-case selection', async () => {
+    const interpreter = new ControlledInterpreter();
+    const { report } = start(interpreter, { maxCases: 1 });
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + DRAIN_MS);
+    const result = await report;
+    const selected = [dataset.cases[0]!.id];
+
+    const acceptance = evaluateAcceptance(result, selected);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toMatch(/unsettled/iu);
+    expect(acceptance.failures.join('\n')).toContain(selected[0]);
+  });
+});
+
+describe('semantic acceptance of a run', () => {
+  const idsOf = (count: number): string[] => dataset.cases.slice(0, count).map((entry) => entry.id);
+  const run = (interpreter: RunSearchInterpreter, options: Partial<Parameters<typeof runEvaluation>[0]> = {}) =>
+    runEvaluation({ clock: new StepClock(), dataset, interpreter, ...options });
+  // Answers every case exactly, except where `override` returns something else.
+  function answering(
+    override: (found: EvaluationCase, proposal: ProviderProposal) => ProviderProposal | InterpreterFailure | null,
+  ): RunSearchInterpreter {
+    return {
+      interpret: (input) => {
+        const found = dataset.cases.find((entry) => entry.text === input.text)!;
+        const proposal = proposalFor(found);
+        const changed = override(found, proposal);
+        if (changed instanceof InterpreterFailure) {
+          return Promise.reject(changed);
+        }
+        return Promise.resolve({ proposal: changed ?? proposal, usage: null });
+      },
+      model: 'acceptance-double',
+    };
+  }
+  const firstCaseWhere = (outcome: 'clarify' | 'search' | 'unsupported'): EvaluationCase =>
+    dataset.cases.find((entry) => entry.expected.outcome === outcome)!;
+
+  it('passes a complete selection of exact answers, and says what a pass is about', async () => {
+    const report = await run(new OracleInterpreter());
+    const acceptance = evaluateAcceptance(report, dataset.cases.map((entry) => entry.id));
+
+    expect(acceptance).toMatchObject({ failures: [], passed: true, scope: 'selected-synthetic-cases' });
+    expect(acceptance.selectedIds).toEqual(dataset.cases.map((entry) => entry.id));
+    expect(acceptance.statement).toMatch(/selected synthetic cases/iu);
+    expect(acceptance.statement).toMatch(/not .*(general model quality|production)/iu);
+    expect(formatAcceptance(acceptance)).toContain('ACCEPTANCE PASSED');
+  });
+
+  it('passes a complete subset although the report is partial relative to the whole dataset', async () => {
+    const selected = idsOf(5);
+    const report = await run(new OracleInterpreter(), { caseIds: selected });
+
+    expect(report.partial).toBe(true);
+    expect(report.executedCount).toBe(5);
+    expect(evaluateAcceptance(report, selected)).toMatchObject({ failures: [], passed: true, selectedIds: selected });
+  });
+
+  it('fails a wrong outcome', async () => {
+    const target = firstCaseWhere('search');
+    const report = await run(
+      answering((found, proposal) =>
+        found.id === target.id
+          ? { ...proposal, clarificationReason: 'period_missing', outcome: 'clarify', period: null }
+          : proposal,
+      ),
+      { caseIds: [target.id] },
+    );
+    const acceptance = evaluateAcceptance(report, [target.id]);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toContain(target.id);
+    expect(formatAcceptance(acceptance)).toContain('ACCEPTANCE FAILED');
+  });
+
+  it('fails a right outcome with the wrong reason', async () => {
+    const target = firstCaseWhere('clarify');
+    const wrong = target.expected.outcome === 'clarify' && target.expected.reason === 'period_missing' ? 'period_ambiguous' : 'period_missing';
+    const report = await run(
+      answering((found, proposal) => (found.id === target.id ? { ...proposal, clarificationReason: wrong } : proposal)),
+      { caseIds: [target.id] },
+    );
+    expect(report.counts.outcome).toEqual({ correct: 1, total: 1 });
+    const acceptance = evaluateAcceptance(report, [target.id]);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toContain(target.id);
+  });
+
+  it('fails a right outcome with a wrong filter', async () => {
+    const target = firstCaseWhere('search');
+    const report = await run(
+      answering((found, proposal) => (found.id === target.id ? { ...proposal, sort: proposal.sort === 'shortest' ? 'longest' : 'shortest' } : proposal)),
+      { caseIds: [target.id] },
+    );
+    expect(report.counts.outcome).toEqual({ correct: 1, total: 1 });
+    const acceptance = evaluateAcceptance(report, [target.id]);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toMatch(/sort/u);
+  });
+
+  it('fails a dropped unsupported condition, en-location, as a search nobody asked for', async () => {
+    const report = await run(
+      answering((found) =>
+        found.id === 'en-location'
+          ? {
+              clarificationReason: null,
+              distanceUnit: 'km',
+              fromDate: null,
+              maxDistance: null,
+              minDistance: '5',
+              outcome: 'search',
+              period: 'this-month',
+              sort: null,
+              toDate: null,
+              unsupportedReason: null,
+            }
+          : null,
+      ),
+      { caseIds: ['en-location'] },
+    );
+    expect(report.incorrectAcceptances.ids).toEqual(['en-location']);
+    const acceptance = evaluateAcceptance(report, ['en-location']);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toMatch(/en-location/u);
+    expect(acceptance.failures.join('\n')).toMatch(/search/u);
+  });
+
+  it('fails a provider failure such as a timeout', async () => {
+    const selected = idsOf(2);
+    const report = await run(answering(() => new InterpreterFailure('timeout')), { caseIds: selected });
+    const acceptance = evaluateAcceptance(report, selected);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toMatch(/timeout/u);
+  });
+
+  it('fails a run that stopped early, naming why it stopped', async () => {
+    const selected = idsOf(10);
+    const report = await run(answering(() => new InterpreterFailure('provider_error')), { caseIds: selected });
+    expect(report.aborted).not.toBeNull();
+    const acceptance = evaluateAcceptance(report, selected);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toMatch(/stopped early/iu);
+    expect(acceptance.failures.join('\n')).toMatch(/provider_error/u);
+  });
+
+  it('fails when a selected case was not executed, and when a case that was not selected was', async () => {
+    const report = await run(new OracleInterpreter(), { caseIds: idsOf(3) });
+    const missing = evaluateAcceptance(report, idsOf(5));
+    expect(missing.passed).toBe(false);
+    expect(missing.failures.join('\n')).toMatch(/not executed/iu);
+    expect(missing.failures.join('\n')).toContain(idsOf(5)[4]);
+
+    const unexpected = evaluateAcceptance(report, idsOf(2));
+    expect(unexpected.passed).toBe(false);
+    expect(unexpected.failures.join('\n')).toMatch(/not selected/iu);
+  });
+
+  it('fails a case that the report says was executed twice', async () => {
+    const selected = idsOf(3);
+    const report = await run(new OracleInterpreter(), { caseIds: selected });
+    const duplicated = { ...report, executedCount: 4, executedIds: [...report.executedIds, selected[0]!] };
+    const acceptance = evaluateAcceptance(duplicated, selected);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.join('\n')).toMatch(/more than once|twice/iu);
+  });
+
+  it('refuses to accept an empty selection', async () => {
+    const report = await run(new OracleInterpreter(), { caseIds: idsOf(1) });
+    expect(evaluateAcceptance(report, []).passed).toBe(false);
+  });
+
+  it('does not mutate the report and keeps its list of reasons short and bounded', async () => {
+    const report = await run(answering(() => new InterpreterFailure('refusal')));
+    const before = structuredClone(report);
+    const acceptance = evaluateAcceptance(report, dataset.cases.map((entry) => entry.id));
+    expect(report).toEqual(before);
+    expect(acceptance.passed).toBe(false);
+    expect(acceptance.failures.length).toBeGreaterThan(0);
+    expect(acceptance.failures.length).toBeLessThanOrEqual(10);
+    for (const failure of acceptance.failures) {
+      expect(failure.length).toBeLessThanOrEqual(300);
+    }
+    // The failing cases are named, but only a handful of them, so a whole-dataset failure stays readable.
+    expect(JSON.stringify(acceptance).length).toBeLessThan(4_000);
   });
 });
