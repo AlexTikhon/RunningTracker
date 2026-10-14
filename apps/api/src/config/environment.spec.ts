@@ -242,6 +242,31 @@ describe('validateEnvironment', () => {
     ).toThrow('DELETION_JOURNAL_DIR must be set in production');
   });
 
+  it('accepts UUID v4 and v7 local identities and still rejects non-canonical ones', () => {
+    const v4 = '11111111-1111-4111-8111-111111111111';
+    const v7 = '01890f47-3f6b-7c82-98c3-b71ef3ed1002';
+    const parsed = validateEnvironment({
+      ...validApplicationEnvironment,
+      ALLOWED_ORIGINS: 'http://127.0.0.1:5173',
+      APP_ENV: 'test',
+      LOCAL_AUTH_ENABLED: 'true',
+      LOCAL_AUTH_USER_IDS: `${v4}, ${v7}, ${v7}`,
+    });
+    expect(parsed.LOCAL_AUTH_USER_IDS).toEqual([v4, v7]);
+
+    for (const bad of [v7.toUpperCase(), '01890f47-3f6b-0c82-98c3-b71ef3ed1002', 'not-a-uuid']) {
+      expect(() =>
+        validateEnvironment({
+          ...validApplicationEnvironment,
+          ALLOWED_ORIGINS: 'http://127.0.0.1:5173',
+          APP_ENV: 'test',
+          LOCAL_AUTH_ENABLED: 'true',
+          LOCAL_AUTH_USER_IDS: `${v4},${bad}`,
+        }),
+      ).toThrow('invalid canonical UUID');
+    }
+  });
+
   it('requires canonical explicit local identities and origins', () => {
     expect(() =>
       validateEnvironment({

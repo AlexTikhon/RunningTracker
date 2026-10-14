@@ -1,3 +1,4 @@
+import { isCanonicalUuid } from '@running-tracker/contracts';
 import type { Pool } from 'pg';
 
 import type { Clock } from '../clock.js';
@@ -21,8 +22,6 @@ export type RunRetentionDeleteCycleResult =
     };
 
 const candidateScanLimit = 1_000;
-const canonicalUuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function effectiveNowIso(clock: Pick<Clock, 'utcNow'>): string {
   const effectiveNow = clock.utcNow();
@@ -36,7 +35,7 @@ function validateCandidate(
   row: RetentionCandidateRow | undefined,
 ): RetentionCandidateRow | undefined {
   if (row === undefined) return undefined;
-  if (!canonicalUuidPattern.test(row.org_id) || !canonicalUuidPattern.test(row.run_id)) {
+  if (!isCanonicalUuid(row.org_id) || !isCanonicalUuid(row.run_id)) {
     throw new Error('The run deletion candidate function returned an invalid result');
   }
   return row;

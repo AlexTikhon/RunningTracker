@@ -94,6 +94,48 @@ describe('journal directory loading and reapplication', () => {
     expect(client.release).toHaveBeenCalledWith();
   });
 
+  it('reapplies a v7 journal from files, and a second pass is idempotent', async () => {
+    const v7Entries = [1, 2].map((seq) =>
+      entry(seq, {
+        orgId: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+        ownerUserId: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+        runId: `01890f47-3f6b-7c82-98c3-b71ef3ed${String(seq).padStart(4, '0')}`,
+      }),
+    );
+    await writeFile(
+      join(directory, 'deletion-journal-1.ndjson'),
+      serializeDeletionJournalEntries([entry(9), ...v7Entries]),
+    );
+    const deleted = new Set<string>();
+    const applied: string[][] = [];
+    const client = {
+      query: vi.fn((sql: string, values?: unknown[]) => {
+        if (sql.includes('reapply_journaled_deletion')) {
+          const runId = String(values?.[1]);
+          applied.push([String(values?.[0]), runId, String(values?.[2])]);
+          const outcome = deleted.has(runId) ? 'marker_present' : 'deleted';
+          deleted.add(runId);
+          return Promise.resolve({ rows: [{ outcome }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: vi.fn(),
+    };
+    const pool = { connect: () => Promise.resolve(client as unknown as PoolClient) };
+
+    const journal = await loadDeletionJournal(directory);
+    const first = await reapplyDeletions(pool, clock, journal);
+    const second = await reapplyDeletions(pool, clock, journal);
+
+    expect(journal.entries.map((item) => item.runId)).toEqual([
+      entry(9).runId,
+      ...v7Entries.map((item) => item.runId),
+    ]);
+    expect(first.outcomes).toMatchObject({ deleted: 3, marker_present: 0 });
+    expect(second.outcomes).toMatchObject({ deleted: 0, marker_present: 3 });
+    expect(applied[1]).toEqual([v7Entries[0]!.orgId, v7Entries[0]!.runId, v7Entries[0]!.ownerUserId]);
+  });
+
   it('stops at the first failure, rolls it back, and destroys the connection', async () => {
     const statements: string[] = [];
     const client = {

@@ -79,6 +79,48 @@ describe('runDeletionJournalExportOnce', () => {
     expect(parseDeletionJournalFile(fileName, contents).map((entry) => entry.seq)).toEqual(['7', '8']);
   });
 
+  it('exports a mixed v4 and v7 batch in one file without blocking later entries', async () => {
+    const order: string[] = [];
+    const sink = {
+      write: vi.fn<(name: string, contents: string) => Promise<void>>(() => {
+        order.push('write');
+        return Promise.resolve();
+      }),
+    };
+    const v7Row = (seq: number) => ({
+      ...journalRow(seq),
+      org_id: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+      owner_user_id: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+      run_id: `01890f47-3f6b-7c82-98c3-b71ef3ed${String(seq).padStart(4, '0')}`,
+    });
+    const { client, pool } = fakePool((sql, values) => {
+      order.push(String(sql).trim().split(/\s/u)[0]!.replace(/\W.*$/u, ''));
+      if (sql.includes('claim_deletion_journal_batch')) {
+        return { rows: [journalRow(1), v7Row(2), journalRow(3), v7Row(4)] };
+      }
+      if (sql.includes('ack_deletion_journal_batch')) {
+        expect(values).toEqual([['1', '2', '3', '4']]);
+        return { rows: [{ acknowledged: 4 }] };
+      }
+      return { rows: [] };
+    });
+
+    await expect(runDeletionJournalExportOnce(pool, sink, clock)).resolves.toMatchObject({
+      exportedCount: 4,
+      status: 'exported',
+    });
+
+    expect(order).toEqual(['BEGIN', 'SELECT', 'write', 'SELECT', 'COMMIT']);
+    expect(client.release).toHaveBeenCalledWith();
+    const [fileName, contents] = sink.write.mock.calls[0]!;
+    expect(parseDeletionJournalFile(fileName, contents).map((entry) => entry.runId)).toEqual([
+      journalRow(1).run_id,
+      v7Row(2).run_id,
+      journalRow(3).run_id,
+      v7Row(4).run_id,
+    ]);
+  });
+
   it('rolls back and keeps every row when the sink fails', async () => {
     const sink = { write: vi.fn(() => Promise.reject(new Error('disk full'))) };
     const { client, pool } = fakePool((sql) =>
@@ -126,6 +168,26 @@ describe('runDeletionJournalExportOnce', () => {
     ).rejects.toThrow('commit outcome unknown');
     expect(failingCommit.client.release).toHaveBeenCalledWith(true);
     expect(failingCommit.client.query.mock.calls.map(([sql]) => sql)).not.toContain('ROLLBACK');
+  });
+
+  it.each([
+    ['a non-UUID run identifier', 'not-a-uuid'],
+    ['an uppercase run identifier', '01890F47-3F6B-7C82-98C3-B71EF3ED1003'],
+    ['an unassigned UUID version', '01890f47-3f6b-0c82-98c3-b71ef3ed1003'],
+  ])('rejects %s in a mixed batch before any write and rolls back', async (_label, runId) => {
+    const sink = { write: vi.fn() };
+    const { client, pool } = fakePool((sql) =>
+      sql.includes('claim_deletion_journal_batch')
+        ? { rows: [journalRow(1), { ...journalRow(2), run_id: runId }, journalRow(3)] }
+        : { rows: [] },
+    );
+
+    await expect(runDeletionJournalExportOnce(pool, sink, clock)).rejects.toThrow();
+
+    expect(sink.write).not.toHaveBeenCalled();
+    expect(client.query.mock.calls.map(([sql]) => String(sql).trim().split(/\s/u)[0]).at(-1)).toBe(
+      'ROLLBACK',
+    );
   });
 
   it('rejects a malformed claim result and an invalid clock before any write', async () => {

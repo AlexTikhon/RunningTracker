@@ -78,6 +78,63 @@ describe('P10.1 raw point purge maintenance boundary', () => {
     ).rejects.toThrow('The raw purge function returned an invalid result');
   });
 
+  it('accepts UUID v7 candidate identifiers and passes them to the purge unit unchanged', async () => {
+    const v7Org = '01890f47-3f6b-7c82-98c3-b71ef3ed1001';
+    const v7Run = '01890f47-3f6b-7c82-98c3-b71ef3ed1003';
+    const release = vi.fn();
+    const query = vi.fn().mockImplementation((sql: string) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return Promise.resolve({ rows: [] });
+      if (sql.includes('claim_run_raw_purge_candidate')) {
+        return Promise.resolve({ rows: [{ org_id: v7Org, run_id: v7Run }] });
+      }
+      if (sql.includes('purge_run_raw_points_batch')) {
+        return Promise.resolve({
+          rowCount: 1,
+          rows: [
+            {
+              completed: true,
+              current_raw_state: 'purged',
+              deleted_count: 3,
+              has_more: false,
+              previous_raw_state: 'available',
+            },
+          ],
+        });
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+
+    await expect(runRawPurgeOnce({ connect: vi.fn().mockResolvedValue({ query, release }) }, clock))
+      .resolves.toMatchObject({ orgId: v7Org, runId: v7Run, status: 'completed' });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('purge_run_raw_points_batch'),
+      [v7Org, v7Run, RUN_RAW_PURGE_BATCH_LIMIT, effectiveNow],
+    );
+    expect(query).toHaveBeenLastCalledWith('COMMIT');
+    expect(release).toHaveBeenCalledWith();
+  });
+
+  it.each([
+    ['an uppercase run identifier', '01890F47-3F6B-7C82-98C3-B71EF3ED1003'],
+    ['an unassigned UUID version', '01890f47-3f6b-0c82-98c3-b71ef3ed1003'],
+    ['a non-UUID', 'not-a-uuid'],
+  ])('rejects %s from the candidate function and rolls back', async (_label, badRunId) => {
+    const query = vi.fn().mockImplementation((sql: string) => {
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return Promise.resolve({ rows: [] });
+      if (sql.includes('claim_run_raw_purge_candidate')) {
+        return Promise.resolve({ rows: [{ org_id: orgId, run_id: badRunId }] });
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const release = vi.fn();
+
+    await expect(
+      runRawPurgeOnce({ connect: vi.fn().mockResolvedValue({ query, release }) }, clock),
+    ).rejects.toThrow('The raw purge candidate function returned an invalid result');
+    expect(query).toHaveBeenLastCalledWith('ROLLBACK');
+    expect(release).toHaveBeenCalledWith();
+  });
+
   it('claims and commits exactly one eligible purge batch', async () => {
     const release = vi.fn();
     const query = vi.fn().mockImplementation((sql: string) => {

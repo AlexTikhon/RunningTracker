@@ -43,6 +43,53 @@ describe('P10.3 annual retention deletion maintenance boundary', () => {
     expect(release).toHaveBeenCalledWith();
   });
 
+  it('accepts UUID v7 candidate identifiers and deletes with them unchanged', async () => {
+    const v7Org = '01890f47-3f6b-7c82-98c3-b71ef3ed1001';
+    const v7Run = '01890f47-3f6b-7c82-98c3-b71ef3ed1003';
+    const release = vi.fn();
+    const query = vi.fn().mockImplementation((sql: string) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return Promise.resolve({ rows: [] });
+      if (sql.includes('claim_run_deletion_candidate')) {
+        return Promise.resolve({ rows: [{ org_id: v7Org, run_id: v7Run }] });
+      }
+      if (sql.includes('delete_run_for_retention')) {
+        return Promise.resolve({ rows: [{ archive_revision: '9' }] });
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+
+    await expect(
+      runRetentionDeleteOnce({ connect: vi.fn().mockResolvedValue({ query, release }) }, clock),
+    ).resolves.toEqual({ archiveRevision: '9', orgId: v7Org, runId: v7Run, status: 'deleted' });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('delete_run_for_retention'), [
+      v7Org,
+      v7Run,
+      effectiveNow,
+    ]);
+    expect(query).toHaveBeenLastCalledWith('COMMIT');
+    expect(release).toHaveBeenCalledWith();
+  });
+
+  it.each([
+    ['an uppercase run identifier', '01890F47-3F6B-7C82-98C3-B71EF3ED1003'],
+    ['an unassigned UUID version', '01890f47-3f6b-0c82-98c3-b71ef3ed1003'],
+  ])('rejects %s from the candidate function and rolls back', async (_label, badRunId) => {
+    const query = vi.fn().mockImplementation((sql: string) => {
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return Promise.resolve({ rows: [] });
+      if (sql.includes('claim_run_deletion_candidate')) {
+        return Promise.resolve({ rows: [{ org_id: orgId, run_id: badRunId }] });
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const release = vi.fn();
+
+    await expect(
+      runRetentionDeleteOnce({ connect: vi.fn().mockResolvedValue({ query, release }) }, clock),
+    ).rejects.toThrow('The run deletion candidate function returned an invalid result');
+    expect(query).toHaveBeenLastCalledWith('ROLLBACK');
+    expect(release).toHaveBeenCalledWith();
+  });
+
   it('reports an empty cycle as idle', async () => {
     const release = vi.fn();
     const query = vi.fn().mockImplementation((sql: string) => {

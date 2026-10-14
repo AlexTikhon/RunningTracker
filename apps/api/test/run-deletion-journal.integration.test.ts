@@ -487,6 +487,79 @@ describe('P10.5 durable deletion journal and restore reapplication', () => {
     });
   });
 
+  describe('UUID v7 identifiers', () => {
+    // UUID v7 is legal under the shared acceptance policy; the whole maintenance chain must carry it.
+    const v7 = {
+      org: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+      owner: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+      run: '01890f47-3f6b-7c82-98c3-b71ef3ed1003',
+      secondRun: '01890f47-3f6b-7c82-98c3-b71ef3ed1004',
+    } as const;
+    const retentionNow = '2032-01-10T00:00:00.000Z';
+
+    async function seedV7Tenant(): Promise<void> {
+      await ownerPool.query(`INSERT INTO users (id, external_identity) VALUES ($1, 'fixture-v7-owner')`, [
+        v7.owner,
+      ]);
+      await ownerPool.query('INSERT INTO organizations (id) VALUES ($1)', [v7.org]);
+      await ownerPool.query(
+        `INSERT INTO memberships (org_id, user_id, role, active) VALUES ($1, $2, 'runner', true)`,
+        [v7.org, v7.owner],
+      );
+      for (const runId of [v7.run, v7.secondRun]) {
+        await ownerPool.query(
+          `INSERT INTO runs (
+             org_id, id, user_id, status, started_at, created_at, finished_at,
+             data_revision, control_revision, raw_state
+           ) VALUES ($1, $2, $3, 'finished', '2020-01-01T00:00:00.000Z',
+                     '2020-01-01T00:00:00.000Z', '2030-01-01T00:00:00.000Z', 1, 0, 'available')`,
+          [v7.org, runId, v7.owner],
+        );
+      }
+    }
+
+    async function retainUntilIdle(): Promise<number> {
+      let deleted = 0;
+      while ((await runRetentionDeleteOnce(maintenancePool, at(retentionNow))).status === 'deleted') {
+        deleted += 1;
+      }
+      return deleted;
+    }
+
+    it('deletes by retention, exports in a mixed batch, and reapplies idempotently', async () => {
+      await seedV7Tenant();
+      await seedRun(runIds.retention, { finishedAt: '2030-01-01T00:00:00.000Z' });
+
+      expect(await retainUntilIdle()).toBe(3);
+      expect((await journalRows()).map((row) => row.run_id).sort()).toEqual(
+        [runIds.retention, v7.run, v7.secondRun].sort(),
+      );
+
+      const sink = createFileDeletionJournalSink(directory);
+      await expect(exportOnce(sink)).resolves.toMatchObject({ exportedCount: 3, status: 'exported' });
+      expect(await journalRows()).toHaveLength(0);
+      const entries = await exportedEntries();
+      expect(entries.map((entry) => entry.runId).sort()).toEqual(
+        [runIds.retention, v7.run, v7.secondRun].sort(),
+      );
+      expect(entries.filter((entry) => entry.orgId === v7.org && entry.ownerUserId === v7.owner)).toHaveLength(2);
+
+      // The restored backup lost the markers; reapplying the journal twice restores, then finds them.
+      await ownerPool.query('DELETE FROM run_tombstones');
+      const first = await reapplyDeletions(ownerPool, at(restoreNow), await loadDeletionJournal(directory));
+      const second = await reapplyDeletions(ownerPool, at(restoreNow), await loadDeletionJournal(directory));
+
+      expect(first.outcomes.marker_restored).toBe(3);
+      expect(second.outcomes.marker_present).toBe(3);
+      expect(second.outcomes.marker_restored).toBe(0);
+      const marker = await ownerPool.query<{ owner_user_id: string }>(
+        'SELECT owner_user_id FROM run_tombstones WHERE org_id = $1 AND run_id = $2',
+        [v7.org, v7.run],
+      );
+      expect(marker.rows[0]?.owner_user_id).toBe(v7.owner);
+    });
+  });
+
   describe('restore-time reapplication', () => {
     function journalFrom(entries: DeletionJournalEntry[]) {
       return { entries, files: 1 };

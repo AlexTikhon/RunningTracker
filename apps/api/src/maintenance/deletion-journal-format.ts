@@ -1,7 +1,6 @@
+import { canonicalUuidSchema } from '@running-tracker/contracts';
 import { z } from 'zod';
 
-const canonicalUuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const utcMillisecondPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 export const deletionJournalFileNamePattern = /^deletion-journal-[0-9A-Za-z._-]+\.ndjson$/u;
@@ -13,9 +12,9 @@ export const deletionJournalFileNamePattern = /^deletion-journal-[0-9A-Za-z._-]+
  */
 const journalEntrySchema = z.strictObject({
   deletedAt: z.string().regex(utcMillisecondPattern),
-  orgId: z.string().regex(canonicalUuidPattern),
-  ownerUserId: z.string().regex(canonicalUuidPattern),
-  runId: z.string().regex(canonicalUuidPattern),
+  orgId: canonicalUuidSchema,
+  ownerUserId: canonicalUuidSchema,
+  runId: canonicalUuidSchema,
   seq: z.string().regex(/^[1-9]\d{0,18}$/u),
   v: z.literal(1),
 });

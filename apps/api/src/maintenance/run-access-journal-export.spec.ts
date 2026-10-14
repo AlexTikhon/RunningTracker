@@ -80,6 +80,60 @@ describe('runAccessJournalExportOnce', () => {
     ]);
   });
 
+  it('exports a mixed v4 and v7 batch in one file without blocking later entries', async () => {
+    const order: string[] = [];
+    const sink = {
+      write: vi.fn<(name: string, contents: string) => Promise<void>>(() => {
+        order.push('write');
+        return Promise.resolve();
+      }),
+    };
+    const v7 = (seq: number, kind: string) => ({
+      ...row(seq, kind),
+      org_id: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+      run_id:
+        kind === 'membership_deactivated'
+          ? null
+          : `01890f47-3f6b-7c82-98c3-b71ef3ed${String(seq).padStart(4, '0')}`,
+      user_id: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+    });
+    const { client, pool } = fakePool((sql, values) => {
+      order.push(String(sql).trim().split(/\s/u)[0]!.replace(/\W.*$/u, ''));
+      if (sql.includes('claim_access_journal_batch')) {
+        return {
+          rows: [
+            row(1),
+            v7(2, 'membership_deactivated'),
+            row(3, 'share_revoked'),
+            v7(4, 'share_revoked'),
+            v7(5, 'share_narrowed'),
+          ],
+        };
+      }
+      if (sql.includes('ack_access_journal_batch')) {
+        expect(values).toEqual([['1', '2', '3', '4', '5']]);
+        return { rows: [{ acknowledged: 5 }] };
+      }
+      return { rows: [] };
+    });
+
+    await expect(runAccessJournalExportOnce(pool, sink, clock)).resolves.toMatchObject({
+      exportedCount: 5,
+      status: 'exported',
+    });
+
+    expect(order).toEqual(['BEGIN', 'SELECT', 'write', 'SELECT', 'COMMIT']);
+    expect(client.release).toHaveBeenCalledWith();
+    const [fileName, contents] = sink.write.mock.calls[0]!;
+    expect(parseAccessJournalFile(fileName, contents).map((entry) => entry.seq)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+    ]);
+  });
+
   it('rolls back and keeps every row when the sink fails', async () => {
     const sink = { write: vi.fn(() => Promise.reject(new Error('disk full'))) };
     const { client, pool } = fakePool((sql) =>

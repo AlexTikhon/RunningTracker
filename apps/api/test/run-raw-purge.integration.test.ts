@@ -36,6 +36,8 @@ const runIds = {
   blockedSummary: 'a6500000-0000-4000-8000-000000000008',
   eligibleWorker: 'a6500000-0000-4000-8000-000000000009',
   tooYoung: 'a6500000-0000-4000-8000-000000000010',
+  // UUID v7: legal under the shared acceptance policy, so maintenance must claim and purge it.
+  v7Worker: '01890f47-3f6b-7c82-98c3-b71ef3ed1020',
 } as const;
 
 const validQualityStats = {
@@ -478,6 +480,26 @@ describe('P10.1 bounded restart-safe raw point purge', () => {
       { id: runIds.eligibleWorker, raw_state: 'purged' },
       { id: runIds.tooYoung, raw_state: 'available' },
     ]);
+  });
+
+  it('claims and purges a run whose identifier is a UUID v7', async () => {
+    await seedRun(runIds.v7Worker, 2, { summary: true });
+
+    await expect(runRawPurgeOnce(maintenancePool, new FixedClock())).resolves.toMatchObject({
+      completed: true,
+      deletedCount: 2,
+      orgId: ids.orgA,
+      runId: runIds.v7Worker,
+      status: 'completed',
+    });
+    const state = await ownerPool.query<{ raw_state: string }>(
+      'SELECT raw_state FROM runs WHERE org_id = $1 AND id = $2',
+      [ids.orgA, runIds.v7Worker],
+    );
+    expect(state.rows[0]?.raw_state).toBe('purged');
+    await expect(runRawPurgeOnce(maintenancePool, new FixedClock())).resolves.toEqual({
+      status: 'idle',
+    });
   });
 
   it('bounds each commit, resumes after restart, hides partial raw data, and preserves archive state', async () => {

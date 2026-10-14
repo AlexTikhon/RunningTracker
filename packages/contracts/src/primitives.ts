@@ -15,6 +15,18 @@ function bigintStringSchema(minimum: bigint) {
 }
 
 export const uuidSchema = z.uuid();
+
+// The one UUID acceptance policy, narrowed to the lowercase spelling PostgreSQL emits. Journals, maintenance
+// candidates and configured identities are compared and stored byte for byte, so they must not accept mixed case.
+// Version and variant acceptance is deliberately inherited from `uuidSchema` rather than restated as a pattern.
+export const canonicalUuidSchema = uuidSchema.refine(
+  (value) => value === value.toLowerCase(),
+  'Expected a lowercase UUID',
+);
+
+export function isCanonicalUuid(value: unknown): boolean {
+  return canonicalUuidSchema.safeParse(value).success;
+}
 export const revisionSchema = bigintStringSchema(0n);
 export const seqSchema = bigintStringSchema(1n);
 export const timestampSchema = z.iso.datetime({ offset: false });

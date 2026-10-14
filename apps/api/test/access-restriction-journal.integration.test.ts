@@ -3,6 +3,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { loadIntegrationTestConfiguration } from '../src/config/environment.js';
 import {
+  parseAccessJournalFile,
+  serializeAccessJournalEntries,
+  type AccessJournalEntry,
+} from '../src/maintenance/access-journal-format.js';
+import {
   prepareTenantIsolationFixtures,
   tenantIsolationIds as ids,
 } from './tenant-isolation-fixtures.js';
@@ -354,6 +359,86 @@ describe('P12.4 access-restriction journal and restore reapplication', () => {
       await expect(reapply('share_narrowed', { history: null, live: true })).rejects.toThrow(
         /access restriction/u,
       );
+    });
+
+    it('exports and reapplies restrictions that carry UUID v7 identifiers, idempotently', async () => {
+      const v7 = {
+        grantee: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+        org: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+        run: '01890f47-3f6b-7c82-98c3-b71ef3ed1003',
+      };
+      await ownerPool.query(`INSERT INTO users (id, external_identity) VALUES ($1, 'fixture-v7-grantee'), ($2, 'fixture-v7-owner')`, [
+        v7.grantee,
+        '01890f47-3f6b-7c82-98c3-b71ef3ed1005',
+      ]);
+      await ownerPool.query('INSERT INTO organizations (id) VALUES ($1)', [v7.org]);
+      await ownerPool.query(
+        `INSERT INTO memberships (org_id, user_id, role, active)
+         VALUES ($1, $2, 'runner', true), ($1, '01890f47-3f6b-7c82-98c3-b71ef3ed1005', 'runner', true)`,
+        [v7.org, v7.grantee],
+      );
+      await ownerPool.query(
+        `INSERT INTO runs (
+           org_id, id, user_id, status, started_at, created_at, finished_at,
+           data_revision, control_revision, raw_state
+         ) VALUES ($1, $2, '01890f47-3f6b-7c82-98c3-b71ef3ed1005', 'finished', $3, $3, $4, 1, 0, 'available')`,
+        [v7.org, v7.run, '2031-01-01T00:00:00.000Z', '2031-01-01T01:00:00.000Z'],
+      );
+      await ownerPool.query(
+        `INSERT INTO run_shares (org_id, run_id, grantee_user_id, can_read_history, can_read_live)
+         VALUES ($1, $2, $3, true, true)`,
+        [v7.org, v7.run, v7.grantee],
+      );
+
+      // Narrow, revoke and deactivate through the owner function, which also journals each change.
+      expect(await reapply('share_narrowed', { history: true, live: false, org: v7.org, run: v7.run, user: v7.grantee })).toBe('applied');
+      expect(await reapply('share_revoked', { org: v7.org, run: v7.run, user: v7.grantee })).toBe('applied');
+      expect(await reapply('membership_deactivated', { org: v7.org, run: null, user: v7.grantee })).toBe('applied');
+
+      const claimed = await maintenancePool.query<{
+        journal_seq: string;
+        kind: string;
+        org_id: string;
+        run_id: string | null;
+        user_id: string;
+      }>(
+        `SELECT journal_seq::text AS journal_seq, org_id, kind, user_id, run_id
+         FROM app_private.claim_access_journal_batch(10)`,
+      );
+      expect(claimed.rows.map((row) => row.kind)).toEqual([
+        'share_narrowed',
+        'share_revoked',
+        'membership_deactivated',
+      ]);
+      const text = serializeAccessJournalEntries(
+        claimed.rows.map((row) => ({
+          changedAt: '2032-01-10T00:00:00.000Z',
+          kind: row.kind,
+          orgId: row.org_id,
+          seq: row.journal_seq,
+          userId: row.user_id,
+          v: 1 as const,
+          ...(row.kind === 'membership_deactivated' ? {} : { runId: row.run_id! }),
+          ...(row.kind === 'share_narrowed' ? { canReadHistory: true, canReadLive: false } : {}),
+        })) as AccessJournalEntry[],
+      );
+      const entries = parseAccessJournalFile('v7.ndjson', text);
+      expect(entries).toHaveLength(3);
+
+      // Replaying the same journal against the already-restricted database changes nothing further.
+      const outcomes: unknown[] = [];
+      for (const entry of [...entries, ...entries]) {
+        outcomes.push(
+          await reapply(entry.kind, {
+            history: entry.kind === 'share_narrowed' ? entry.canReadHistory : null,
+            live: entry.kind === 'share_narrowed' ? entry.canReadLive : null,
+            org: entry.orgId,
+            run: entry.kind === 'membership_deactivated' ? null : entry.runId,
+            user: entry.userId,
+          }),
+        );
+      }
+      expect(outcomes).toEqual(Array.from({ length: 6 }, () => 'already_applied'));
     });
 
     it('advances the archive revision when it changes access, and journals the change again', async () => {

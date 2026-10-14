@@ -6,7 +6,9 @@ import {
   apiErrorResponseSchema,
   archiveMetadataQuerySchema,
   archiveRunListQuerySchema,
+  canonicalUuidSchema,
   ingestPointsRequestSchema,
+  isCanonicalUuid,
   liveStateSchema,
   liveTrackChangesQuerySchema,
   nearbyQuerySchema,
@@ -140,6 +142,34 @@ describe('shared model contracts', () => {
     expect(timestampSchema.safeParse(timestamp).success).toBe(true);
     expect(timestampSchema.safeParse('2026-09-22T12:00:00+02:00').success).toBe(false);
     expect(timestampSchema.safeParse('2026-09-22').success).toBe(false);
+  });
+
+  it('derives the canonical lowercase UUID form from the same acceptance policy', () => {
+    const v7 = '01890f47-3f6b-7c82-98c3-b71ef3ed1020';
+    for (const accepted of [userId, v7, '6ba7b810-9dad-11d1-80b4-00c04fd430c8']) {
+      expect(uuidSchema.safeParse(accepted).success).toBe(true);
+      expect(canonicalUuidSchema.safeParse(accepted).success).toBe(true);
+      expect(isCanonicalUuid(accepted)).toBe(true);
+    }
+    // Mixed case is public-API-valid, but a stored or journaled identifier must be the lowercase form.
+    expect(uuidSchema.safeParse(v7.toUpperCase()).success).toBe(true);
+    expect(canonicalUuidSchema.safeParse(v7.toUpperCase()).success).toBe(false);
+    expect(isCanonicalUuid(v7.toUpperCase())).toBe(false);
+    for (const rejected of [
+      'not-a-uuid',
+      '',
+      '01890f47-3f6b-0c82-98c3-b71ef3ed1020',
+      '01890f47-3f6b-9c82-98c3-b71ef3ed1020',
+      '01890f47-3f6b-7c82-c8c3-b71ef3ed1020',
+      ` ${v7}`,
+      `${v7}\n`,
+      '01890f473f6b7c8298c3b71ef3ed1020',
+    ]) {
+      expect(canonicalUuidSchema.safeParse(rejected).success).toBe(false);
+      expect(isCanonicalUuid(rejected)).toBe(false);
+    }
+    expect(isCanonicalUuid(undefined)).toBe(false);
+    expect(isCanonicalUuid(7)).toBe(false);
   });
 
   it('enforces PostgreSQL bigint domains as decimal strings', () => {

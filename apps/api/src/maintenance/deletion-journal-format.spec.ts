@@ -27,6 +27,33 @@ describe('deletion journal format', () => {
     expect(parseDeletionJournalFile('empty.ndjson', '')).toEqual([]);
   });
 
+  it('serializes and parses UUID v7 identifiers alongside v4 ones', () => {
+    const v7Entry: DeletionJournalEntry = {
+      ...entry,
+      orgId: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+      ownerUserId: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+      runId: '01890f47-3f6b-7c82-98c3-b71ef3ed1003',
+      seq: '44',
+    };
+    const text = serializeDeletionJournalEntries([entry, v7Entry]);
+
+    expect(parseDeletionJournalFile('mixed.ndjson', text)).toEqual([entry, v7Entry]);
+    expect(text).toContain(v7Entry.runId);
+  });
+
+  it.each([
+    ['an uppercase identifier', '01890F47-3F6B-7C82-98C3-B71EF3ED1003'],
+    ['an unassigned version', '01890f47-3f6b-0c82-98c3-b71ef3ed1003'],
+    ['a version beyond the registered range', '01890f47-3f6b-9c82-98c3-b71ef3ed1003'],
+    ['a foreign variant', '01890f47-3f6b-7c82-c8c3-b71ef3ed1003'],
+    ['an identifier without hyphens', '01890f473f6b7c8298c3b71ef3ed1003'],
+  ])('still rejects %s when serializing and parsing', (_label, runId) => {
+    expect(() => serializeDeletionJournalEntries([{ ...entry, runId }])).toThrow();
+    expect(() =>
+      parseDeletionJournalFile('bad.ndjson', `${JSON.stringify({ ...entry, runId })}\n`),
+    ).toThrow(/line 1 is not a valid entry/u);
+  });
+
   it('carries identifiers and timestamps only', () => {
     expect(Object.keys(JSON.parse(serializeDeletionJournalEntries([entry])) as object).sort()).toEqual([
       'deletedAt',

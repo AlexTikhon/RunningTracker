@@ -39,6 +39,34 @@ describe('access journal format', () => {
     expect(parseAccessJournalFile('empty.ndjson', '')).toEqual([]);
   });
 
+  it('serializes and parses UUID v7 identifiers for every kind', () => {
+    const v7 = {
+      orgId: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+      runId: '01890f47-3f6b-7c82-98c3-b71ef3ed1003',
+      userId: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+    };
+    const entries: AccessJournalEntry[] = [
+      { ...membership, orgId: v7.orgId, userId: v7.userId },
+      { ...revoked, ...v7 },
+      { ...narrowed, ...v7 },
+    ];
+    const text = serializeAccessJournalEntries([membership, ...entries]);
+
+    expect(parseAccessJournalFile('v7.ndjson', text)).toEqual([membership, ...entries]);
+  });
+
+  it.each([
+    ['an uppercase identifier', '01890F47-3F6B-7C82-98C3-B71EF3ED1003'],
+    ['an unassigned version', '01890f47-3f6b-0c82-98c3-b71ef3ed1003'],
+    ['a version beyond the registered range', '01890f47-3f6b-9c82-98c3-b71ef3ed1003'],
+    ['a foreign variant', '01890f47-3f6b-7c82-c8c3-b71ef3ed1003'],
+  ])('still rejects %s when serializing and parsing', (_label, runId) => {
+    expect(() => serializeAccessJournalEntries([{ ...revoked, runId }])).toThrow();
+    expect(() =>
+      parseAccessJournalFile('bad.ndjson', `${JSON.stringify({ ...revoked, runId })}\n`),
+    ).toThrow(/line 1 is not a valid entry/u);
+  });
+
   it('carries identifiers, two booleans and an instant only', () => {
     const keys = (entry: AccessJournalEntry) =>
       Object.keys(JSON.parse(serializeAccessJournalEntries([entry])) as object).sort();

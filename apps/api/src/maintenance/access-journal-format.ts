@@ -1,12 +1,11 @@
+import { canonicalUuidSchema } from '@running-tracker/contracts';
 import { z } from 'zod';
 
-const canonicalUuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const utcMillisecondPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 export const accessJournalFileNamePattern = /^access-journal-[0-9A-Za-z._-]+\.ndjson$/u;
 
-const uuid = z.string().regex(canonicalUuidPattern);
+const uuid = canonicalUuidSchema;
 const common = {
   changedAt: z.string().regex(utcMillisecondPattern),
   orgId: uuid,

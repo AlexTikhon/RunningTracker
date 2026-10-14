@@ -129,6 +129,57 @@ describe('access journal loading and reapplication', () => {
     expect(client.release).toHaveBeenCalledWith();
   });
 
+  it('loads a v7 journal and replays it idempotently with identifiers unchanged', async () => {
+    const v7 = {
+      orgId: '01890f47-3f6b-7c82-98c3-b71ef3ed1001',
+      runId: '01890f47-3f6b-7c82-98c3-b71ef3ed1003',
+      userId: '01890f47-3f6b-7c82-98c3-b71ef3ed1002',
+    };
+    await writeFile(
+      join(directory, 'access-journal-1.ndjson'),
+      serializeAccessJournalEntries([
+        entry(1),
+        entry(2, { orgId: v7.orgId, userId: v7.userId }),
+        entry(3, { ...v7, kind: 'share_revoked' }),
+        entry(4, { ...v7, canReadHistory: true, canReadLive: false, kind: 'share_narrowed' }),
+      ]),
+    );
+    const seen = new Set<string>();
+    const calls: unknown[][] = [];
+    const statements: string[] = [];
+    const client = {
+      query: vi.fn((sql: string, values?: unknown[]) => {
+        statements.push(sql.trim().split(/\s/u)[0]!);
+        if (sql.includes('reapply_access_restriction')) {
+          calls.push(values ?? []);
+          const key = JSON.stringify(values);
+          const outcome = seen.has(key) ? 'already_applied' : 'applied';
+          seen.add(key);
+          return Promise.resolve({ rows: [{ outcome }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: vi.fn(),
+    };
+    const pool = { connect: () => Promise.resolve(client as unknown as PoolClient) };
+
+    const journal = await loadAccessJournal(directory);
+    const first = await reapplyAccessRestrictions(pool, journal);
+    const second = await reapplyAccessRestrictions(pool, journal);
+
+    expect(journal.entries).toHaveLength(4);
+    expect(first.outcomes).toMatchObject({ already_applied: 0, applied: 4 });
+    expect(second.outcomes).toMatchObject({ already_applied: 4, applied: 0 });
+    expect(calls.slice(0, 4)).toEqual([
+      ['membership_deactivated', org, user, null, null, null],
+      ['membership_deactivated', v7.orgId, v7.userId, null, null, null],
+      ['share_revoked', v7.orgId, v7.userId, v7.runId, null, null],
+      ['share_narrowed', v7.orgId, v7.userId, v7.runId, true, false],
+    ]);
+    expect(statements.filter((verb) => verb === 'COMMIT')).toHaveLength(8);
+    expect(statements).not.toContain('ROLLBACK');
+  });
+
   it('stops at the first failure, rolls it back, and destroys the connection', async () => {
     const statements: string[] = [];
     const client = {

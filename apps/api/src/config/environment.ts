@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { parseEnv } from 'node:util';
+import { isCanonicalUuid } from '@running-tracker/contracts';
 import { z } from 'zod';
 
 import {
@@ -17,9 +18,6 @@ import {
   withoutRunSearchAiFields,
 } from './run-search-ai-config.js';
 import { resolveSecretFiles } from './secret-files.js';
-
-const canonicalUuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 const localLiveTrackCursorSigningKey =
   'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE';
@@ -54,7 +52,7 @@ const uuidList = z
       .filter(Boolean);
 
     for (const entry of entries) {
-      if (!canonicalUuidPattern.test(entry)) {
+      if (!isCanonicalUuid(entry)) {
         context.addIssue({ code: 'custom', message: `invalid canonical UUID: ${entry}` });
       }
     }
