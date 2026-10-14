@@ -115,6 +115,81 @@ The evaluator's report for an Ollama run states the provider, the model, the run
 generation settings (`num_ctx 4096`, `num_predict 800`, `temperature 0`, `think false`, `stream false`); it does not
 attach the OpenAI SDK version. The report files are untracked (`apps/api/.local/eval-reports/`).
 
+## Addendum: a compact Ollama wording, evaluated and not adopted (2026-10-14)
+
+One bounded experiment: does a compact Ollama-specific wording, with the decision order stated first (unsupported,
+then clarification, then search), interpret better or faster than the current one on the installed `qwen3:8b`?
+**No.** The candidate was not better on any measured figure and was worse on correctness; the original wording stays.
+Only the instructions differed. The OpenAI instructions are byte for byte as before (hash pinned by a test), the
+Ollama wire schema (`schemaSha256` `33034b87dfca14b9…`), the public contracts, normalisation, the 10 s deadline,
+generation settings (`num_ctx 4096`, `num_predict 800`, `temperature 0`, `think false`, `stream false`), admission
+accounting and cancellation were not touched. No request text of the dataset is in the candidate (a test checks this
+against every dataset case).
+
+| | Original (`…ollama/2026-10-14.1`) | Candidate (`…ollama/2026-10-14.2`) |
+|---|---|---|
+| Instructions | 6,281 characters, 975 words, sha256 `2bcf2f32…` | 6,035 characters (-3.9 %), 930 words, sha256 `476543bc…` |
+| Prompt tokens per answered call (reported total / 3) | about 1,660 | about 1,620 (-2.4 %) |
+
+The candidate is only about 4 % shorter: every interpretation rule, trigger phrase and reason name of the original is
+kept (a test compares the quoted phrases), and those lists are most of the text. The decision order is the change.
+
+**Protocol.** Same machine, one Ollama 0.35.1 server, same model, same settings and case order, concurrency 1, the
+existing `--fail-on-mismatch` gate with its early-stop rule, the existing 10 s deadline, a distinct report file per run
+(`.local/eval-reports/prompt-baseline-set1.json`, `prompt-candidate-set1.json`; untracked). Before each run the model
+was unloaded and loaded again with an empty prompt, so each run started from the same resident model with an empty
+cache. That load generates nothing and is not counted as an inference call. No other CPU-heavy command ran during
+inference; the focused tests, lint and `npm run verify` ran afterwards. The candidate was frozen (by its hash, which
+each report records) before its run.
+
+**Cold load, kept apart:** 15.5 s (original run) and 11.3 s (candidate run), wall time of the empty-prompt load,
+CPU only. It is a property of the model and machine, not of the wording, and it alone exceeds the 10 s deadline.
+
+**Set 1** (`en-last-month-min-longest`, `ru-last-month-min-longest`, `en-strict-more-than`, `en-location`,
+`en-injection-sql`), 5 calls per run:
+
+| | Original | Candidate |
+|---|---|---|
+| Acceptance (`--fail-on-mismatch`) | **failed**, exit 2 | **failed**, exit 2 |
+| Exact matches (outcome, reason and filters) | 1 of 5 (`en-injection-sql`) | 0 of 5 |
+| Outcome correct | 1 of 5 | 1 of 5 |
+| Reason correct (clarify and unsupported cases) | 1 of 3 | 0 of 3 |
+| Exact filters (search cases) | 0 of 2 (both timed out) | 0 of 2 (both timed out) |
+| Incorrect acceptances (a search answered where a clarification or unsupported was expected) | 1 of 3: `en-location` | 2 of 3: `en-strict-more-than`, `en-location` |
+| Failures | 2 `timeout` (`en-last-month-min-longest`, `ru-last-month-min-longest`) | the same 2 |
+| Wrong answers | `en-strict-more-than`: unsupported / `comparison_or_analysis`; `en-location`: search | `en-strict-more-than`: search; `en-location`: search; `en-injection-sql`: unsupported / `other_attributes` |
+| Latency, all 5 calls (timeouts count as about 10 s) | mean 6,791 ms, p50 6,445, p95 = max 10,012 | mean 7,368 ms, p50 8,018, p95 = max 10,009 |
+| Latency, the 3 answered calls (derived from the means) | mean about 4.6 s | mean about 5.6 s |
+| Tokens, 3 calls that reported usage | input 4,979 (cached 4,810), output 94 | input 4,859 (cached 4,730), output 128 |
+
+The early-stop rule did not trigger in either run (two timeouts in a row, one short of the three that stop a run), so
+all five cases were executed in both.
+
+**Set 2** (`ru-location`, `en-supported-plus-location`, `en-not-shorter-than`, `en-dates-iso-max`, `en-units-mixed`)
+was **not run**: it was to run only if the candidate passed set 1. Calls used: 10 of the 15 permitted (5 + 5), no
+retries, no further tuning rounds.
+
+**Decision:** not adopted. The candidate neither passed set 1 nor improved latency, and it turned one correct
+unsupported answer (a prompt-injection attempt) into a wrong reason and one wrong clarification answer into an
+incorrect acceptance. The original Ollama wording remains the one the adapter and the evaluation send. The candidate
+is kept in `interpretation-prompt.ts` as an exported constant that nothing sends, pinned by hash, so the experiment can
+be repeated exactly.
+
+**Limitations.**
+
+- Five cases, one run per prompt, `temperature 0`, no repeats: the differences between the two columns (one case each
+  way, 94 against 128 output tokens) are within what one different answer would change. They show no improvement;
+  they do not show that the compact wording is worse in general.
+- Two of the five calls timed out in both runs, always the first two. The cached-token figures (96 % to 97 % of input
+  tokens on the answered calls) suggest the calls that fit the deadline reused a prompt prefix evaluated by the earlier
+  ones, so the later latencies describe a warm prompt cache and not a first request. Whether the first two would have
+  answered correctly is unknown, and no prompt was shown to be fast enough cold.
+- Both searches (`last month`, one English, one Russian) never produced an answer, so neither wording was measured on
+  the case type the feature mostly serves.
+- A warm synthetic result is not cold-start usability and not general model quality. On this CPU-only machine the
+  model's cold load alone exceeds the application's deadline. The deadline was not changed, and the expected answers
+  and rules were not changed.
+
 ## Not claimed
 
 Nothing here says how well any model interprets these requests, that the provider accepts the schema, that 800
