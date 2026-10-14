@@ -6,6 +6,19 @@ export class ResponseTooLargeError extends Error {
   }
 }
 
+// The SDKs and `fetch` may wrap a failure that happened while the body was read; look a few levels down the cause
+// chain for the size limit.
+export function causedByOversizedResponse(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    if (current instanceof ResponseTooLargeError) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
 /**
  * Wraps a `fetch` so that no response body larger than `maxBytes` is ever buffered: a declared length over the limit
  * is refused before a byte is read, and a body that grows past it (or declares nothing) is cut off mid-stream. The

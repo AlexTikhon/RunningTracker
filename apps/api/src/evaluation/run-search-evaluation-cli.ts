@@ -1,11 +1,15 @@
+import { createHash } from 'node:crypto';
+
 import { z } from 'zod';
 
 import {
   buildRunSearchAiConfig,
   checkRunSearchAiEnvironment,
   runSearchAiEnvironmentFields,
-  type RunSearchAiConfig,
+  type RealRunSearchAiConfig,
 } from '../config/run-search-ai-config.js';
+import { OLLAMA_GENERATION } from '../runs/interpretation/ollama-interpreter.js';
+import { INTERPRETATION_SCHEMA_NAME } from '../runs/interpretation/interpretation-schema.js';
 import { FILTER_FIELDS } from './run-search-scoring.js';
 import { EVALUATION_MAX_CONCURRENCY, type EvaluationReport } from './run-search-evaluator.js';
 
@@ -100,19 +104,20 @@ export function parseEvaluationArguments(argv: readonly string[]): EvaluationArg
 
 /**
  * The same settings, with the same bounds and the same model check, as the application's own configuration, read
- * from the environment (and `OPENAI_API_KEY_FILE`, resolved by the caller). The provider is always the real one: a
- * fake provider would make the numbers worthless, and the enabling flag is irrelevant to an explicit live run.
+ * from the environment (and `OPENAI_API_KEY_FILE`, resolved by the caller when OpenAI is the provider). The provider
+ * is the configured REAL one, `openai` or `ollama`: a fake provider would make the numbers worthless, so it is
+ * refused rather than replaced by a paid one, and the enabling flag is irrelevant to an explicit live run.
  */
-export function loadLiveEvaluationConfig(source: Record<string, string | undefined>): RunSearchAiConfig {
+export function loadLiveEvaluationConfig(source: Record<string, string | undefined>): RealRunSearchAiConfig {
   const schema = z
     .object(runSearchAiEnvironmentFields)
     .superRefine((values, context) => {
-      checkRunSearchAiEnvironment(values, { APP_ENV: 'production' }, context);
+      // Not production: the local provider is for development machines, and this is a development tool.
+      checkRunSearchAiEnvironment(values, { APP_ENV: 'development' }, context);
     });
   const result = schema.safeParse({
     ...source,
     RUN_SEARCH_AI_ENABLED: 'true',
-    RUN_SEARCH_AI_PROVIDER: 'openai',
   });
   if (!result.success) {
     // Messages name variables and limits; none of them carries a value of OPENAI_API_KEY.
@@ -122,16 +127,106 @@ export function loadLiveEvaluationConfig(source: Record<string, string | undefin
   if (config === undefined) {
     throw new Error('Invalid evaluation configuration');
   }
+  if (config.provider === 'fake') {
+    throw new Error(
+      'RUN_SEARCH_AI_PROVIDER is fake: an evaluation measures a real model. Set RUN_SEARCH_AI_PROVIDER to openai or ollama for this run.',
+    );
+  }
   return config;
+}
+
+export interface EvaluationRunDescription {
+  concurrency: number;
+  /** The settings that shape what a model produces, as the provider receives them. */
+  generation: Record<string, boolean | number | string>;
+  instructionsSha256: string;
+  maxOutputTokens: number;
+  maxResponseBytes: number;
+  model: string;
+  provider: 'ollama' | 'openai';
+  /** What served the requests: the local runtime for Ollama, the client library for OpenAI. */
+  runtime: { name: string; version: string | null };
+  schemaName: string;
+  schemaSha256: string;
+  selection: 'all' | 'first-n' | 'ids';
+  timeoutMs: number;
+}
+
+const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
+
+/**
+ * What was frozen for a run, so that a later report with a different prompt, schema, model, runtime or limit cannot
+ * be taken for the same measurement. An Ollama run is described by the local runtime's version and its generation
+ * settings; the OpenAI SDK's version describes an OpenAI run and is never attached to anything else. No key, no text
+ * of a person, no provider response.
+ */
+export function describeEvaluationRun(options: {
+  args: EvaluationArguments;
+  config: RealRunSearchAiConfig;
+  instructions: string;
+  openaiSdkVersion: string;
+  /** The local runtime's reported version; null when it was not asked (a dry run) or for OpenAI. */
+  runtimeVersion: string | null;
+  schema: unknown;
+}): EvaluationRunDescription {
+  const { args, config } = options;
+  const common = {
+    concurrency: args.concurrency,
+    instructionsSha256: sha256(options.instructions),
+    maxOutputTokens: config.maxOutputTokens,
+    maxResponseBytes: config.maxResponseBytes,
+    model: config.model,
+    schemaName: INTERPRETATION_SCHEMA_NAME,
+    schemaSha256: sha256(JSON.stringify(options.schema)),
+    selection: args.caseIds !== undefined ? ('ids' as const) : args.maxCases !== undefined ? ('first-n' as const) : ('all' as const),
+    timeoutMs: config.timeoutMs,
+  };
+  switch (config.provider) {
+    case 'ollama':
+      return {
+        ...common,
+        generation: {
+          numCtx: OLLAMA_GENERATION.numCtx,
+          numPredict: config.maxOutputTokens,
+          stream: false,
+          temperature: OLLAMA_GENERATION.temperature,
+          think: OLLAMA_GENERATION.think,
+        },
+        provider: 'ollama',
+        runtime: { name: 'ollama', version: options.runtimeVersion },
+      };
+    case 'openai':
+      return {
+        ...common,
+        generation: { maxOutputTokens: config.maxOutputTokens, retries: 0, store: false },
+        provider: 'openai',
+        runtime: { name: 'openai-node-sdk', version: options.openaiSdkVersion },
+      };
+    default:
+      return unsupportedEvaluationProvider(config);
+  }
+}
+
+function unsupportedEvaluationProvider(config: never): never {
+  throw new Error(`Unsupported evaluation provider: ${String((config as { provider?: unknown }).provider).slice(0, 32)}`);
 }
 
 function percent(value: number | null): string {
   return value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`;
 }
 
-export function formatEvaluationReport(report: EvaluationReport): string {
+export function formatEvaluationReport(report: EvaluationReport, run?: EvaluationRunDescription): string {
   const lines: string[] = [];
   lines.push(`Run search interpreter evaluation`);
+  if (run !== undefined) {
+    const kind = run.provider === 'ollama' ? 'local runtime' : 'client library';
+    lines.push(`Provider: ${run.provider} (${kind} ${run.runtime.name} ${run.runtime.version ?? 'version not read'})`);
+    lines.push(
+      `Generation: ${Object.entries(run.generation)
+        .map(([name, value]) => `${name.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`)} ${String(value)}`)
+        .join(', ')}`,
+    );
+  }
   lines.push(`Model: ${report.model}`);
   lines.push(`Prompt: ${report.promptVersion}`);
   lines.push(`Data: dataset v${report.datasetVersion}, ${report.executedCount} of ${report.caseCount} cases run`);

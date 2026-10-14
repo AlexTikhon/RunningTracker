@@ -2072,3 +2072,62 @@ settles within its delay and honours cancellation, so no browser-reachable path 
 **Not verified / limits.** Settlement bounds only locally tracked calls; whether a remote provider stopped computing
 is unknown. Limits are per process and reset on restart, which also forgets outstanding operations. The real adapter's
 behaviour on abort is covered by its existing offline tests only; the live provider has still never been called.
+
+## Run-search interpreter: a local Ollama provider (2026-10-14)
+
+ADR-0057 addendum "a local Ollama interpreter"; runbook "Running it on a local model"; `.env.example`. Builds on the
+operation-lifetime fix (commit `c146b7d`, branch `fix/interpretation-operation-lifetime`), which it preserves. No
+contract, search, authorization, SQL, browser or timeout change. OpenAI was not called; no model was downloaded.
+
+**Architecture.** `RUN_SEARCH_AI_PROVIDER` is `openai` (default), `ollama` or `fake`; the configuration is a
+discriminated union (`OpenAiRunSearchAiConfig` with `apiKey`, `OllamaRunSearchAiConfig`, `FakeRunSearchAiConfig`) so
+there is no optional credential to cast, and `createInterpreter` is an exhaustive switch that builds the OpenAI client
+only for the OpenAI configuration. Ollama mode neither reads nor validates `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`,
+requires an explicit local model name (cloud names refused), and is refused in production. New
+`ollama-interpreter.ts`: native `/api/chat` at the constant `http://127.0.0.1:11434`, `stream:false`, the existing JSON
+Schema as `format`, `think:false`, `temperature 0`, `num_ctx 4096`, `num_predict` from the output limit, no tools, no
+retries, `redirect:'manual'` (3xx refused), size-bounded body (`boundedFetch`), only `message.content` parsed, local
+validation of envelope, `done_reason`, JSON and proposal. It never races the signal, so the service keeps holding
+capacity for a call that ignores cancellation. The evaluator selects the configured real provider through the same
+factory, refuses `fake`, and writes a run description with provider, model, runtime and version, and generation
+settings. `readOllamaVersion` is the one extra local request, made before any inference.
+
+**Changed files.** `run-search-ai-config.ts`, `environment.ts` (secret-file names per provider),
+`interpretation-factory.ts`, new `ollama-interpreter.ts`, `bounded-fetch.ts` + `openai-interpreter.ts` (the
+oversized-cause helper is shared, same behaviour), `run-search-evaluation-cli.ts`, `run-search-evaluation-main.ts`,
+`.env.example`, ADR, runbook, report, this file. Tests: `ollama-interpreter.spec.ts` (new, 52),
+`interpretation-factory.spec.ts` (new, 6), additions to `environment-run-search-ai.spec.ts` and
+`run-search-evaluation-cli.spec.ts`; one existing test changed on purpose (a `fake` provider is now refused by the
+evaluator instead of silently becoming OpenAI).
+
+**Offline checks.** Red first (the modules and exports did not exist). Mutation check: with the adapter changed to
+settle on abort, the two lifetime tests fail; restored. `npm run verify`: exit 0; scripts 48; API **1184** in 105 files
+(was 1111, +73); web 520; contracts 128; fixtures 14; simulator 3: **1897** (was 1824). `npm run test:integration`: 44
+files, **435** (unchanged). `npm run test:e2e -- run-search-interpretation` (fake provider): 6 passed; the full
+browser suite was not rerun (no browser-reachable path changed). `git diff --check`: exit 0.
+
+**Real local inference: it ran.** Ollama 0.35.1 started by me with `OLLAMA_NO_CLOUD=1`, `OLLAMA_HOST=127.0.0.1:11434`
+(log: "Ollama cloud disabled: true"), `qwen3:8b` already installed (8.2B, Q4_K_M, 5.2 GB; capabilities completion,
+tools, thinking), CPU only (`size_vram` 0). Stopped again afterwards. Five representative cases from the runbook's
+smoke list; **no deadline was changed**.
+
+| Step | Result |
+|---|---|
+| Cold-load probe (unloaded, trivial one-token request, not an evaluation case) | load 12.5 s, wall 12.9 s; `done_reason` `length` for a `num_predict` cut |
+| Evaluator, `en-last-month-min-longest`, cold, 10 s deadline | `timeout` at 10.03 s |
+| Evaluator, 3 further cases warm (`ru-last-month-min-longest`, `en-strict-more-than`, `en-location`) | `timeout` x3 at 10.01 s; stopped itself after 3 identical failures, so `en-injection-sql` was not run by it |
+| Diagnostic, `en-last-month-min-longest`, 180 s adapter limit, twice | 11.2 s and 13.2 s (input 1602 tokens of which 1573 cached, output 80); valid JSON of the schema's shape, `clarify` + `conflicting_conditions` with filters set: refused as `invalid_output`; expected `search` |
+| Diagnostic, `en-injection-sql`, 180 s adapter limit | 11.5 s; `clarify` / `conflicting_conditions`; expected `unsupported` / `not_a_run_search` |
+
+Requests made to Ollama: 1 probe + 4 through the evaluator + 3 diagnostics = 8, all to 127.0.0.1. Cases 2 to 4 only
+timed out, so their answers are unknown. **Conclusions limited to what was measured:** the request is accepted by the
+real runtime (schema with nullable and enum-with-null properties, `think:false` yields no thinking trace, `stop` on
+completion); the application's 10 s deadline (12 s maximum) is **not met on this hardware even warm, and a cold start
+alone is 12.5 s**; `qwen3:8b` answered the two cases it was given wrongly. This is a smoke test, not the baseline: no
+accuracy figure is claimed. Reports: `apps/api/.local/eval-reports/ollama-smoke-cold.json` and `...-warm.json`
+(untracked).
+
+**Not verified / limits.** Accuracy on the 65 cases (the full dataset was not run, by instruction); GPU behaviour, any
+other model or Ollama version, and `think:false` for a model without thinking capability (only `qwen3:8b` was
+installed); container or production use (out of scope, refused in production); whether Ollama stops computing after a
+disconnect beyond one log observation. Hosted CI has not run these changes.

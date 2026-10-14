@@ -96,7 +96,27 @@ scenario is slower or different; the evidence for the new rule is the API tests 
 settles keeps its place until the process restarts (fail-closed, by design); a remote provider that keeps computing
 after a dropped connection is not observable here.
 
+## Addendum: a local Ollama run (2026-10-14)
+
+The first real inference this feature has seen, with a **local** model; OpenAI is still unreached (0 of 75
+dispatches used). Ollama 0.35.1 (`OLLAMA_NO_CLOUD=1`, loopback), `qwen3:8b` Q4_K_M, CPU only, Windows 11.
+
+| What | Result |
+|---|---|
+| Request accepted by the real runtime (schema with nullable and enum-with-null properties, `think:false`, `stream:false`) | yes, status 200, `done_reason` `stop`, no thinking trace |
+| Cold load | 12.5 s (wall 12.9 s) |
+| Warm request | 11.2 s, 11.5 s, 13.2 s |
+| Within the 10 s deadline (12 s maximum) | **no**, 4 of 4 evaluator calls timed out |
+| Answers seen | 2 of 2 wrong: `clarify` + `conflicting_conditions` where `search` and where `unsupported` / `not_a_run_search` were expected; one carried filters next to `clarify` and was refused locally as `invalid_output` |
+| Cases that produced no answer inside the deadline | 3 (`ru-last-month-min-longest`, `en-strict-more-than`, `en-location`) |
+| Accuracy on the dataset | **not measured** (5 of 65 cases touched; 2 answers read) |
+
+The evaluator's report for an Ollama run states the provider, the model, the runtime and its version, and the
+generation settings (`num_ctx 4096`, `num_predict 800`, `temperature 0`, `think false`, `stream false`); it does not
+attach the OpenAI SDK version. The report files are untracked (`apps/api/.local/eval-reports/`).
+
 ## Not claimed
 
 Nothing here says how well any model interprets these requests, that the provider accepts the schema, that 800
-output tokens or 10 s are enough for a given model, or what a request costs.
+output tokens or 10 s are enough for a given model, or what a request costs. The Ollama figures above describe one
+machine, one model and five cases; they are a smoke test, not a baseline.

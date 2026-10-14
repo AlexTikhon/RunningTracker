@@ -13,6 +13,7 @@ import {
   buildRunSearchAiConfig,
   checkRunSearchAiEnvironment,
   runSearchAiEnvironmentFields,
+  runSearchAiSecretVariables,
   withoutRunSearchAiFields,
 } from './run-search-ai-config.js';
 import { resolveSecretFiles } from './secret-files.js';
@@ -459,13 +460,13 @@ export function loadEnvironmentSource(
   return environmentSource(options);
 }
 
-// Only credentials and key material may come from a mounted secret file.
+// Only credentials and key material may come from a mounted secret file. The interpreter's own credential is
+// listed by runSearchAiSecretVariables, because a local Ollama configuration must not read an OpenAI file.
 const secretFileVariables = [
   'DATABASE_URL',
   'MAINTENANCE_DATABASE_URL',
   'LIVE_TRACK_CURSOR_SIGNING_KEY',
   'OIDC_CLIENT_SECRET',
-  'OPENAI_API_KEY',
 ] as const;
 
 type ParsedIntegrationDatabaseConnection = ParsedDatabaseConnection;
@@ -512,7 +513,10 @@ function assertSameIntegrationDatabase(
 }
 
 export function loadEnvironment(options: LoadEnvironmentOptions = {}): Environment {
-  return validateEnvironment(resolveSecretFiles(environmentSource(options), secretFileVariables));
+  const source = environmentSource(options);
+  return validateEnvironment(
+    resolveSecretFiles(source, [...secretFileVariables, ...runSearchAiSecretVariables(source)]),
+  );
 }
 
 export function loadIntegrationTestConfiguration(

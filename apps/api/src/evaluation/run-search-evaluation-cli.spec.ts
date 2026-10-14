@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  describeEvaluationRun,
   formatEvaluationReport,
   loadLiveEvaluationConfig,
   parseEvaluationArguments,
@@ -100,15 +101,113 @@ describe('live evaluation configuration', () => {
     expect(rejected).not.toContain(ok.OPENAI_API_KEY);
   });
 
-  it('ignores a fake provider and the enabling flag: a live run is always the real provider', () => {
-    expect(
-      loadLiveEvaluationConfig({ ...ok, RUN_SEARCH_AI_ENABLED: 'false', RUN_SEARCH_AI_PROVIDER: 'fake' }),
-    ).toMatchObject({ provider: 'openai' });
+  it('ignores the enabling flag, and refuses the fake provider: a measurement needs a real model', () => {
+    expect(loadLiveEvaluationConfig({ ...ok, RUN_SEARCH_AI_ENABLED: 'false' })).toMatchObject({
+      provider: 'openai',
+    });
+    // The fake provider is never silently replaced by a paid one: the configuration is wrong, so say so.
+    expect(() => loadLiveEvaluationConfig({ ...ok, RUN_SEARCH_AI_PROVIDER: 'fake' })).toThrow(
+      /RUN_SEARCH_AI_PROVIDER.*(openai|ollama)/u,
+    );
   });
 
   it('uses the same bounds as the application', () => {
     expect(() => loadLiveEvaluationConfig({ ...ok, RUN_SEARCH_AI_TIMEOUT_MS: '60000' })).toThrow();
     expect(loadLiveEvaluationConfig({ ...ok, RUN_SEARCH_AI_TIMEOUT_MS: '8000' }).timeoutMs).toBe(8_000);
+  });
+
+  describe('with the local Ollama provider', () => {
+    const local = { RUN_SEARCH_AI_MODEL: 'qwen3:8b', RUN_SEARCH_AI_PROVIDER: 'ollama' };
+
+    it('selects it, needs a model and no OpenAI credential, and carries none', () => {
+      const config = loadLiveEvaluationConfig(local);
+      expect(config).toMatchObject({ model: 'qwen3:8b', provider: 'ollama' });
+      expect(config).not.toHaveProperty('apiKey');
+      expect(() => loadLiveEvaluationConfig({ RUN_SEARCH_AI_PROVIDER: 'ollama' })).toThrow(/RUN_SEARCH_AI_MODEL/u);
+    });
+
+    it('does not use a stray OpenAI credential, and never selects a cloud model', () => {
+      const config = loadLiveEvaluationConfig({ ...local, OPENAI_API_KEY: ok.OPENAI_API_KEY });
+      expect(JSON.stringify(config)).not.toContain(ok.OPENAI_API_KEY);
+      expect(() => loadLiveEvaluationConfig({ ...local, RUN_SEARCH_AI_MODEL: 'qwen3:cloud' })).toThrow(
+        /RUN_SEARCH_AI_MODEL/u,
+      );
+    });
+
+    it('keeps the application deadline and bounds by default', () => {
+      expect(loadLiveEvaluationConfig(local)).toMatchObject({
+        maxOutputTokens: 800,
+        maxResponseBytes: 32_768,
+        timeoutMs: 10_000,
+      });
+    });
+  });
+});
+
+describe('what a run is described by', () => {
+  const common = {
+    args: { caseIds: ['en-location'], concurrency: 1, dryRun: false, live: true, maxCases: undefined, out: undefined },
+    instructions: 'fixed instructions',
+    openaiSdkVersion: '7.22.0',
+    schema: { type: 'object' },
+  };
+
+  it('names the local runtime and its generation settings for Ollama, and no OpenAI SDK', () => {
+    const run = describeEvaluationRun({
+      ...common,
+      config: loadLiveEvaluationConfig({ RUN_SEARCH_AI_MODEL: 'qwen3:8b', RUN_SEARCH_AI_PROVIDER: 'ollama' }),
+      runtimeVersion: '0.35.1',
+    });
+    expect(run).toMatchObject({
+      generation: { numCtx: 4_096, numPredict: 800, stream: false, temperature: 0, think: false },
+      model: 'qwen3:8b',
+      provider: 'ollama',
+      runtime: { name: 'ollama', version: '0.35.1' },
+      selection: 'ids',
+      timeoutMs: 10_000,
+    });
+    expect(JSON.stringify(run).toLowerCase()).not.toContain('openai');
+    expect(run.instructionsSha256).toMatch(/^[0-9a-f]{64}$/u);
+    expect(run.schemaSha256).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it('names the SDK, not a local runtime, for OpenAI', () => {
+    const run = describeEvaluationRun({
+      ...common,
+      config: loadLiveEvaluationConfig({
+        OPENAI_API_KEY: 'sk-test-synthetic-sentinel-key-2b7e',
+        RUN_SEARCH_AI_MODEL: 'gpt-4.1-mini',
+      }),
+      runtimeVersion: null,
+    });
+    expect(run).toMatchObject({
+      model: 'gpt-4.1-mini',
+      provider: 'openai',
+      runtime: { name: 'openai-node-sdk', version: '7.22.0' },
+    });
+    expect(JSON.stringify(run)).not.toContain('sk-test');
+    expect(JSON.stringify(run).toLowerCase()).not.toContain('ollama');
+  });
+
+});
+
+describe('selecting the provider for a run', () => {
+  it('builds the adapter of the configured provider and never another', async () => {
+    const { createInterpreter } = await import('../runs/interpretation/interpretation-factory.js');
+    const { OllamaInterpreter } = await import('../runs/interpretation/ollama-interpreter.js');
+    const { OpenAiInterpreter } = await import('../runs/interpretation/openai-interpreter.js');
+    const local = createInterpreter(
+      loadLiveEvaluationConfig({ RUN_SEARCH_AI_MODEL: 'qwen3:8b', RUN_SEARCH_AI_PROVIDER: 'ollama' }),
+    );
+    expect(local).toBeInstanceOf(OllamaInterpreter);
+    expect(local.model).toBe('qwen3:8b');
+    const remote = createInterpreter(
+      loadLiveEvaluationConfig({
+        OPENAI_API_KEY: 'sk-test-synthetic-sentinel-key-2b7e',
+        RUN_SEARCH_AI_MODEL: 'gpt-4.1-mini',
+      }),
+    );
+    expect(remote).toBeInstanceOf(OpenAiInterpreter);
   });
 });
 
@@ -227,6 +326,26 @@ describe('report text', () => {
     expect(stopped).toContain('STOPPED EARLY');
     expect(stopped).toContain('3 identical failures in a row (provider_error)');
     expect(stopped).toContain('not a measurement');
+  });
+
+  it('says the provider, runtime and generation settings when it is given the run description', () => {
+    const local = describeEvaluationRun({
+      args: { caseIds: undefined, concurrency: 1, dryRun: false, live: true, maxCases: 5, out: undefined },
+      config: loadLiveEvaluationConfig({ RUN_SEARCH_AI_MODEL: 'qwen3:8b', RUN_SEARCH_AI_PROVIDER: 'ollama' }),
+      instructions: 'fixed instructions',
+      openaiSdkVersion: '7.22.0',
+      runtimeVersion: '0.35.1',
+      schema: { type: 'object' },
+    });
+    const text = formatEvaluationReport({ ...report, model: 'qwen3:8b' }, local);
+    expect(text).toContain('Provider: ollama (local runtime ollama 0.35.1)');
+    expect(text).toContain('Generation: ');
+    expect(text).toContain('temperature 0');
+    expect(text).toContain('think false');
+    expect(text).toContain('num_ctx 4096');
+    expect(text.toLowerCase()).not.toContain('openai');
+    // Without a description the text is the one it always was: no provider line is invented.
+    expect(formatEvaluationReport(report)).not.toContain('Provider:');
   });
 
   it('says plainly that a run of this kind is one model on one day, and not a guarantee', () => {

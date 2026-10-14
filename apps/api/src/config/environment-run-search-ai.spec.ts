@@ -164,6 +164,98 @@ describe('run search interpretation configuration', () => {
     );
   });
 
+  describe('the local Ollama provider (ADR-0057, local development and test only)', () => {
+    const ollama = {
+      ...base,
+      RUN_SEARCH_AI_ENABLED: 'true',
+      RUN_SEARCH_AI_MODEL: 'qwen3:8b',
+      RUN_SEARCH_AI_PROVIDER: 'ollama',
+    };
+
+    it('needs a model and no credential, and the configuration has no credential field at all', () => {
+      const configuration = validateEnvironment(ollama).RUN_SEARCH_AI;
+      expect(configuration).toEqual({
+        allowance: { perWindow: 100, windowMs: 86_400_000 },
+        limiterMaxUsers: 1_000,
+        maxConcurrent: 4,
+        maxOutputTokens: 800,
+        maxResponseBytes: 32_768,
+        model: 'qwen3:8b',
+        provider: 'ollama',
+        timeoutMs: 10_000,
+        userRate: { perWindow: 5, windowMs: 60_000 },
+      });
+      expect(configuration).not.toHaveProperty('apiKey');
+    });
+
+    it('stays off unless enabled, whatever else is set', () => {
+      const environment = validateEnvironment({ ...ollama, RUN_SEARCH_AI_ENABLED: 'false' });
+      expect(environment.RUN_SEARCH_AI).toBeUndefined();
+    });
+
+    it('requires an explicit model and never falls back to another one or another provider', () => {
+      const withoutModel: Record<string, string> = { ...ollama };
+      delete withoutModel.RUN_SEARCH_AI_MODEL;
+      expect(() => validateEnvironment(withoutModel)).toThrow('RUN_SEARCH_AI_MODEL must be set');
+      for (const model of ['', ' ', 'qwen3 8b', 'http://127.0.0.1:11434/qwen3', '../qwen3', 'qwen3:8b:q4']) {
+        expect(() => validateEnvironment({ ...ollama, RUN_SEARCH_AI_MODEL: model }), model).toThrow(
+          'RUN_SEARCH_AI_MODEL',
+        );
+      }
+    });
+
+    it('refuses a cloud model: the feature is local-only', () => {
+      for (const model of ['qwen3:cloud', 'gpt-oss:120b-cloud', 'gemma4:cloud', 'ollama.com/library/qwen3:8b']) {
+        expect(() => validateEnvironment({ ...ollama, RUN_SEARCH_AI_MODEL: model }), model).toThrow(
+          'RUN_SEARCH_AI_MODEL',
+        );
+      }
+      for (const model of ['qwen3:8b', 'qwen3:8b-q4_K_M', 'llama3.2:3b', 'hf.co/someone/some-model:Q4_K_M', 'qwen3']) {
+        expect(validateEnvironment({ ...ollama, RUN_SEARCH_AI_MODEL: model }).RUN_SEARCH_AI?.model, model).toBe(model);
+      }
+    });
+
+    it('does not carry or require an OpenAI credential, and does not check names with the OpenAI pattern', () => {
+      const withKey = validateEnvironment({ ...ollama, OPENAI_API_KEY: 'sk-test-synthetic-key-value' });
+      expect(JSON.stringify(withKey)).not.toContain('sk-test-synthetic-key-value');
+      expect(withKey.RUN_SEARCH_AI).not.toHaveProperty('apiKey');
+      // A key with whitespace is an OpenAI problem; in this mode it is never looked at.
+      expect(() => validateEnvironment({ ...ollama, OPENAI_API_KEY: 'has white space' })).not.toThrow();
+    });
+
+    it('is refused in production, where the destination would be the container itself', () => {
+      expect(() => validateEnvironment({ ...production, RUN_SEARCH_AI_PROVIDER: 'ollama', RUN_SEARCH_AI_MODEL: 'qwen3:8b' })).toThrow(
+        'RUN_SEARCH_AI_PROVIDER must be openai in production',
+      );
+    });
+
+    it('applies the same limits and deadlines as the other providers', () => {
+      expect(() => validateEnvironment({ ...ollama, RUN_SEARCH_AI_TIMEOUT_MS: '13000' })).toThrow(
+        'RUN_SEARCH_AI_TIMEOUT_MS',
+      );
+      expect(validateEnvironment({ ...ollama, RUN_SEARCH_AI_MAX_CONCURRENT: '1' }).RUN_SEARCH_AI).toMatchObject({
+        maxConcurrent: 1,
+      });
+    });
+
+    it('does not read the OpenAI credential file, while OpenAI mode still does', () => {
+      const missing = resolve('/definitely/not/here/openai-api-key');
+      expect(
+        loadEnvironment({ envFiles: [], environment: { ...ollama, OPENAI_API_KEY_FILE: missing } }).RUN_SEARCH_AI,
+      ).toMatchObject({ provider: 'ollama' });
+      // A relative path would be refused by the reader; in this mode nothing validates or opens it.
+      expect(() =>
+        loadEnvironment({ envFiles: [], environment: { ...ollama, OPENAI_API_KEY_FILE: 'relative/path' } }),
+      ).not.toThrow();
+
+      const openai: Record<string, string> = { ...enabled, OPENAI_API_KEY_FILE: missing };
+      delete openai.OPENAI_API_KEY;
+      expect(() => loadEnvironment({ envFiles: [], environment: openai })).toThrow(
+        'OPENAI_API_KEY_FILE could not be read',
+      );
+    });
+  });
+
   it('reads the credential from a mounted file and refuses setting both forms', () => {
     const directory = mkdtempSync(join(tmpdir(), 'rt-openai-key-'));
     try {
@@ -176,7 +268,7 @@ describe('run search interpretation configuration', () => {
         envFiles: [],
         environment: { ...withoutKey, OPENAI_API_KEY_FILE: keyFile },
       });
-      expect(environment.RUN_SEARCH_AI?.apiKey).toBe('sk-test-synthetic-file-key');
+      expect(environment.RUN_SEARCH_AI).toMatchObject({ apiKey: 'sk-test-synthetic-file-key', provider: 'openai' });
 
       expect(() =>
         loadEnvironment({ envFiles: [], environment: { ...enabled, OPENAI_API_KEY_FILE: keyFile } }),
