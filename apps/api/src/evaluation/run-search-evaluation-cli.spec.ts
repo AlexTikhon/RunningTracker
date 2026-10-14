@@ -265,6 +265,7 @@ describe('report text', () => {
     partial: false,
     promptVersion: 'run-search-interpreter/2026-10-12.2',
     reasonAccuracy: 0.7,
+    unsettled: { caseIds: [], count: 0 },
     usage: {
       cachedInputTokens: 1_000,
       callsWithReasoningDetail: 59,
@@ -326,6 +327,19 @@ describe('report text', () => {
     expect(stopped).toContain('STOPPED EARLY');
     expect(stopped).toContain('3 identical failures in a row (provider_error)');
     expect(stopped).toContain('not a measurement');
+  });
+
+  it('names the operations that outlived their cancellation and says that no case was started beside them', () => {
+    expect(formatEvaluationReport(report)).not.toContain('UNSETTLED');
+    const text = formatEvaluationReport({
+      ...report,
+      executedCount: 1,
+      partial: true,
+      unsettled: { caseIds: ['en-this-month-plain'], count: 1 },
+    });
+    expect(text).toContain('PARTIAL: 1 of 60 cases');
+    expect(text).toContain('UNSETTLED: 1 interpreter operation(s) had not ended');
+    expect(text).toContain('en-this-month-plain');
   });
 
   it('says the provider, runtime and generation settings when it is given the run description', () => {

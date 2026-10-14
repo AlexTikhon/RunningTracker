@@ -2,7 +2,7 @@ import {
   runSearchClarificationReasonSchema,
   runSearchUnsupportedReasonSchema,
 } from '@running-tracker/contracts';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { normalizeProposal } from '../runs/interpretation/interpretation-normalizer.js';
 import { INTERPRETATION_PROMPT_VERSION } from '../runs/interpretation/interpretation-prompt.js';
@@ -559,18 +559,259 @@ describe('evaluator', () => {
     expect(report.executedCount).toBe(calls);
   });
 
-  it('stops waiting for a call that never answers, and counts it as a timeout', async () => {
+});
+
+// A call the test settles by hand, so the number of operations still alive is observable at every instant.
+interface ControlledCall {
+  reject: (reason: Error) => void;
+  resolve: (answer: InterpreterAnswer) => void;
+  settled: boolean;
+  signal: AbortSignal | undefined;
+  text: string;
+}
+
+class ControlledInterpreter implements RunSearchInterpreter {
+  public readonly model = 'controlled';
+  public readonly calls: ControlledCall[] = [];
+  public active = 0;
+  public peak = 0;
+  /** When set, an operation rejects as soon as it is asked to cancel; otherwise it ignores the signal. */
+  public cooperative = false;
+
+  public interpret(input: InterpretationInput, options?: { signal?: AbortSignal }): Promise<InterpreterAnswer> {
+    this.active += 1;
+    this.peak = Math.max(this.peak, this.active);
+    return new Promise<InterpreterAnswer>((resolve, reject) => {
+      const call: ControlledCall = {
+        reject: (reason) => {
+          if (!call.settled) {
+            call.settled = true;
+            this.active -= 1;
+            reject(reason);
+          }
+        },
+        resolve: (answer) => {
+          if (!call.settled) {
+            call.settled = true;
+            this.active -= 1;
+            resolve(answer);
+          }
+        },
+        settled: false,
+        signal: options?.signal,
+        text: input.text,
+      };
+      this.calls.push(call);
+      if (this.cooperative) {
+        options?.signal?.addEventListener('abort', () => call.reject(new InterpreterFailure('timeout')));
+      }
+    });
+  }
+}
+
+function answerFor(text: string): InterpreterAnswer {
+  return { proposal: proposalFor(dataset.cases.find((entry) => entry.text === text)!), usage: null };
+}
+
+describe('evaluator operation lifetime', () => {
+  const CALL_TIMEOUT_MS = 20;
+  const DRAIN_MS = 50;
+  const clock = { monotonicNow: () => Date.now() };
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    unhandled.length = 0;
+    process.on('unhandledRejection', onUnhandled);
+  });
+
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandled);
+    vi.useRealTimers();
+  });
+
+  function start(
+    interpreter: RunSearchInterpreter,
+    overrides: Partial<Parameters<typeof runEvaluation>[0]> = {},
+  ): { finished: () => boolean; report: Promise<Awaited<ReturnType<typeof runEvaluation>>> } {
+    let isFinished = false;
+    const report = runEvaluation({
+      callTimeoutMs: CALL_TIMEOUT_MS,
+      cancellationDrainMs: DRAIN_MS,
+      clock,
+      dataset,
+      interpreter,
+      maxCases: 3,
+      ...overrides,
+    }).finally(() => {
+      isFinished = true;
+    });
+    return { finished: () => isFinished, report };
+  }
+
+  it('keeps the only slot of concurrency 1 occupied by an operation that ignores cancellation', async () => {
+    const interpreter = new ControlledInterpreter();
+    const { report } = start(interpreter);
+
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + DRAIN_MS);
+    const result = await report;
+
+    expect(interpreter.calls).toHaveLength(1);
+    expect(interpreter.active).toBe(1);
+    expect(interpreter.peak).toBe(1);
+    expect(result.executedIds).toEqual([dataset.cases[0]!.id]);
+    expect(result.failures.byReason).toEqual({ timeout: 1 });
+    expect(result.unsettled).toEqual({ caseIds: [dataset.cases[0]!.id], count: 1 });
+    expect(result.partial).toBe(true);
+  });
+
+  it('never has more unsettled operations than the concurrency of 2, and stops when both are stuck', async () => {
+    const interpreter = new ControlledInterpreter();
+    const { report } = start(interpreter, { concurrency: 2, maxCases: 6 });
+
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + DRAIN_MS);
+    const result = await report;
+
+    expect(interpreter.calls).toHaveLength(2);
+    expect(interpreter.active).toBe(2);
+    expect(interpreter.peak).toBe(2);
+    expect(result.unsettled.count).toBe(2);
+    expect(result.unsettled.caseIds).toEqual([dataset.cases[0]!.id, dataset.cases[1]!.id]);
+    expect(result.executedCount).toBe(2);
+  });
+
+  it('keeps the slot at the deadline, requests cancellation, and goes on only once the operation has settled', async () => {
+    const interpreter = new ControlledInterpreter();
+    const { report } = start(interpreter);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(interpreter.calls).toHaveLength(1);
+    expect(interpreter.calls[0]!.signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS);
+    // The case has timed out and cancellation was asked for, but the operation is alive: no new call.
+    expect(interpreter.calls[0]!.signal?.aborted).toBe(true);
+    expect(interpreter.calls).toHaveLength(1);
+    expect(interpreter.active).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(DRAIN_MS - 1);
+    expect(interpreter.calls).toHaveLength(1);
+
+    interpreter.calls[0]!.reject(new InterpreterFailure('timeout'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(interpreter.calls).toHaveLength(2);
+    expect(interpreter.active).toBe(1);
+
+    interpreter.calls[1]!.resolve(answerFor(interpreter.calls[1]!.text));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(interpreter.calls).toHaveLength(3);
+    interpreter.calls[2]!.resolve(answerFor(interpreter.calls[2]!.text));
+
+    const result = await report;
+    expect(interpreter.peak).toBe(1);
+    expect(interpreter.active).toBe(0);
+    expect(result.unsettled).toEqual({ caseIds: [], count: 0 });
+    expect(result.executedCount).toBe(3);
+    expect(result.failures.byReason).toEqual({ timeout: 1 });
+    expect(result.counts.outcome).toEqual({ correct: 2, total: 3 });
+    // The measured latency of the case is its deadline, not the deadline plus the time spent draining.
+    expect(result.latencyMs.max).toBe(CALL_TIMEOUT_MS);
+  });
+
+  it('lets cooperative cancellation through to the next cases without waiting for the drain interval', async () => {
+    const interpreter = new ControlledInterpreter();
+    interpreter.cooperative = true;
+    const { report } = start(interpreter);
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS);
+    expect(interpreter.calls).toHaveLength(2);
+    interpreter.calls[1]!.resolve(answerFor(interpreter.calls[1]!.text));
+    await vi.advanceTimersByTimeAsync(0);
+    interpreter.calls[2]!.resolve(answerFor(interpreter.calls[2]!.text));
+
+    const result = await report;
+    expect(interpreter.peak).toBe(1);
+    expect(result.unsettled.count).toBe(0);
+    expect(result.executedCount).toBe(3);
+    expect(result.failures.byReason).toEqual({ timeout: 1 });
+  });
+
+  it('returns within the deadline plus the drain interval when cancellation is ignored', async () => {
+    const interpreter = new ControlledInterpreter();
+    const { finished, report } = start(interpreter);
+
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + DRAIN_MS - 1);
+    expect(finished()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(finished()).toBe(true);
+    await report;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('is not changed by an operation that succeeds or fails after the report was returned', async () => {
+    const interpreter = new ControlledInterpreter();
+    const { report } = start(interpreter, { concurrency: 2, maxCases: 4 });
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + DRAIN_MS);
+    const result = await report;
+    const before = structuredClone(result);
+
+    interpreter.calls[0]!.resolve(answerFor(interpreter.calls[0]!.text));
+    interpreter.calls[1]!.reject(new InterpreterFailure('refusal'));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(result).toEqual(before);
+    expect(interpreter.calls).toHaveLength(2);
+    expect(unhandled).toEqual([]);
+    expect(result.failures).toEqual({ byReason: { timeout: 2 }, total: 2 });
+  });
+
+  it('counts a synchronous throw and an immediate rejection once each, and frees the slot at once', async () => {
+    let active = 0;
+    let peak = 0;
+    let count = 0;
+    const interpreter: RunSearchInterpreter = {
+      interpret: (input) => {
+        count += 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        try {
+          if (count === 1) {
+            throw new Error('boom');
+          }
+          return count === 2
+            ? Promise.reject(new InterpreterFailure('refusal'))
+            : Promise.resolve(answerFor(input.text));
+        } finally {
+          active -= 1;
+        }
+      },
+      model: 'immediate',
+    };
+    const { report } = start(interpreter);
+    const result = await report;
+
+    expect(count).toBe(3);
+    expect(peak).toBe(1);
+    expect(result.executedIds).toEqual(dataset.cases.slice(0, 3).map((entry) => entry.id));
+    expect(result.failures).toEqual({ byReason: { provider_error: 1, refusal: 1 }, total: 2 });
+    expect(result.counts.outcome).toEqual({ correct: 1, total: 3 });
+    expect(result.unsettled).toEqual({ caseIds: [], count: 0 });
+    expect(unhandled).toEqual([]);
+  });
+
+  it('stops waiting for a call that never answers, counts it as a timeout, and does not start another', async () => {
     const interpreter: RunSearchInterpreter = {
       interpret: () => new Promise(() => undefined),
       model: 'hang',
     };
-    const report = await runEvaluation({
-      callTimeoutMs: 20,
-      clock: new StepClock(),
-      dataset,
-      interpreter,
-      maxCases: 2,
-    });
-    expect(report.failures.byReason).toEqual({ timeout: 2 });
+    const { report } = start(interpreter, { maxCases: 2 });
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + DRAIN_MS);
+    const result = await report;
+    expect(result.failures.byReason).toEqual({ timeout: 1 });
+    expect(result.executedCount).toBe(1);
+    expect(result.unsettled.count).toBe(1);
   });
 });

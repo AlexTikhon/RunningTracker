@@ -239,6 +239,11 @@ export function formatEvaluationReport(report: EvaluationReport, run?: Evaluatio
       `PARTIAL: ${report.executedCount} of ${report.caseCount} cases. The percentages below describe only the cases that were run.`,
     );
   }
+  if (report.unsettled.count > 0) {
+    lines.push(
+      `UNSETTLED: ${report.unsettled.count} interpreter operation(s) had not ended after cancellation was requested (${report.unsettled.caseIds.join(', ')}). No further cases were started, so the concurrency limit was not exceeded. Those cases are counted as timeouts.`,
+    );
+  }
   lines.push('');
   const { counts } = report;
   lines.push(`Outcome accuracy: ${percent(report.outcomeAccuracy)} (${counts.outcome.correct}/${counts.outcome.total})`);

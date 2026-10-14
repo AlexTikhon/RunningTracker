@@ -14,6 +14,11 @@ import { FILTER_FIELDS, scoreCase, type FilterField } from './run-search-scoring
 
 export const EVALUATION_MAX_CONCURRENCY = 4;
 export const EVALUATION_DEFAULT_CALL_TIMEOUT_MS = 12_000;
+/**
+ * How long a call that has hit its deadline, and was asked to cancel, may keep its slot before the run gives up on it.
+ * It is not part of the case's latency or of its deadline: it only bounds how long the run waits for the call to end.
+ */
+export const EVALUATION_DEFAULT_CANCELLATION_DRAIN_MS = 2_000;
 /** Identical systemic failures in a row after which a run stops spending calls: 3 is evidence, not noise. */
 export const EVALUATION_SYSTEMIC_FAILURE_STREAK = 3;
 
@@ -31,6 +36,11 @@ const SYSTEMIC_FAILURES: ReadonlySet<string> = new Set([
 export interface EvaluationOptions {
   /** Hard deadline for one call, response included. */
   callTimeoutMs?: number;
+  /**
+   * After a call's deadline cancellation is requested, and the call keeps its slot until it settles. This is how long
+   * the run waits for that; a call still unsettled then stops the run (it is never abandoned to free its slot).
+   */
+  cancellationDrainMs?: number;
   /** Run exactly these cases, in dataset order. An id the dataset does not have is an error before any call. */
   caseIds?: readonly string[];
   clock: Pick<Clock, 'monotonicNow'>;
@@ -95,10 +105,16 @@ export interface EvaluationReport {
   outcomeAccuracy: number;
   /** Expected outcome (rows) against what happened (columns); a failed call is its own column. */
   outcomeMatrix: Record<ExpectedOutcome, Record<ActualOutcome, number>>;
-  /** True unless every case of the dataset was executed. */
+  /** True unless every case of the dataset was executed, and whenever an operation outlived its cancellation drain. */
   partial: boolean;
   promptVersion: string;
   reasonAccuracy: number | null;
+  /**
+   * Operations that had not settled when the cancellation drain after their deadline ended. Each kept its slot, so the
+   * run stopped starting cases instead of exceeding its concurrency. The cases are counted as timeouts above; a later
+   * settlement of these operations is ignored and changes nothing in this report.
+   */
+  unsettled: { caseIds: string[]; count: number };
   usage: {
     cachedInputTokens: number;
     callsWithReasoningDetail: number;
@@ -159,12 +175,22 @@ export function selectEvaluationCases(
   return selected.slice(0, maxCases ?? selected.length);
 }
 
+interface CaseRun {
+  /** Never rejects. Ends with the answer, or at the deadline: the latency of the case is measured up to this point. */
+  result: Promise<CaseResult>;
+  /** True once the interpreter's own promise has resolved or rejected, whatever the case's result was. */
+  hasSettled: () => boolean;
+  /** Never rejects. Resolves when the interpreter's own promise settles: only then is the operation over. */
+  operation: Promise<void>;
+}
+
 // One provider call, never retried, under its own deadline: a call that never answers is a timeout of this case.
-async function evaluateOne(
+// The deadline ends the CASE; it does not end the operation, which is over only when the interpreter's promise settles.
+function startCase(
   testCase: EvaluationCase,
   options: Required<Pick<EvaluationOptions, 'callTimeoutMs' | 'clock' | 'interpreter'>>,
   dataset: EvaluationDataset,
-): Promise<CaseResult> {
+): CaseRun {
   const { callTimeoutMs, clock, interpreter } = options;
   const startedAt = clock.monotonicNow();
   const controller = new AbortController();
@@ -177,49 +203,78 @@ async function evaluateOne(
   });
   deadline.catch(() => undefined);
 
-  let usage: InterpreterAnswer['usage'] = null;
-  try {
-    const call = interpreter.interpret(
+  // The async wrapper turns a synchronous throw into a rejection, so every operation has exactly one settlement.
+  const call = (async () =>
+    interpreter.interpret(
       {
         text: testCase.text,
         timeZone: dataset.timeZone,
         today: localDateOf(Date.parse(dataset.now), dataset.timeZone),
       },
       { signal: controller.signal },
-    );
-    call.catch(() => undefined);
-    const answer = await Promise.race([call, deadline]);
-    usage = answer.usage;
-    const normalized = normalizeProposal(answer.proposal, {
-      now: new Date(dataset.now),
-      timeZone: dataset.timeZone,
-    });
-    return {
-      answer: normalized,
-      durationMs: clock.monotonicNow() - startedAt,
-      failure: null,
-      testCase,
-      usage,
-    };
-  } catch (error) {
-    const failure =
-      error instanceof InterpreterFailure
-        ? error.reason
-        : error instanceof ProposalRejectedError
-          ? 'invalid_output'
-          : 'provider_error';
-    return {
-      answer: null,
-      durationMs: clock.monotonicNow() - startedAt,
-      failure,
-      testCase,
-      usage: error instanceof InterpreterFailure ? error.usage : usage,
-    };
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
+    ))();
+  let settled = false;
+  const markSettled = (): void => {
+    settled = true;
+  };
+  // Attached before the race so the flag is already set when the race continues; also consumes a late rejection.
+  const operation = call.then(markSettled, markSettled);
+
+  const decide = async (): Promise<CaseResult> => {
+    let usage: InterpreterAnswer['usage'] = null;
+    try {
+      const answer = await Promise.race([call, deadline]);
+      usage = answer.usage;
+      const normalized = normalizeProposal(answer.proposal, {
+        now: new Date(dataset.now),
+        timeZone: dataset.timeZone,
+      });
+      return {
+        answer: normalized,
+        durationMs: clock.monotonicNow() - startedAt,
+        failure: null,
+        testCase,
+        usage,
+      };
+    } catch (error) {
+      const failure =
+        error instanceof InterpreterFailure
+          ? error.reason
+          : error instanceof ProposalRejectedError
+            ? 'invalid_output'
+            : 'provider_error';
+      return {
+        answer: null,
+        durationMs: clock.monotonicNow() - startedAt,
+        failure,
+        testCase,
+        usage: error instanceof InterpreterFailure ? error.usage : usage,
+      };
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      controller.abort();
     }
-    controller.abort();
+  };
+
+  return { hasSettled: () => settled, operation, result: decide() };
+}
+
+// Waits for an operation to settle, for at most `drainMs`. Resolves true when it settled. The timer is not created for
+// an operation that already settled, which is every operation that answered before its deadline.
+async function settlesWithin(run: CaseRun, drainMs: number): Promise<boolean> {
+  if (run.hasSettled()) {
+    return true;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), drainMs);
+  });
+  try {
+    return await Promise.race([run.operation.then(() => true as const), expired]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -242,6 +297,8 @@ export async function runEvaluation(options: EvaluationOptions): Promise<Evaluat
     interpreter,
   };
   const streakLimit = options.stopAfterSystemicFailures ?? EVALUATION_SYSTEMIC_FAILURE_STREAK;
+  const drainMs = options.cancellationDrainMs ?? EVALUATION_DEFAULT_CANCELLATION_DRAIN_MS;
+  const unsettledIds: string[] = [];
 
   let next = 0;
   let done = 0;
@@ -256,7 +313,8 @@ export async function runEvaluation(options: EvaluationOptions): Promise<Evaluat
       }
       next += 1;
       const testCase = cases[index]!;
-      const result = await evaluateOne(testCase, callOptions, dataset);
+      const run = startCase(testCase, callOptions, dataset);
+      const result = await run.result;
       results[index] = result;
       done += 1;
       options.onCase?.({ done, id: testCase.id, total: cases.length });
@@ -273,6 +331,15 @@ export async function runEvaluation(options: EvaluationOptions): Promise<Evaluat
         // Cases already in flight finish; nothing new is started.
         aborted = { afterCases: done, consecutive: streak, reason: streakReason };
         next = cases.length;
+      }
+
+      // The slot is this worker: it is not free for the next case until the operation has settled. An operation that
+      // ignores its cancellation is waited for only for the drain interval; after that the run stops rather than
+      // start a case beside an operation it cannot end, and the occupied slot is never reclaimed.
+      if (!(await settlesWithin(run, drainMs))) {
+        unsettledIds.push(testCase.id);
+        next = cases.length;
+        return;
       }
     }
   };
@@ -392,6 +459,9 @@ export async function runEvaluation(options: EvaluationOptions): Promise<Evaluat
     }
   }
 
+  const unsettledInDatasetOrder = executed
+    .map((result) => result.testCase.id)
+    .filter((id) => unsettledIds.includes(id));
   const durations = executed.map((result) => result.durationMs).sort((a, b) => a - b);
   const total = durations.reduce((sum, value) => sum + value, 0);
   return {
@@ -420,9 +490,10 @@ export async function runEvaluation(options: EvaluationOptions): Promise<Evaluat
     model: interpreter.model,
     outcomeAccuracy: executed.length === 0 ? 0 : outcome.correct / executed.length,
     outcomeMatrix,
-    partial: executed.length < dataset.cases.length,
+    partial: executed.length < dataset.cases.length || unsettledInDatasetOrder.length > 0,
     promptVersion: INTERPRETATION_PROMPT_VERSION,
     reasonAccuracy: ratio(reason.correct, reason.total),
+    unsettled: { caseIds: unsettledInDatasetOrder, count: unsettledInDatasetOrder.length },
     usage,
   };
 }
