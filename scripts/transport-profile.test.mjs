@@ -4,9 +4,12 @@ import test from 'node:test';
 import { resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
+// Checkouts may materialize text files as CRLF (core.autocrlf on Windows). The assertions below search for
+// LF-delimited structure, so every file is normalized to LF at this single read boundary.
+const read = (path) => readFileSync(resolve(root, path), 'utf8').replaceAll('\r\n', '\n');
 
 test('P08.5 proxy keeps the SSE transport explicit and bounded', () => {
-  const nginx = readFileSync(resolve(root, 'infra/proxy/nginx.conf'), 'utf8');
+  const nginx = read('infra/proxy/nginx.conf');
   const liveStart = nginx.indexOf('    location ~ ^/api/orgs/');
   const liveEnd = nginx.indexOf('\n    }', liveStart);
   const liveLocation = liveStart >= 0 && liveEnd >= 0 ? nginx.slice(liveStart, liveEnd) : undefined;
@@ -25,10 +28,7 @@ test('P08.5 proxy keeps the SSE transport explicit and bounded', () => {
 });
 
 test('P08.5 Compose publishes only the TLS proxy', () => {
-  const compose = readFileSync(
-    resolve(root, 'infra/compose/docker-compose.transport.yml'),
-    'utf8',
-  );
+  const compose = read('infra/compose/docker-compose.transport.yml');
   const apiService = compose.split('\n  proxy:')[0];
   assert.match(compose, /127\.0\.0\.1:8443:443/u);
   assert.match(apiService, /api:[\s\S]+?expose:\s+- "3000"/u);
@@ -37,10 +37,7 @@ test('P08.5 Compose publishes only the TLS proxy', () => {
 });
 
 test('transport Compose passes the optional public Mapbox token to the web build, empty by default', () => {
-  const compose = readFileSync(
-    resolve(root, 'infra/compose/docker-compose.transport.yml'),
-    'utf8',
-  );
+  const compose = read('infra/compose/docker-compose.transport.yml');
   const proxy = compose.slice(compose.indexOf('\n  proxy:\n'));
   assert.match(proxy, /target: transport\s+args:\s+(?:#.*\n\s+)*VITE_MAPBOX_ACCESS_TOKEN: \$\{VITE_MAPBOX_ACCESS_TOKEN:-\}/u);
   assert.doesNotMatch(compose.split('\n  proxy:')[0], /MAPBOX/u, 'the API service takes no map token');
@@ -49,7 +46,7 @@ test('transport Compose passes the optional public Mapbox token to the web build
 // F01: the local TLS profile has to log the same way as the production one: method, path and protocol, never
 // the raw request line, because the OIDC callback carries a one-time code and state in its query string.
 test('F01 transport proxy: the access log format carries no query string and keeps its diagnostics', () => {
-  const nginx = readFileSync(resolve(root, 'infra/proxy/nginx.conf'), 'utf8');
+  const nginx = read('infra/proxy/nginx.conf');
   const formats = [...nginx.matchAll(/log_format\s+(\w+)\s+((?:'[^']*'\s*)+);/gu)];
   assert.equal(formats.length, 1, 'exactly one log_format is expected');
   const body = formats[0][2].replaceAll(/'\s*'/gu, '');

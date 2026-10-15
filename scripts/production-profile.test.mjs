@@ -7,7 +7,9 @@ import test from 'node:test';
 // proof is `npm run deploy:verify`.
 
 const root = resolve(import.meta.dirname, '..');
-const read = (path) => readFileSync(resolve(root, path), 'utf8');
+// Checkouts may materialize text files as CRLF (core.autocrlf on Windows). The assertions below search for
+// LF-delimited structure, so every file is normalized to LF at this single read boundary.
+const read = (path) => readFileSync(resolve(root, path), 'utf8').replaceAll('\r\n', '\n');
 const compose = read('infra/compose/docker-compose.production.yml');
 const site = read('infra/proxy/production-site.conf.template');
 
