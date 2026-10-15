@@ -42,6 +42,27 @@ that the scenario fixture removes a failed test's data, and Playwright counts it
   the test database, Chromium and native IndexedDB. Commit `83f804f` recorded the same 6/6 earlier; this run repeats it.
 - All 9 OIDC sign-in tests passed in `chromium-oidc`.
 
+## Hosted CI run (a different commit, not this run)
+
+Checked on 2026-10-15 with `gh run view 38624437491 --json headSha,conclusion,jobs,url` and the two job logs.
+
+| Item | Value |
+|---|---|
+| Run | [actions/runs/38624437491](https://github.com/AlexTikhon/RunningTracker/actions/runs/38624437491), workflow `CI`, push to `main`, 2026-10-14 19:31 to 19:39 UTC |
+| Tested SHA | `83f804f357f203135ddead8ce083c062ce42d284` (the last of the six repairs) |
+| Runner | GitHub-hosted `ubuntu-24.04` |
+| Conclusion | `success`; jobs `verify` and `browser` both `success` |
+| `verify` job | lint, typecheck, build and `npm test` passed (scripts 54/54); integration **436 passed, 9 skipped** of 445 in 44 files |
+| `browser` job | `npm run test:e2e`: **87 passed** (6.0 min) |
+
+- The 9 skipped integration tests are `backup-restore.integration.test.ts`: the file skips itself unless
+  `RESTORE_DRILL_ADMIN_URL` is set, and CI does not set it. The local run above executed them (445 of 445).
+- **Not covered by the hosted run:** the commits after `83f804f`, which are `fb20668` (a test-only change to two
+  profile test files, for CRLF checkouts) and `6550a81` (the first version of this report). The diff from
+  `83f804f` to `fb20668` touches no application code.
+- This is one run of one commit. It does not show stability across runs, and it is not production, device or
+  real-provider evidence.
+
 ## Carried forward, not re-run in this closeout
 
 Same working tree and same day, but earlier commands:
@@ -55,8 +76,15 @@ Same working tree and same day, but earlier commands:
 
 ## Remaining limits
 
-- **Workstation-only verification.** Everything ran on one Windows 11 machine with Docker Desktop and loopback
-  addresses. There was no CI run, no Linux host, no real DNS or certificate authority, and no remote deployment.
+- **Workstation execution of this closeout.** The commands above ran on one Windows 11 machine with Docker Desktop
+  and loopback addresses. The only hosted evidence is the single Ubuntu CI run of `83f804f`; the current HEAD has no
+  hosted run of its own.
+- **Remote deployment.** Nothing was deployed. `deploy:verify` used throwaway secrets and a self-signed certificate on
+  localhost, so there is no real host, DNS name or certificate authority behind any result here.
+- **Real devices.** Chromium only, with the Simulator standing in for GPS. Safari, Firefox, mobile browsers and real
+  device location, permission and background behaviour are unverified.
+- **Real identity provider.** Sign-in was exercised only against the test `oidc-provider` process and, in
+  `deploy:verify`, against an unreachable issuer that must fail closed. Provider-specific behaviour is unverified.
 - **Browser fencing coverage.** Stale-writer fencing of `abandonQueuedStart` (a stale writer, a different request or an
   active run writes nothing) is covered by unit tests on `fake-indexeddb`. No browser test drives a stale writer
   against the abandonment of a rejected Start.
