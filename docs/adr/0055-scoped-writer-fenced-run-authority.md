@@ -101,7 +101,8 @@ were still not true.
   produced by accident are gone (one read per writer epoch).
 - `acknowledgeStart`, `acknowledgeCommand`, `acknowledgeReconciledRequest` and `queueRequest` still use the activation
   write with the ownership check made just before it by the caller (`assertOwned`), not inside the transaction. They are
-  tied to a queued request identity and were out of this change; the residual race is described below.
+  tied to a queued request identity and were out of this change; the residual race is described below. (Closed by
+  ADR-0059: they now check the lease, the exact request and the active run inside their own transactions.)
 - The uploader is still not gated by the authority (ADR-0052): after a refusal it can make one more attempt, which
   receives the same answer. Its `upload-changed` reports are dropped when they are for another scope.
 

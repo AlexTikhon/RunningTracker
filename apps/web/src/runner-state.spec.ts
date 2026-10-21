@@ -249,6 +249,59 @@ describe('runnerReducer', () => {
     expect(runnerPhase(reconciled)).toBe('finished');
   });
 
+  // ADR-0059: the completion of a request whose writer epoch or durable write is obsolete reports nothing.
+  describe('an obsolete request', () => {
+    const pause: CommandRequest = {
+      commandId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      expectedControlRevision: '0',
+      kind: 'command',
+      orgId: startRequest.orgId,
+      runId: startRequest.runId,
+      type: 'pause',
+    };
+
+    it('is released without a success or a failure, and the page keeps its run when nothing could be read', () => {
+      const pending = runnerReducer(startRecording(), { request: pause, type: 'request-started' });
+      const released = runnerReducer(pending, { recovery: null, request: pause, type: 'request-obsolete' });
+      expect(released).toEqual({ ...pending, pendingRequest: null });
+      expect(released.error).toBeNull();
+      expect(released.run?.status).toBe('recording');
+      // The late answer to the released request is a stale completion like any other.
+      expect(runnerReducer(released, { request: pause, result: { commandId: pause.commandId, controlRevision: '1', dataRevision: '0', finishedAt: null, status: 'paused' }, type: 'command-succeeded' })).toBe(released);
+    });
+
+    it('follows the durable state another writer left: no run, nothing queued', () => {
+      const pending = runnerReducer(startRecording(), { request: pause, type: 'request-started' });
+      const followed = runnerReducer(pending, {
+        recovery: { pendingPointCount: 0, request: null, run: null, uploadRejection: null },
+        request: pause,
+        type: 'request-obsolete',
+      });
+      expect(followed.pendingRequest).toBeNull();
+      expect(followed.run).toBeNull();
+      expect(followed.error).toBeNull();
+      expect(runnerPhase(followed)).toBe('idle');
+    });
+
+    it('follows a durable state that still holds the exact request, as a recovered request awaiting confirmation', () => {
+      const pending = runnerReducer(startRecording(), { request: pause, type: 'request-started' });
+      const followed = runnerReducer(pending, {
+        recovery: { pendingPointCount: 2, request: pause, run: recordingRun, uploadRejection: null },
+        request: pause,
+        type: 'request-obsolete',
+      });
+      expect(followed).toMatchObject({ authority: { status: 'restored' }, error: { request: pause }, pendingRequest: null, run: recordingRun, upload: { pendingCount: 2 } });
+    });
+
+    it('changes nothing when it is not the request in flight', () => {
+      const pending = runnerReducer(startRecording(), { request: pause, type: 'request-started' });
+      const other = { ...pause, commandId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' };
+      expect(runnerReducer(pending, { recovery: null, request: other, type: 'request-obsolete' })).toBe(pending);
+      const idle = startRecording();
+      expect(runnerReducer(idle, { recovery: { pendingPointCount: 0, request: null, run: null }, request: pause, type: 'request-obsolete' })).toBe(idle);
+    });
+  });
+
   it('exposes only valid lifecycle commands', () => {
     expect(availableCommands('recording')).toEqual(['pause', 'finish']);
     expect(availableCommands('paused')).toEqual(['resume', 'finish']);

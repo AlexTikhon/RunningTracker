@@ -2241,3 +2241,36 @@ IndexedDB: 6 passed. The 403 `ORG_ACCESS_DENIED` is the real server's answer (me
 database); the unknown outcomes (refused connection, 503, 429 carrying the membership code) are injected at the
 browser network layer. Stale-writer and changed-state fencing is exercised in `runner-storage.spec.ts` against
 `fake-indexeddb`, not in a browser.
+
+## Runner: lifecycle requests fenced by the writer capability they began with (2026-10-21)
+
+Design and limits: ADR-0059. `apps/web` and `tests/e2e` only; no API, SQL, migration, dependency or server lease.
+
+**Defect (reproduced on 9285ab3).** `executeRunnerRequest` sent the mutation before any ownership check: with
+`assertOwned() === false` it still called `sendRunCommand` once and only then threw. `queueRequest` and the three
+acknowledgements did not check the lease in their transaction and moved the active-run pointer. In a throwaway
+reproduction, tab A's late Pause acknowledgement ran after B had acknowledged the same command and moved to run B, and
+it pointed the profile back at run A.
+
+**Invariant.** A lifecycle request carries its capability: the user, owner and fencing token, plus the session signal.
+Queueing, acknowledgement and reconciliation each check, in one transaction and before any write: the lease is live,
+the queued request is exactly this one, and the active run matches. A Start applies only while no run is active. If
+any check fails, the outcome is `obsolete` (`writer-lost` / `superseded` / `not-active`) and nothing is written. The
+same epoch and session are revalidated right before the send. Completions reach the page only for the same session,
+operation and epoch, checked after the durable write. Otherwise `request-obsolete` releases the pending marker and the
+page follows the durable state.
+
+**Executed.** The new `runner-request-fencing.spec.ts` (27 tests, two storage instances on one `IDBFactory`, an
+injected clock, deferred promises) ran red first: 24 failed and 3 passed. The old executor ran through a temporary
+compatibility shim that answered `assertOwned` from the same epoch. After the fix: 27 passed. The new
+`tests/e2e/lifecycle-takeover.spec.ts` fails on the HEAD sources: the page showed `paused` after the old answer
+arrived in the newer epoch. It passes with the fix. The existing specs now pass a lease, and pure seeds use
+`activateRunSnapshot`. `runner-state.spec.ts` gained 4 `request-obsolete` cases. `npm run verify`: exit 0 (scripts 54,
+API 1324, web 599 = 568 + 31 new, contracts 129, fixtures 14, simulator 3, build). `npm run test:e2e` (Chromium and
+Chromium OIDC, real API, `_test` database migrated to 0023, native IndexedDB): 88 passed. `git diff --check`: clean.
+
+**Not run / limits.** `test:integration` (nothing outside `apps/web` changed). The browser regression models the other
+tab by writing its epoch, queue and profile directly into IndexedDB, not with a second live page. The browser's
+ownership check and the server's execution remain non-atomic (ADR-0059 decision 4). `clearActiveRun` and
+`activateRunSnapshot` are still unfenced. Browsers other than Chromium were not run, and there is no hosted CI run of
+this change.

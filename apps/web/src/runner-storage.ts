@@ -105,6 +105,17 @@ export type StorageWriteOutcome =
   | { outcome: 'applied' }
   | { outcome: 'obsolete'; reason: 'not-active' | 'writer-lost' };
 
+// The result of queueing, acknowledging or reconciling a lifecycle request (ADR-0059). `obsolete` means nothing at
+// all was written:
+//  - writer-lost: the capability is not the live lease epoch (lost, expired, released, or taken again under a newer
+//                 fencing token, even by the same owner)
+//  - superseded:  the queue no longer holds exactly this request (acknowledged, discarded, or the same identity with
+//                 another payload)
+//  - not-active:  the active run is not the one the request applies to (for a Start: another run is active)
+export type RequestWriteOutcome =
+  | { outcome: 'applied' }
+  | { outcome: 'obsolete'; reason: 'not-active' | 'superseded' | 'writer-lost' };
+
 // The result of abandoning a queued Start. `obsolete` means nothing was written: the writer is no longer the live
 // epoch, the exact request is no longer queued, or a run is active. None of these is an error.
 export type StartAbandonOutcome =
@@ -246,6 +257,24 @@ function parseRunnerRequest(value: unknown): RunnerRequest {
     return { kind: 'command', ...parsedPath, ...body };
   }
   throw new Error('Stored runner request kind is invalid');
+}
+
+// The same identity and the same payload: what was queued is exactly what is being acknowledged.
+function sameRequest(left: RunnerRequest, right: RunnerRequest): boolean {
+  if (left.kind !== right.kind || left.orgId !== right.orgId || left.runId !== right.runId) return false;
+  if (left.kind === 'start') return left.startedAt === (right as StartRequest).startedAt;
+  const command = right as CommandRequest;
+  return left.commandId === command.commandId
+    && left.type === command.type
+    && left.expectedControlRevision === command.expectedControlRevision;
+}
+
+function noActiveRun(profile: ProfileRecord | undefined): boolean {
+  return profile?.activeRunId === null || profile?.activeRunId === undefined;
+}
+
+function isActiveRun(profile: ProfileRecord | undefined, orgId: string, runId: string): boolean {
+  return profile?.activeOrgId === orgId && profile.activeRunId === runId;
 }
 
 function compareRequests(left: RequestRecord, right: RequestRecord): number {
@@ -579,50 +608,59 @@ export class IndexedDbRunnerStorage {
     return count;
   }
 
+  // Saves the exact request before it is sent, so an unknown outcome can be retried under the same identity (offline
+  // too: nothing here needs the network). Fenced like every lifecycle request write (see #writeRequest): a Start
+  // only while no run is active, a command only for the run the profile points at, and never over a request of the
+  // same identity with another payload. Saving the same request again keeps its place in the queue. A command's
+  // snapshot is merged into the active run's record; queueing never moves the pointer.
   public async queueRequest(
     userIdInput: string,
     requestInput: RunnerRequest,
     confirmedRun: RunView | null,
-  ): Promise<void> {
+    lease: WriterLease,
+  ): Promise<RequestWriteOutcome> {
     const userId = uuidSchema.parse(userIdInput);
     const request = parseRunnerRequest(requestInput);
     const run = confirmedRun === null ? null : runViewSchema.parse(confirmedRun);
     if (request.kind === 'command' && (run === null || run.runId !== request.runId)) {
       throw new Error('A durable command requires its confirmed run snapshot');
     }
+    if (request.kind === 'start' && run !== null) {
+      throw new Error('A durable start has no run snapshot yet');
+    }
 
-    const database = await this.#open();
-    const transaction = database.transaction(
-      [STORES.profiles, STORES.requests, STORES.runs],
-      'readwrite',
-    );
-    const done = transactionDone(transaction);
-    try {
+    return this.#writeRequest(userId, lease, async (transaction, profile) => {
       const requestKey = requestIdentity(request);
       const storageKey = requestStorageKey(userId, request);
-      const requestStore = transaction.objectStore(STORES.requests);
-      const existing = (await requestResult(requestStore.get(storageKey))) as RequestRecord | undefined;
-      const record: RequestRecord = {
+      const requests = transaction.objectStore(STORES.requests);
+      const existing = (await requestResult(requests.get(storageKey))) as RequestRecord | undefined;
+      if (existing !== undefined && !sameRequest(parseRunnerRequest(existing.request), request)) {
+        return { outcome: 'obsolete', reason: 'superseded' };
+      }
+      const active = request.kind === 'start'
+        ? noActiveRun(profile)
+        : isActiveRun(profile, request.orgId, request.runId);
+      if (!active) return { outcome: 'obsolete', reason: 'not-active' };
+      requests.put({
         enqueuedAt: existing?.enqueuedAt ?? this.#now().toISOString(),
         request,
         requestKey,
         storageKey,
         userId,
-      };
-      requestStore.put(record);
-
-      if (run !== null) {
-        await this.#putRunSnapshot(transaction, userId, request.orgId, run);
-      }
-      await done;
-    } catch (error) {
-      abortTransaction(transaction);
-      await done.catch(() => undefined);
-      throw error;
-    }
+      } satisfies RequestRecord);
+      if (run !== null) await this.#mergeRunRecord(transaction, userId, request.orgId, run);
+      return { outcome: 'applied' };
+    });
   }
 
-  public async acknowledgeStart(userIdInput: string, requestInput: StartRequest, runInput: RunView): Promise<void> {
+  // The initial Start is the one lifecycle transition with no active run to match: it is applied only while none is
+  // active (or this very run already is), and it is the acknowledgement that makes the new run active.
+  public async acknowledgeStart(
+    userIdInput: string,
+    requestInput: StartRequest,
+    runInput: RunView,
+    lease: WriterLease,
+  ): Promise<RequestWriteOutcome> {
     const userId = uuidSchema.parse(userIdInput);
     const parsedRequest = parseRunnerRequest(requestInput);
     if (parsedRequest.kind !== 'start') {
@@ -634,15 +672,11 @@ export class IndexedDbRunnerStorage {
       throw new Error('The acknowledged run does not match the queued start request');
     }
 
-    const database = await this.#open();
-    const transaction = database.transaction(
-      [STORES.profiles, STORES.requests, STORES.runs],
-      'readwrite',
-    );
-    const done = transactionDone(transaction);
-    transaction.objectStore(STORES.requests).delete(requestStorageKey(userId, request));
-    await this.#putRunSnapshot(transaction, userId, request.orgId, run);
-    await done;
+    return this.#acknowledgeRequest(userId, request, lease, async (transaction, profile) => {
+      if (!noActiveRun(profile) && !isActiveRun(profile, request.orgId, request.runId)) return false;
+      await this.#putRunSnapshot(transaction, userId, request.orgId, run);
+      return true;
+    });
   }
 
   public async acknowledgeCommand(
@@ -650,7 +684,8 @@ export class IndexedDbRunnerStorage {
     requestInput: CommandRequest,
     currentRunInput: RunView,
     result: RunCommandResponse,
-  ): Promise<void> {
+    lease: WriterLease,
+  ): Promise<RequestWriteOutcome> {
     const userId = uuidSchema.parse(userIdInput);
     const parsedRequest = parseRunnerRequest(requestInput);
     if (parsedRequest.kind !== 'command') {
@@ -662,41 +697,87 @@ export class IndexedDbRunnerStorage {
       throw new Error('The command acknowledgement does not match the queued request');
     }
 
-    const database = await this.#open();
-    const transaction = database.transaction(
-      [STORES.profiles, STORES.requests, STORES.runs],
-      'readwrite',
-    );
-    const done = transactionDone(transaction);
-    transaction.objectStore(STORES.requests).delete(requestStorageKey(userId, request));
-    await this.#putRunSnapshot(transaction, userId, request.orgId, mergeCommandResult(currentRun, result));
-    await done;
+    return this.#acknowledgeRequest(userId, request, lease, async (transaction, profile) => {
+      if (!isActiveRun(profile, request.orgId, request.runId)) return false;
+      await this.#mergeRunRecord(transaction, userId, request.orgId, mergeCommandResult(currentRun, result));
+      return true;
+    });
   }
 
   public async acknowledgeReconciledRequest(
     userIdInput: string,
     requestInput: CommandRequest,
     runInput: RunView,
-  ): Promise<void> {
+    lease: WriterLease,
+  ): Promise<RequestWriteOutcome> {
     const userId = uuidSchema.parse(userIdInput);
     const parsedRequest = parseRunnerRequest(requestInput);
     if (parsedRequest.kind !== 'command') {
       throw new Error('Request reconciliation requires a command request');
     }
+    const request = parsedRequest;
     const run = runViewSchema.parse(runInput);
-    if (run.runId !== parsedRequest.runId) {
+    if (run.runId !== request.runId) {
       throw new Error('The reconciled run does not match the queued request');
     }
 
+    return this.#acknowledgeRequest(userId, request, lease, async (transaction, profile) => {
+      if (!isActiveRun(profile, request.orgId, request.runId)) return false;
+      await this.#mergeRunRecord(transaction, userId, request.orgId, run);
+      return true;
+    });
+  }
+
+  // Deletes exactly the acknowledged request and persists its result, in one fenced transaction: the request must
+  // still be queued with the same identity and payload, and `persist` decides from the profile whether the result
+  // still applies to the active run (writing it if so). Every check happens before the first write.
+  async #acknowledgeRequest(
+    userId: string,
+    request: RunnerRequest,
+    lease: WriterLease,
+    persist: (transaction: IDBTransaction, profile: ProfileRecord | undefined) => Promise<boolean>,
+  ): Promise<RequestWriteOutcome> {
+    return this.#writeRequest(userId, lease, async (transaction, profile) => {
+      const storageKey = requestStorageKey(userId, request);
+      const requests = transaction.objectStore(STORES.requests);
+      const queued = (await requestResult(requests.get(storageKey))) as RequestRecord | undefined;
+      if (queued === undefined || !sameRequest(parseRunnerRequest(queued.request), request)) {
+        return { outcome: 'obsolete', reason: 'superseded' };
+      }
+      if (!await persist(transaction, profile)) return { outcome: 'obsolete', reason: 'not-active' };
+      requests.delete(storageKey);
+      return { outcome: 'applied' };
+    });
+  }
+
+  // One transaction over the lease, the profile, the queue and the run records for a lifecycle request write. The
+  // capability (user, owner, fencing epoch, unexpired and unreleased) is checked inside it before anything else, so
+  // a tab that lost the lease, even one that took it back under a newer epoch, finds out here and writes nothing.
+  // `write` returns obsolete only before it has written anything.
+  async #writeRequest(
+    userId: string,
+    leaseInput: WriterLease,
+    write: (transaction: IDBTransaction, profile: ProfileRecord | undefined) => Promise<RequestWriteOutcome>,
+  ): Promise<RequestWriteOutcome> {
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    if (lease.userId !== userId) throw new Error('Writer lease does not match the request');
     const database = await this.#open();
-    const transaction = database.transaction(
-      [STORES.profiles, STORES.requests, STORES.runs],
-      'readwrite',
-    );
+    const transaction = database.transaction([STORES.leases, STORES.profiles, STORES.requests, STORES.runs], 'readwrite');
     const done = transactionDone(transaction);
-    transaction.objectStore(STORES.requests).delete(requestStorageKey(userId, parsedRequest));
-    await this.#putRunSnapshot(transaction, userId, parsedRequest.orgId, run);
-    await done;
+    try {
+      if (!await this.#holdsCurrentLease(transaction, lease)) {
+        await done;
+        return { outcome: 'obsolete', reason: 'writer-lost' };
+      }
+      const profile = (await requestResult(transaction.objectStore(STORES.profiles).get(userId))) as ProfileRecord | undefined;
+      const outcome = await write(transaction, profile);
+      await done;
+      return outcome;
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   // Makes this run the active one: the profile points at it afterwards. Only for a run the page is taking up
@@ -1013,12 +1094,33 @@ export class IndexedDbRunnerStorage {
     this.#databasePromise = null;
   }
 
+  // Merges a snapshot into the run's record (creating it if needed) and makes that run the active one.
   async #putRunSnapshot(
     transaction: IDBTransaction,
     userId: string,
     orgId: string,
     run: RunView,
   ): Promise<void> {
+    const scope = await this.#mergeRunRecord(transaction, userId, orgId, run);
+    const profiles = transaction.objectStore(STORES.profiles);
+    const existingProfile = (await requestResult(profiles.get(scope.userId))) as ProfileRecord | undefined;
+    const profile: ProfileRecord = {
+      activeOrgId: scope.orgId,
+      activeRunId: scope.runId,
+      ...captureSourceField(existingProfile),
+      userId: scope.userId,
+    };
+    profiles.put(profile);
+  }
+
+  // Merges a snapshot into the run's record, keeping its point sequence, capture segment and rejection marker. The
+  // control and data revisions are merged independently (run-snapshot.ts). The pointer is not touched.
+  async #mergeRunRecord(
+    transaction: IDBTransaction,
+    userId: string,
+    orgId: string,
+    run: RunView,
+  ): Promise<RunScope> {
     const scope = validateScope({ orgId, runId: run.runId, userId });
     const store = transaction.objectStore(STORES.runs);
     const storageKey = runStorageKey(scope);
@@ -1034,15 +1136,7 @@ export class IndexedDbRunnerStorage {
       userId: scope.userId,
     };
     store.put(record);
-    const profiles = transaction.objectStore(STORES.profiles);
-    const existingProfile = (await requestResult(profiles.get(scope.userId))) as ProfileRecord | undefined;
-    const profile: ProfileRecord = {
-      activeOrgId: scope.orgId,
-      activeRunId: scope.runId,
-      ...captureSourceField(existingProfile),
-      userId: scope.userId,
-    };
-    profiles.put(profile);
+    return scope;
   }
 
   #open(): Promise<IDBDatabase> {

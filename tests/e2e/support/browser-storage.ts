@@ -114,6 +114,55 @@ export async function readDurableRunStatus(page: Page, userId: string): Promise<
   );
 }
 
+// What another tab leaves behind after it took the writer lease over under the next fencing epoch, settled every
+// lifecycle request this user had queued, moved off the active run and closed: one transaction over the lease, the
+// queue and the profile, written behind the page's back. Buffered points and run records are left as they are. The
+// page finds out at its next renewal, and a claim afterwards starts a still newer epoch for the same owner.
+export async function takeOverWriterBehindThePage(page: Page, userId: string): Promise<void> {
+  await page.evaluate(
+    async ({ name, user }) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error ?? new Error('Unable to open IndexedDB'));
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const transaction = database.transaction(['leases', 'profiles', 'requests'], 'readwrite');
+          const leases = transaction.objectStore('leases');
+          const read = leases.get(user);
+          read.onsuccess = () => {
+            const lease = read.result as { fencingToken: string } | undefined;
+            if (lease === undefined) { reject(new Error('There is no lease to take over')); return; }
+            const now = new Date().toISOString();
+            leases.put({
+              ...lease,
+              expiresAt: now,
+              fencingToken: (BigInt(lease.fencingToken) + 1n).toString(),
+              ownerId: crypto.randomUUID(),
+              releasedAt: now,
+            });
+          };
+          const requests = transaction.objectStore('requests');
+          const queued = requests.index('by-user').getAllKeys(user);
+          queued.onsuccess = () => { for (const key of queued.result) requests.delete(key); };
+          const profiles = transaction.objectStore('profiles');
+          const profile = profiles.get(user);
+          profile.onsuccess = () => {
+            const record = profile.result as Record<string, unknown> | undefined;
+            if (record !== undefined) profiles.put({ ...record, activeOrgId: null, activeRunId: null });
+          };
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error ?? new Error('Unable to take the lease over'));
+        });
+      } finally {
+        database.close();
+      }
+    },
+    { name: databaseName, user: userId },
+  );
+}
+
 // Ends the writer lease record behind the page's back, as if the owner had been released or had expired: the page
 // finds out at its next renewal, and a claim afterwards starts a newer epoch for the same owner (ADR-0053).
 export async function endWriterLeaseBehindThePage(page: Page, userId: string): Promise<void> {

@@ -49,7 +49,7 @@ async function fixture() {
   const factory = new IDBFactory();
   const databaseName = crypto.randomUUID();
   const storage = new IndexedDbRunnerStorage({ databaseName, factory, keyRange: IDBKeyRange, now: () => new Date('2026-10-08T08:00:01.000Z') });
-  await storage.acknowledgeStart(userId, startOf(runA), run(runA, 'recording', 3, 5));
+  await storage.activateRunSnapshot(userId, orgId, run(runA, 'recording', 3, 5));
   await storage.appendPoint(scopeA, { accuracyM: 4, latitude: 52.2, longitude: 21, recordedAt: startedAt, segmentId: 0 });
   const acquired = await storage.acquireWriterLease(userId, owner, 15_000);
   if (!acquired.acquired) throw new Error('lease');
@@ -231,7 +231,8 @@ describe('an answer that arrives after its scope or its writer has changed', () 
     const completion = f.authority.request();
     await f.storage.refreshActiveRun(scopeA, run(runA, 'finished', 3, 6), f.lease);
     await f.storage.clearActiveRun(userId);
-    await f.storage.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0));
+    await f.storage.queueRequest(userId, startOf(runB), null, f.lease);
+    await f.storage.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0), f.lease);
     await f.storage.appendPoint(scopeB, { accuracyM: 4, latitude: 52.2, longitude: 21, recordedAt: startedAt, segmentId: 0 });
     f.state.scope = scopeB;
     const before = await f.dump();

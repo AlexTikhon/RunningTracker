@@ -9,7 +9,7 @@ import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-sour
 import type { CaptureSourceKind } from './capture-source-kind.js';
 import { organizationLabel, organizationPrompt } from './organization-selection.js';
 import { OrganizationPicker } from './OrganizationPicker.js';
-import { definitiveStartRejectionOf, executeRunnerRequest } from './runner-requests.js';
+import { performRunnerRequest } from './runner-requests.js';
 import { RunnerView, type StorageState } from './RunnerView.js';
 import { SessionBar } from './SessionBar.js';
 import { unsentWorkNote } from './unsent-work.js';
@@ -98,7 +98,13 @@ export function App() {
   // asked to restore durable state underneath a request in flight.
   const abandoningStart = useRef(false);
   const [abandonFailure, setAbandonFailure] = useState<string | null>(null);
+  // The lifecycle request this page has in flight. A suspended or replaced session lets go of it, so its late
+  // completion reports nothing (ADR-0059); the exact request stays queued in IndexedDB.
+  const requestOperation = useRef<{ request: RunnerRequest } | null>(null);
   const suspendRunner = useCallback(() => {
+    const operation = requestOperation.current;
+    requestOperation.current = null;
+    if (operation !== null) dispatch({ recovery: null, request: operation.request, type: 'request-obsolete' });
     captureController.current?.stop();
     uploadWorker.current?.stop();
     if (uploadWorker.current !== null && latestUpload.current.status !== 'blocked') {
@@ -370,50 +376,46 @@ export function App() {
       if (session.status !== 'ready' || storage.status !== 'ready' || abandoningStart.current) {
         return;
       }
-      if (!await writerCoordinator.current?.assertOwned()) {
+      // The capability the request is made under: this user, owner and fencing epoch, in this session.
+      const lease = await writerCoordinator.current?.assertOwnedLease();
+      if (!lease || session.signal.aborted) {
         return;
       }
+      const operation = { request };
+      requestOperation.current = operation;
+      const userId = session.session.identity.userId;
       setAbandonFailure(null);
       dispatch({ request, type: 'request-started' });
       try {
-        const outcome = await executeRunnerRequest({
-          assertOwned: async () => await writerCoordinator.current?.assertOwned() ?? false,
+        await performRunnerRequest({
           csrf: session.session.csrf,
+          describe: errorMessage,
+          dispatch,
+          lease,
+          // The durable state replaces what any read in flight was asked about.
+          onFollow: (recovery) => {
+            authority.current?.invalidate();
+            setRunOrgId(recovery.orgId);
+          },
+          // A definitive refusal of the run also stops the capture and opens the explicit discard.
+          onRefused: (refusal) => {
+            captureController.current?.stop();
+            authority.current?.refuse({ orgId: request.orgId, runId: request.runId, userId }, refusal);
+          },
           online: runner.connectivity === 'online',
+          page: {
+            current: () => requestOperation.current === operation && !session.signal.aborted,
+            lease: () => writerCoordinator.current?.currentLease() ?? null,
+          },
           request,
+          revalidate: async () => await writerCoordinator.current?.assertOwnedLease() ?? null,
           run: runner.run,
           signal: session.signal,
           storage: getBrowserRunnerStorage(),
-          userId: session.session.identity.userId,
+          userId,
         });
-        if (outcome.kind === 'start' && request.kind === 'start') {
-          dispatch({ request, run: outcome.run, type: 'start-succeeded' });
-        } else if (outcome.kind === 'command' && request.kind === 'command') {
-          dispatch({ request, result: outcome.result, type: 'command-succeeded' });
-        } else if (outcome.kind === 'reconciled' && request.kind === 'command') {
-          dispatch({ request, run: outcome.run, type: 'request-reconciled' });
-        }
-      } catch (error) {
-        // The request stays exactly as it was, queued under its own identity. A definitive refusal of the run also
-        // stops the capture and opens the explicit discard; a network failure, a 5xx or any unknown outcome is
-        // only a failed request.
-        // Only a Start answered by the definitive rejection may later be abandoned; any other failure keeps the
-        // exact request for the retry and offers nothing destructive.
-        const rejection = request.kind === 'start' ? definitiveStartRejectionOf(error) : null;
-        dispatch({
-          message: errorMessage(error),
-          ...(rejection === null ? {} : { rejection }),
-          request,
-          type: 'request-failed',
-        });
-        const refusal = request.kind === 'command' ? unrecoverableRefusalOf(error) : null;
-        if (refusal !== null) {
-          captureController.current?.stop();
-          authority.current?.refuse(
-            { orgId: request.orgId, runId: request.runId, userId: session.session.identity.userId },
-            refusal,
-          );
-        }
+      } finally {
+        if (requestOperation.current === operation) requestOperation.current = null;
       }
     },
     [runner.connectivity, runner.run, session, storage.status],

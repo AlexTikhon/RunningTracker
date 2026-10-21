@@ -76,7 +76,7 @@ async function acquire(storage: IndexedDbRunnerStorage, owner: string, forUser =
 
 async function withActiveRun(runId = runA) {
   const fixture = createFixture();
-  await fixture.storage.acknowledgeStart(userId, startOf(runId), run(runId, 'recording', 3, 5));
+  await fixture.storage.activateRunSnapshot(userId, orgId, run(runId, 'recording', 3, 5));
   await fixture.storage.appendPoint({ orgId, runId, userId }, measurement);
   const lease = await acquire(fixture.storage, ownerA);
   return { ...fixture, lease };
@@ -114,10 +114,11 @@ describe('refreshActiveRun', () => {
     await storage.refreshActiveRun(scopeA, run(runA, 'finished', 3, 6), lease);
     await storage.clearActiveRun(userId);
     const scopeB = { orgId, runId: runB, userId };
-    await storage.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0));
+    await storage.queueRequest(userId, startOf(runB), null, lease);
+    await storage.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0), lease);
     await storage.appendPoint(scopeB, measurement);
     const pause: CommandRequest = { ...scopeB, commandId: crypto.randomUUID(), expectedControlRevision: '0', kind: 'command', type: 'pause' };
-    await storage.queueRequest(userId, pause, run(runB, 'recording', 0, 0));
+    await storage.queueRequest(userId, pause, run(runB, 'recording', 0, 0), lease);
     const before = await dump();
 
     // The old read of A, asked while A was active, is released only now.
@@ -134,7 +135,7 @@ describe('refreshActiveRun', () => {
   it('answer for a run the person already discarded cannot restore the pointer or the discarded queue', async () => {
     const { dump, lease, open, storage } = await withActiveRun();
     const pause: CommandRequest = { ...scopeA, commandId: crypto.randomUUID(), expectedControlRevision: '3', kind: 'command', type: 'pause' };
-    await storage.queueRequest(userId, pause, run(runA, 'recording', 3, 5));
+    await storage.queueRequest(userId, pause, run(runA, 'recording', 3, 5), lease);
     await storage.discardRefusedRun(scopeA, lease);
     const before = await dump();
 

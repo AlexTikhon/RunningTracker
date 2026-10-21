@@ -89,16 +89,22 @@ export type RunnerPhase =
   | 'finished'
   | 'error';
 
+// What the page restores from IndexedDB.
+export interface RestoredRunnerState {
+  pendingPointCount: number;
+  uploadRejection?: string | null;
+  request: RunnerRequest | null;
+  run: RunView | null;
+}
+
 export type RunnerEvent =
   | { connectivity: Connectivity; type: 'connectivity-changed' }
-  | {
-      pendingPointCount: number;
-      uploadRejection?: string | null;
-      request: RunnerRequest | null;
-      run: RunView | null;
-      type: 'storage-restored';
-    }
+  | (RestoredRunnerState & { type: 'storage-restored' })
   | { request: RunnerRequest; type: 'request-started' }
+  // The request's completion no longer says anything about this page: its writer epoch was replaced or its durable
+  // write was obsolete (ADR-0059). Nothing about the outcome is reported; the request in flight is released and the
+  // page follows the durable state read afterwards, or keeps what it shows when that could not be read.
+  | { recovery: RestoredRunnerState | null; request: RunnerRequest; type: 'request-obsolete' }
   | { request: StartRequest; run: RunView; type: 'start-succeeded' }
   | { request: CommandRequest; result: RunCommandResponse; type: 'command-succeeded' }
   | { request: CommandRequest; run: RunView; type: 'request-reconciled' }
@@ -295,6 +301,13 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         pendingRequest: null,
         run: mergeRunSnapshot(state.run, event.run),
       };
+    case 'request-obsolete':
+      if (!isSameRequest(state.pendingRequest, event.request)) {
+        return state;
+      }
+      return event.recovery === null
+        ? { ...state, pendingRequest: null }
+        : runnerReducer({ ...state, pendingRequest: null }, { ...event.recovery, type: 'storage-restored' });
     case 'request-failed':
       if (!isSameRequest(state.pendingRequest, event.request)) {
         return state;

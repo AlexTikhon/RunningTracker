@@ -27,9 +27,16 @@ const paused: RunCommandResponse = { commandId: pause.commandId, controlRevision
 const apiError = (status: number, code: string) => new RunnerApiError('The server said no', status, code, null);
 const csrf = { headerName: 'x-csrf-token', token: 't' } as const;
 
+// The live writer lease the request is made under, and the renewal the coordinator would answer with (ADR-0059).
+async function writerOf(storage: IndexedDbRunnerStorage) {
+  const { lease } = await storage.acquireWriterLease(userId, crypto.randomUUID(), 15_000);
+  return { lease, revalidate: () => storage.renewWriterLease(lease, 15_000) };
+}
+
 async function setup() {
   const storage = new IndexedDbRunnerStorage({ databaseName: crypto.randomUUID(), factory: new IDBFactory(), keyRange: IDBKeyRange });
-  await storage.acknowledgeStart(userId, start, recording);
+  await storage.activateRunSnapshot(userId, orgId, recording);
+  const { lease, revalidate } = await writerOf(storage);
   const sent: CommandRequest[] = [];
   const run = (
     send: (request: CommandRequest) => Promise<RunCommandResponse>,
@@ -42,10 +49,11 @@ async function setup() {
         readRun: read,
         sendRunCommand: (input) => { sent.push(input as CommandRequest); return send(input as CommandRequest); },
       },
-      assertOwned: () => Promise.resolve(true),
       csrf,
+      lease,
       online: true,
       request,
+      revalidate,
       run: recording,
       signal: new AbortController().signal,
       storage,
@@ -124,8 +132,9 @@ describe('a command whose outcome is unknown', () => {
 // the membership behind it is gone. Everything else, including the same code with another status or an unreadable
 // body, is an unknown outcome and keeps the identical request for the retry (ADR-0058).
 describe('a Start the server definitively rejects', () => {
-  function setupStart() {
+  async function setupStart() {
     const storage = new IndexedDbRunnerStorage({ databaseName: crypto.randomUUID(), factory: new IDBFactory(), keyRange: IDBKeyRange });
+    const { lease, revalidate } = await writerOf(storage);
     const sent: StartRequest[] = [];
     const run = (createRun: (request: StartRequest) => Promise<RunView>, signal: AbortSignal = new AbortController().signal) =>
       executeRunnerRequest({
@@ -134,10 +143,11 @@ describe('a Start the server definitively rejects', () => {
           readRun: () => Promise.reject(new Error('unexpected read')),
           sendRunCommand: () => Promise.reject(new Error('unexpected command')),
         },
-        assertOwned: () => Promise.resolve(true),
         csrf,
+        lease,
         online: true,
         request: start,
+        revalidate,
         run: null,
         signal,
         storage,
@@ -147,7 +157,7 @@ describe('a Start the server definitively rejects', () => {
   }
 
   it('a valid 403 ORG_ACCESS_DENIED is classified, and the exact Start stays queued with no run', async () => {
-    const { run, storage } = setupStart();
+    const { run, storage } = await setupStart();
     const error = await run(() => Promise.reject(apiError(403, 'ORG_ACCESS_DENIED'))).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(RunnerApiError);
     expect(definitiveStartRejectionOf(error)).toEqual({ code: 'ORG_ACCESS_DENIED' });
@@ -170,7 +180,7 @@ describe('a Start the server definitively rejects', () => {
     ['a 500', apiError(500, 'ORG_ACCESS_DENIED')],
     ['a 503', apiError(503, 'HTTP_ERROR')],
   ])('%s is not definitive, and the retry sends the very same Start identity', async (_name, failure) => {
-    const { run, sent, storage } = setupStart();
+    const { run, sent, storage } = await setupStart();
     const error = await run(() => Promise.reject(failure)).catch((caught: unknown) => caught);
     expect(definitiveStartRejectionOf(error)).toBeNull();
     const recovered = (await storage.loadRecovery(userId)).request;
@@ -186,7 +196,7 @@ describe('a Start the server definitively rejects', () => {
   });
 
   it('an abort before the answer keeps the Start queued and is not definitive', async () => {
-    const { run, sent, storage } = setupStart();
+    const { run, sent, storage } = await setupStart();
     const controller = new AbortController();
     const aborted = new DOMException('The operation was aborted', 'AbortError');
     const error = await run(() => { controller.abort(aborted); return Promise.reject(aborted); }, controller.signal)
