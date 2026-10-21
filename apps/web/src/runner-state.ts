@@ -126,7 +126,8 @@ export type RunnerEvent =
   // event, and nothing about the server run is implied.
   | { runId: string; type: 'local-recovery-discarded' }
   | { type: 'session-ended' }
-  | { type: 'finished-run-cleared' }
+  // The durable pointer of this exact finished run was cleared ("New run"). A clear of another run changes nothing.
+  | { runId: string; type: 'finished-run-cleared' }
   | { upload: UploadState; type: 'upload-changed' };
 
 export function createInitialRunnerState(connectivity: Connectivity): RunnerState {
@@ -380,6 +381,7 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
         upload: { message: null, pendingCount: 0, status: 'idle' },
       };
     case 'finished-run-cleared':
+      if (state.run?.runId !== event.runId) return state;
       if (state.run?.status !== 'finished' || state.pendingRequest !== null) {
         throw new Error('Only a settled finished run can be cleared');
       }

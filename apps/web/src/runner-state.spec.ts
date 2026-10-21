@@ -320,7 +320,15 @@ describe('runnerReducer', () => {
       },
     };
 
-    expect(runnerPhase(runnerReducer(finished, { type: 'finished-run-cleared' }))).toBe('idle');
+    expect(runnerPhase(runnerReducer(finished, { runId: recordingRun.runId, type: 'finished-run-cleared' }))).toBe('idle');
+  });
+
+  it('ignores a clear of another run than the one shown', () => {
+    const finished = { ...startRecording(), run: { ...recordingRun, finishedAt: '2026-09-26T09:00:00.000Z', status: 'finished' as const } };
+    const other = { ...startRecording(), run: { ...recordingRun, runId: crypto.randomUUID() } };
+
+    expect(runnerReducer(other, { runId: recordingRun.runId, type: 'finished-run-cleared' })).toBe(other);
+    expect(runnerReducer({ ...finished, run: null }, { runId: recordingRun.runId, type: 'finished-run-cleared' }).run).toBeNull();
   });
 });
 

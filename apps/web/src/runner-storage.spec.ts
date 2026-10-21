@@ -2,6 +2,7 @@ import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb';
 import { describe, expect, it, vi } from 'vitest';
 
 import { IndexedDbRunnerStorage, type PointMeasurement } from './runner-storage.js';
+import { detachActiveRunForTest } from './runner-storage-test-support.js';
 import type { CommandRequest, StartRequest } from './runner-state.js';
 
 const userId = '11111111-1111-4111-8111-111111111111';
@@ -266,26 +267,23 @@ describe('IndexedDbRunnerStorage', () => {
     });
   });
 
-  it('keeps buffered points when the finished run is cleared from the active UI', async () => {
+  it('cannot hide buffered points by clearing the finished run from the active UI', async () => {
     const storage = createStorage(new IDBFactory(), crypto.randomUUID());
-    await startRun(storage);
+    const lease = await startRun(storage);
     await storage.appendPoint(scope, measurement);
+    const finishedRun = { ...recordingRun, controlRevision: '1', finishedAt: '2026-09-26T09:00:00.000Z', status: 'finished' as const };
+    await storage.refreshActiveRun(scope, finishedRun, lease);
 
-    await expect(storage.loadRecovery(userId)).resolves.toMatchObject({
-      orgId,
-      pendingPointCount: 1,
-      run: recordingRun,
-    });
+    await expect(storage.clearFinishedRun(scope, lease)).resolves.toEqual({ outcome: 'blocked', reason: 'points-buffered' });
 
-    await storage.clearActiveRun(userId);
-
+    // Recovery still shows the run and its point, which stays buffered for upload.
     await expect(storage.loadRecovery(userId)).resolves.toEqual({
       uploadRejection: null,
       captureSource: 'geolocation',
-      orgId: null,
-      pendingPointCount: 0,
+      orgId,
+      pendingPointCount: 1,
       request: null,
-      run: null,
+      run: finishedRun,
     });
     await expect(storage.readPointBatch(scope)).resolves.toHaveLength(1);
   });
@@ -347,9 +345,10 @@ describe('IndexedDbRunnerStorage', () => {
     it('keeps the choice as a preference, with no active run, after a finished run is cleared', async () => {
       const storage = createStorage(new IDBFactory(), crypto.randomUUID());
       await storage.saveCaptureSource(userId, 'simulator');
-      await startRun(storage);
+      const lease = await startRun(storage);
+      await storage.refreshActiveRun(scope, { ...recordingRun, controlRevision: '1', finishedAt: '2026-09-26T09:00:00.000Z', status: 'finished' }, lease);
 
-      await storage.clearActiveRun(userId);
+      await expect(storage.clearFinishedRun(scope, lease)).resolves.toEqual({ outcome: 'cleared' });
 
       await expect(storage.loadRecovery(userId)).resolves.toEqual({
       uploadRejection: null,
@@ -546,8 +545,8 @@ describe('discardRefusedRun', () => {
   });
 
   it('there is nothing to discard once the pointer is already cleared', async () => {
-    const { storage, lease } = await refusedRun();
-    await storage.clearActiveRun(userId);
+    const { factory, lease, name, storage } = await refusedRun();
+    await detachActiveRunForTest(factory, name, userId);
     await expect(storage.discardRefusedRun(scope, lease)).rejects.toThrow('Only the active run');
     // The points were not touched by a discard that did not apply.
     await expect(storage.countPoints(scope)).resolves.toBe(2);

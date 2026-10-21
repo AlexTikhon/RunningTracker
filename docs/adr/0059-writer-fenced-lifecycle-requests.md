@@ -49,7 +49,8 @@ boolean cannot tell "still the owner" from "the owner again under a newer epoch"
 - A late answer of an old epoch can leave the server ahead of this browser (the Pause was committed). The new epoch's
   authority read or retry learns it; this is the existing ADR-0055 model.
 - `activateRunSnapshot` (tests and seeding only) and `clearActiveRun` (clearing a finished run) remain unfenced; they are
-  not lifecycle requests and were out of scope.
+  not lifecycle requests and were out of scope. ADR-0060 has since replaced `clearActiveRun` with the fenced
+  `clearFinishedRun`.
 
 ## Verification
 

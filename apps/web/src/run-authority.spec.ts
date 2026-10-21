@@ -230,7 +230,8 @@ describe('an answer that arrives after its scope or its writer has changed', () 
     const f = await fixture();
     const completion = f.authority.request();
     await f.storage.refreshActiveRun(scopeA, run(runA, 'finished', 3, 6), f.lease);
-    await f.storage.clearActiveRun(userId);
+    await f.storage.acknowledgePointBatch(scopeA, ['1']);
+    await expect(f.storage.clearFinishedRun(scopeA, f.lease)).resolves.toEqual({ outcome: 'cleared' });
     await f.storage.queueRequest(userId, startOf(runB), null, f.lease);
     await f.storage.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0), f.lease);
     await f.storage.appendPoint(scopeB, { accuracyM: 4, latitude: 52.2, longitude: 21, recordedAt: startedAt, segmentId: 0 });

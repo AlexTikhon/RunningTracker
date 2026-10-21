@@ -112,7 +112,8 @@ describe('refreshActiveRun', () => {
     const { dump, lease, open, storage } = await withActiveRun();
     // A is finished and cleared, then B is started and recording with a point and a queued command.
     await storage.refreshActiveRun(scopeA, run(runA, 'finished', 3, 6), lease);
-    await storage.clearActiveRun(userId);
+    await storage.acknowledgePointBatch(scopeA, ['1']);
+    await expect(storage.clearFinishedRun(scopeA, lease)).resolves.toEqual({ outcome: 'cleared' });
     const scopeB = { orgId, runId: runB, userId };
     await storage.queueRequest(userId, startOf(runB), null, lease);
     await storage.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0), lease);

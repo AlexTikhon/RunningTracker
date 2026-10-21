@@ -5,6 +5,7 @@ import { loadHealth, type HealthSnapshot } from './health.js';
 import { ArchiveScreen } from './ArchiveScreen.js';
 import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
+import { performFinishedRunClear } from './finished-run-clear.js';
 import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
 import type { CaptureSourceKind } from './capture-source-kind.js';
 import { organizationLabel, organizationPrompt } from './organization-selection.js';
@@ -101,9 +102,13 @@ export function App() {
   // The lifecycle request this page has in flight. A suspended or replaced session lets go of it, so its late
   // completion reports nothing (ADR-0059); the exact request stays queued in IndexedDB.
   const requestOperation = useRef<{ request: RunnerRequest } | null>(null);
+  // The "New run" clear this page has in flight. A suspended or replaced session lets go of it too, so its late
+  // completion neither reports nor releases anything; no lifecycle request begins while it is set.
+  const clearingRun = useRef<object | null>(null);
   const suspendRunner = useCallback(() => {
     const operation = requestOperation.current;
     requestOperation.current = null;
+    clearingRun.current = null;
     if (operation !== null) dispatch({ recovery: null, request: operation.request, type: 'request-obsolete' });
     captureController.current?.stop();
     uploadWorker.current?.stop();
@@ -373,7 +378,7 @@ export function App() {
 
   const executeRequest = useCallback(
     async (request: RunnerRequest) => {
-      if (session.status !== 'ready' || storage.status !== 'ready' || abandoningStart.current) {
+      if (session.status !== 'ready' || storage.status !== 'ready' || abandoningStart.current || clearingRun.current !== null) {
         return;
       }
       // The capability the request is made under: this user, owner and fencing epoch, in this session.
@@ -567,17 +572,47 @@ export function App() {
       .catch((error: unknown) => setStorage({ message: errorMessage(error), status: 'error' }));
   };
 
+  // "New run". The storage transaction decides whether this exact finished run may be let go of for the writer epoch
+  // the page proves now; the completion reaches the page only while it still has the same session, operation and
+  // coordinator, and only that coordinator's same epoch is released (finished-run-clear.ts).
   const clearFinishedRun = async () => {
-    if (session.status !== 'ready') {
+    const coordinator = writerCoordinator.current;
+    if (
+      session.status !== 'ready'
+      || storage.status !== 'ready'
+      || coordinator === null
+      || runner.run?.status !== 'finished'
+      || scopeOrgId === null
+      || busy
+      || clearingRun.current !== null
+    ) {
       return;
     }
+    const operation = {};
+    clearingRun.current = operation;
+    const { signal } = session;
+    const current = () => clearingRun.current === operation && !signal.aborted;
     authority.current?.invalidate();
     try {
-      await getBrowserRunnerStorage().clearActiveRun(session.session.identity.userId);
-      dispatch({ type: 'finished-run-cleared' });
-      await writerCoordinator.current?.release();
+      await performFinishedRunClear({
+        dispatch,
+        onFollow: (recovery) => {
+          authority.current?.invalidate();
+          setRunOrgId(recovery.orgId);
+        },
+        page: {
+          current,
+          lease: () => (writerCoordinator.current === coordinator ? coordinator.currentLease() : null),
+        },
+        release: () => coordinator.release(),
+        revalidate: () => coordinator.assertOwnedLease(),
+        scope: { orgId: scopeOrgId, runId: runner.run.runId, userId: session.session.identity.userId },
+        storage: getBrowserRunnerStorage(),
+      });
     } catch (error) {
-      setStorage({ message: errorMessage(error), status: 'error' });
+      if (current()) setStorage({ message: errorMessage(error), status: 'error' });
+    } finally {
+      if (clearingRun.current === operation) clearingRun.current = null;
     }
   };
 

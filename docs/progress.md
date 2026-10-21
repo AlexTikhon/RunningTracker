@@ -2274,3 +2274,39 @@ tab by writing its epoch, queue and profile directly into IndexedDB, not with a 
 ownership check and the server's execution remain non-atomic (ADR-0059 decision 4). `clearActiveRun` and
 `activateRunSnapshot` are still unfenced. Browsers other than Chromium were not run, and there is no hosted CI run of
 this change.
+
+## Runner: "New run" fenced by the writer epoch and the exact finished run (2026-10-21)
+
+Design and limits: ADR-0060. `apps/web` and `tests/e2e` only; no API, SQL, migration, dependency or server lease.
+
+**Defect (reproduced on 9211f08).** `clearFinishedRun` in `App` called `clearActiveRun(userId)`, which wrote a null
+pointer in a profiles-only transaction with no lease, scope or pending-work check. In a temporary probe (since
+deleted), A finished run A, its lease expired, B took the next epoch, cleared A, started run B and buffered a point,
+and A's delayed `clearActiveRun` then ran. `countPoints(scopeB)` was 1 while `loadRecovery` returned `run: null` and
+`pendingPointCount: 0`. The new browser test failed on the 9211f08 web sources the same way: the durable
+`activeRunId` was `null` instead of B's run.
+
+**Invariant.** `clearFinishedRun(scope, lease)` clears the pointer only in one transaction that finds the live epoch,
+exactly this active run, a finished run, no buffered point and no queued request. Otherwise it returns `obsolete` or
+`blocked` and writes nothing. In `App`, only the same session, operation and coordinator, still on the same epoch,
+dispatches `finished-run-cleared` (now carrying the run id) and releases the lease. A replaced page gets nothing.
+Every other case follows the durable state.
+
+**Executed.** `finished-run-clear.spec.ts` (19 tests) ran red first: all 19 failed because the operation did not
+exist. One more expectation was added later (a lost lease is proven again) and failed before its fix. After the fix:
+19 passed. `runner-state.spec.ts` gained 1 case (red, then green). The existing specs that used `clearActiveRun` now
+use the fenced clear where the scenario is a finished, uploaded run. Where another epoch moves the pointer off an
+unfinished run, they use the test-only `detachActiveRunForTest`. The old "keeps buffered points when the finished
+run is cleared" case now asserts that the clear is blocked and recovery still shows the point. The new
+`tests/e2e/new-run-takeover.spec.ts` has 2 tests: the stale-tab regression with two live pages and a positive New
+run, reload, Start, reload. The regression failed on the baseline sources and passes with the fix, including 3 of 3
+with `--repeat-each=3`. `npm run verify`: exit 0 (scripts 54, API 1324, web 619 = 599 + 20 new, contracts 129,
+fixtures 14, simulator 3, build). `npm run test:e2e` (Chromium and Chromium OIDC, real API, `_test` database, native
+IndexedDB): 90 passed (88 + 2 new). The harness's deliberately failing test counts as expected. `git diff --check`:
+clean.
+
+**Not run / limits.** `test:integration` (nothing outside `apps/web` changed). In the browser, A's lease goes stale
+because a page-scoped init script holds A's 5 s renewal timer. This stands in for a suspended tab, and the click is
+caught by the lease proof just before the transaction. A takeover between that proof and the transaction is covered
+only by the fake-indexeddb tests. Browsers other than Chromium were not run, and there is no hosted CI run of this
+change.

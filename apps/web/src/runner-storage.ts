@@ -122,6 +122,17 @@ export type StartAbandonOutcome =
   | { outcome: 'abandoned' }
   | { outcome: 'obsolete'; reason: 'not-queued' | 'run-active' | 'writer-lost' };
 
+// The result of clearing a finished run ("New run"). Nothing at all is written unless it is `cleared`:
+//  - obsolete writer-lost:     the capability is not the live lease epoch (lost, expired, released, or newer)
+//  - obsolete not-active:      the profile no longer points at exactly this user, organization and run
+//  - blocked not-finished:     the stored run is not finished
+//  - blocked points-buffered:  points of the run are still waiting to be uploaded
+//  - blocked request-pending:  a lifecycle request of this user is still queued
+export type FinishedRunClearOutcome =
+  | { outcome: 'cleared' }
+  | { outcome: 'obsolete'; reason: 'not-active' | 'writer-lost' }
+  | { outcome: 'blocked'; reason: 'not-finished' | 'points-buffered' | 'request-pending' };
+
 export type WriterLeaseAcquisition =
   | { acquired: true; lease: WriterLease }
   | { acquired: false; lease: WriterLease };
@@ -780,9 +791,9 @@ export class IndexedDbRunnerStorage {
     }
   }
 
-  // Makes this run the active one: the profile points at it afterwards. Only for a run the page is taking up
-  // (a start, a queued command, a recovery); never for an answer about a run that was already active, which
-  // must use refreshActiveRun (ADR-0055).
+  // Test and fixture setup only; no application module calls it. Makes this run the active one without any lease:
+  // the profile points at it afterwards. The application moves the pointer only through the fenced writes (a Start
+  // acknowledgement, clearFinishedRun, the discards), and merges answers through refreshActiveRun (ADR-0055).
   public async activateRunSnapshot(userIdInput: string, orgIdInput: string, runInput: RunView): Promise<void> {
     const userId = uuidSchema.parse(userIdInput);
     const orgId = uuidSchema.parse(orgIdInput);
@@ -907,21 +918,50 @@ export class IndexedDbRunnerStorage {
     };
   }
 
-  public async clearActiveRun(userIdInput: string): Promise<void> {
-    const userId = uuidSchema.parse(userIdInput);
+  // "New run": lets go of the finished run the page shows. In one writer-fenced transaction over every store that
+  // could still hold work for it, the capability must be the live epoch, the profile must point at exactly this
+  // user, organization and run, the run must be finished, no point of it may be buffered and no lifecycle request of
+  // this user may be queued. Only then is the pointer cleared; the run record (with its point sequence) and the
+  // capture preference stay. Anything else is an outcome with nothing written, never a pointer cleared under another
+  // epoch's run or over work that recovery would then no longer show.
+  public async clearFinishedRun(scopeInput: RunScope, leaseInput: WriterLease): Promise<FinishedRunClearOutcome> {
+    const scope = validateScope(scopeInput);
+    const lease = parseWriterLease({ ...leaseInput, storageKey: leaseInput.userId });
+    if (lease.userId !== scope.userId) throw new Error('Writer lease does not match the run');
     const database = await this.#open();
-    const transaction = database.transaction(STORES.profiles, 'readwrite');
+    const transaction = database.transaction(
+      [STORES.leases, STORES.points, STORES.profiles, STORES.requests, STORES.runs],
+      'readwrite',
+    );
     const done = transactionDone(transaction);
-    const store = transaction.objectStore(STORES.profiles);
-    const existing = (await requestResult(store.get(userId))) as ProfileRecord | undefined;
-    const profile: ProfileRecord = {
-      activeOrgId: null,
-      activeRunId: null,
-      ...captureSourceField(existing),
-      userId,
-    };
-    store.put(profile);
-    await done;
+    try {
+      const outcome = await this.#clearFinishedRun(transaction, scope, lease);
+      await done;
+      return outcome;
+    } catch (error) {
+      abortTransaction(transaction);
+      await done.catch(() => undefined);
+      throw error;
+    }
+  }
+
+  // Every check comes before the only write.
+  async #clearFinishedRun(transaction: IDBTransaction, scope: RunScope, lease: WriterLease): Promise<FinishedRunClearOutcome> {
+    if (!await this.#holdsCurrentLease(transaction, lease)) return { outcome: 'obsolete', reason: 'writer-lost' };
+    const profiles = transaction.objectStore(STORES.profiles);
+    const profile = (await requestResult(profiles.get(scope.userId))) as ProfileRecord | undefined;
+    if (profile === undefined || !isActiveRun(profile, scope.orgId, scope.runId)) return { outcome: 'obsolete', reason: 'not-active' };
+    const record = (await requestResult(transaction.objectStore(STORES.runs).get(runStorageKey(scope)))) as RunRecord | undefined;
+    if (record?.run?.status !== 'finished') return { outcome: 'blocked', reason: 'not-finished' };
+    const range = this.#keyRange.bound([scope.userId, scope.orgId, scope.runId, ''], [scope.userId, scope.orgId, scope.runId, '\uffff']);
+    if (await requestResult(transaction.objectStore(STORES.points).index('by-run-seq').count(range)) > 0) {
+      return { outcome: 'blocked', reason: 'points-buffered' };
+    }
+    if (await requestResult(transaction.objectStore(STORES.requests).index('by-user').count(scope.userId)) > 0) {
+      return { outcome: 'blocked', reason: 'request-pending' };
+    }
+    profiles.put({ ...profile, activeOrgId: null, activeRunId: null } satisfies ProfileRecord);
+    return { outcome: 'cleared' };
   }
 
   // Marks the active run's queue as rejected so capture cannot add to it. Fenced like refreshActiveRun: a late

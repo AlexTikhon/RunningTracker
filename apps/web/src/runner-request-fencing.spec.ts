@@ -6,6 +6,7 @@ import { RunnerApiError } from './runner-api.js';
 import { executeRunnerRequest, performRunnerRequest, type RunnerRequestPage } from './runner-requests.js';
 import type { CommandRequest, RunnerRequest, StartRequest } from './runner-state.js';
 import { IndexedDbRunnerStorage, type PointMeasurement, type WriterLease } from './runner-storage.js';
+import { detachActiveRunForTest } from './runner-storage-test-support.js';
 
 // ADR-0059: a lifecycle request (queue, dispatch, acknowledge, reconcile) belongs to the writer capability it began
 // with: the user, the owner and the fencing epoch, and the session. Two storage instances share one IDBFactory and
@@ -88,6 +89,8 @@ function createFixture() {
   };
   const fixture = {
     advance: (ms: number) => { nowMs += ms; },
+    // The pointer moved off the active run, as another epoch can leave it (test setup, unfenced).
+    detach: () => detachActiveRunForTest(factory, databaseName, userId),
     dump,
     open,
     tabA: open(),
@@ -232,7 +235,7 @@ describe('lifecycle request writes check the writer capability inside their own 
     // transaction opens, its lease expires and B takes over, acknowledges the same idempotent command and moves on.
     const leaseB = await f.takeOver();
     await expect(f.tabB.acknowledgeCommand(userId, pause, run(runA, 'recording', 3, 5), resultOf(pause, 'paused', 4, 5), leaseB)).resolves.toEqual(applied);
-    await f.tabB.clearActiveRun(userId);
+    await f.detach();
     await expect(f.tabB.queueRequest(userId, startOf(runB), null, leaseB)).resolves.toEqual(applied);
     await expect(f.tabB.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0), leaseB)).resolves.toEqual(applied);
     const before = await f.dump();
@@ -273,7 +276,7 @@ describe('lifecycle request writes check the writer capability inside their own 
     const pause = commandOf('pause');
     await f.tabA.queueRequest(userId, pause, run(runA, 'recording', 3, 5), lease);
     // The same writer has since cleared run A and started run B.
-    await f.tabA.clearActiveRun(userId);
+    await f.detach();
     await f.tabA.activateRunSnapshot(userId, orgId, run(runB, 'recording', 0, 0));
     const before = await f.dump();
 
@@ -410,7 +413,7 @@ describe('executeRunnerRequest sends a mutation only for the capability it began
       sendRunCommand: (command) => Promise.resolve(resultOf(command, 'paused', 4, 5)),
     });
     await expect(execute(f.tabB, leaseB, recovered as CommandRequest, run(runA, 'recording', 3, 5), tabBServer.api)).resolves.toMatchObject({ kind: 'command' });
-    await f.tabB.clearActiveRun(userId);
+    await f.detach();
     await expect(execute(f.tabB, leaseB, startOf(runB), null, tabBServer.api)).resolves.toMatchObject({ kind: 'start' });
     expect(tabBServer.mutations).toEqual([`command:${pause.commandId}:pause:3`, `start:${runB}:${startedAt}`]);
     const before = await f.dump();
@@ -438,7 +441,7 @@ describe('executeRunnerRequest sends a mutation only for the capability it began
 
     const leaseB = await f.takeOver();
     await f.tabB.acknowledgeReconciledRequest(userId, pause, run(runA, 'paused', 4, 5), leaseB);
-    await f.tabB.clearActiveRun(userId);
+    await f.detach();
     await f.tabB.queueRequest(userId, startOf(runB), null, leaseB);
     await f.tabB.acknowledgeStart(userId, startOf(runB), run(runB, 'recording', 0, 0), leaseB);
     const before = await f.dump();
