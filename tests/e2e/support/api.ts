@@ -9,7 +9,7 @@ export interface AuthedApi {
   deleteRun(orgId: string, runId: string): Promise<void>;
   getRun(orgId: string, runId: string): Promise<RunView>;
   listRunIds(orgId: string): Promise<string[]>;
-  getAllPoints(orgId: string, runId: string): Promise<Array<{ seq: string }>>;
+  getAllPoints(orgId: string, runId: string): Promise<Array<{ segmentId: number; seq: string }>>;
   putShare(
     orgId: string,
     runId: string,
@@ -30,7 +30,7 @@ interface RunListResponse {
 
 interface PointsResponse {
   readonly nextCursor: string | null;
-  readonly points: ReadonlyArray<{ readonly seq: string }>;
+  readonly points: ReadonlyArray<{ readonly segmentId: number; readonly seq: string }>;
 }
 
 // A range that covers every run the suite can create, for the list endpoint which requires one.
@@ -111,7 +111,7 @@ export async function authedApi(context: BrowserContext, environment: E2eEnviron
     },
 
     async getAllPoints(orgId, runId) {
-      const points: Array<{ seq: string }> = [];
+      const points: Array<{ segmentId: number; seq: string }> = [];
       let cursor: string | null = null;
       do {
         const query: string = cursor === null ? '' : `?cursor=${encodeURIComponent(cursor)}`;

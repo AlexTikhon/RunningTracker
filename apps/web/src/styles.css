@@ -82,6 +82,10 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .capture-source select { width: 100%; border: 1px solid #465149; border-radius: 0.75rem; padding: 0.78rem 0.9rem; color: #f4f7f3; background: #111713; }
 .capture-source select:disabled { opacity: 0.55; }
 .capture-source span { color: #7f8a82; font-size: 0.75rem; line-height: 1.45; }
+.capture-health { margin: 0 0 1.25rem; color: #b8c2bb; font-size: 0.78rem; line-height: 1.45; }
+.capture-health strong { color: #f4f7f3; }
+.capture-health--waiting strong { color: #e8c66a; }
+.capture-health--blocked strong { color: #f08f7f; }
 .start-panel { display: grid; gap: 0.65rem; }
 .start-panel label { color: #dfe6e0; font-size: 0.82rem; font-weight: 750; }
 .start-panel input { width: 100%; border: 1px solid #465149; border-radius: 0.75rem; padding: 0.82rem 0.9rem; color: #f4f7f3; background: #111713; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.78rem; }

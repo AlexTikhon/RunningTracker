@@ -2,6 +2,8 @@ import type { RunView } from '@running-tracker/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
+import type { CaptureState } from './capture-controller.js';
+import type { CaptureSourceKind } from './capture-source-kind.js';
 import { RunnerView } from './RunnerView.js';
 import {
   createInitialRunnerState,
@@ -46,14 +48,21 @@ function render(
     failure: null,
     onAbandon: () => undefined,
   },
+  captureView: { capture: CaptureState; kind: CaptureSourceKind; nowMs: number } = {
+    capture: { status: 'idle' },
+    kind: 'simulator',
+    nowMs: 0,
+  },
 ): string {
   const noop = () => undefined;
   return renderToStaticMarkup(
     <RunnerView
       canStart
-      capture={{ status: 'idle' }}
-      captureSourceKind="simulator"
+      capture={captureView.capture}
+      captureNowMs={captureView.nowMs}
+      captureSourceKind={captureView.kind}
       controlsDisabled={false}
+      onRetryCapture={noop}
       elapsed="00:00:00"
       onChooseCaptureSource={noop}
       onClearFinishedRun={noop}
@@ -221,5 +230,70 @@ describe('RunnerView for a Start the server rejected', () => {
     expect(markup).not.toContain('Request not confirmed');
     expect(markup).not.toContain('Abandon this Start');
     expect(markup).toContain('No active run');
+  });
+});
+
+// Capture health on the Runner screen (ADR-0061): a temporary location failure is a waiting state of the same
+// watch, a permission denial is blocked with guidance, and only GPS failures offer the explicit Retry GPS.
+describe('RunnerView capture health', () => {
+  const recording = apply(createInitialRunnerState('online'), { pendingPointCount: 0, request: null, run, type: 'storage-restored' });
+  const facts = { capturedCount: 4, lastPersistedAtMs: 20_000, lastRecordedAt: '2026-10-06T08:00:20.000Z' };
+  const waiting: CaptureState = {
+    ...facts,
+    consecutiveFailures: 1,
+    segmentId: 2,
+    signal: 'waiting',
+    source: 'Device GPS',
+    startedAtMs: 1_000,
+    status: 'capturing',
+    warning: 'The location provider timed out while waiting for a fresh measurement.',
+  };
+  const denied: CaptureState = {
+    ...facts,
+    message: 'Location permission was denied.',
+    reason: 'permission-denied',
+    source: 'Device GPS',
+    status: 'error',
+  };
+  const retryButton = /<button[^>]*>Retry GPS<\/button>/u;
+  const disabledRetry = /<button[^>]*disabled=""[^>]*>Retry GPS<\/button>/u;
+  const show = (capture: CaptureState, writer: WriterOwnershipState = owned, kind: CaptureSourceKind = 'geolocation') =>
+    render(recording, writer, undefined, { capture, kind, nowMs: 30_000 });
+
+  it('shows a temporary failure as waiting for location, with the stale last point, the same segment and a retry', () => {
+    const markup = show(waiting);
+    expect(markup).toContain('Waiting for location');
+    expect(markup).toContain('Last point saved 10 s ago (stale).');
+    expect(markup).toContain('segment 2 · 4 buffered');
+    expect(markup).not.toContain('Capture stopped');
+    expect(markup).toMatch(retryButton);
+    expect(markup).not.toMatch(disabledRetry);
+  });
+
+  it('shows a permission denial as blocked, with guidance and an enabled Retry GPS', () => {
+    const markup = show(denied);
+    expect(markup).toContain('Location permission blocked');
+    expect(markup).toContain('Allow location for this site in the browser settings, then choose Retry GPS.');
+    expect(markup).toMatch(retryButton);
+    expect(markup).not.toMatch(disabledRetry);
+  });
+
+  it('disables Retry GPS for a tab that does not own the writer lease', () => {
+    expect(show(denied, { message: 'lost', status: 'lost' })).toMatch(disabledRetry);
+  });
+
+  it('offers no Retry GPS for a storage failure, a lost writer or the simulator', () => {
+    const storage: CaptureState = { ...facts, message: 'QuotaExceededError', reason: 'storage', source: 'Device GPS', status: 'error' };
+    expect(show(storage)).toContain('Capture stopped');
+    expect(show(storage)).not.toContain('Retry GPS');
+    expect(show({ ...facts, message: 'No lease.', source: 'Device GPS', status: 'lost' })).not.toContain('Retry GPS');
+    expect(show(waiting, owned, 'simulator')).not.toContain('Retry GPS');
+  });
+
+  it('a live capture shows the age of the last saved point and no retry', () => {
+    const markup = show({ ...waiting, consecutiveFailures: 0, lastPersistedAtMs: 26_000, signal: 'live', warning: null });
+    expect(markup).toContain('Capturing');
+    expect(markup).toContain('Last point saved 4 s ago.');
+    expect(markup).not.toContain('Retry GPS');
   });
 });

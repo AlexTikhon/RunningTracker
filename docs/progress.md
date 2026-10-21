@@ -2310,3 +2310,37 @@ because a page-scoped init script holds A's 5 s renewal timer. This stands in fo
 caught by the lease proof just before the transaction. A takeover between that proof and the transaction is covered
 only by the fake-indexeddb tests. Browsers other than Chromium were not run, and there is no hosted CI run of this
 change.
+
+## Runner: foreground device GPS recovers from temporary location failures (2026-10-21)
+
+Design and limits: ADR-0061. `apps/web` and `tests/e2e` only; no API, SQL, contract, migration, dependency or GPS
+threshold.
+
+**Defect (reproduced on 6b9e1a4).** Every geolocation error, including TIMEOUT and POSITION_UNAVAILABLE, reached
+`sink.error`, and the controller treated it as terminal: it cleared the watch and dropped the segment. Nothing
+restarted capture, and the Runner view said "Capture stopped" with no retry, while the server run stayed `recording`.
+The new browser test on the baseline web sources showed exactly that after one simulated TIMEOUT.
+
+**Failure model.** TIMEOUT and POSITION_UNAVAILABLE are temporary. The same watch stays registered, the state is
+`capturing` / `waiting` with the last facts marked stale, and the next genuine fix is persisted in the same segment
+with the next seq. These failures are terminal and kept apart: permission denied, an unknown receiver failure,
+unsupported geolocation, an unclassified source exception, storage, queue overflow and a lost writer (`lost`). A
+denial waits for an explicit Retry GPS, with guidance. Retry is refused after stop, while a start is in flight and
+after storage, overflow, unsupported, unclassified or lost. Otherwise it stops the old watch, proves the lease again
+and starts one watch in a new durable segment. It sends no lifecycle request and changes no buffered point.
+Freshness uses the page's monotonic clock and a display-only 15 s bound.
+
+**Executed.** Red first: the unit run on the baseline had 27 failures across the new and extended specs, and
+`capture-health.spec.ts` could not load. All 3 new browser tests failed on the baseline web sources: the waiting and
+blocked notices were missing, and the page snapshot showed "Capture stopped" after one TIMEOUT. After the fix, the
+focused unit files had 69 passing tests. `tests/e2e/gps-recovery.spec.ts` passed 3 of 3, then 9 of 9 with
+`--repeat-each=3`, and 6 of 6 with `--repeat-each=2` after the offline step was added. `npm run verify`: exit 0
+(scripts 54, API 1324, web 661 = 619 + 42 new, contracts 129, fixtures 14, simulator 3, build). `npm run test:e2e` (Chromium and Chromium OIDC, real API, `_test` database,
+native IndexedDB): 93 passed (90 + 3 new). The harness's deliberately failing test counts as expected. After a
+CSS-only follow-up (the health line style): web build, `gps-recovery` and the simulator `record` control passed (4).
+`git diff --check`: clean.
+
+**Not run / limits.** `test:integration` (nothing outside `apps/web` changed). The browser receiver is simulated at
+the `Geolocation.prototype` boundary, so no physical device, mobile browser or background/locked-screen behaviour was
+observed, and background tracking is not supported. D10 stays PARTIAL: zero real device traces. Browsers other than
+Chromium were not run, and there is no hosted CI run of this change.

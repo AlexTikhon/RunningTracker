@@ -81,6 +81,8 @@ export function App() {
     typeof window === 'undefined' ? undefined : signInFailureMessage(window.location.search),
   );
   const [now, setNow] = useState(() => Date.now());
+  // The monotonic clock the capture controller stamps its saved points with; only for the freshness the page shows.
+  const [captureNowMs, setCaptureNowMs] = useState(() => performance.now());
   const [storage, setStorage] = useState<StorageState>({ status: 'loading' });
   const [writer, setWriter] = useState<WriterOwnershipState>({ status: 'unclaimed' });
   // True from the start of an explicit claim until the page has taken over what the previous owner left behind.
@@ -372,7 +374,10 @@ export function App() {
     if (runner.run === null || runner.run.status === 'finished') {
       return undefined;
     }
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+      setCaptureNowMs(performance.now());
+    }, 1_000);
     return () => window.clearInterval(timer);
   }, [runner.run]);
 
@@ -560,6 +565,25 @@ export function App() {
       type,
     };
     void executeRequest(request);
+  };
+
+  // "Retry GPS" (ADR-0061). It asks only for what the capture effect would start under now: this session, a run the
+  // server lets record, the owned writer and an unblocked upload. The controller then stops the old watch, proves
+  // the lease again and starts one new watch in a new durable segment. No lifecycle request and no buffer change.
+  const retryCapture = () => {
+    if (
+      session.status !== 'ready'
+      || session.signal.aborted
+      || storage.status !== 'ready'
+      || writer.status !== 'owned'
+      || runner.run === null
+      || runner.upload.status === 'blocked'
+      || !captureAllowed
+      || captureSourceKind !== 'geolocation'
+    ) {
+      return;
+    }
+    void captureController.current?.retry();
   };
 
   const chooseCaptureSource = (kind: CaptureSourceKind) => {
@@ -777,6 +801,7 @@ export function App() {
         <RunnerView
           canStart={scopeOrgId !== null}
           capture={capture}
+          captureNowMs={captureNowMs}
           captureSourceKind={captureSourceKind}
           controlsDisabled={controlsDisabled}
           elapsed={elapsed}
@@ -784,6 +809,7 @@ export function App() {
           onClearFinishedRun={() => void clearFinishedRun()}
           onConfirmRun={confirmRun}
           onCommand={command}
+          onRetryCapture={retryCapture}
           onRetryOwnership={() => void claimWriter()}
           onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
           onStart={() => void start()}

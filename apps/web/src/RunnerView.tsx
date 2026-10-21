@@ -2,6 +2,7 @@ import type { RunCommandType } from '@running-tracker/contracts';
 import { useState } from 'react';
 
 import type { CaptureState } from './capture-controller.js';
+import { captureHealth } from './capture-health.js';
 import {
   DEFAULT_CAPTURE_SOURCE_KIND,
   parseCaptureSourceKind,
@@ -27,6 +28,8 @@ interface RunnerViewProps {
   // Whether the next run can be started in the selected organization right now.
   canStart: boolean;
   capture: CaptureState;
+  // The page's monotonic clock, on the same scale as the capture state's times; only for the freshness shown.
+  captureNowMs: number;
   captureSourceKind: CaptureSourceKind | null;
   controlsDisabled: boolean;
   elapsed: string;
@@ -46,6 +49,8 @@ interface RunnerViewProps {
   onClearFinishedRun: () => void;
   onConfirmRun: () => void;
   onCommand: (type: RunCommandType) => void;
+  // The explicit Retry GPS: restarts the device watch only; it changes nothing on the server or in the buffer.
+  onRetryCapture: () => void;
   onRetryOwnership: () => void;
   onRetryRequest: () => void;
   onStart: () => void;
@@ -56,6 +61,7 @@ interface RunnerViewProps {
 export function RunnerView({
   canStart,
   capture,
+  captureNowMs,
   captureSourceKind,
   controlsDisabled,
   elapsed,
@@ -71,6 +77,7 @@ export function RunnerView({
   onClearFinishedRun,
   onConfirmRun,
   onCommand,
+  onRetryCapture,
   onRetryOwnership,
   onRetryRequest,
   onStart,
@@ -86,6 +93,12 @@ export function RunnerView({
       : capture.status === 'error' || capture.status === 'lost'
         ? capture.message
         : 'Starts while the run is recording';
+  const health = captureHealth(capture, captureNowMs);
+  // Retry GPS restarts the device watch. The simulator has no receiver to retry.
+  const retryGps = health.retry && captureSourceKind === 'geolocation' ? (
+    <button disabled={writer.status !== 'owned'} onClick={onRetryCapture} type="button">Retry GPS</button>
+  ) : null;
+  const waitingForLocation = capture.status === 'capturing' && (capture.signal === 'waiting' || health.retry);
 
   return (
     <>
@@ -126,6 +139,10 @@ export function RunnerView({
             </select>
             <span>Foreground only. Pausing or losing the writer lease stops capture.</span>
           </div>
+
+          <p className={`capture-health capture-health--${health.tone}`} aria-label="Capture health">
+            <strong>{health.headline}</strong> {health.detail}
+          </p>
 
           {runner.run === null ? (
             <div className="start-panel">
@@ -192,7 +209,15 @@ export function RunnerView({
 
       {(capture.status === 'error' || capture.status === 'lost') && (
         <section className="notice notice--error" role="alert">
-          <div><strong>Capture stopped</strong><span>{capture.message}</span></div>
+          <div><strong>{health.headline}</strong><span>{health.detail}</span></div>
+          {retryGps}
+        </section>
+      )}
+
+      {waitingForLocation && (
+        <section className="notice notice--offline" role="status">
+          <div><strong>{health.headline}</strong><span>{health.detail}</span></div>
+          {retryGps}
         </section>
       )}
 
