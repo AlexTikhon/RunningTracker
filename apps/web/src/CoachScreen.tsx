@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
+import { CoachMap } from './CoachMap.js';
 import {
   CoachLiveClient,
   type CoachConnectionSnapshot,
 } from './coach-live-client.js';
+import { coachMapGeometry, emptyCoachMapGeometry } from './coach-map-geometry.js';
 import {
   coachReducer,
   createInitialCoachState,
@@ -34,12 +36,16 @@ function ageLabel(ageMs: number | null): string {
 }
 
 export interface CoachScreenProps {
+  // The public Mapbox token, or null for the tokenless board (no provider code is loaded then).
+  mapboxAccessToken: string | null;
   orgId: string;
   sessionExpiresAt: string;
+  // The session the screen was opened under. Its end stops the stream and clears positions, tracks and the map.
+  signal: AbortSignal;
   userId: string;
 }
 
-export function CoachScreen({ orgId, sessionExpiresAt, userId }: CoachScreenProps) {
+export function CoachScreen({ mapboxAccessToken, orgId, sessionExpiresAt, signal, userId }: CoachScreenProps) {
   const [state, dispatch] = useReducer(coachReducer, undefined, createInitialCoachState);
   const [connection, setConnection] = useState(initialConnection);
   const [nowMonotonicMs, setNowMonotonicMs] = useState(monotonicNow);
@@ -55,16 +61,28 @@ export function CoachScreen({ orgId, sessionExpiresAt, userId }: CoachScreenProp
     });
     trackSynchronizer.current = synchronizer;
     setTracks([]);
+    const end = () => {
+      synchronizer.dispose();
+      setTracks([]);
+    };
+    signal.addEventListener('abort', end, { once: true });
+    if (signal.aborted) {
+      end();
+    }
     return () => {
+      signal.removeEventListener('abort', end);
       if (trackSynchronizer.current === synchronizer) {
         trackSynchronizer.current = null;
       }
       synchronizer.dispose();
     };
-  }, [orgId, userId]);
+  }, [orgId, signal, userId]);
 
   useEffect(() => {
     dispatch({ type: 'reset' });
+    if (signal.aborted) {
+      return undefined;
+    }
     const client = new CoachLiveClient({
       onConnection: (next) => {
         setConnection(next);
@@ -85,14 +103,20 @@ export function CoachScreen({ orgId, sessionExpiresAt, userId }: CoachScreenProp
       sessionExpiresAt,
     });
     liveClient.current = client;
+    const end = () => {
+      client.stop();
+      dispatch({ type: 'reset' });
+    };
+    signal.addEventListener('abort', end, { once: true });
     client.start();
     return () => {
+      signal.removeEventListener('abort', end);
       if (liveClient.current === client) {
         liveClient.current = null;
       }
       client.stop();
     };
-  }, [orgId, sessionExpiresAt, userId]);
+  }, [orgId, sessionExpiresAt, signal, userId]);
 
   useEffect(() => {
     const synchronizer = trackSynchronizer.current;
@@ -129,6 +153,11 @@ export function CoachScreen({ orgId, sessionExpiresAt, userId }: CoachScreenProp
     () => new Map(tracks.map((track) => [track.runId, track])),
     [tracks],
   );
+  // Only the authorized run set and committed track snapshots reach the map (coach-map-geometry.ts).
+  const mapGeometry = useMemo(
+    () => signal.aborted ? emptyCoachMapGeometry() : coachMapGeometry(state, tracks, nowMonotonicMs),
+    [nowMonotonicMs, signal, state, tracks],
+  );
 
   return (
     <section className="coach-shell" aria-labelledby="coach-title">
@@ -154,6 +183,13 @@ export function CoachScreen({ orgId, sessionExpiresAt, userId }: CoachScreenProp
           </button>
         </section>
       )}
+
+      <CoachMap
+        accessToken={mapboxAccessToken}
+        geometry={mapGeometry}
+        key={`${userId}|${orgId}`}
+        signal={signal}
+      />
 
       <div className="coach-grid">
         <section className="live-field" aria-label="Live run markers">

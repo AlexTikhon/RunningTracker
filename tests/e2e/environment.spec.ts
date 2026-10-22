@@ -17,6 +17,7 @@ test.describe('environment guard', () => {
 
     expect(environment.apiOrigin).toBe('http://127.0.0.1:3100');
     expect(environment.webOrigin).toBe('http://127.0.0.1:5273');
+    expect(environment.mapWebOrigin).toBe('http://127.0.0.1:5275');
     expect(environment.runtimeDatabaseUrl).toBe(validSource.TEST_DATABASE_URL);
     expect(environment.maintenanceDatabaseUrl).toBe(validSource.TEST_MAINTENANCE_DATABASE_URL);
     expect(environment.ownerDatabaseUrl).toBe(validSource.TEST_MIGRATION_DATABASE_URL);

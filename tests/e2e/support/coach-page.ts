@@ -14,8 +14,9 @@ const snapshotTimeoutMs = 30_000;
 export class CoachPage {
   constructor(private readonly page: Page) {}
 
-  async open(orgId: string): Promise<void> {
-    await this.page.goto('/');
+  // `origin` opens the app from another local Vite server, such as the one with a map token.
+  async open(orgId: string, origin?: string): Promise<void> {
+    await this.page.goto(origin === undefined ? '/' : `${origin}/`);
     await this.page.getByRole('navigation', { name: 'Application view' }).getByRole('button', { name: 'Coach' }).click();
     await expectOrganizationSelected(this.page, orgId);
   }
@@ -52,6 +53,25 @@ export class CoachPage {
   // The "N points · rev R" (or "rev R" / "syncing ...") text next to a track checkbox.
   trackLabel(option: Locator): Locator {
     return option.locator('xpath=ancestor::label').locator('small');
+  }
+
+  // The map panel above the board, with its legend, summary and Fit control.
+  mapPanel(): Locator {
+    return this.page.getByRole('region', { name: 'Live map' });
+  }
+
+  // The tokenless fallback.
+  mapUnavailable(): Locator {
+    return this.mapPanel().getByText('Map unavailable. Positions and tracks are listed below.');
+  }
+
+  fitVisibleRuns(): Locator {
+    return this.mapPanel().getByRole('button', { name: 'Fit visible runs' });
+  }
+
+  // One line per selected track: which revision is drawn and whether it is the latest.
+  mapTrackStatuses(): Locator {
+    return this.mapPanel().getByRole('list', { name: 'Tracks on the map' }).getByRole('listitem');
   }
 
   // The "N selected" counter at the top of the track picker.

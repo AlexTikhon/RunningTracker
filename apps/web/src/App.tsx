@@ -162,6 +162,18 @@ export function App() {
   // Capture runs only for a lifecycle the server has confirmed (or, offline, one that will be confirmed on reconnection).
   const captureAllowed = captureMayRun(runner);
   const mapboxAccessToken = (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '').trim() || null;
+  // A stable number per session lifetime signal, for keying views that must not outlive their session.
+  const sessionGenerations = useRef<{ next: number; bySignal: WeakMap<AbortSignal, number> }>({ bySignal: new WeakMap(), next: 0 });
+  const sessionGeneration = (signal: AbortSignal): number => {
+    const generations = sessionGenerations.current;
+    let generation = generations.bySignal.get(signal);
+    if (generation === undefined) {
+      generation = generations.next;
+      generations.next += 1;
+      generations.bySignal.set(signal, generation);
+    }
+    return generation;
+  };
 
   const refreshHealth = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -854,9 +866,14 @@ export function App() {
 
       {activeView === 'coach' && (
         session.status === 'ready' && selectedOrgId !== null ? (
+          // A new session, person or organization is a new screen: nothing shown under the previous scope, not even for
+          // one render, reaches the new one's board, tracks or map.
           <CoachScreen
+            key={`${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`}
+            mapboxAccessToken={mapboxAccessToken}
             orgId={selectedOrgId}
             sessionExpiresAt={session.session.expiresAt}
+            signal={session.signal}
             userId={session.session.identity.userId}
           />
         ) : (

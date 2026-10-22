@@ -1,6 +1,15 @@
 export interface MapboxMapInstance {
   addControl(control: unknown, position?: string): void;
-  on(type: string, listener: (event: unknown) => void): void;
+  addLayer(layer: Record<string, unknown>): unknown;
+  addSource(id: string, source: Record<string, unknown>): unknown;
+  fitBounds(
+    bounds: [[number, number], [number, number]],
+    options?: { duration?: number; maxZoom?: number; padding?: number },
+  ): unknown;
+  getSource(id: string): unknown;
+  isStyleLoaded(): boolean;
+  off(type: string, listener: (event: unknown) => void): unknown;
+  on(type: string, listener: (event: unknown) => void): unknown;
   remove(): void;
 }
 
@@ -14,5 +23,7 @@ export interface MapboxRuntime {
   }) => MapboxMapInstance;
   NavigationControl: new () => unknown;
 }
+
+export const MAPBOX_BASE_STYLE: string;
 
 export function loadMapbox(): Promise<MapboxRuntime>;

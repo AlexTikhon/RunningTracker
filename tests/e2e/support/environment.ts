@@ -27,6 +27,9 @@ export interface E2eEnvironment {
   readonly ownerDatabaseUrl: string;
   readonly runnerUserId: string;
   readonly coachUserId: string;
+  // The same app served with a placeholder public Mapbox token, so the Coach map code path runs. Tests on this
+  // origin intercept every provider request inside the browser; nothing is sent to Mapbox.
+  readonly mapWebOrigin: string;
 }
 
 // Fixed rather than generated per run: playwright.config.ts is imported again in every worker, so a random
@@ -94,6 +97,7 @@ export function resolveE2eEnvironment(source: Record<string, string | undefined>
     apiOrigin: 'http://127.0.0.1:3100',
     coachUserId,
     maintenanceDatabaseUrl: maintenance.url,
+    mapWebOrigin: 'http://127.0.0.1:5275',
     oidc: {
       apiOrigin: 'http://127.0.0.1:3101',
       clientId: 'running-tracker-e2e',

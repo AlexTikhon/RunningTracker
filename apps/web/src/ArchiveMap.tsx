@@ -6,7 +6,7 @@ import {
   synchronizeArchiveMapSource,
   type ArchiveMapPort,
 } from './archive-map-source.js';
-import { loadMapbox, type MapboxMapInstance } from './mapbox-runtime.js';
+import { loadMapbox, MAPBOX_BASE_STYLE, type MapboxMapInstance } from './mapbox-runtime.js';
 
 export interface ArchiveMapProps {
   accessToken: string | null;
@@ -38,7 +38,7 @@ export function ArchiveMap({ accessToken, metadata, onTileError }: ArchiveMapPro
         accessToken,
         center: [21.0122, 52.2297],
         container: container.current,
-        style: 'mapbox://styles/mapbox/dark-v11',
+        style: MAPBOX_BASE_STYLE,
         zoom: 10,
       });
       map.current = createdMap;

@@ -16,6 +16,9 @@ const webPort = new URL(environment.webOrigin).port;
 // Fixed local-only HMAC key, the same fixture value as .env.example. Not valid for any deployment.
 const liveTrackCursorSigningKey = 'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE';
 
+// Shaped like a public Mapbox token so the runtime accepts it; it belongs to no account.
+const mapPlaceholderToken = 'pk.e2e-local-placeholder';
+
 export default defineConfig({
   expect: { timeout: 15_000 },
   fullyParallel: false,
@@ -46,7 +49,8 @@ export default defineConfig({
       command: 'node --import tsx src/entrypoint.ts',
       cwd: resolve(repositoryRoot, 'apps', 'api'),
       env: {
-        ALLOWED_ORIGINS: environment.webOrigin,
+        // The map origin signs out through the same API.
+        ALLOWED_ORIGINS: `${environment.webOrigin},${environment.mapWebOrigin}`,
         APP_ENV: 'test',
         DATABASE_URL: environment.runtimeDatabaseUrl,
         LIVE_TRACK_CURSOR_SIGNING_KEY: liveTrackCursorSigningKey,
@@ -74,6 +78,17 @@ export default defineConfig({
       stderr: 'pipe',
       stdout: 'pipe',
       url: environment.webOrigin,
+    },
+    {
+      // The same app with a placeholder public Mapbox token, for the Coach map tests. The token is not valid for
+      // any provider account; those tests answer or abort every provider request in the browser.
+      command: `npx vite --port ${new URL(environment.mapWebOrigin).port}`,
+      cwd: resolve(repositoryRoot, 'apps', 'web'),
+      env: { API_PROXY_TARGET: environment.apiOrigin, VITE_MAPBOX_ACCESS_TOKEN: mapPlaceholderToken },
+      reuseExistingServer: false,
+      stderr: 'pipe',
+      stdout: 'pipe',
+      url: environment.mapWebOrigin,
     },
     {
       // OpenID Connect stack. The provider (oidc-provider with its development login pages) ...

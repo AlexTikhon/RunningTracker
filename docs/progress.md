@@ -2485,3 +2485,53 @@ owner had no way to see or revoke it, and My runs had no sharing action. ADR-006
   only the reason).
 - No mutation runs were made for this change.
 - D10 is still awaiting physical recordings.
+
+## Coach live state on a map (2026-10-22)
+
+Design: ADR-0065. This is a web and browser-suite change. The routes, contracts, the `/live` stream, migrations,
+RLS, the runner lifecycle, queue and fencing, the track synchronization and the Archive map are unchanged, and no
+dependency was added.
+
+**Gap.** The Coach tab received the authorized live state and synchronized selected tracks, but showed them only as
+cards and point counts.
+
+**Change.**
+- `coach-map-geometry.ts`: a pure conversion from the coach reducer state and the synchronizer's committed
+  snapshots to two GeoJSON collections. Markers come only from `markerForRun`. Lines join a point to the one before
+  it only when `connectFromPrevious` is true, `predecessorSeq` equals that point's `seq` (as BigInt) and the
+  `segmentId` matches. Tracks are drawn only for selected runs in the current full state. Retained older geometry
+  is marked as not the latest. Geometry is cached per committed snapshot.
+- `coach-map-source.ts`: the map port, the sources and layers, and `CoachMapController` (one map, latest geometry
+  only, applied on `load`; disposal, session abort or a late map remove it; one initial fit, then only **Fit visible
+  runs**).
+- `CoachMap.tsx`: the panel, legend, position summary and per-track revision lines; the tokenless and failure
+  messages. `CoachScreen` takes the token and `session.signal`; `App` keys it by session generation, user and
+  organization.
+- `mapbox-runtime.d.ts` gained the six map methods used; `mapbox-runtime.js` exports the shared style constant,
+  which `ArchiveMap` now reads (no behaviour change).
+- Browser suite: a third Vite server on port 5275 with a placeholder token, the API allows that origin, a fake
+  `mapbox-gl` module served by routing, a tracked `EventSource` to drop the stream, and `coach-map.spec.ts`.
+
+**Executed.**
+- **Focused web tests** while building: geometry 17 → 18, controller 16, CoachScreen/CoachMap 4.
+- **`npm run verify`** (final code): exit 0. Scripts 68; API 1331; web 737 = 700 + 37 (geometry 18, controller 16,
+  CoachScreen +3); contracts 132; fixtures 14; simulator 3; build. The Mapbox chunk stays lazy.
+- **Chromium, after the build:**
+  - Full `npm run test:e2e` (before the last performance change): exit 0, 103 passed in 11.4 min (94 `chromium`,
+    9 `chromium-oidc`; 99 + 4 new). The harness's deliberately failing test counts as expected; nothing was
+    retried or flaky.
+  - After the performance change (per-snapshot geometry cache, keyed track source): `coach-map`, `coach-live` and
+    `run-sharing`, 8 of 8.
+- **Real runtime smoke:** `mapbox-gl` 3.31.0 started in headless Chromium with WebGL against an empty style served in
+  the browser, and drew the confirmed marker and the selected line with no map error. The only requests it tried to
+  send out, `events.mapbox.com/events/v2` and `api.mapbox.com/map-sessions/v1`, were aborted in the browser.
+- **Not run:** `npm run test:integration`, because no backend code changed.
+
+**Not run / limits.**
+- No real Mapbox token or basemap was used; no paid service was called. The fake-runtime tests prove the lifecycle,
+  not rendering; the smoke proves the runtime, WebGL and layer specs in Chromium only.
+- Two first attempts failed and were fixed: Chromium's offline emulation does not end an open `EventSource` (the
+  test now drops the stream itself), and sign-out from the map origin was `ORIGIN_DENIED` until the test API allowed
+  it.
+- Fitting ignores the antimeridian. No phone, second engine or hosted CI run. `demo.md` was not followed by hand.
+- D10 is still awaiting physical recordings.

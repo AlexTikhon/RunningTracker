@@ -16,8 +16,9 @@ and about five minutes.
 - **The runner is a script, not the browser.** `npm run demo:run` plays the runner over HTTP with a simulated route.
   The Runner tab of the web app can also record (Device GPS or its simulator) and share the run with a coach
   (step 4a, ADR-0063); the script is still the shortest way to show the coach view.
-- **The map needs a Mapbox token.** Without `VITE_MAPBOX_ACCESS_TOKEN` the Archive tab shows a notice instead of a
-  map. The token is public by design; never put a server secret there.
+- **The maps need a Mapbox token.** Without `VITE_MAPBOX_ACCESS_TOKEN` the Archive tab shows a notice instead of a
+  map, and the Coach tab says its map is unavailable; the Coach cards and track picker work either way. The token is
+  public by design; never put a server secret there.
 - Nothing here is a performance or recovery claim.
 
 ## What was run, and what was not
@@ -92,6 +93,15 @@ Ctrl+C finishes the run early. In the Coach tab, within a poll interval (two sec
 
 The share is what lets the coach see the run: a coach role alone grants nothing (the access suites test this; the
 demo does not repeat it).
+
+**The live map (ADR-0065).** With a token, a **Live map** panel sits above the cards. The run's position is a disc
+(solid when confirmed, a ring when unconfirmed, small and faded when stale); a run without a usable position is not
+drawn. Tick the run under **Track selection** to draw its track as a solid line, broken wherever the server rejected
+an edge or a new capture segment began. While a newer revision loads, the older one is dashed and the panel says
+"showing older rev N". The camera fits the first thing shown once; after that it stays where you leave it, and
+**Fit visible runs** brings everything back into view. Without a token the panel says "Map unavailable" and the rest
+of the tab is unchanged. This panel was tested in Chromium (`tests/e2e/coach-map.spec.ts`, one test with the real
+runtime but a local empty style); it has not been followed by hand against a real Mapbox basemap.
 
 ## 4a. Share from the browser instead (optional)
 
@@ -195,6 +205,7 @@ await fetch('/api/session', { method: 'DELETE', headers: { 'x-csrf-token': csrf.
 | `demo:run` answers 403 `ORG_ACCESS_DENIED` | `demo:seed` was not run against the database the API uses |
 | The summary is not published within 150 s | The API process is not running its maintenance jobs, or the database is not the one the script's run was written to |
 | The Coach tab shows nothing | The coach has no share on the run (the script creates one), or the page shows no organization: `demo:seed` was not run against the database the API uses |
+| The Coach map says "The map could not be shown" | The browser has no WebGL, the token is not valid for Mapbox, or the base style could not be loaded; the cards and track picker still work |
 
 ## Removing the demo
 
