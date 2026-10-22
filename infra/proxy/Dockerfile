@@ -18,9 +18,22 @@ COPY packages/fixtures packages/fixtures
 ARG VITE_MAPBOX_ACCESS_TOKEN=
 RUN npm run build --workspace=@running-tracker/web
 
+# Both proxy profiles start nginx behind the error-log boundary (ADR-0062): nginx's stderr is a private FIFO read only
+# by the sanitizer, which runs on njs's QuickJS engine from the base image. Docker still stops it with SIGQUIT.
+FROM nginx:1.28.0-alpine3.21@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284 AS proxy-base
+
+# Created first: COPY --chmod would give a directory it creates the file's mode, and with every capability dropped
+# even root cannot traverse a directory without its execute bit.
+RUN mkdir -m 0755 /usr/local/lib/nginx-error-log
+COPY --chmod=0644 infra/proxy/error-log-sanitizer.mjs /usr/local/lib/nginx-error-log/sanitizer.mjs
+COPY --chmod=0755 infra/proxy/error-log-boundary.sh /usr/local/sbin/nginx-error-log-boundary
+STOPSIGNAL SIGQUIT
+ENTRYPOINT ["/usr/local/sbin/nginx-error-log-boundary"]
+CMD []
+
 # Deployment profile (P12.2): operator-supplied certificate, one configured public host name, HTTP redirect.
 # The site file is rendered from the image's envsubst template at container start.
-FROM nginx:1.28.0-alpine3.21@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284 AS production
+FROM proxy-base AS production
 
 RUN rm -f /etc/nginx/conf.d/default.conf
 COPY infra/proxy/nginx.production.conf /etc/nginx/nginx.conf
@@ -31,7 +44,7 @@ COPY --from=web-build /app/apps/web/dist /usr/share/nginx/html
 EXPOSE 80 443
 
 # Local transport profile (P08.5). Keep it the LAST stage: it is the default build target.
-FROM nginx:1.28.0-alpine3.21@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284 AS transport
+FROM proxy-base AS transport
 
 # OpenSSL is present only to generate the explicitly local development certificate.
 RUN apk add --no-cache openssl

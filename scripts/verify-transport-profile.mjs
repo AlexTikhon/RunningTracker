@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { connect as connectHttp2, constants as http2Constants } from 'node:http2';
 import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { Pool } from 'pg';
+
+import {
+  correlate,
+  countExposed,
+  createCanary,
+  misroutedErrorLineCount,
+  percentEncodeAll,
+  unsanitizedLineCount,
+} from './proxy-log-boundary.mjs';
 
 const repositoryRoot = resolve(import.meta.dirname, '..');
 const origin = 'https://localhost:8443';
@@ -301,6 +310,104 @@ async function commitPoint(pool, revision) {
   }
 }
 
+function composeContainer(service) {
+  return execFileSync('docker', ['compose', ...composeFiles, 'ps', '-q', service], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+  }).trim();
+}
+
+async function probeLogBoundary(certificate) {
+  const sentCanaries = [];
+  const callbackQuery = (label, encode = (value) => value) => {
+    const code = createCanary(`${label}code`);
+    const state = createCanary(`${label}state`);
+    sentCanaries.push(code, state);
+    return `code=${encode(code)}&state=${encode(state)}`;
+  };
+  const referer = (label) => `${origin}/api/auth/callback?${callbackQuery(label)}`;
+  // One connection per request, so that each error event is on the connection of its own access entry.
+  const once = async (options, body) => {
+    const probeClient = await openHttp2Client(certificate);
+    try {
+      return await request(probeClient, options, body);
+    } catch (error) {
+      return { error: error.message, status: undefined };
+    } finally {
+      probeClient.close();
+    }
+  };
+  const proxy = composeContainer('proxy');
+  const answers = {};
+  answers.ordinary = (await once({ path: `/api/auth/callback?${callbackQuery('ordinary')}` })).status;
+  answers.encoded = (await once({ path: `/api/auth/callback?${callbackQuery('encoded', percentEncodeAll)}` })).status;
+  const oversized = 'x'.repeat(256 * 1024);
+  answers.oversized = (await once(
+    {
+      headers: { 'content-length': oversized.length, 'content-type': 'application/octet-stream', origin, referer: referer('oversizedreferer') },
+      method: 'POST',
+      path: `/api/auth/callback?${callbackQuery('oversized')}`,
+    },
+    oversized,
+  )).status;
+  const api = composeContainer('api');
+  execFileSync('docker', ['stop', '--time', '15', api], { stdio: 'ignore' });
+  try {
+    answers.unreachableUpstream = (await once({
+      headers: { referer: referer('upstreamreferer') },
+      path: `/api/auth/callback?${callbackQuery('upstream')}`,
+    })).status;
+  } finally {
+    execFileSync('docker', ['start', api], { stdio: 'ignore' });
+  }
+  assert.ok([502, 504].includes(answers.unreachableUpstream), `the unreachable upstream answered ${answers.unreachableUpstream}`);
+
+  const streams = () => {
+    const logged = spawnSync('docker', ['logs', proxy], { encoding: 'utf8', maxBuffer: 64 * 1024 ** 2 });
+    assert.equal(logged.status, 0, 'docker logs failed');
+    return { access: logged.stdout, error: logged.stderr };
+  };
+  const upstreamEvent = /^upstream_(?:connect_failed|timeout|unavailable)$/u;
+  const deadline = performance.now() + 30_000;
+  let current;
+  let refused;
+  let failedUpstream;
+  while (performance.now() < deadline) {
+    current = streams();
+    const entries = correlate(current);
+    refused = entries.filter((entry) => entry.status === 413);
+    failedUpstream = entries.filter((entry) => entry.status === 502 || entry.status === 504);
+    const paired =
+      refused.every((entry) => entry.events.includes('request_body_too_large')) &&
+      failedUpstream.every((entry) => entry.events.some((event) => upstreamEvent.test(event)));
+    if (refused.length >= 1 && failedUpstream.length >= 1 && paired) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  const exposure = {
+    accessLogCanariesFound: countExposed(current.access, sentCanaries),
+    errorLogCanariesFound: countExposed(current.error, sentCanaries),
+    errorLogUnsanitizedLines: unsanitizedLineCount(current.error),
+    errorLinesOnStdout: misroutedErrorLineCount(current.access),
+  };
+  assert.deepEqual(
+    exposure,
+    { accessLogCanariesFound: 0, errorLogCanariesFound: 0, errorLogUnsanitizedLines: 0, errorLinesOnStdout: 0 },
+    `transport proxy log boundary: ${JSON.stringify(exposure)}`,
+  );
+  assert.ok(refused.length >= 1 && refused.every((entry) => entry.events.includes('request_body_too_large')), 'a 413 has no event');
+  assert.ok(
+    failedUpstream.length >= 1 && failedUpstream.every((entry) => entry.events.some((event) => upstreamEvent.test(event))),
+    'an upstream failure has no event',
+  );
+  return {
+    answers,
+    canariesSent: sentCanaries.length,
+    ...exposure,
+    tooLargeEvents: [...new Set(refused.flatMap((entry) => entry.events))],
+    upstreamEvents: [...new Set(failedUpstream.flatMap((entry) => entry.events))],
+  };
+}
+
 function percentile(values, percentileValue) {
   const ordered = [...values].sort((left, right) => left - right);
   return ordered[Math.ceil((percentileValue / 100) * ordered.length) - 1];
@@ -403,6 +510,13 @@ try {
   assert.notEqual(replacement.streamId, first.streamId);
   replacementSse.close();
 
+  // ADR-0062: this profile has the deployment profile's error-log boundary. Callback canaries go through requests
+  // nginx fails itself (a body over client_max_body_size, the API stopped) and through Referer copies, as sent and
+  // percent-encoded. The proxy's Docker streams must hold none of them, every error line must be one the sanitizer
+  // built, and each refused request must keep an event of its own category on its connection.
+  const logBoundary = await probeLogBoundary(certificate);
+  await waitForReady(client);
+
   const result = {
     apiHealthStatus: health.status,
     databaseActivity: activity.rows,
@@ -410,6 +524,7 @@ try {
     heartbeatObservedAfterMs: Math.round(sse.heartbeatFrameMs),
     hostAllowlistRejectedUntrustedAuthority: untrustedHostRejected,
     http2Alpn: client.socket.alpnProtocol,
+    logBoundary,
     latency: {
       p50Ms: Math.round(percentile(latencyMs, 50)),
       p95Ms: Math.round(percentile(latencyMs, 95)),

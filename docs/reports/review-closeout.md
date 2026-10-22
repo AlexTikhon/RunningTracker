@@ -24,6 +24,24 @@ model call is configured in this environment.
 Reading the E2E list: `harness.spec.ts:66` is printed with `x` because it calls `test.fail()` on purpose; it proves
 that the scenario fixture removes a failed test's data, and Playwright counts it among the 87 passed.
 
+## Update 2026-10-22: the nginx error-log exposure is closed (ADR-0062)
+
+The last remaining privacy limit below ("Nginx error-log query exposure") is closed in the working tree after
+`aa42f83`, uncommitted at the time of writing. The sections after this one are left as they were recorded on
+2026-10-15, including the carried-forward `deploy:verify` row that reports `errorLogQueryExposedOnNginxError`
+**true**.
+
+| Run (2026-10-22, Docker Desktop, self-signed, localhost) | Result |
+|---|---|
+| `npm run deploy:verify` on the baseline proxy, with the new gate | exit 1: `errorLogQueryExposedOnNginxError`, 12 of 20 canaries in the stored proxy stderr |
+| `npm run deploy:verify` with the boundary | exit 0; access, error stream and writable files 0 of 20; 0 unsanitized stderr lines; 413 and 504 paired with `request_body_too_large` and `upstream_timeout`/`upstream_connect_failed`; reload, restart, re-migration and rotation pass |
+| `npm run transport:verify` on baseline images, then with the boundary | exit 1 (8 of 12 canaries, 5 raw error lines), then exit 0 (0, 0); SSE checks unchanged |
+| `npm run proxy:verify-error-log` | exit 0: startup failure stays readable; a missing sanitizer exits 70; reload; frozen sanitizer blocks and then delivers 600 of 600 lines with none bypassing; killed sanitizer exits 70; SIGQUIT and SIGTERM exit 0; njs QuickJS output identical to Node; about 3.7 MiB peak |
+| `npm run verify` | exit 0; scripts 68, API 1324, web 661, contracts 129, fixtures 14, simulator 3, build |
+
+This is workstation evidence with throwaway secrets and certificates. It is not proof on a production host, and the
+residual channels are listed in ADR-0062.
+
 ## Findings, commits and regression tests
 
 | Finding | Commit | Regression tests |
@@ -90,10 +108,10 @@ Same working tree and same day, but earlier commands:
   against the abandonment of a rejected Start.
 - **Real Mapbox rendering.** No run in this cycle rendered a map with a real token. Token propagation was checked by
   finding a fake token in the built bundle; scope and URL restrictions are a provider-side setting.
-- **Nginx error-log query exposure.** nginx writes its own error entries with the full request line and upstream URI.
-  `deploy:verify` provoked one (a 413) and the callback query appeared in it. This is documented in the deployment
-  runbook and is not fixed: the access log is query-free, the error log is not. Treat it as holding the same
-  sensitivity as the callback query.
+- **Nginx error-log query exposure** (as of 2026-10-15; closed on 2026-10-22, see the update at the top and
+  ADR-0062). nginx writes its own error entries with the full request line and upstream URI.
+  `deploy:verify` provoked one (a 413) and the callback query appeared in it. This was documented in the deployment
+  runbook and was not fixed at the time: the access log was query-free, the error log was not.
 
 ## Test-resource state
 

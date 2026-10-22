@@ -189,6 +189,7 @@ test('F01 proxy: the access log format carries no query string and keeps its dia
     '$body_bytes_sent',
     '$upstream_addr',
     '$request_time',
+    '$connection',
   ]) {
     assert.ok(body.includes(field), `${field} is missing from the access log format`);
   }
@@ -198,4 +199,59 @@ test('F01 proxy: the access log format carries no query string and keeps its dia
   // No site may switch to another format or log the request elsewhere.
   assert.doesNotMatch(site, /access_log\s+(?!off;)/u, 'a site overrides the access log');
   assert.doesNotMatch(site, /log_format/u);
+});
+
+// ADR-0062: nginx's error entries quote the request line, upstream URI and referrer. Its stderr is a private FIFO
+// read only by the sanitizer, so every error_log must name `stderr` and nothing else. The runtime proof is the
+// canary gate in verify-production-profile.mjs and scripts/verify-proxy-error-log.mjs.
+const errorLogTargets = (config) => [...config.matchAll(/^\s*error_log\s+([^;]+);/gmu)].map((match) => match[1].trim());
+
+test('ADR-0062 proxy: both profiles send the error log only to the boundary FIFO', () => {
+  assert.deepEqual(errorLogTargets(read('infra/proxy/nginx.production.conf')), ['stderr warn']);
+  assert.deepEqual(errorLogTargets(read('infra/proxy/nginx.conf')), ['stderr warn']);
+  for (const path of ['infra/proxy/production-site.conf.template', 'infra/proxy/security-headers.conf']) {
+    assert.deepEqual(errorLogTargets(read(path)), [], `${path} must not set an error log`);
+  }
+});
+
+test('ADR-0062 image: both proxy targets start nginx through the error-log boundary', () => {
+  const dockerfile = read('infra/proxy/Dockerfile');
+  const stage = (name) => {
+    const start = dockerfile.search(new RegExp(`^FROM .* AS ${name}$`, 'mu'));
+    assert.ok(start >= 0, `stage ${name} is missing`);
+    const next = dockerfile.slice(start + 1).search(/^FROM /mu);
+    return next < 0 ? dockerfile.slice(start) : dockerfile.slice(start, start + 1 + next);
+  };
+  const base = stage('proxy-base');
+  assert.match(base, /^FROM nginx:1\.28\.0-alpine3\.21@sha256:[0-9a-f]{64} AS proxy-base$/mu);
+  assert.match(base, /^COPY --chmod=0644 infra\/proxy\/error-log-sanitizer\.mjs \/usr\/local\/lib\/nginx-error-log\/sanitizer\.mjs$/mu);
+  assert.match(base, /^COPY --chmod=0755 infra\/proxy\/error-log-boundary\.sh \/usr\/local\/sbin\/nginx-error-log-boundary$/mu);
+  assert.match(base, /^ENTRYPOINT \["\/usr\/local\/sbin\/nginx-error-log-boundary"\]$/mu);
+  assert.match(base, /^CMD \[\]$/mu);
+  assert.match(base, /^STOPSIGNAL SIGQUIT$/mu);
+  for (const name of ['production', 'transport']) {
+    assert.match(stage(name), new RegExp(`^FROM proxy-base AS ${name}$`, 'mu'));
+    assert.doesNotMatch(stage(name), /^(?:ENTRYPOINT|CMD)\b/mu, `${name} must not bypass the boundary`);
+  }
+  assert.equal(dockerfile.match(/^FROM nginx:/gmu).length, 1, 'the nginx base is pinned in one place');
+});
+
+test('ADR-0062 boundary script: LF, QuickJS engine, and no raw path to the container stderr', () => {
+  // Raw bytes on purpose: busybox sh cannot run a CRLF script, and .gitattributes keeps it LF.
+  const raw = readFileSync(resolve(root, 'infra/proxy/error-log-boundary.sh'), 'utf8');
+  assert.ok(!raw.includes('\r'), 'the boundary script must have LF line endings');
+  assert.match(raw, /^#!\/bin\/sh\n/u);
+  // The default njs engine never frees memory; QuickJS does.
+  // Sanitized lines go to the container's stderr (fd 1 duplicated from 2 first); njs's own reports go nowhere.
+  assert.match(raw, /njs -n QuickJS -m "\$sanitizer" <"\$fifo" >&2 2>\/dev\/null/u);
+  assert.match(raw, /nginx -g 'daemon off;' 2>"\$fifo" &/u);
+  assert.match(raw, /mkdir -m 0700 "\$fifo_dir"/u);
+  assert.match(raw, /mkfifo -m 0600 "\$fifo"/u);
+  for (const signal of ['QUIT', 'TERM', 'INT', 'HUP']) {
+    assert.match(raw, new RegExp(`trap 'forward ${signal}' ${signal}`, 'u'), `${signal} is not forwarded to nginx`);
+  }
+  // nginx -t runs before the FIFO exists and before anything listens; nginx itself is started exactly once.
+  assert.equal(raw.match(/^\s*nginx -g /gmu).length, 1);
+  assert.ok(raw.indexOf('/docker-entrypoint.sh nginx -t -q') < raw.indexOf('mkfifo'));
+  assert.match(read('.gitattributes'), /^\*\.sh text eol=lf$/mu);
 });

@@ -2344,3 +2344,43 @@ CSS-only follow-up (the health line style): web build, `gps-recovery` and the si
 the `Geolocation.prototype` boundary, so no physical device, mobile browser or background/locked-screen behaviour was
 observed, and background tracking is not supported. D10 stays PARTIAL: zero real device traces. Browsers other than
 Chromium were not run, and there is no hosted CI run of this change.
+
+## Proxy: nginx error log crosses an allow-listed boundary (2026-10-22)
+
+Design, residual channels and trade-offs: ADR-0062. `infra/proxy`, the profile verifiers and their tests only; no API,
+OIDC, SQL, browser, Compose service or dependency change.
+
+**Defect (reproduced on aa42f83).** nginx's error entries quote the request line, upstream URI and referrer of a
+request it fails itself, query string included, and nginx 1.28 cannot reformat them. Production sent them to
+`/dev/stderr`. The local profile had no `error_log`, and the image links its compiled default to stderr. The rewritten
+`deploy:verify` probe, which turns `errorLogQueryExposedOnNginxError` into a gate, failed on the baseline proxy with 12
+of 20 canaries in the stored proxy stderr. They came from 413s on both listeners, a Referer-only 413 and an
+unreachable upstream. The transport probe on baseline-built images found 8 of 12 canaries and 5 raw lines.
+
+**Repair.** nginx's stderr is a private FIFO whose only reader is a sanitizer on njs's QuickJS engine, already in the
+pinned image. The sanitizer writes only allow-listed fields: time, level, `pid#tid`, `*N`, a fixed event and numeric
+details. Unknown, malformed, overlong and truncated input is reported by size, and nothing falls back to the raw line.
+The access log gains `connection=$connection` to join the two logs. The entrypoint runs `nginx -t` before the FIFO
+exists, forwards QUIT/TERM/INT/HUP, waits for the sanitizer to drain, and stops nginx with exit 70 if the sanitizer
+fails. Backpressure blocks nginx instead of dropping or bypassing.
+
+**Executed.** `npm run deploy:verify`: red as above, then exit 0. All probes were 0 of 20 (access, error stream,
+writable files), with 0 unsanitized lines, 413 paired with `request_body_too_large` and 504 paired with
+`upstream_timeout`/`upstream_connect_failed`. `npm run transport:verify`: red as above, then exit 0 with SSE
+unchanged. `npm run proxy:verify-error-log`: exit 0, covering the following.
+- A readable startup failure, and exit 70 without the sanitizer.
+- Reload, with no zombies.
+- 600 of 600 lines after a frozen-sanitizer burst, with none bypassing.
+- Exit 70 after the sanitizer was killed, and exit 0 on SIGQUIT and SIGTERM.
+- Identical output from njs QuickJS and Node, and a 3.7 MiB peak for 200,000 lines and for a 20 MB record.
+
+The default njs engine reached 330 MB on the same input, which is why QuickJS is required. Graceful stop after an
+HTTP/2 request took about 6.3 s with and without the boundary. `npm run verify`: exit 0 (scripts 68 = 54 + 14 new,
+API 1324, web 661, contracts 129, fixtures 14, simulator 3, build). Eight structural mutations, run on scratch copies,
+each failed one profile test. `git diff --check`: clean.
+
+**Not run / limits.** No real host, DNS, certificate authority or log driver other than json-file was used, and there
+is no hosted CI run of this change. `test:integration` and `test:e2e` were not run, because no application code
+changed. Residual channels are listed in ADR-0062: configuration output at startup, an entrypoint override, the
+query-free access log, the API's own logs, core dumps, and entries already stored by older images. The local TLS
+certificate in `.local/tls` had expired (5 Oct) and was regenerated with the project's own 7-day command.

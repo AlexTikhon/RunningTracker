@@ -8,6 +8,16 @@ import { resolve } from 'node:path';
 import { connect as connectTls } from 'node:tls';
 
 import { writeProductionSecrets } from './production-secrets.mjs';
+import {
+  accessEntries,
+  canaryForms,
+  correlate,
+  countExposed,
+  createCanary,
+  misroutedErrorLineCount,
+  percentEncodeAll,
+  unsanitizedLineCount,
+} from './proxy-log-boundary.mjs';
 
 // Brings up the P12.2 deployment profile on this machine with throwaway secrets and a
 // self-signed certificate, then asserts the properties the profile claims. It proves the
@@ -135,6 +145,31 @@ function plainHttp(path, hostHeader) {
   });
 }
 
+// Declares a body larger than the listener accepts and sends only its start: nginx answers from the declared
+// length, before reading the body.
+function plainHttpDeclaredUpload(path, declaredBytes) {
+  return new Promise((resolveRequest, reject) => {
+    const request = httpRequest(
+      {
+        headers: { 'content-length': String(declaredBytes), 'content-type': 'application/octet-stream', host: hostname },
+        host: '127.0.0.1',
+        method: 'POST',
+        path,
+        port: httpPort,
+      },
+      (response) => {
+        response.resume();
+        response.on('end', () => {
+          request.destroy();
+          resolveRequest({ status: response.statusCode });
+        });
+      },
+    );
+    request.on('error', reject);
+    request.write(Buffer.alloc(1024));
+  });
+}
+
 function handshakeRefused(servername) {
   return new Promise((resolveHandshake) => {
     const socket = connectTls({ host: '127.0.0.1', port: httpsPort, rejectUnauthorized: false, servername });
@@ -162,6 +197,8 @@ async function waitFor(description, check, timeoutMs = 90_000) {
 }
 
 const results = {};
+// Every canary sent through the proxy; the failure dump below masks them.
+const sentCanaries = [];
 
 try {
   rmSync(workDirectory, { force: true, recursive: true });
@@ -334,73 +371,147 @@ try {
   assert.ok(!apiEnvironment.some((entry) => entry.startsWith('OIDC_CLIENT_SECRET=')), 'client secret is an environment value');
   results.signIn = 'no dev login (404); unreachable provider returns 503; login burst returns 429 despite forged IP headers and alternate route spellings; API stays ready';
 
-  // 9c. F01: the OIDC callback's one-time code and state must not reach the proxy access log. Unique canaries go
-  // through the real edge on both listeners, then the proxy's own streams are read: stdout is the access log and
-  // stderr is the error log (docker keeps them apart). The path and status must stay observable.
-  const canaryCode = `canary-code-${randomBytes(16).toString('hex')}`;
-  const canaryState = `canary-state-${randomBytes(16).toString('hex')}`;
-  const callbackQuery = `code=${canaryCode}&state=${canaryState}`;
-  const callback = await http2Request(`/api/auth/callback?${callbackQuery}`);
-  assert.ok(callback.status >= 300 && callback.status < 600, `callback answered ${callback.status}`);
-  const plainCallback = await plainHttp(`/api/auth/callback?${callbackQuery}`, hostname);
+  // 9c. F01 and ADR-0062: the OIDC callback's one-time code and state must not reach anything the proxy keeps.
+  // Unique canaries go through the real edge on both listeners: an ordinary callback, the same values
+  // percent-encoded and next to a raw quote and backslash, the HTTP redirect, requests nginx fails itself (a body
+  // over client_max_body_size before any routing, an upstream it cannot reach) and copies carried only in the
+  // Referer. Then the proxy's Docker streams are read as stored (stdout is the access log, stderr the error log)
+  // together with the container's writable mounts. Checks count matches; they never print a log sample.
+  const callbackQuery = (label, encode = (value) => value) => {
+    const code = createCanary(`${label}code`);
+    const state = createCanary(`${label}state`);
+    sentCanaries.push(code, state);
+    return `code=${encode(code)}&state=${encode(state)}`;
+  };
+  const callbackReferer = (label) => `${origin}/api/auth/callback?${callbackQuery(label)}`;
+  const callbackStatus = (response) => response.status >= 300 && response.status < 600;
+
+  const callback = await http2Request(`/api/auth/callback?${callbackQuery('ordinary')}`);
+  assert.ok(callbackStatus(callback), `callback answered ${callback.status}`);
+  const encodedCallback = await http2Request(`/api/auth/callback?${callbackQuery('encoded', percentEncodeAll)}`);
+  assert.ok(callbackStatus(encodedCallback), `encoded callback answered ${encodedCallback.status}`);
+  // nginx writes a raw quote or backslash escaped in its own entries; the canary between them stays whole.
+  const escapedCallback = await http2Request(`/api/auth/callback?${callbackQuery('escaped', (value) => `"${value}\\`)}`)
+    .catch((error) => ({ error: error.message, status: undefined }));
+
+  const redirectQuery = callbackQuery('redirect');
+  const plainCallback = await plainHttp(`/api/auth/callback?${redirectQuery}`, hostname);
   assert.equal(plainCallback.status, 301);
   // The redirect itself legitimately carries the query back to the browser; only the logs are in question.
-  assert.equal(plainCallback.headers.location, `${origin}/api/auth/callback?${callbackQuery}`);
+  assert.equal(plainCallback.headers.location, `${origin}/api/auth/callback?${redirectQuery}`);
 
-  const proxyStreams = () => {
-    const logged = spawnSync('docker', ['logs', containerId('proxy')], { encoding: 'utf8', maxBuffer: 64 * 1024 ** 2 });
-    assert.equal(logged.status, 0, `docker logs failed: ${logged.stderr}`);
-    return { access: logged.stdout, error: logged.stderr };
-  };
-  const accessLines = (text) => text.split('\n').filter((line) => line.includes('/api/auth/callback'));
-  const tlsLine = new RegExp(
-    `^\\S+ - ${hostname} \\[[^\\]]+\\] "GET /api/auth/callback HTTP/2\\.0" ${callback.status} \\d+ upstream=\\S+ request_time=[\\d.]+$`,
-    'u',
-  );
-  const plainLine = /^\S+ - \S+ \[[^\]]+\] "GET \/api\/auth\/callback HTTP\/1\.1" 301 \d+ upstream=\S+ request_time=[\d.]+$/u;
-  const observed = await waitFor('the callback requests in the proxy access log', () => {
-    const lines = accessLines(proxyStreams().access);
-    return lines.some((line) => tlsLine.test(line)) && lines.some((line) => plainLine.test(line)) ? lines : false;
-  }, 15_000);
-  const afterProbe = proxyStreams();
-  const canaries = [canaryCode, canaryState, callbackQuery];
-  const accessLogCanariesFound = canaries.filter((canary) => afterProbe.access.includes(canary)).length;
-  const errorLogCanariesDuringProbe = canaries.filter((canary) => afterProbe.error.includes(canary)).length;
-  assert.equal(accessLogCanariesFound, 0, 'an OIDC callback query value is in the proxy access log');
-  assert.equal(errorLogCanariesDuringProbe, 0, 'an OIDC callback query value is in the proxy error log');
-  assert.ok(observed.every((line) => !line.includes('?')), 'a callback log line still has a query separator');
-
-  // The error log has its own, fixed request-line format that no log_format reaches: when nginx itself fails a
-  // request it writes `request: "<method> <uri>?<query> ..."`. That cannot be proven absent from the access log
-  // alone, so one nginx-generated error (a body over client_max_body_size) is provoked on purpose and reported.
+  // nginx may reset an HTTP/2 stream while the body is still being sent, so an answer is not required to arrive
+  // intact: what matters is the access entry and the error entry, which are waited for below.
   const oversized = 'x'.repeat(256 * 1024);
-  // nginx may reset the stream while the body is still being sent, so the answer is not required to arrive intact:
-  // what matters is the log entry, which is waited for below.
+  const oversizedHeaders = { 'content-length': String(oversized.length), 'content-type': 'application/octet-stream', origin };
   const refused = await http2Request(
-    `/api/auth/callback?code=${canaryCode}-413&state=${canaryState}-413`,
-    { 'content-length': String(oversized.length), 'content-type': 'application/octet-stream', origin },
+    `/api/auth/callback?${callbackQuery('oversized')}`,
+    { ...oversizedHeaders, referer: callbackReferer('oversizedreferer') },
     { body: oversized, method: 'POST' },
   ).catch((error) => ({ error: error.message, status: undefined }));
   assert.ok(refused.status === undefined || refused.status === 413, `the oversized callback answered ${refused.status}`);
-  const errorLines = await waitFor('the proxy error log entry for the oversized request', () => {
-    const lines = proxyStreams().error.split('\n').filter((line) => line.includes('/api/auth/callback'));
-    return lines.length > 0 ? lines : false;
-  }, 15_000);
-  const afterError = proxyStreams();
-  assert.ok(!afterError.access.includes(`${canaryCode}-413`), 'the refused request leaked into the access log');
-  const errorLogExposure = errorLines.some((line) => line.includes(`${canaryCode}-413`));
+  const refusedByReferer = await http2Request(
+    '/api/runs',
+    { ...oversizedHeaders, referer: callbackReferer('refereronly') },
+    { body: oversized, method: 'POST' },
+  ).catch((error) => ({ error: error.message, status: undefined }));
+  assert.ok(refusedByReferer.status === undefined || refusedByReferer.status === 413);
+  // The HTTP listener applies the default 1 MiB limit before its redirect.
+  const plainRefused = await plainHttpDeclaredUpload(`/api/auth/callback?${callbackQuery('plainoversized')}`, 2 * 1024 ** 2);
+  assert.equal(plainRefused.status, 413);
+
+  // An upstream nginx cannot reach: with the API container stopped, the proxy fails the callback itself.
+  execFileSync('docker', ['stop', '--time', '15', containerId('api')], { stdio: 'ignore' });
+  let upstreamFailure;
+  try {
+    upstreamFailure = await http2Request(
+      `/api/auth/callback?${callbackQuery('upstream')}`,
+      { referer: callbackReferer('upstreamreferer') },
+    );
+  } finally {
+    execFileSync('docker', ['start', containerId('api')], { stdio: 'ignore' });
+  }
+  assert.ok([502, 504].includes(upstreamFailure.status), `the unreachable upstream answered ${upstreamFailure.status}`);
+  await waitFor('API readiness after the upstream probe', async () => (await http2Request('/api/health/ready')).status === 200);
+
+  const proxyStreams = () => {
+    const logged = spawnSync('docker', ['logs', containerId('proxy')], { encoding: 'utf8', maxBuffer: 64 * 1024 ** 2 });
+    assert.equal(logged.status, 0, 'docker logs failed');
+    return { access: logged.stdout, error: logged.stderr };
+  };
+  await waitFor('the probes in the proxy access log', () => {
+    const statuses = accessEntries(proxyStreams().access).map((entry) => entry.status);
+    const tooLarge = statuses.filter((status) => status === 413).length;
+    return tooLarge >= 3 && statuses.some((status) => status === 502 || status === 504);
+  }, 30_000);
+  // Each refused request needs an event of its own category on its connection. Error entries reach Docker after
+  // their access entries (they pass through the sanitizer), so they get time to arrive; the gate runs either way.
+  const upstreamEvent = /^upstream_(?:connect_failed|timeout|unavailable)$/u;
+  const paired = (entry) => {
+    if (entry.status === 413) return entry.events.includes('request_body_too_large');
+    if (entry.status === 502 || entry.status === 504) return entry.events.some((event) => upstreamEvent.test(event));
+    return true;
+  };
+  await waitFor('the error events of the refused requests', () => correlate(proxyStreams()).every(paired), 15_000).catch(() => undefined);
+  const streams = proxyStreams();
+  // Regular files only: the error-log FIFO must never be opened by a reader other than the sanitizer.
+  const fileScan = spawnSync(
+    'docker',
+    [
+      'exec', containerId('proxy'), 'find', '/tmp', '/run', '/var/cache/nginx', '/etc/nginx/conf.d', '/var/log',
+      '-type', 'f', '-exec', 'grep', '-lF', ...sentCanaries.flatMap((canary) => canaryForms(canary).flatMap((form) => ['-e', form])), '{}', '+',
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.ok(fileScan.status === 0 || fileScan.status === 1, 'the writable-mount scan failed');
+  const errorLogCanariesFound = countExposed(streams.error, sentCanaries);
   const apiLogged = compose(['logs', '--no-color', 'api'], { quiet: true });
   results.callbackLogging = {
-    accessLogCanariesFound,
-    accessLogLine: observed.find((line) => tlsLine.test(line)),
+    canariesSent: sentCanaries.length,
+    accessLogCanariesFound: countExposed(streams.access, sentCanaries),
+    errorLogCanariesFound,
+    writableFilesWithCanaries: fileScan.stdout.split('\n').filter(Boolean).length,
     // Informational: the API's own log is outside this check's assertions.
-    apiLogCanariesFound: [canaryCode, canaryState].filter((canary) => apiLogged.includes(canary)).length,
-    errorLogCanariesDuringProbe,
-    oversizedRequestAnswer: refused.status ?? `no answer (${refused.error})`,
-    // Known limitation, reported rather than hidden: an nginx error entry keeps the request line and the upstream
-    // URI, so a request that nginx itself fails can still expose its query in the error stream.
-    errorLogQueryExposedOnNginxError: errorLogExposure,
-    errorLogSample: errorLines[0]?.replaceAll(canaryCode, '<code>').replaceAll(canaryState, '<state>'),
+    apiLogCanariesFound: countExposed(apiLogged, sentCanaries),
+    answers: {
+      escapedCallback: escapedCallback.status ?? 'no answer',
+      oversizedCallback: refused.status ?? 'no answer',
+      oversizedRefererOnly: refusedByReferer.status ?? 'no answer',
+      plainOversizedCallback: plainRefused.status,
+      unreachableUpstream: upstreamFailure.status,
+    },
+    errorLogQueryExposedOnNginxError: errorLogCanariesFound > 0,
+    errorLogUnsanitizedLines: unsanitizedLineCount(streams.error),
+    errorLinesOnStdout: misroutedErrorLineCount(streams.access),
+  };
+  // Security gate (ADR-0062). It used to be reported as an accepted limitation; it now fails the run.
+  assert.equal(
+    results.callbackLogging.errorLogQueryExposedOnNginxError,
+    false,
+    `errorLogQueryExposedOnNginxError: ${errorLogCanariesFound} of ${sentCanaries.length} callback values reached the proxy error stream`,
+  );
+  assert.equal(results.callbackLogging.accessLogCanariesFound, 0, 'a callback query value is in the proxy access log');
+  assert.equal(results.callbackLogging.writableFilesWithCanaries, 0, 'a callback query value is in a proxy file');
+  assert.equal(results.callbackLogging.errorLogUnsanitizedLines, 0, 'the proxy error stream has a line the sanitizer did not build');
+  assert.equal(results.callbackLogging.errorLinesOnStdout, 0, 'sanitized error lines went to the access stream');
+
+  // Diagnostics that must survive: the access log keeps method, path, protocol, status and timing with a connection
+  // number, and each refused or failed request has an error event of its own category on that connection.
+  const entries = correlate(streams);
+  const callbackEntries = entries.filter((entry) => entry.path === '/api/auth/callback');
+  assert.ok(callbackEntries.some((entry) => entry.method === 'GET' && entry.status === callback.status));
+  assert.ok(callbackEntries.some((entry) => entry.method === 'GET' && entry.status === 301));
+  assert.ok(entries.every((entry) => !entry.path.includes('?') && entry.connection !== undefined), 'an access entry lost its shape');
+  const tooLarge = entries.filter((entry) => entry.status === 413);
+  const failedUpstream = entries.filter((entry) => entry.status === 502 || entry.status === 504);
+  assert.ok(tooLarge.length >= 3 && tooLarge.every(paired), 'a 413 has no request_body_too_large event');
+  assert.ok(failedUpstream.length >= 1 && failedUpstream.every(paired), 'an upstream failure has no upstream event');
+  results.callbackLogging.diagnostics = {
+    accessEntryShape: 'method, path without query, protocol, status, bytes, upstream, request_time, connection',
+    tooLarge: [...new Set(tooLarge.flatMap((entry) => entry.events))],
+    upstreamFailure: [...new Set(failedUpstream.flatMap((entry) => entry.events))],
+    sampleAccessLine: streams.access.split('\n').find((line) => line.includes('" 413 ')),
+    sampleErrorLine: streams.error.split('\n').find((line) => line.includes('event=request_body_too_large')),
   };
 
   // 10. Restart and redeploy behaviour: the API returns, the one-shot job is idempotent.
@@ -440,7 +551,9 @@ try {
   console.info(JSON.stringify(results, null, 2));
 } catch (error) {
   try {
-    console.error(compose(['logs', '--no-color', '--tail', '60'], { quiet: true }));
+    let logs = compose(['logs', '--no-color', '--tail', '60'], { quiet: true });
+    for (const form of sentCanaries.flatMap(canaryForms)) logs = logs.replaceAll(form, '<canary>');
+    console.error(logs);
   } catch {
     // Diagnostics only.
   }

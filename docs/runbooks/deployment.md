@@ -110,16 +110,36 @@ query shape (the set of readable runs built per statement, ADR-0042) holds a has
 `work_mem` does not bound; watch PostgreSQL memory if organizations grow far beyond the measured
 one. Raise limits with the environment variables; do not remove them.
 
-Every container's log is rotated at 10 MiB x 5 files. The proxy access log records client address,
-host, method, path and protocol (never the query string), status, response bytes, upstream address and
-request time. The query string is left out because the OIDC callback carries a one-time `code` and
+Every container's log is rotated at 10 MiB x 5 files. The proxy access log (stdout) records client address,
+host, method, path and protocol (never the query string), status, response bytes, upstream address,
+request time and `connection=N`. The query string is left out because the OIDC callback carries a one-time `code` and
 `state` in it; tile URLs contain tile coordinates and period, never GPS points.
 
-The proxy **error log** (stderr) is a different format that cannot be configured: when nginx itself
-fails a request (for example a body over `client_max_body_size`, or an upstream error) the entry keeps
-the request line and the upstream URI, query string included. `npm run deploy:verify` provokes one such
-entry on purpose and reports it as `errorLogQueryExposedOnNginxError`; treat the error log as holding
-the same sensitivity as the callback query.
+The proxy **error log** (stderr) passes an allow-listed sanitizer before Docker stores it (ADR-0062). nginx's own
+entries quote the request line, upstream URI and referrer of a failed request, and nginx cannot reformat them, so
+nginx writes to a private pipe and only rebuilt lines reach stderr:
+
+```text
+2026/10/22 08:09:26 [error] 34#34: *39 event=request_body_too_large bytes=262144
+2026/10/22 08:09:31 [error] 35#35: *41 event=upstream_connect_failed errno=111 phase=upstream_connect
+```
+
+- Join an entry to its request with the access line that has the same number: `*39` matches `connection=39`. That
+  line holds the path, status and timing.
+- `event=unclassified` is an nginx message outside the sanitizer's table. Its text is withheld on purpose. Investigate
+  it outside production with a debug configuration.
+- `nginx-error-log: event=...` lines come from the boundary itself. `unrecognized_record`, `overlong_record` and
+  `truncated_record` mean input it would not parse, reported by size only.
+- `sanitizer_stopped action=stopping_nginx` means the sanitizer failed. The proxy then exits with status 70 and
+  restarts (`restart: unless-stopped`), and nginx never falls back to raw logging.
+- Configuration errors at startup (`nginx -t`) still print unfiltered, because nothing listens yet.
+- `npm run deploy:verify` sends unique fake callback values through failing and succeeding requests on both
+  listeners, then fails if any appears in the stored streams or in a writable file
+  (`errorLogQueryExposedOnNginxError` must be `false`). `npm run proxy:verify-error-log` exercises the boundary's
+  failure modes on the image.
+- Error entries written by images built before ADR-0062 may still be in existing logs. Treat them as holding the
+  callback query until they rotate out, or delete them.
+- Running the image with a different entrypoint bypasses the boundary.
 
 ## Metrics
 

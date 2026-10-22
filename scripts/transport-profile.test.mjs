@@ -60,6 +60,7 @@ test('F01 transport proxy: the access log format carries no query string and kee
     '$body_bytes_sent',
     '$upstream_addr',
     '$request_time',
+    '$connection',
   ]) {
     assert.ok(body.includes(field), `${field} is missing from the access log format`);
   }
