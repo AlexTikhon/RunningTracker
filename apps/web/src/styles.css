@@ -279,3 +279,12 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .run-card__quality--good { border-color: #6a8d3b; color: #b8f264; }
 .run-card__quality--poor { border-color: #6b5a2f; color: #f1d27b; }
 .run-card__quality--insufficient { border-color: #75433e; color: #ffaca4; }
+.run-card__share { justify-self: start; }
+.run-card--sharing { grid-column: 1 / -1; border-color: #6a8d3b; }
+.archive-share { display: grid; gap: 0.8rem; padding-top: 0.9rem; border-top: 1px solid #2e3831; }
+.archive-share__header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.archive-share__header h5 { margin: 0; font-size: 1rem; }
+.archive-share__header h5:focus { outline: none; }
+.archive-share__header h5:focus-visible { outline: 2px solid #b8f264; outline-offset: 3px; }
+.archive-share .run-id { margin-left: 0.3rem; font-weight: 500; }
+.run-share--embedded { margin-top: 0; padding-top: 0; border-top: 0; }

@@ -111,6 +111,9 @@ The panel only lists and changes shares of your own run; the server checks owner
 queue anything offline: an action that fails says so and offers Retry. This flow is tested in Chromium by
 `tests/e2e/run-sharing.spec.ts`; following these steps by hand in a browser was not part of that change.
 
+After **Finish** and **New run** the panel leaves the Runner tab, but the share stays on the server. Manage it from
+**My runs** instead (section 5a).
+
 ## 5. Browse the archive
 
 The summary worker runs once a minute (`RUN_SUMMARY_INTERVAL_MS`), so the script reports the summary after up to
@@ -158,6 +161,17 @@ in-process, with no network. Try `Show my runs of at least 5 km from last month,
 the fake does says nothing about a real model; the real one needs a key and a model name, and its quality is only
 measured by the live evaluation. All of it, with the limits and the privacy notes, is in
 `docs/runbooks/run-search-ai.md`.
+
+**Sharing a finished run (optional).** Each card in **My runs** has **Manage sharing**. It opens the Runner tab's
+sharing panel for that run, inside the card, named by the card's date and the start of the run ID. Only one panel is
+open at a time, and **Close** or Escape closes it. The panel works as in section 4a: **Share** grants live and history
+access, which for a finished run means its recorded route, distance and duration, and **Revoke** removes it. This is
+also where a grant made from the Runner tab is managed after **New run** or a reload. The selected run never becomes
+the active run.
+
+Applying another search closes the panel. A run deleted in the meantime shows only the reason and Close. Nothing about
+sharing is read until a panel is opened. Tested in Chromium by `tests/e2e/archive-sharing.spec.ts`; these steps were
+not followed by hand.
 
 ## 6. Sign out
 

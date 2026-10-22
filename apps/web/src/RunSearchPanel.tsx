@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import { openSharingItem, type ArchiveShareSelection } from './ArchiveRunShare.js';
 import { RunSearchFilters } from './RunSearchFilters.js';
 import { RunSearchInterpreter } from './RunSearchInterpreter.js';
 import { AppliedFilters, RunSearchResults } from './RunSearchResults.js';
@@ -42,6 +43,8 @@ interface AppliedSearch {
 export interface RunSearchPanelProps {
   csrf: CsrfCredentials;
   orgId: string;
+  // The session's signal, from when the session was issued; only the sharing panel uses it.
+  signal: AbortSignal;
   userId: string;
 }
 
@@ -51,7 +54,7 @@ const idleInterpretation: InterpretationSnapshot = { status: 'idle' };
 // different person or organization starts from a clean draft with no results, cursors or requests carried over.
 // The editable draft and the applied filters are separate state: results always belong to the applied filters.
 // Describing the search in words only ever replaces the draft; applying it stays the person's explicit step.
-export function RunSearchPanel({ csrf, orgId, userId }: RunSearchPanelProps) {
+export function RunSearchPanel({ csrf, orgId, signal, userId }: RunSearchPanelProps) {
   const timeZone = useMemo(() => defaultTimeZone(), []);
   const [draft, setDraft] = useState<RunSearchDraft>(defaultDraft);
   const [text, setText] = useState('');
@@ -74,6 +77,13 @@ export function RunSearchPanel({ csrf, orgId, userId }: RunSearchPanelProps) {
   });
   const controller = useRef<RunSearchController | null>(null);
   const snapshot = searchState.scopeKey === scopeKey ? searchState.snapshot : loadingSnapshot;
+  // The one run whose sharing panel is open. It is dropped as soon as the shown search no longer lists it, so a
+  // later answer listing the same run again does not reopen it by itself.
+  const [sharing, setSharing] = useState<ArchiveShareSelection | null>(null);
+  const sharedItem = openSharingItem(sharing, scopeKey, snapshot);
+  if (sharing !== null && sharedItem === null) {
+    setSharing(null);
+  }
 
   useEffect(() => {
     const next = new RunSearchController({
@@ -161,6 +171,14 @@ export function RunSearchPanel({ csrf, orgId, userId }: RunSearchPanelProps) {
         filters={applied.filters}
         onLoadMore={() => controller.current?.loadMore()}
         onRetry={() => controller.current?.retry()}
+        sharing={{
+          onClose: () => setSharing(null),
+          onToggle: (runId) =>
+            setSharing((current) =>
+              current?.runId === runId && current.searchKey === scopeKey ? null : { runId, searchKey: scopeKey }),
+          openRunId: sharedItem?.runId ?? null,
+          scope: { csrfToken: csrf.token, orgId, signal, userId },
+        }}
         snapshot={snapshot}
       />
     </section>

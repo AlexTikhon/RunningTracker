@@ -870,6 +870,7 @@ export function App() {
             accessToken={mapboxAccessToken}
             csrf={session.session.csrf}
             orgId={selectedOrgId}
+            signal={session.signal}
             userId={session.session.identity.userId}
           />
         ) : (

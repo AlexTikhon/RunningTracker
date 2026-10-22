@@ -174,6 +174,68 @@ describe('RunSearchResults', () => {
     const markup = render(snapshot({ items: [runItem()], pendingSummaryCount: 2 }));
     expect(markup).not.toMatch(/revision|\bSQL\b|stage|source_revision|summary|cursor|keyset/iu);
   });
+
+  describe('managing sharing from a card', () => {
+    const second = runItem({ runId: 'c2000000-0000-4000-8000-000000000002', startedAt: '2026-10-20T06:00:00.000Z' });
+    const sharing = (openRunId: string | null) => ({
+      onClose: noop,
+      onToggle: noop,
+      openRunId,
+      scope: {
+        csrfToken: 't'.repeat(43),
+        orgId: '11111111-1111-4111-8111-111111111111',
+        signal: new AbortController().signal,
+        userId: '22222222-2222-4222-8222-222222222222',
+      },
+    });
+    const renderWith = (openRunId: string | null, items = [runItem(), second]) =>
+      renderToStaticMarkup(
+        <RunSearchResults
+          filters={filters}
+          onLoadMore={noop}
+          onRetry={noop}
+          sharing={sharing(openRunId)}
+          snapshot={snapshot({ items })}
+        />,
+      );
+    const cards = (markup: string) => markup.split('<li class="run-card').slice(1);
+
+    it('offers Manage sharing on every card, named by the run’s date, with no panel open', () => {
+      const markup = renderWith(null);
+      expect(markup.match(/>Manage sharing<\/button>/gu)).toHaveLength(2);
+      expect(markup).toContain('aria-label="Manage sharing for your run of 1 Nov 2026, 00:30"');
+      expect(markup).toContain('aria-label="Manage sharing for your run of 20 Oct 2026, 08:00"');
+      expect(markup.match(/aria-expanded="false"/gu)).toHaveLength(2);
+      expect(markup).not.toContain('aria-controls');
+      expect(markup).not.toContain('Sharing for your run');
+      expect(markup).not.toContain('Loading coaches');
+    });
+
+    it('opens one panel, inside the chosen card, which its button controls', () => {
+      const markup = renderWith(second.runId);
+      expect(markup.match(/Sharing for your run of/gu)).toHaveLength(1);
+      const [first, chosen] = cards(markup);
+      expect(first).toContain('aria-expanded="false"');
+      expect(first).not.toContain('Sharing for your run');
+      expect(chosen).toMatch(/^ run-card--sharing"/u);
+      expect(chosen).toContain('aria-expanded="true"');
+      const controls = /aria-controls="([^"]+)"/u.exec(chosen ?? '')?.[1];
+      expect(controls).toBeDefined();
+      expect(chosen).toContain(`id="${controls}"`);
+      expect(chosen).toContain('Sharing for your run of 20 Oct 2026, 08:00 <span class="run-id">#c2000000</span>');
+      expect(chosen).toContain('#c2000000');
+    });
+
+    it('opens nothing for a run the list does not show', () => {
+      const markup = renderWith(second.runId, [runItem()]);
+      expect(markup).not.toContain('Sharing for your run');
+      expect(markup).not.toContain('aria-expanded="true"');
+    });
+
+    it('offers nothing about sharing when the caller gives no sharing scope', () => {
+      expect(render(snapshot({ items: [runItem()] }))).not.toContain('Manage sharing');
+    });
+  });
 });
 
 describe('AppliedFilters', () => {

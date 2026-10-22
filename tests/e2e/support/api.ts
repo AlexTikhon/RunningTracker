@@ -8,6 +8,8 @@ export interface AuthedApi {
   // The owner deleting the run (204): the server then answers 410 RUN_DELETED for it.
   deleteRun(orgId: string, runId: string): Promise<void>;
   getRun(orgId: string, runId: string): Promise<RunView>;
+  // The status of reading the finished run as this person: 200 when they may read its history, 404 when not.
+  getRunStatus(orgId: string, runId: string): Promise<number>;
   listRunIds(orgId: string): Promise<string[]>;
   getAllPoints(orgId: string, runId: string): Promise<Array<{ segmentId: number; seq: string }>>;
   putShare(
@@ -124,6 +126,10 @@ export async function authedApi(context: BrowserContext, environment: E2eEnviron
 
     getRun(orgId, runId) {
       return get<RunView>(runPath(orgId, runId));
+    },
+
+    async getRunStatus(orgId, runId) {
+      return (await context.request.get(url(runPath(orgId, runId)))).status();
     },
 
     async listRunIds(orgId) {

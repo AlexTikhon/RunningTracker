@@ -8,7 +8,7 @@ const orgId = '11111111-1111-4111-8111-111111111111';
 const userId = '22222222-2222-4222-8222-222222222222';
 
 describe('RunSearchPanel', () => {
-  const markup = renderToStaticMarkup(<RunSearchPanel csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }} orgId={orgId} userId={userId} />);
+  const markup = renderToStaticMarkup(<RunSearchPanel csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }} orgId={orgId} signal={new AbortController().signal} userId={userId} />);
 
   it('is titled as the person’s own runs and says how it differs from the map', () => {
     expect(markup).toContain('My runs');

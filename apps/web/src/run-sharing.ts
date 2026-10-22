@@ -16,6 +16,10 @@ export interface ShareRow {
 
 export type ShareChange = 'grant' | 'revoke';
 
+// Why the server will not let this person manage the run's sharing at all: the run was deleted (410), it is not
+// theirs or no longer exists (404), or their membership of the organization ended (403).
+export type SharingUnavailable = 'deleted' | 'missing' | 'no-access';
+
 export interface RunSharingSnapshot {
   // Why the shares could not be read (status `error`), or why the last change was not confirmed (status `ready`).
   message: string | null;
@@ -23,6 +27,8 @@ export interface RunSharingSnapshot {
   rows: ShareRow[];
   status: 'error' | 'loading' | 'ready';
   truncated: boolean;
+  // Set with status `error` when retrying cannot help; null for any other failure and in every other state.
+  unavailable: SharingUnavailable | null;
 }
 
 export interface RunSharingApi {
@@ -94,12 +100,21 @@ function describeFailure(error: unknown): string {
   return 'Check your connection and try again.';
 }
 
+function unavailableOf(error: unknown): SharingUnavailable | null {
+  if (!(error instanceof RunnerApiError)) return null;
+  if (error.status === 410 && error.code === 'RUN_DELETED') return 'deleted';
+  if (error.status === 404 && error.code === 'RUN_NOT_FOUND') return 'missing';
+  if (error.status === 403 && error.code === 'ORG_ACCESS_DENIED') return 'no-access';
+  return null;
+}
+
 const initialSnapshot: RunSharingSnapshot = {
   message: null,
   pending: null,
   rows: [],
   status: 'loading',
   truncated: false,
+  unavailable: null,
 };
 
 /**
@@ -185,6 +200,7 @@ export class RunSharingController {
           rows: shareRows(coaches, shares.items),
           status: 'ready',
           truncated: shares.truncated,
+          unavailable: null,
         });
       },
       (error: unknown) => {
@@ -202,6 +218,7 @@ export class RunSharingController {
       rows: [],
       status: 'error',
       truncated: false,
+      unavailable: unavailableOf(error),
     });
   }
 
@@ -238,6 +255,7 @@ export class RunSharingController {
           rows: shareRows(this.#coaches, shares.items),
           status: 'ready',
           truncated: shares.truncated,
+          unavailable: null,
         });
       },
       (error: unknown) => {

@@ -132,6 +132,7 @@ describe('RunSharingController', () => {
       rows: [{ access: 'none', kind: 'coach', userId: coachA }],
       status: 'ready',
       truncated: false,
+      unavailable: null,
     });
   });
 
@@ -210,6 +211,49 @@ describe('RunSharingController', () => {
     next('shares').resolve(shares());
     await settle();
     expect(latest()).toMatchObject({ message: null, status: 'ready' });
+  });
+
+  it('says when the server refuses the run for good, and only then, with no rows to act on', async () => {
+    const cases: Array<[unknown, string | null]> = [
+      [new RunnerApiError('The run has been deleted', 410, 'RUN_DELETED', null), 'deleted'],
+      [new RunnerApiError('The run does not exist or is not accessible', 404, 'RUN_NOT_FOUND', null), 'missing'],
+      [new RunnerApiError('The current identity cannot access this organization', 403, 'ORG_ACCESS_DENIED', null), 'no-access'],
+      [new RunnerApiError('Internal error', 500, 'INTERNAL_ERROR', null), null],
+      [new DOMException('Request deadline exceeded', 'TimeoutError'), null],
+      [new TypeError('Failed to fetch'), null],
+    ];
+    for (const [error, unavailable] of cases) {
+      const { api, next } = scriptedApi();
+      const { controller, latest } = controllerWith(api);
+      controller.start();
+      next('coaches').resolve([coachA]);
+      next('shares').reject(error);
+      await settle();
+
+      expect(latest()).toMatchObject({ pending: null, rows: [], status: 'error', unavailable });
+    }
+  });
+
+  it('a change refused because the run was deleted is not shown as done, and nothing is sent again', async () => {
+    const { api, calls, next } = scriptedApi();
+    const { controller, latest } = controllerWith(api);
+    controller.start();
+    next('coaches').resolve([coachA]);
+    next('shares').resolve(shares({ canReadHistory: true, canReadLive: true, userId: coachA }));
+    await settle();
+
+    controller.revoke(coachA);
+    next('revoke').reject(new RunnerApiError('The run has been deleted', 410, 'RUN_DELETED', null));
+    await settle();
+    next('shares').reject(new RunnerApiError('The run has been deleted', 410, 'RUN_DELETED', null));
+    await settle();
+
+    expect(latest()).toMatchObject({ rows: [], status: 'error', unavailable: 'deleted' });
+    controller.revoke(coachA);
+    controller.grant(coachA);
+    expect(api.revoke).toHaveBeenCalledTimes(1);
+    expect(api.grant).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
   });
 
   it('marks a list the server cut at its maximum', async () => {

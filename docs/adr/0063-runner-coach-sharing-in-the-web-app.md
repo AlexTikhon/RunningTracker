@@ -60,7 +60,8 @@ identity provider's subject, and no name or email claim is stored.
 - Any active member, not only a run owner, can list the organization's active coaches by ID. This is new: before, a
   member could learn no other member's identifier. Only coaches are listed, never runners. An identifier reveals
   nothing else, because no name, email or identity-provider subject is returned.
-- Sharing from the Archive, separate live and history choices, and display names are not built.
+- Separate live and history choices and display names are not built. Sharing a finished run from Archive → My runs
+  was added later by ADR-0064, with the same panel and controller.
 - A share made in another tab or through the API appears after the panel reloads (a page reload or the next change),
   not live.
 

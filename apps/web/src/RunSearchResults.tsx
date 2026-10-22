@@ -1,5 +1,7 @@
 import type { GpsQuality, RunSearchItem } from '@running-tracker/contracts';
+import { useId, useRef } from 'react';
 
+import { ArchiveRunShare, type ArchiveShareScope } from './ArchiveRunShare.js';
 import type { RunSearchSnapshot } from './run-search-controller.js';
 import {
   describeAppliedFilters,
@@ -69,11 +71,32 @@ function PendingNotice({ count, distanceFiltered }: { count: number; distanceFil
   );
 }
 
-function RunCard({ filters, item }: { filters: RunSearchFilters; item: RunSearchItem }) {
+// Managing who can see the person's own finished runs. At most one card has its panel open, and nothing about
+// sharing is read until it is opened.
+export interface RunSearchSharing {
+  onClose: () => void;
+  onToggle: (runId: string) => void;
+  openRunId: string | null;
+  scope: ArchiveShareScope;
+}
+
+function RunCard({
+  filters,
+  item,
+  sharing,
+}: {
+  filters: RunSearchFilters;
+  item: RunSearchItem;
+  sharing: RunSearchSharing | undefined;
+}) {
+  const manage = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
+  const startedAt = formatStartedAt(item.startedAt, filters.timeZone);
+  const open = sharing !== undefined && sharing.openRunId === item.runId;
   return (
-    <li className="run-card">
+    <li className={open ? 'run-card run-card--sharing' : 'run-card'}>
       <h4>
-        <time dateTime={item.startedAt}>{formatStartedAt(item.startedAt, filters.timeZone)}</time>
+        <time dateTime={item.startedAt}>{startedAt}</time>
       </h4>
       <dl>
         <div>
@@ -86,6 +109,31 @@ function RunCard({ filters, item }: { filters: RunSearchFilters; item: RunSearch
         </div>
       </dl>
       <p className={`run-card__quality run-card__quality--${item.gpsQuality}`}>{qualityText[item.gpsQuality]}</p>
+      {sharing !== undefined && (
+        <button
+          aria-controls={open ? panelId : undefined}
+          aria-expanded={open}
+          aria-label={`Manage sharing for your run of ${startedAt}`}
+          className="run-card__share"
+          onClick={() => sharing.onToggle(item.runId)}
+          ref={manage}
+          type="button"
+        >
+          Manage sharing
+        </button>
+      )}
+      {open && (
+        <ArchiveRunShare
+          id={panelId}
+          onClose={() => {
+            sharing.onClose();
+            manage.current?.focus();
+          }}
+          runId={item.runId}
+          scope={sharing.scope}
+          startedAtLabel={startedAt}
+        />
+      )}
     </li>
   );
 }
@@ -95,10 +143,12 @@ export interface RunSearchResultsProps {
   filters: RunSearchFilters;
   onLoadMore: () => void;
   onRetry: () => void;
+  // Absent: the cards offer no sharing.
+  sharing?: RunSearchSharing;
   snapshot: RunSearchSnapshot;
 }
 
-export function RunSearchResults({ filters, onLoadMore, onRetry, snapshot }: RunSearchResultsProps) {
+export function RunSearchResults({ filters, onLoadMore, onRetry, sharing, snapshot }: RunSearchResultsProps) {
   const distanceFiltered = filters.minDistance !== null || filters.maxDistance !== null;
 
   if (snapshot.status === 'loading') {
@@ -145,7 +195,7 @@ export function RunSearchResults({ filters, onLoadMore, onRetry, snapshot }: Run
       </p>
       <ol aria-label="My runs" className="run-cards">
         {snapshot.items.map((item) => (
-          <RunCard filters={filters} item={item} key={item.runId} />
+          <RunCard filters={filters} item={item} key={item.runId} sharing={sharing} />
         ))}
       </ol>
       {snapshot.moreMessage !== null && (

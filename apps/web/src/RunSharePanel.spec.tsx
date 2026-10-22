@@ -23,6 +23,7 @@ const ready: RunSharingSnapshot = {
   ],
   status: 'ready',
   truncated: false,
+  unavailable: null,
 };
 
 describe('RunShareView', () => {
@@ -74,6 +75,30 @@ describe('RunShareView', () => {
 
     expect(html).toContain('Revoking was not confirmed: gone.');
     expect(html).toContain('Coach …cccc0001');
+  });
+
+  it('describes a finished run in My runs without the recording wording, inside the frame that names the run', () => {
+    const noop = () => undefined;
+    const html = renderToStaticMarkup(
+      <RunShareView onGrant={noop} onRetry={noop} onRevoke={noop} snapshot={ready} variant="archive" />,
+    );
+
+    expect(html).toContain('Share gives the coach <strong>live and history access</strong>');
+    expect(html).toContain('This run is finished, so the coach can see its recorded route, distance and duration until you revoke it.');
+    expect(html).not.toContain('while you record');
+    // The same rows and actions as the Runner tab; the frame around it carries the heading.
+    expect(html).toContain('aria-label="Share with Coach …cccc0001"');
+    expect(html).toContain('aria-label="Revoke Member …dddd0009"');
+    expect(html).not.toContain('<h2');
+    expect(html).not.toContain('Share this run with a coach');
+  });
+
+  it('labels each panel by its own heading, so two panels on one page do not share an id', () => {
+    const html = render(ready);
+    const labelledBy = /aria-labelledby="([^"]+)"/u.exec(html)?.[1];
+    expect(labelledBy).toBeDefined();
+    expect(html).toContain(`<h2 id="${labelledBy}">Share this run with a coach</h2>`);
+    expect(labelledBy).not.toBe('run-share-title');
   });
 
   it('says when there is no other coach, and when the list was cut', () => {

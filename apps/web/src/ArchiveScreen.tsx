@@ -53,10 +53,12 @@ export interface ArchiveScreenProps {
   accessToken: string | null;
   csrf: CsrfCredentials;
   orgId: string;
+  // The session's signal, from when the session was issued: ending or replacing the session silences run sharing.
+  signal: AbortSignal;
   userId: string;
 }
 
-export function ArchiveScreen({ accessToken, csrf, orgId, userId }: ArchiveScreenProps) {
+export function ArchiveScreen({ accessToken, csrf, orgId, signal, userId }: ArchiveScreenProps) {
   const defaults = useMemo(initialDates, []);
   const [fromDate, setFromDate] = useState(defaults.fromDate);
   const [toDate, setToDate] = useState(defaults.toDate);
@@ -175,7 +177,7 @@ export function ArchiveScreen({ accessToken, csrf, orgId, userId }: ArchiveScree
         <span>Metadata refreshes every 30 seconds and immediately on tab focus.</span>
       </footer>
 
-      <RunSearchPanel csrf={csrf} key={`${userId}/${orgId}`} orgId={orgId} userId={userId} />
+      <RunSearchPanel csrf={csrf} key={`${userId}/${orgId}`} orgId={orgId} signal={signal} userId={userId} />
     </section>
   );
 }

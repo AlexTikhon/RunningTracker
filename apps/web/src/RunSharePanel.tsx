@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
 import {
   accessLabel,
@@ -7,6 +7,7 @@ import {
   rowActions,
   type RunSharingApi,
   type RunSharingSnapshot,
+  type SharingUnavailable,
   type ShareRow,
 } from './run-sharing.js';
 import {
@@ -23,13 +24,20 @@ const defaultApi: RunSharingApi = {
   revoke: revokeRunShare,
 };
 
+// `runner`: the run in the Runner tab, which may still be recording. `archive`: a finished run chosen in My runs,
+// inside a frame that names the run and closes the panel (ArchiveRunShare).
+export type RunShareVariant = 'archive' | 'runner';
+
 interface RunSharePanelProps {
   api?: RunSharingApi;
   csrfToken: string;
+  // Told when the server refuses the run's sharing for good (deleted, not this person's, membership ended).
+  onUnavailable?: (reason: SharingUnavailable) => void;
   orgId: string;
   runId: string;
   // The session's signal: when the session ends or is replaced, the panel stops listening to its answers.
   signal: AbortSignal;
+  variant?: RunShareVariant;
 }
 
 const loadingSnapshot: RunSharingSnapshot = {
@@ -38,20 +46,34 @@ const loadingSnapshot: RunSharingSnapshot = {
   rows: [],
   status: 'loading',
   truncated: false,
+  unavailable: null,
 };
 
-// Sharing for the run in the Runner tab (ADR-0063). It is separate from the runner's lifecycle state, request queue
-// and writer lease: the server decides who owns the run, and nothing here is stored or replayed. The caller keys it
-// by user, organization and run, so a new scope is a new panel.
-export function RunSharePanel({ api = defaultApi, csrfToken, orgId, runId, signal }: RunSharePanelProps) {
+// Sharing for one run (ADR-0063, ADR-0064). It is separate from the runner's lifecycle state, request queue and
+// writer lease: the server decides who owns the run, and nothing here is stored or replayed. The caller keys it by
+// user, organization and run, so a new scope is a new panel.
+export function RunSharePanel({
+  api = defaultApi,
+  csrfToken,
+  onUnavailable,
+  orgId,
+  runId,
+  signal,
+  variant = 'runner',
+}: RunSharePanelProps) {
   const [snapshot, setSnapshot] = useState<RunSharingSnapshot>(loadingSnapshot);
   const controller = useRef<RunSharingController | null>(null);
+  const unavailable = useRef(onUnavailable);
+  unavailable.current = onUnavailable;
 
   useEffect(() => {
     const next = new RunSharingController({
       api,
       csrf: { headerName: 'x-csrf-token', token: csrfToken },
-      onChange: setSnapshot,
+      onChange: (changed) => {
+        setSnapshot(changed);
+        if (changed.unavailable !== null) unavailable.current?.(changed.unavailable);
+      },
       orgId,
       runId,
     });
@@ -76,6 +98,7 @@ export function RunSharePanel({ api = defaultApi, csrfToken, orgId, runId, signa
       onRetry={() => controller.current?.retry()}
       onRevoke={(userId) => controller.current?.revoke(userId)}
       snapshot={snapshot}
+      variant={variant}
     />
   );
 }
@@ -85,16 +108,24 @@ interface RunShareViewProps {
   onRetry: () => void;
   onRevoke: (userId: string) => void;
   snapshot: RunSharingSnapshot;
+  variant?: RunShareVariant;
 }
 
-export function RunShareView({ onGrant, onRetry, onRevoke, snapshot }: RunShareViewProps) {
-  return (
-    <section className="run-share" aria-labelledby="run-share-title">
-      <h2 id="run-share-title">Share this run with a coach</h2>
-      <p className="run-share__note">
-        Share gives the coach <strong>live and history access</strong>: your position and track while you record,
-        and this run after you finish it, until you revoke it.
-      </p>
+export function RunShareView({ onGrant, onRetry, onRevoke, snapshot, variant = 'runner' }: RunShareViewProps) {
+  const titleId = useId();
+  const body = (
+    <>
+      {variant === 'runner' ? (
+        <p className="run-share__note">
+          Share gives the coach <strong>live and history access</strong>: your position and track while you record,
+          and this run after you finish it, until you revoke it.
+        </p>
+      ) : (
+        <p className="run-share__note">
+          Share gives the coach <strong>live and history access</strong>. This run is finished, so the coach can
+          see its recorded route, distance and duration until you revoke it.
+        </p>
+      )}
 
       {snapshot.status === 'loading' && <p role="status">Loading coaches and current sharing…</p>}
 
@@ -128,6 +159,13 @@ export function RunShareView({ onGrant, onRetry, onRevoke, snapshot }: RunShareV
           )}
         </>
       )}
+    </>
+  );
+  if (variant === 'archive') return <div className="run-share run-share--embedded">{body}</div>;
+  return (
+    <section className="run-share" aria-labelledby={titleId}>
+      <h2 id={titleId}>Share this run with a coach</h2>
+      {body}
     </section>
   );
 }

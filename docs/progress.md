@@ -2442,3 +2442,46 @@ and no names exist.
 - There are no display names; people are labelled by role and the end of their identifier.
 - There is no hosted CI run of this change.
 - D10 is still awaiting physical recordings.
+
+## Finished-run sharing from Archive → My runs (2026-10-22)
+
+Design: ADR-0064 (spec and plan in `docs/superpowers/`). This is a web-only change. The routes, contracts,
+migrations, RLS, runner reducer, IndexedDB queue, writer fencing, capture, archive tiles and search contract are
+unchanged.
+
+**Gap.** The sharing panel was mounted only for `runner.run`. After **New run** the grant stayed on the server, but the
+owner had no way to see or revoke it, and My runs had no sharing action. ADR-0063 had deferred this.
+
+**Change.**
+- Each My runs card has **Manage sharing**. One panel at a time opens inside its card, named by the card's date and
+  the first 8 characters of the run ID, with Close and Escape, and focus moves in and back.
+- `ArchiveRunShare.tsx` frames the existing `RunSharePanel` (its new `archive` variant: finished-run copy, heading id
+  from `useId`). It is keyed by user, organization and run, and gets the session signal that `App` passes through
+  `ArchiveScreen` and `RunSearchPanel`.
+- The selection belongs to the search on screen: a new search, a first page read again, lost access or the run
+  leaving the list closes it, and another page keeps it.
+- `RunSharingSnapshot.unavailable` marks 410 `RUN_DELETED`, 404 `RUN_NOT_FOUND` and 403 `ORG_ACCESS_DENIED`. The
+  Archive frame then unmounts the panel and shows only the reason and Close. The Runner tab is unchanged.
+- No backend test was added. `run-read-share.integration.test.ts` already covers the finished-run history grant, its
+  revocation, owner-only management and 410 for a deleted run.
+
+**Executed.**
+- **Focused web tests:** 86 passed in 7 files.
+- **`npm run verify`:** exit 0. Scripts 68; API 1331; web 700 = 684 + 16 (run-sharing +2, RunSharePanel +2,
+  ArchiveRunShare 8, RunSearchResults +4); contracts 132; fixtures 14; simulator 3; build.
+- **`npm run test:integration`** on `_test`: exit 0, 463 passed in 45 files. Unchanged, as no backend code changed.
+- **Chromium, after the build:**
+  - `archive-sharing.spec.ts`: 4 of 4. The first test waits up to a minute for the summary worker before the run is
+    searchable, and took 1.9 min.
+  - `run-sharing`, `coach-live`, `run-search`, `run-search-interpretation` and `new-run-takeover`: 17 of 17.
+  - Full `npm run test:e2e`: exit 0, 99 passed in 10.2 min (90 `chromium`, 9 `chromium-oidc`; 95 + 4 new). The
+    harness's deliberately failing test counts as expected, and nothing was retried or flaky.
+- **`git diff --check`:** clean.
+
+**Not run / limits.**
+- Only Chromium was run. No phone or second engine was used, and `demo.md` section 5a was not followed by hand.
+- No hosted CI run.
+- The search list does not refresh by itself, so a deleted run's card stays until the next search (its panel shows
+  only the reason).
+- No mutation runs were made for this change.
+- D10 is still awaiting physical recordings.
