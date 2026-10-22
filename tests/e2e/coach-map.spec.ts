@@ -239,7 +239,10 @@ const emptyStyle = JSON.stringify({
   version: 8,
 });
 
-test('coach map smoke: the installed Mapbox runtime starts with a local empty style and draws without errors', async ({
+// Tagged so the bounded Firefox gate can leave it out; the Chromium project still runs it.
+test('coach map smoke: the installed Mapbox runtime starts with a local empty style and draws without errors', {
+  tag: '@real-map-runtime',
+}, async ({
   browser,
   environment,
   scenario,

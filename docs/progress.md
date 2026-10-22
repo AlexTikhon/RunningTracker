@@ -2535,3 +2535,61 @@ cards and point counts.
   it.
 - Fitting ignores the antimeridian. No phone, second engine or hosted CI run. `demo.md` was not followed by hand.
 - D10 is still awaiting physical recordings.
+
+## Bounded Firefox gate for the core workflows (2026-10-22)
+
+This is a test harness and CI change only. No application code, route, contract, migration, RLS, queue, fencing or map
+geometry changed, and Playwright stays at 1.63.0.
+
+**Gap.** Every browser test ran only in Chromium, so there was no evidence for a second engine. That was missing
+evidence, not a known defect.
+
+**Change.**
+- `tests/e2e/playwright.config.ts` has a new `firefox-core` project. It runs an explicit allowlist of existing
+  specs, unchanged: `record`, `reload-offline`, `second-tab`, `gps-recovery`, `run-sharing`, `archive-sharing` and
+  `coach-map`. That is 18 tests. It reuses the same servers, fixtures, `_test` database and single worker.
+- The real Mapbox/WebGL smoke in `coach-map.spec.ts` is tagged `@real-map-runtime`, and `firefox-core` excludes it
+  with `grepInvert`. The other three map tests (tokenless and fake runtime) still run in Firefox. The `chromium`
+  project runs all four.
+- Scripts: `npm run test:e2e` now selects `--project=chromium --project=chromium-oidc` (the same 103 tests as before,
+  so it never launches Firefox). `npm run test:e2e:firefox` selects `firefox-core`.
+- CI: the `browser` job is a matrix. Each entry has its own runner and PostGIS service, installs only its browser
+  (`playwright install --with-deps <browser>`) and runs its own script. `chromium` keeps 20 min and `firefox-core`
+  gets 15 min. Each uploads `playwright-test-results-<project>` on failure, and Playwright's result folders also
+  end in the project name.
+- No helper needed a change. The selected specs use no CDP or other Chromium-only API. Offline emulation, request
+  routing, init scripts, `exposeFunction`, Web Locks, native IndexedDB and `EventSource` all behaved as the tests
+  expect.
+
+**Executed** (Windows 11, Node 24, local PostGIS `_test` database, one worker, no retries).
+
+| Command | Engine | Result | Duration |
+|---|---|---|---|
+| `npm run test:e2e:firefox` (run 1) | Firefox 155.0 (Playwright build 1543) | 18 passed, 0 failed, 0 skipped, 0 flaky | 3.6 min |
+| `npm run test:e2e:firefox` (run 2) | Firefox 155.0 | 18 passed, 0 failed, 0 skipped, 0 flaky | 3.6 min |
+| `npx playwright test --project=chromium` on the same 7 specs | Chromium 153.0.8010.12 | 19 passed (18 + the real-runtime smoke), 0 failed | 4.1 min |
+| `npx playwright test --project=chromium environment.spec.ts harness.spec.ts` | Chromium | 18 passed (the deliberately failing harness test counts as expected) | 18 s |
+
+`npm run lint` and `npm run typecheck` exited 0, and `git diff --check` is clean. `--list` shows 18 `firefox-core`
+tests and 103 for `chromium` + `chromium-oidc`. The full Chromium suite, `npm run verify` and the integration tests
+were not run, because no application or backend code changed.
+
+| Scenario group | Chromium | Firefox | Limits |
+|---|---|---|---|
+| Record and finish a simulated run (`record`) | 1/1 | 1/1 | Simulator, not a device |
+| Reload recovery, offline buffering, failed-upload retry, exactly-once points (`reload-offline`) | 3/3 | 3/3 | Native IndexedDB of desktop engines; offline is Playwright's emulation |
+| Competing and duplicated tabs cannot become a second writer (`second-tab`) | 2/2 | 2/2 | "Duplicate tab" is modelled by copying sessionStorage |
+| GPS errors and explicit recovery (`gps-recovery`) | 3/3 | 3/3 | **Simulated receiver** at `Geolocation.prototype`; no real permission prompt or fix |
+| Runner tab grant and revoke reach the coach (`run-sharing`) | 2/2 | 2/2 | Development session sign-in |
+| Finished-run sharing from My runs, stale-work suppression (`archive-sharing`) | 4/4 | 4/4 | Development session sign-in |
+| Coach map lifecycle: tokenless, selection, revocation, stream loss and recovery, sign-out (`coach-map`) | 3/3 | 3/3 | Fake `mapbox-gl` runtime; proves the lifecycle, not rendering |
+| Real Mapbox runtime with WebGL (`@real-map-runtime`) | 1/1 | not run | Excluded from the Firefox gate; local empty style, no basemap |
+
+**Not run / limits.**
+- No compatibility defect was reproduced, so there are no fixes. Two clean Firefox runs do not measure flakiness.
+- The Firefox gate is desktop Firefox on Windows only. Ubuntu Firefox has not run yet: the CI entry is configured
+  but nothing was pushed or triggered.
+- Not covered in Firefox: the 75 `chromium` tests in the other 16 specs (for example lifecycle takeover, session
+  revalidation, sign-out, run search, organizations), OpenID sign-in (`chromium-oidc`) and real WebGL map rendering. A Firefox WebGL smoke was not attempted.
+- Nothing here covers Safari, mobile browsers, a physical phone, background behaviour or real GPS. D10 stays
+  deferred until physical-device evidence exists.

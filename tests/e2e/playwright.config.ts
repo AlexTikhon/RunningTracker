@@ -19,6 +19,12 @@ const liveTrackCursorSigningKey = 'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktd
 // Shaped like a public Mapbox token so the runtime accepts it; it belongs to no account.
 const mapPlaceholderToken = 'pk.e2e-local-placeholder';
 
+// The bounded Firefox gate: the core recording, recovery, authorization and sharing specs, reused unchanged. Only
+// these files run in Firefox; the rest of the suite stays Chromium-only. The real-runtime map smoke is tagged and
+// excluded, so Firefox runs the fake-runtime map lifecycle but not WebGL.
+const firefoxCoreSpecs =
+  /[\\/](record|reload-offline|second-tab|gps-recovery|run-sharing|archive-sharing|coach-map)\.spec\.ts$/;
+
 export default defineConfig({
   expect: { timeout: 15_000 },
   fullyParallel: false,
@@ -32,6 +38,14 @@ export default defineConfig({
       name: 'chromium-oidc',
       testMatch: /[\\/]oidc[\\/].*\.spec\.ts$/,
       use: { baseURL: environment.oidc.webOrigin, browserName: 'chromium' },
+    },
+    // Run on its own (`npm run test:e2e:firefox`); `npm run test:e2e` selects only the two Chromium projects, so a
+    // machine without Firefox installed never launches it.
+    {
+      grepInvert: /@real-map-runtime/,
+      name: 'firefox-core',
+      testMatch: firefoxCoreSpecs,
+      use: { browserName: 'firefox' },
     },
   ],
   reporter: 'list',

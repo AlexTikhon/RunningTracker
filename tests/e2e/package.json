@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "e2e": "playwright test",
+    "e2e": "playwright test --project=chromium --project=chromium-oidc",
+    "e2e:firefox": "playwright test --project=firefox-core",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "pretypecheck": "npm run build --workspace=@running-tracker/contracts"
   },

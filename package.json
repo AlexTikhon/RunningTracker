@@ -24,6 +24,7 @@
     "test:migrations": "node --test scripts/*.test.mjs",
     "test:integration": "npm run test:integration --workspace=@running-tracker/api",
     "test:e2e": "npm run e2e --workspace=@running-tracker/e2e",
+    "test:e2e:firefox": "npm run e2e:firefox --workspace=@running-tracker/e2e",
     "backup:create": "npm run backup --workspace=@running-tracker/api -- create",
     "backup:verify": "npm run backup --workspace=@running-tracker/api -- verify",
     "backup:decrypt": "npm run backup --workspace=@running-tracker/api -- decrypt",
