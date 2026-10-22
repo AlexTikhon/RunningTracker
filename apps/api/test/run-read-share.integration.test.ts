@@ -1,6 +1,7 @@
 import {
   apiErrorResponseSchema,
   runListResponseSchema,
+  runShareListResponseSchema,
   runShareResponseSchema,
   runViewSchema,
 } from '@running-tracker/contracts';
@@ -410,6 +411,125 @@ describe('P03.4 run list/read and share endpoints', () => {
       `/api/orgs/${ids.orgA}/runs/${ids.runFinishedHistory}`,
     ).expect(403);
     expect(apiErrorResponseSchema.parse(objectBody(denied)).error.code).toBe('ORG_ACCESS_DENIED');
+  });
+
+  describe('listing the shares of a run (ADR-0063)', () => {
+    function shareListPath(runId: string, orgId: string = ids.orgA): string {
+      return `/api/orgs/${orgId}/runs/${runId}/shares`;
+    }
+
+    it('gives the owner every share with both flags as stored, in grantee order, uncached', async () => {
+      const history = await read(ids.userOrgA, shareListPath(ids.runFinishedHistory)).expect(200);
+      expect(history.headers['cache-control']).toBe('no-store');
+      expect(runShareListResponseSchema.parse(objectBody(history))).toEqual({
+        items: [
+          { canReadHistory: true, canReadLive: false, userId: ids.userDual },
+          { canReadHistory: true, canReadLive: false, userId: ids.userInactive },
+        ],
+        truncated: false,
+      });
+
+      const live = await read(ids.userOrgA, shareListPath(ids.runRecording)).expect(200);
+      expect(runShareListResponseSchema.parse(objectBody(live)).items).toEqual([
+        { canReadHistory: false, canReadLive: true, userId: ids.userDual },
+      ]);
+    });
+
+    it('follows grants and revocations made through the share routes', async () => {
+      await mutate(ids.userOrgA, 'put', sharePath(ids.runRecording, ids.userStranger))
+        .type('application/json')
+        .send({ canReadHistory: true, canReadLive: true })
+        .expect(200);
+      await mutate(ids.userOrgA, 'delete', sharePath(ids.runRecording, ids.userDual)).expect(204);
+
+      const listed = await read(ids.userOrgA, shareListPath(ids.runRecording)).expect(200);
+      expect(runShareListResponseSchema.parse(objectBody(listed)).items).toEqual([
+        { canReadHistory: true, canReadLive: true, userId: ids.userStranger },
+      ]);
+    });
+
+    it('answers a grantee and another member exactly as for a missing run, and a non-member with 403', async () => {
+      // userDual can read runFinishedBoth through its share, but its shares are the owner's business.
+      await read(ids.userDual, `/api/orgs/${ids.orgA}/runs/${ids.runFinishedBoth}`).expect(200);
+      for (const userId of [ids.userDual, ids.userStranger]) {
+        const denied = await read(userId, shareListPath(ids.runFinishedBoth)).expect(404);
+        expect(apiErrorResponseSchema.parse(objectBody(denied)).error.code).toBe('RUN_NOT_FOUND');
+        expect(JSON.stringify(denied.body)).not.toContain('canRead');
+      }
+      const missing = await read(ids.userOrgA, shareListPath('a9999999-9999-4999-8999-999999999999')).expect(404);
+      expect(apiErrorResponseSchema.parse(objectBody(missing)).error.code).toBe('RUN_NOT_FOUND');
+
+      const foreign = await read(ids.userOrgB, shareListPath(ids.runFinishedBoth)).expect(403);
+      expect(apiErrorResponseSchema.parse(objectBody(foreign)).error.code).toBe('ORG_ACCESS_DENIED');
+      // The owner of a run in organization B cannot read it through organization A's path either.
+      await read(ids.userOrgB, shareListPath(ids.runOrgBShared, ids.orgB)).expect(200);
+      await read(ids.userOrgA, shareListPath(ids.runOrgBShared)).expect(404);
+    });
+
+    it('answers the owner of a deleted run with 410 and refuses any query parameter', async () => {
+      await ownerPool.query(
+        `INSERT INTO run_tombstones (org_id, run_id, owner_user_id, deleted_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [ids.orgA, tombstoneRunId, ids.userOrgA, '2026-09-20T10:00:00.000Z', '2026-10-20T10:00:00.000Z'],
+      );
+      const deleted = await read(ids.userOrgA, shareListPath(tombstoneRunId)).expect(410);
+      expect(apiErrorResponseSchema.parse(objectBody(deleted)).error.code).toBe('RUN_DELETED');
+
+      const withQuery = await read(ids.userOrgA, `${shareListPath(ids.runFinishedHistory)}?limit=1`).expect(400);
+      expect(apiErrorResponseSchema.parse(objectBody(withQuery)).error.code).toBe('INVALID_REQUEST');
+    });
+
+    it('returns at most 100 shares and says that more exist', async () => {
+      const grantees = Array.from({ length: 100 }, (_, index) =>
+        `c1000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      );
+      await ownerPool.query(
+        "INSERT INTO users (id, external_identity) SELECT id, 'fixture-grantee-' || id FROM unnest($1::uuid[]) AS id",
+        [grantees],
+      );
+      await ownerPool.query(
+        "INSERT INTO memberships (org_id, user_id, role, active) SELECT $1, unnest($2::uuid[]), 'coach', true",
+        [ids.orgA, grantees],
+      );
+      await ownerPool.query(
+        `INSERT INTO run_shares (org_id, run_id, grantee_user_id, can_read_live, can_read_history)
+         SELECT $1, $2, unnest($3::uuid[]), true, true`,
+        [ids.orgA, ids.runRecording, grantees],
+      );
+
+      const listed = runShareListResponseSchema.parse(
+        objectBody(await read(ids.userOrgA, shareListPath(ids.runRecording)).expect(200)),
+      );
+
+      // 101 shares: the fixture's live-only share to userDual sorts first.
+      expect(listed.truncated).toBe(true);
+      expect(listed.items).toHaveLength(100);
+      expect(listed.items.map((item) => item.userId)).toEqual([ids.userDual, ...grantees.slice(0, 99)]);
+    });
+
+    it('still requires the CSRF token to grant or revoke', async () => {
+      const auth = authentication.get(ids.userOrgA)!;
+      const path = sharePath(ids.runRecording, ids.userStranger);
+      const put = await request(app)
+        .put(path)
+        .set('Cookie', auth.cookie)
+        .set('Origin', allowedOrigin)
+        .type('application/json')
+        .send({ canReadHistory: true, canReadLive: true })
+        .expect(403);
+      expect(apiErrorResponseSchema.parse(objectBody(put)).error.code).toBe('CSRF_DENIED');
+      const revoke = await request(app)
+        .delete(sharePath(ids.runRecording, ids.userDual))
+        .set('Cookie', auth.cookie)
+        .set('Origin', allowedOrigin)
+        .expect(403);
+      expect(apiErrorResponseSchema.parse(objectBody(revoke)).error.code).toBe('CSRF_DENIED');
+
+      const listed = await read(ids.userOrgA, shareListPath(ids.runRecording)).expect(200);
+      expect(runShareListResponseSchema.parse(objectBody(listed)).items).toEqual([
+        { canReadHistory: false, canReadLive: true, userId: ids.userDual },
+      ]);
+    });
   });
 
   it('handles missing and deleted owned runs without leaking them through share operations', async () => {

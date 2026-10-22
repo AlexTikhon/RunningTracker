@@ -2384,3 +2384,61 @@ is no hosted CI run of this change. `test:integration` and `test:e2e` were not r
 changed. Residual channels are listed in ADR-0062: configuration output at startup, an entrypoint override, the
 query-free access log, the API's own logs, core dumps, and entries already stored by older images. The local TLS
 certificate in `.local/tls` had expired (5 Oct) and was regenerated with the project's own 7-day command.
+
+## D10 real-device pilot: awaiting physical recordings (2026-10-22)
+
+No real GPS recording was supplied: `.local/gps-traces/raw/` is empty (git ignores it through `.local/`), and no
+`.gpx`, `.tcx`, `.fit`, `.kml` or `.kmz` file exists anywhere in the project. Nothing was sanitized, analyzed or
+regenerated; `docs/reports/d10-real-traces.md` still reports 0 traces and D10 stays PARTIAL.
+`docs/reports/real-device-pilot.md` holds the collection checklist, the browser pilot checklist, and an evidence
+table in which every step is "not run". Only the synthetic checks ran: 119 GPS-trace unit tests, 20 `_test` replay
+and report integration tests, and `gps:report --check`, which reports the report as current.
+
+## Runner → coach sharing from the Runner tab (2026-10-22)
+
+Design: ADR-0063 (spec and plan in `docs/superpowers/`). The coach board, the share mutation routes, the live stream
+and every GPS rule are unchanged.
+
+**Gap.** The share API existed and the coach board already dropped a revoked run, but the web app had no way to
+grant or revoke. A runner also could not learn whom to share with: `memberships` shows a person only their own row,
+and no names exist.
+
+**Change.**
+- **Migration `0024_list_current_org_coaches.sql`** (0023 was taken): a runtime-only `SECURITY DEFINER` function
+  that lists the other active coaches of `app.org_id`, for a caller with an active membership there.
+- **`GET /api/orgs/:orgId/coaches`.**
+- **`GET /api/orgs/:orgId/runs/:runId/shares`:** owner-only through `ensureOwnedRun`, with both flags, at most 100
+  and `truncated`.
+- **Contracts and regenerated OpenAPI.**
+- **Web:** `runner-api.ts` gains four calls. `run-sharing.ts` is a row model and a controller for one session, one
+  organization and one run: one request at a time, a re-read after every change, and dispose silences late
+  answers. `RunSharePanel.tsx` sits under the Runner view, keyed by user, organization and run and bound to the
+  session's abort signal.
+- Share always grants live and history and says so. Partial grants are shown as stored.
+
+**Executed.**
+- **Red first.** The contract tests failed 3 of 3, and the coach integration test failed 8 of 12 while the route
+  was missing. The four function tests passed as soon as the migration was applied.
+- **Mutations.**
+  - Removing the owner check from the share list failed 2 share-list integration tests: the grantee check and the
+    deleted-run check.
+  - Making Share send `canReadLive: false` failed both browser tests on "History only".
+  - Both were reverted.
+- **`npm run db:migrate:test`:** applied 0024.
+- **`npm run verify`:** exit 0. Scripts 68; API 1331 = 1324 + 7; web 684 = 661 + 23; contracts 132 = 129 + 3;
+  fixtures 14; simulator 3; build. The first run failed lint on 4 untyped test parameters; they were typed and the
+  rerun passed.
+- **`npm run test:integration`:** exit 0, 463 passed in 45 files. That is 445 at the last closeout, plus 12 for coach
+  discovery and 6 for the share list.
+- **`npm run build`, then `npm run test:e2e`:** exit 0, 95 passed in 9.3 min (86 `chromium`, 9 `chromium-oidc`;
+  93 + 2 new). The harness's deliberately failing test counts as expected, and no test was flaky or retried.
+  `run-sharing.spec.ts` and `coach-live.spec.ts` also passed on their own, 4 of 4.
+- **`git diff --check`:** clean.
+
+**Not run / limits.**
+- Only Chromium was run. No phone, mobile browser or second browser engine was used, and the steps in `demo.md`
+  section 4a were not followed by hand.
+- A share made in another tab appears in the panel only after a reload or the next change.
+- There are no display names; people are labelled by role and the end of their identifier.
+- There is no hosted CI run of this change.
+- D10 is still awaiting physical recordings.

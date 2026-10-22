@@ -13,13 +13,17 @@ import {
   liveTrackChangesQuerySchema,
   nearbyQuerySchema,
   openApiDocument,
+  ORGANIZATION_COACH_LIST_MAX,
   ORGANIZATION_LIST_MAX,
+  organizationCoachListResponseSchema,
   organizationListResponseSchema,
   pointInputSchema,
   qualityStatsSchema,
   revisionSchema,
   runCommandRequestSchema,
+  RUN_SHARE_LIST_MAX,
   runListQuerySchema,
+  runShareListResponseSchema,
   runViewSchema,
   seqSchema,
   sessionResponseSchema,
@@ -359,6 +363,49 @@ describe('organization discovery contract', () => {
     expect('security' in operation).toBe(false);
     expect(operation.responses['200'].content['application/json'].schema.$ref).toBe(
       '#/components/schemas/OrganizationListResponse',
+    );
+  });
+});
+
+describe('run sharing contracts', () => {
+  const userId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+  it('lists coaches as bare identifiers, bounded, with no other field', () => {
+    expect(organizationCoachListResponseSchema.parse({ items: [{ userId }] })).toEqual({ items: [{ userId }] });
+    expect(organizationCoachListResponseSchema.safeParse({ items: [{ userId, name: 'x' }] }).success).toBe(false);
+    expect(organizationCoachListResponseSchema.safeParse({ items: [{ userId: 'nope' }] }).success).toBe(false);
+    const full = Array.from({ length: ORGANIZATION_COACH_LIST_MAX }, () => ({ userId }));
+    expect(organizationCoachListResponseSchema.safeParse({ items: full }).success).toBe(true);
+    expect(organizationCoachListResponseSchema.safeParse({ items: [...full, { userId }] }).success).toBe(false);
+  });
+
+  it('lists shares with both permission flags exactly as stored, and says when the list was cut', () => {
+    const partial = { canReadHistory: false, canReadLive: true, userId };
+    expect(runShareListResponseSchema.parse({ items: [partial], truncated: false })).toEqual({
+      items: [partial],
+      truncated: false,
+    });
+    expect(runShareListResponseSchema.safeParse({ items: [{ canReadLive: true, userId }], truncated: false }).success)
+      .toBe(false);
+    expect(runShareListResponseSchema.safeParse({ items: [] }).success).toBe(false);
+    const full = Array.from({ length: RUN_SHARE_LIST_MAX }, () => partial);
+    expect(runShareListResponseSchema.safeParse({ items: full, truncated: true }).success).toBe(true);
+    expect(runShareListResponseSchema.safeParse({ items: [...full, partial], truncated: true }).success).toBe(false);
+  });
+
+  it('documents both reads as authenticated GETs with no query parameters', () => {
+    const coaches = openApiDocument.paths['/api/orgs/{orgId}/coaches'].get;
+    expect(coaches.parameters).toEqual([{ $ref: '#/components/parameters/OrgId' }]);
+    expect(coaches.responses['200'].content['application/json'].schema.$ref).toBe(
+      '#/components/schemas/OrganizationCoachListResponse',
+    );
+    const shares = openApiDocument.paths['/api/orgs/{orgId}/runs/{runId}/shares'].get;
+    expect(shares.parameters).toEqual([
+      { $ref: '#/components/parameters/OrgId' },
+      { $ref: '#/components/parameters/RunId' },
+    ]);
+    expect(shares.responses['200'].content['application/json'].schema.$ref).toBe(
+      '#/components/schemas/RunShareListResponse',
     );
   });
 });

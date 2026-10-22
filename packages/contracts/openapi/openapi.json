@@ -270,6 +270,35 @@
         }
       }
     },
+    "/api/orgs/{orgId}/coaches": {
+      "get": {
+        "tags": [
+          "Shares"
+        ],
+        "summary": "List the active coaches of the organization",
+        "description": "For choosing whom to share a run with. The caller must have an active membership in the organization. Returns the user ids of the other active coaches in this organization, ordered by id, at most 100; runners, inactive members, other organizations and the caller are never listed. No query parameters are accepted.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationCoachListResponse"
+                }
+              }
+            },
+            "description": "Active coaches of the organization."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/runs": {
       "get": {
         "tags": [
@@ -650,6 +679,38 @@
               }
             },
             "description": "Raw point page."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/runs/{runId}/shares": {
+      "get": {
+        "tags": [
+          "Shares"
+        ],
+        "summary": "List the shares of an owned run",
+        "description": "Owner only: anyone else, a grantee included, gets the same answer as for a missing run. Each item carries both permission flags as stored, ordered by grantee id, at most 100; `truncated` is true when more exist. No query parameters are accepted.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunShareListResponse"
+                }
+              }
+            },
+            "description": "The run shares."
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2076,6 +2137,72 @@
         },
         "required": [
           "items"
+        ],
+        "additionalProperties": false
+      },
+      "OrganizationCoachListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "userId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              },
+              "required": [
+                "userId"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "additionalProperties": false
+      },
+      "RunShareListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "canReadHistory": {
+                  "type": "boolean"
+                },
+                "canReadLive": {
+                  "type": "boolean"
+                },
+                "userId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              },
+              "required": [
+                "canReadHistory",
+                "canReadLive",
+                "userId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "truncated"
         ],
         "additionalProperties": false
       },

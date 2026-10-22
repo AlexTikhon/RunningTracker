@@ -10,12 +10,14 @@ import {
   ingestPointsRequestSchema,
   ingestPointsResponseSchema,
   nearbyResponseSchema,
+  organizationCoachListResponseSchema,
   organizationListResponseSchema,
   pointsResponseSchema,
   runCommandRequestSchema,
   runCommandResponseSchema,
   runListResponseSchema,
   runSearchResponseSchema,
+  runShareListResponseSchema,
   runShareResponseSchema,
   sessionCreateRequestSchema,
   sessionResponseSchema,
@@ -189,6 +191,19 @@ export const openApiDocument = {
         },
       },
     },
+    '/api/orgs/{orgId}/coaches': {
+      get: {
+        tags: ['Shares'],
+        summary: 'List the active coaches of the organization',
+        description:
+          'For choosing whom to share a run with. The caller must have an active membership in the organization. Returns the user ids of the other active coaches in this organization, ordered by id, at most 100; runners, inactive members, other organizations and the caller are never listed. No query parameters are accepted.',
+        parameters: [parameterRef('OrgId')],
+        responses: {
+          '200': jsonResponse('Active coaches of the organization.', 'OrganizationCoachListResponse'),
+          ...defaultErrors,
+        },
+      },
+    },
     '/api/orgs/{orgId}/runs': {
       get: {
         tags: ['Runs'],
@@ -292,6 +307,19 @@ export const openApiDocument = {
         summary: 'Read raw point history',
         parameters: [...orgRunParameters, parameterRef('Limit1000'), parameterRef('Cursor')],
         responses: { '200': jsonResponse('Raw point page.', 'PointsResponse'), ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/runs/{runId}/shares': {
+      get: {
+        tags: ['Shares'],
+        summary: 'List the shares of an owned run',
+        description:
+          'Owner only: anyone else, a grantee included, gets the same answer as for a missing run. Each item carries both permission flags as stored, ordered by grantee id, at most 100; `truncated` is true when more exist. No query parameters are accepted.',
+        parameters: [...orgRunParameters],
+        responses: {
+          '200': jsonResponse('The run shares.', 'RunShareListResponse'),
+          ...defaultErrors,
+        },
       },
     },
     '/api/orgs/{orgId}/runs/{runId}/shares/{userId}': {
@@ -535,6 +563,8 @@ export const openApiDocument = {
       ApiErrorResponse: jsonSchema(apiErrorResponseSchema),
       HealthResponse: jsonSchema(healthResponseSchema),
       OrganizationListResponse: jsonSchema(organizationListResponseSchema),
+      OrganizationCoachListResponse: jsonSchema(organizationCoachListResponseSchema),
+      RunShareListResponse: jsonSchema(runShareListResponseSchema),
       CreateRunRequest: jsonSchema(createRunRequestSchema),
       RunCommandRequest: jsonSchema(runCommandRequestSchema),
       RunCommandResponse: jsonSchema(runCommandResponseSchema),

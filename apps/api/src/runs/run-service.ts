@@ -5,6 +5,8 @@ import {
   revisionSchema,
   runListResponseSchema,
   runCommandResponseSchema,
+  RUN_SHARE_LIST_MAX,
+  runShareListResponseSchema,
   runShareResponseSchema,
   runViewSchema,
   timestampSchema,
@@ -24,6 +26,7 @@ import {
   type RunCommandRequest,
   type RunCommandResponse,
   type RunCommandType,
+  type RunShareListResponse,
   type RunShareResponse,
   type RunStatus,
   type UpsertRunShareRequest,
@@ -935,6 +938,37 @@ export async function upsertRunShare(
     }
     throw error;
   }
+}
+
+// Owner only, like the share mutations: anyone else gets the missing-run answer. One extra row is read to tell
+// whether the list was cut at RUN_SHARE_LIST_MAX.
+export async function listRunShares(
+  client: PoolClient,
+  session: Pick<StoredSession, 'userId'>,
+  orgId: string,
+  runId: string,
+): Promise<RunShareListResponse> {
+  await ensureOwnedRun(client, session, orgId, runId);
+  const result = await client.query<{
+    can_read_history: boolean;
+    can_read_live: boolean;
+    grantee_user_id: string;
+  }>(
+    `SELECT grantee_user_id, can_read_history, can_read_live
+     FROM run_shares
+     WHERE org_id = $1 AND run_id = $2
+     ORDER BY grantee_user_id
+     LIMIT $3`,
+    [orgId, runId, RUN_SHARE_LIST_MAX + 1],
+  );
+  return runShareListResponseSchema.parse({
+    items: result.rows.slice(0, RUN_SHARE_LIST_MAX).map((row) => ({
+      canReadHistory: row.can_read_history,
+      canReadLive: row.can_read_live,
+      userId: row.grantee_user_id,
+    })),
+    truncated: result.rows.length > RUN_SHARE_LIST_MAX,
+  });
 }
 
 export async function revokeRunShare(

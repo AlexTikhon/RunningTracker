@@ -33,6 +33,7 @@ import {
   createLiveSseHub,
   type LiveConnectionManager,
 } from './live/live-sse.js';
+import { createOrganizationCoachRouter } from './organizations/organization-coach.routes.js';
 import { createOrganizationRouter } from './organizations/organization.routes.js';
 import { createInterpretationService } from './runs/interpretation/interpretation-factory.js';
 import type { RunSearchInterpreter } from './runs/interpretation/interpretation-types.js';
@@ -154,6 +155,10 @@ export function createApp({
       tilePipeline: archiveTilePipeline ?? postgisArchiveTilePipeline,
       tileScheduler: archiveTileGenerations,
     }),
+  );
+  app.use(
+    '/api/orgs/:orgId/coaches',
+    createOrganizationCoachRouter({ pool: pool as Pick<Pool, 'connect'>, sessionManager: sessions }),
   );
   app.use('/api/orgs/:orgId/live', createLiveRouter(sessions, live));
   app.use(

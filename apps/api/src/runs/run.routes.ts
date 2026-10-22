@@ -17,7 +17,7 @@ import {
 import type { Request, RequestHandler, Router } from 'express';
 import { Router as createRouter } from 'express';
 import type { Pool } from 'pg';
-import type { ZodType } from 'zod';
+import { z, type ZodType } from 'zod';
 
 import {
   createAuthenticatedMutationProtection,
@@ -41,6 +41,7 @@ import {
   createRun,
   deleteRun,
   ingestRunPoints,
+  listRunShares,
   listRuns,
   readLiveTrackChanges,
   readLiveTrackSnapshot,
@@ -71,7 +72,10 @@ function parseContract<Output>(schema: ZodType<Output>, input: unknown, label: s
   return parsed.data;
 }
 
-const requireJson: RequestHandler = (request, _response, next) => {
+// A read that takes no parameters refuses any instead of ignoring them.
+const noQuerySchema = z.strictObject({});
+
+const requireJson: RequestHandler =(request, _response, next) => {
   if (!request.is('application/json')) {
     next(new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json'));
     return;
@@ -350,6 +354,22 @@ export function createRunRouter({
       }
     },
   );
+
+  router.get('/:runId/shares', authenticate, async (request, response, next) => {
+    try {
+      const { orgId, runId } = routeInput(request);
+      parseContract(noQuerySchema, request.query, 'run share list query');
+      const session = getAuthenticatedSession(request);
+      const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+        listRunShares(client, session, orgId, runId),
+      );
+      // Owner-only data: never stored by a cache that does not know the session.
+      response.setHeader('Cache-Control', 'no-store');
+      response.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
 
   router.put(
     '/:runId/shares/:userId',

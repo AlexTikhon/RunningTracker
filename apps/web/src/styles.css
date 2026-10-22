@@ -227,6 +227,19 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .org-picker--empty { border-color: #6b5a2f; color: #d8caa7; }
 .org-picker--empty strong { font-family: inherit; }
 
+.run-share { display: grid; gap: 0.9rem; margin-top: 2.5rem; padding-top: 1.6rem; border-top: 1px solid #2e3831; }
+.run-share h2 { margin: 0; font-size: 1.3rem; letter-spacing: -0.02em; }
+.run-share p { margin: 0; }
+.run-share__note { max-width: 46rem; color: #9ba59d; font-size: 0.86rem; line-height: 1.5; }
+.run-share__note strong { color: #f4f7f3; }
+.run-share__failure { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; color: #ffaca4; font-size: 0.86rem; }
+.run-share__empty { color: #7f8a82; font-size: 0.82rem; }
+.run-share__list { display: grid; gap: 0.6rem; margin: 0; padding: 0; list-style: none; }
+.run-share__row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1.2rem; padding: 0.75rem 1rem; border: 1px solid #2e3831; border-radius: 0.9rem; background: #151c17; }
+.run-share__person { min-width: 10rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86rem; }
+.run-share__access { flex: 1; color: #9ba59d; font-size: 0.82rem; }
+.run-share__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
 .search-panel { display: grid; gap: 1.1rem; padding-top: 1.6rem; border-top: 1px solid #2e3831; }
 .search-panel__heading h2 { margin: 0; font-size: clamp(1.8rem, 3.4vw, 2.6rem); letter-spacing: -0.04em; }
 .search-panel__heading p:last-child { max-width: 46rem; margin: 0.6rem 0 0; color: #9ba59d; font-size: 0.86rem; line-height: 1.5; }

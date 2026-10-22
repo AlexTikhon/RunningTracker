@@ -3,10 +3,13 @@ import {
   archiveMetadataResponseSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
+  organizationCoachListResponseSchema,
   organizationListResponseSchema,
   runCommandResponseSchema,
   runSearchInterpretationResponseSchema,
   runSearchResponseSchema,
+  runShareListResponseSchema,
+  runShareResponseSchema,
   runViewSchema,
   sessionResponseSchema,
   type ArchiveMetadataResponse,
@@ -17,6 +20,8 @@ import {
   type RunCommandType,
   type RunSearchInterpretationResponse,
   type RunSearchResponse,
+  type RunShareListResponse,
+  type RunShareResponse,
   type RunView,
   type SessionResponse,
 } from '@running-tracker/contracts';
@@ -227,6 +232,58 @@ export async function createRun(
     },
   );
   return runViewSchema.parse(requireSuccess(response));
+}
+
+export interface RunShareTarget extends LiveTrackScope {
+  userId: string;
+}
+
+// The other active coaches of the organization, as identifiers in the server's fixed order (ADR-0063).
+export async function loadOrganizationCoaches(orgId: string, signal: AbortSignal): Promise<string[]> {
+  const response = await requestJson(`/api/orgs/${encodeURIComponent(orgId)}/coaches`, {
+    credentials: 'same-origin',
+    signal,
+  });
+  return organizationCoachListResponseSchema.parse(requireSuccess(response)).items.map((item) => item.userId);
+}
+
+// Owner only: the server answers anyone else as for a missing run.
+export async function loadRunShares(scope: LiveTrackScope, signal: AbortSignal): Promise<RunShareListResponse> {
+  const response = await requestJson(
+    `/api/orgs/${encodeURIComponent(scope.orgId)}/runs/${encodeURIComponent(scope.runId)}/shares`,
+    { credentials: 'same-origin', signal },
+  );
+  return runShareListResponseSchema.parse(requireSuccess(response));
+}
+
+function sharePath({ orgId, runId, userId }: RunShareTarget): string {
+  return `/api/orgs/${encodeURIComponent(orgId)}/runs/${encodeURIComponent(runId)}/shares/${encodeURIComponent(userId)}`;
+}
+
+// The web app grants one thing: live and history together. Partial grants made elsewhere are shown, not created.
+export async function grantRunShare(
+  target: RunShareTarget,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<RunShareResponse> {
+  const response = await requestJson(sharePath(target), {
+    body: JSON.stringify({ canReadHistory: true, canReadLive: true }),
+    credentials: 'same-origin',
+    headers: mutationHeaders(csrf),
+    method: 'PUT',
+    signal,
+  });
+  return runShareResponseSchema.parse(requireSuccess(response));
+}
+
+export async function revokeRunShare(target: RunShareTarget, csrf: CsrfCredentials, signal: AbortSignal): Promise<void> {
+  const response = await requestJson(sharePath(target), {
+    credentials: 'same-origin',
+    headers: { [csrf.headerName]: csrf.token },
+    method: 'DELETE',
+    signal,
+  });
+  requireSuccess(response);
 }
 
 export async function readRun(orgId: string, runId: string, signal?: AbortSignal): Promise<RunView> {

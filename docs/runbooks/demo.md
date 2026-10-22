@@ -14,8 +14,8 @@ and about five minutes.
   Connect flow is exercised against an in-process test provider by `npm run test:integration` (the
   `oidc-login` suite) and its production surface by `npm run deploy:verify`; neither is a real provider.
 - **The runner is a script, not the browser.** `npm run demo:run` plays the runner over HTTP with a simulated route.
-  The Runner tab of the web app can record with its own 6-point simulator, but it has no control for sharing a run
-  with a coach, so a coach would see nothing from it.
+  The Runner tab of the web app can also record (Device GPS or its simulator) and share the run with a coach
+  (step 4a, ADR-0063); the script is still the shortest way to show the coach view.
 - **The map needs a Mapbox token.** Without `VITE_MAPBOX_ACCESS_TOKEN` the Archive tab shows a notice instead of a
   map. The token is public by design; never put a server secret there.
 - Nothing here is a performance or recovery claim.
@@ -92,6 +92,24 @@ Ctrl+C finishes the run early. In the Coach tab, within a poll interval (two sec
 
 The share is what lets the coach see the run: a coach role alone grants nothing (the access suites test this; the
 demo does not repeat it).
+
+## 4a. Share from the browser instead (optional)
+
+Sign in as the runner (step 3 with `…0001`) in a second browser or a private window, since one browser profile holds one
+session. Keep the coach in the first. In the Runner tab, start a run with the simulator. The **Share this run with a
+coach** panel under the controls lists the organization's active coaches by role and the end of their identifier (no
+names exist), here `Coach …dddd0002`.
+
+- **Share** grants live and history access together; the panel says so. The coach's board shows the run within a
+  poll interval.
+- **Revoke** removes the share. The coach's marker, the run's track option and its selection disappear within a
+  poll interval. The run keeps recording; sharing is not a lifecycle command.
+- A share made through the API with only one permission is shown as it is ("Live only", "History only"), with
+  **Share live and history** to complete it.
+
+The panel only lists and changes shares of your own run; the server checks ownership on every request. It does not
+queue anything offline: an action that fails says so and offers Retry. This flow is tested in Chromium by
+`tests/e2e/run-sharing.spec.ts`; following these steps by hand in a browser was not part of that change.
 
 ## 5. Browse the archive
 

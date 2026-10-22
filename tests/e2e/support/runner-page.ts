@@ -19,6 +19,10 @@ const uploadTimeoutMs = 20_000;
 // own can never be what satisfies the wait.
 const reloadOwnershipTimeoutMs = 10_000;
 
+function coachLabel(userId: string): string {
+  return `Coach …${userId.slice(-8)}`;
+}
+
 // Page object for the Runner view. Every locator uses roles, labels or visible text only.
 export class RunnerPage {
   constructor(private readonly page: Page) {}
@@ -56,6 +60,37 @@ export class RunnerPage {
 
   async finish(): Promise<void> {
     await this.page.getByRole('button', { name: 'Finish' }).click();
+  }
+
+  // The sharing panel under the Runner view (ADR-0063). No name exists for anyone, so a coach is shown by role
+  // and the last 8 characters of the user id.
+  sharePanel(): Locator {
+    return this.page.getByRole('region', { name: 'Share this run with a coach' });
+  }
+
+  shareRow(coachUserId: string): Locator {
+    return this.sharePanel().getByRole('listitem', { name: coachLabel(coachUserId) });
+  }
+
+  // The access the server reports for that coach: "Not shared", "Live and history", "Live only", ...
+  shareAccess(coachUserId: string): Locator {
+    return this.shareRow(coachUserId).getByText(/^(Not shared|Live and history|Live only|History only|No access)$/);
+  }
+
+  async shareWith(coachUserId: string): Promise<void> {
+    await this.shareRow(coachUserId)
+      .getByRole('button', { name: `Share with ${coachLabel(coachUserId)}`, exact: true })
+      .click();
+  }
+
+  async completeShareWith(coachUserId: string): Promise<void> {
+    await this.shareRow(coachUserId)
+      .getByRole('button', { name: `Share live and history with ${coachLabel(coachUserId)}` })
+      .click();
+  }
+
+  async revokeShare(coachUserId: string): Promise<void> {
+    await this.shareRow(coachUserId).getByRole('button', { name: `Revoke ${coachLabel(coachUserId)}` }).click();
   }
 
   card(label: StateCardLabel): StateCard {

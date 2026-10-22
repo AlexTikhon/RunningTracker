@@ -133,6 +133,27 @@ export const runShareResponseSchema = z.strictObject({
   canReadLive: z.boolean(),
 });
 
+// The active coaches of the caller's organization, as identifiers only: no name exists to show (ADR-0063).
+export const ORGANIZATION_COACH_LIST_MAX = 100;
+export const organizationCoachListResponseSchema = z.strictObject({
+  items: z.array(z.strictObject({ userId: uuidSchema })).max(ORGANIZATION_COACH_LIST_MAX),
+});
+
+// An owned run's shares with both flags exactly as stored, ordered by grantee. `truncated` says more exist.
+export const RUN_SHARE_LIST_MAX = 100;
+export const runShareListResponseSchema = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        canReadHistory: z.boolean(),
+        canReadLive: z.boolean(),
+        userId: uuidSchema,
+      }),
+    )
+    .max(RUN_SHARE_LIST_MAX),
+  truncated: z.boolean(),
+});
+
 export const runListQuerySchema = z
   .strictObject({
     cursor: cursorSchema.optional(),
@@ -466,6 +487,8 @@ export type IngestPointsRequest = z.infer<typeof ingestPointsRequestSchema>;
 export type IngestPointsResponse = z.infer<typeof ingestPointsResponseSchema>;
 export type UpsertRunShareRequest = z.infer<typeof upsertRunShareRequestSchema>;
 export type RunShareResponse = z.infer<typeof runShareResponseSchema>;
+export type OrganizationCoachListResponse = z.infer<typeof organizationCoachListResponseSchema>;
+export type RunShareListResponse = z.infer<typeof runShareListResponseSchema>;
 export type RunListQuery = z.infer<typeof runListQuerySchema>;
 export type RunListResponse = z.infer<typeof runListResponseSchema>;
 export type RunSearchQuery = z.infer<typeof runSearchQuerySchema>;

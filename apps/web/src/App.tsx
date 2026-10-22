@@ -12,6 +12,7 @@ import { organizationLabel, organizationPrompt } from './organization-selection.
 import { OrganizationPicker } from './OrganizationPicker.js';
 import { performRunnerRequest } from './runner-requests.js';
 import { RunnerView, type StorageState } from './RunnerView.js';
+import { RunSharePanel } from './RunSharePanel.js';
 import { SessionBar } from './SessionBar.js';
 import { unsentWorkNote } from './unsent-work.js';
 import { useOrganizations } from './use-organizations.js';
@@ -834,6 +835,21 @@ export function App() {
           storage={storage}
           writer={writer}
         />
+        {/* Sharing is the owner's server-side decision, outside the lifecycle queue and the writer lease (ADR-0063).
+            The key makes a new user, organization or run a new panel; the session signal silences a replaced session. */}
+        {session.status === 'ready'
+          && restoredUserId.current === session.session.identity.userId
+          && runner.run !== null
+          && scopeOrgId !== null
+          && runner.authority.status !== 'refused' && (
+          <RunSharePanel
+            csrfToken={session.session.csrf.token}
+            key={`${session.session.identity.userId}|${scopeOrgId}|${runner.run.runId}`}
+            orgId={scopeOrgId}
+            runId={runner.run.runId}
+            signal={session.signal}
+          />
+        )}
       </div>
 
       {activeView === 'coach' && (

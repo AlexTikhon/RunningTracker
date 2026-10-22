@@ -3,13 +3,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createRun,
   endSession,
+  grantRunShare,
   interpretRunSearch,
   loadArchiveMetadata,
+  loadOrganizationCoaches,
   loadOrganizations,
+  loadRunShares,
   loadSession,
   readLiveTrackChangesPage,
   readLiveTrackSnapshotPage,
   readRun,
+  revokeRunShare,
   sendRunCommand,
   uploadPointBatch,
 } from './runner-api.js';
@@ -390,6 +394,91 @@ describe('runner API', () => {
         interpretRunSearch({ orgId, text: 'x', timeZone: 'UTC' }, csrf, new AbortController().signal),
       ).rejects.toMatchObject({ status: 502 });
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('run sharing', () => {
+    const coachId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+    it('lists the coaches of the organization through its canonical path', async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ items: [{ userId: coachId }] })),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(loadOrganizationCoaches(orgId, new AbortController().signal)).resolves.toEqual([coachId]);
+      expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/coaches`, {
+        credentials: 'same-origin',
+        signal: expect.any(AbortSignal) as AbortSignal,
+      });
+    });
+
+    it('lists the shares of a run with both flags and the truncation marker', async () => {
+      const shares = { items: [{ canReadHistory: false, canReadLive: true, userId: coachId }], truncated: false };
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(shares)));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(loadRunShares({ orgId, runId }, new AbortController().signal)).resolves.toEqual(shares);
+      expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/runs/${runId}/shares`, {
+        credentials: 'same-origin',
+        signal: expect.any(AbortSignal) as AbortSignal,
+      });
+    });
+
+    it('refuses coach and share lists outside the contract', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>().mockImplementation(() =>
+          Promise.resolve(new Response(JSON.stringify({ items: [{ userId: coachId, name: 'x' }] }))),
+        ),
+      );
+      await expect(loadOrganizationCoaches(orgId, new AbortController().signal)).rejects.toThrow();
+      await expect(loadRunShares({ orgId, runId }, new AbortController().signal)).rejects.toThrow();
+    });
+
+    it('grants live and history together, with the CSRF header', async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ canReadHistory: true, canReadLive: true })),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(
+        grantRunShare({ orgId, runId, userId: coachId }, csrf, new AbortController().signal),
+      ).resolves.toEqual({ canReadHistory: true, canReadLive: true });
+      expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/runs/${runId}/shares/${coachId}`, {
+        body: JSON.stringify({ canReadHistory: true, canReadLive: true }),
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token },
+        method: 'PUT',
+        signal: expect.any(AbortSignal) as AbortSignal,
+      });
+    });
+
+    it('revokes with a DELETE that carries the CSRF header and accepts the empty 204', async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(
+        revokeRunShare({ orgId, runId, userId: coachId }, csrf, new AbortController().signal),
+      ).resolves.toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/runs/${runId}/shares/${coachId}`, {
+        credentials: 'same-origin',
+        headers: { 'x-csrf-token': csrf.token },
+        method: 'DELETE',
+        signal: expect.any(AbortSignal) as AbortSignal,
+      });
+    });
+
+    it('reports a refused change with its code, status and request id', async () => {
+      const refusal = { error: { code: 'RUN_NOT_FOUND', message: 'gone', requestId: coachId } };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(refusal), { status: 404 })),
+      );
+
+      await expect(
+        revokeRunShare({ orgId, runId, userId: coachId }, csrf, new AbortController().signal),
+      ).rejects.toMatchObject({ code: 'RUN_NOT_FOUND', requestId: coachId, status: 404 });
     });
   });
 });
