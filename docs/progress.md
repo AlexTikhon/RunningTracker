@@ -2593,3 +2593,43 @@ were not run, because no application or backend code changed.
   revalidation, sign-out, run search, organizations), OpenID sign-in (`chromium-oidc`) and real WebGL map rendering. A Firefox WebGL smoke was not attempted.
 - Nothing here covers Safari, mobile browsers, a physical phone, background behaviour or real GPS. D10 stays
   deferred until physical-device evidence exists.
+
+## Interview package, documentation reconciliation and a scripted demo rehearsal (2026-10-24)
+
+Documentation only, on top of `4ee4d94` (the pre-demo smoke). No application, test, harness, dependency or
+configuration change; no model call, commit or push. The entries for `demo:doctor`/`demo:up` (`4e51958`), the demo
+sign-in buttons (`eff3a71`) and the smoke (`4ee4d94`) are recorded in `docs/runbooks/demo.md` and the README rather
+than here.
+
+**Written.** `docs/interview.md`: a spoken pitch, a component and data-flow diagram, six stories (offline buffering
+and idempotent persistence, writer fencing, RLS and roles, SSE revalidation, revision-bound derived data,
+backup/restore with journal replay), follow-up answers, and a conditional scaling section that keeps what is built
+apart from what is proposed.
+
+**Corrected.** README: the AI line now says OpenAI was never called *and* that local Ollama runs were made and missed
+the deadline (it said no real model had been run); the browser limits name the Firefox core gate instead of
+"Chromium only" for the runner and coach; the full-suite duration is the latest supplied report's 109 passed in
+about 12.3 min instead of "about four minutes"; the demo entry point is `demo:up` with the sign-in buttons.
+`docs/runbooks/demo.md`: the rehearsal's offline step could not be done as written (DevTools opened after Resume
+usually arrives after the six simulator points are gone, and going offline before Resume records nothing because
+capture waits for the server). It now opens DevTools first, moves the offline gap before the revoke so the coach
+can watch it, and says what to show without a Mapbox token.
+
+**Executed** (Windows 11, Docker Desktop, development database for the rehearsal and `_test` for the smoke).
+
+| Check | Result |
+|---|---|
+| `npm run demo:up` | ready about 31 s after start, 0 of 25 migrations pending |
+| Rehearsal steps 1–10 and sign-out, driven by a throwaway Playwright script in two headless Chromium contexts, no Mapbox token, twice | 11/11 steps both times; 70.4 s and 84.9 s; coach card 1.9 s after a share and gone 1.9–2.1 s after a revoke; offline gap with 5 pending, drained 0.1–0.2 s after reconnecting, coach 7 → 12 points and one revision higher; run listed in My runs 26.4 s and 41.8 s after Finish |
+| `npm run test:e2e:smoke` (Chromium) | 18 passed, 2.8 min (176 s with server start-up) |
+| Relative links and anchors in the four changed documents (scratch checker); `git diff --check`; whitespace in the new file | 118 links, 0 broken; exit 0; none |
+
+`demo:up` was stopped by ending its process tree (the script had no console to send Ctrl+C to), and its stale lock
+was removed by hand.
+
+**Not run.** The full browser suite, the Firefox smoke, `npm run verify` and the integration suite (nothing they
+cover changed). The figures quoted in the new documents come from the runs that recorded them: the 109-test,
+12.3-minute report; the Firefox runs and the 463 integration tests of 2026-10-22 above; the P11.5 load report; the
+P12.4 restore drill; and the 2,321 unit tests recorded at `eff3a71`. Not covered by the rehearsal: a person in two
+real browser profiles, the DevTools throttling menu itself (the script used Playwright's offline emulation), other
+browsers and the maps with a token.

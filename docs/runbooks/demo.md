@@ -141,7 +141,15 @@ second browser profile.
 
 One pass through the browser story for a demo or an interview: two people, a simulated run, live sharing, an offline
 gap, the archive, and sharing a finished run. It uses only the browser and `demo:up`; `demo:run` is not needed. The
-times are a plan, not a measurement: the only fixed wait is the summary worker (step 8).
+5–7 minutes are a plan for a person who talks while doing it. Driven by a script, the same steps took 70 s and 85 s
+(see "Rehearsal results" below). The only fixed waits are the simulator's ten seconds (steps 3 and 6) and the summary
+worker (step 9).
+
+Two facts shape the steps. The browser's Simulator produces **six points per capture session**, the first at once
+and then one every two seconds, so about ten seconds after Start or Resume it reads `complete` and stops; the run
+stays `recording` and sends nothing more until the next Resume. And capture starts only once the server has confirmed
+that the run is recording, so going offline *before* Resume would leave the Resume request queued and record
+nothing. The offline gap therefore has to start a moment *after* Resume.
 
 **The day before, or an hour before: run the automated smoke.** It needs the test database (`npm run
 db:bootstrap:test` and `npm run db:migrate:test` once) and the browsers (`cd tests/e2e; npx playwright install
@@ -162,7 +170,8 @@ holder is reported, never reused or stopped) or PostgreSQL does not answer for t
 and screenshots go to `tests/e2e/smoke-results/chromium` or `…/firefox`, apart from the full suite's
 `tests/e2e/test-results`. The ports differ from `demo:up`'s (3000, 5173), so the smoke can run while the demo is up,
 but its data is in the test database, not the demo's. A pass says those flows work in that browser on this machine
-today; it is not a promise about the next run.
+today; it is not a promise about the next run. Recorded so far: `npm run test:e2e:smoke` on 2026-10-24 (Windows 11,
+commit `4ee4d94`), 18 passed in 2.8 min, 176 s including server start-up. `test:e2e:smoke:firefox` has not been run.
 
 **Before the audience:** `npm run demo:up` (section 0) and wait for the app URL. Open `http://127.0.0.1:5173` in two
 separate browser profiles, or an ordinary and a private window, side by side: one for the Runner, one for the Coach.
@@ -172,20 +181,25 @@ Two tabs of one profile are one person (section 3).
 |---|---|---|
 | 1 | Runner window: **Demo runner**. Coach window: **Demo coach**. | Each shows "Signed in" and organization `…0000` selected; nothing is typed. |
 | 2 | Coach: open the Coach tab. | The stream is live; the position board says "No active runs are currently shared with this identity." Without a token the **Live map** panel says "Map unavailable. Positions and tracks are listed below." |
-| 3 | Runner: Runner tab, **Capture source** → *Simulator · normal · seed 1*, **Start run**. | Recording reads `recording`. The simulator sends six points, two seconds apart; after about ten seconds Capture reads `complete` and Upload "No buffered points". |
+| 3 | Runner: first open the developer tools (F12) → **Network** and leave its throttling menu (*No throttling*) in view; step 6 needs it within a second or two. Then Runner tab, **Capture source** → *Simulator · normal · seed 1*, **Start run**. | Recording reads `recording`. After about ten seconds Capture reads `complete` ("segment 0 · 6 buffered") and Upload "No buffered points". Nothing more is captured until step 6; the run stays `recording`. |
 | 4 | Runner: in **Share this run with a coach**, press **Share** next to `Coach …dddd0002`. | The row reads "Live and history". |
-| 5 | Coach: watch the board, then tick the run under **Track selection**. | Within a poll interval (two seconds) one run card with its position appears; the track option reads "N points · rev R" and "1 selected". With a token the position and the track are drawn on the map; without one they are only listed. |
-| 6 | Runner: **Revoke**. | The row reads "Not shared". The coach's card, track option and selection disappear within a poll interval; the run keeps recording. |
-| 7 | Runner: **Pause**, then **Resume**, and at once open the developer tools (F12) → Network → *Offline*. Resuming starts the simulator again with six more points. | An "Offline" notice; Upload reads "N pending" and grows while the points are kept in the browser. Untick *Offline*: the notice goes and Upload returns to "No buffered points" (that each point arrived exactly once is what the smoke checks). If Upload never shows pending, the points went out before the switch: Pause, Resume and switch faster. |
+| 5 | Coach: watch the board, then tick the run under **Track selection**. | Within a poll interval (two seconds) one run card with its position appears; the track option reads "6 points · rev R" and "1 selected". About ten seconds after the last point the marker turns `stale`, which is correct: capture has ended. With a token the position and the track are drawn on the map; without one they are only listed. |
+| 6 | Runner: **Pause**, then **Resume**. As soon as Recording reads `recording` again, choose *Offline* in the throttling menu. Wait until Capture reads `complete` again (about ten seconds), then choose *No throttling*. | An "Offline" notice, and Upload reads "N pending", usually 5: the first point of the new session leaves before the switch. Meanwhile the coach's track stops at that point ("7 points") and the card stays, because a recording run is still live. Back online, the notice goes, Upload returns to "No buffered points" within about a second, and within a poll the coach's track jumps to "12 points" with a revision one higher: the pending points went as one batch and one revision. If Upload never showed pending, the switch came after the last point: Pause and Resume again for six more. |
+| 7 | Runner: **Revoke**. | The row reads "Not shared". The coach's card, track option and selection disappear within a poll interval, and the board says no runs are shared again; the run keeps recording. |
 | 8 | Runner: **Finish**, then **New run**. | Recording reads `finished`; **New run** is enabled only when nothing is pending, and the sharing panel leaves the Runner tab. |
-| 9 | Runner: Archive tab, **My runs**, press **Apply filters** until the run is listed. | The summary worker runs once a minute (`RUN_SUMMARY_INTERVAL_MS`, 60 s in `.env.example`), so allow up to about a minute; until then a notice says the run "is still being processed". Talk through the Archive map meanwhile: with a token it draws the archive, without one it says "Map provider not configured". |
-| 10 | Runner: **Manage sharing** on the new card, then **Share**, then **Revoke**. | The panel opens inside the card; the coach row reads "Not shared" (the grant was revoked in step 6), then "Live and history", then "Not shared". **Close** or Escape closes it. The run never becomes the active run. |
+| 9 | Runner: Archive tab, **My runs**, press **Apply filters** every few seconds until the run is listed. | The summary worker runs once a minute (`RUN_SUMMARY_INTERVAL_MS`, 60 s in `.env.example`), so allow up to about a minute; until then a notice says the run "is still being processed". The card then shows the date, a distance of about 0.08 km, the observed duration and **Manage sharing**. Talk through the Archive map meanwhile: with a token it draws the archive, without one it says "Map provider not configured". |
+| 10 | Runner: **Manage sharing** on the new card, then **Share**, then **Revoke**. | The panel opens inside the card; the coach row reads "Not shared" (the grant was revoked in step 7), then "Live and history", then "Not shared". **Close** or Escape closes it. The run never becomes the active run. The coach's window shows nothing new: a finished run is not live. |
 
 Finish with **Sign out** in both windows (section 6). Without a Mapbox token everything above works except drawing:
-the Coach live map and the Archive map show their notices, and the coach cannot see a shared finished run's route
-(step 10) anywhere else, because **My runs** lists only the signed-in person's own runs. With
-`demo:seed:search` run beforehand, **My runs** also holds 47 synthetic runs of the demo runner, so the new one is
-the first card of the default newest-first list rather than the only one.
+the Coach live map and the Archive map show their notices. What to show instead is the coach's card and its
+"N points · rev R" count changing (steps 5–7) and the runner's **My runs** card (steps 9–10). Do not promise that the
+coach sees the shared finished route: the Coach tab lists live runs only, **My runs** lists only the signed-in
+person's own runs, and the only place a coach could see a finished shared route is the Archive map, which needs a
+token. With `demo:seed:search` run beforehand, **My runs** also holds 47 synthetic runs of the demo runner, so the new
+one is the first card of the default newest-first list rather than the only one.
+
+The offline step uses the Chromium (Chrome, Edge) DevTools throttling menu. Other browsers have different controls,
+and none of them was tried.
 
 **Automated and manual, step by step.** The smoke covers the same behaviour in the browser it runs, but not the same
 way a person does it:
@@ -194,14 +208,33 @@ way a person does it:
 |---|---|---|
 | 1 Demo sign-in | `demo-sign-in` (both buttons, the organization, Sign out, a pending, failed and late sign-in, no buttons without the flag) | Two real browser profiles: the tests use two browser contexts |
 | 3, 8 Record, finish | `record`, `reload-offline` (a reload during recording) | — |
-| 4–6 Share, coach sees the track, revoke | `run-sharing` | The coach's map with a real token; the tests run without one |
-| 7 Offline and reconnect | `reload-offline` (offline buffering, a failed upload) | The developer tools' Offline switch: the tests switch the browser context offline, and they go offline without the Pause and Resume |
+| 4, 5, 7 Share, coach sees the track, revoke | `run-sharing` | The coach's map with a real token; the tests run without one |
+| 6 Offline and reconnect | `reload-offline` (offline buffering, a failed upload) | The developer tools' Offline switch: the tests switch the browser context offline, and they go offline without the Pause and Resume or a coach watching |
 | 9 Summary wait, My runs | `archive-sharing`, which waits up to 120 s for the real summary worker | — |
 | 10 Manage sharing | `archive-sharing` (after New run and a reload, one panel at a time, a deleted run, a held answer) | — |
 | A second tab cannot record | `second-tab` | Not part of the rehearsal |
 
-These steps were written from the code and the tests above. They have not yet been followed by hand in a browser:
-treat the first pass as a test and report what differs.
+**Rehearsal results (2026-10-24).** Steps 1–10 and the sign-out were driven twice by a throwaway Playwright script
+(not part of the repository), against a real `npm run demo:up` on Windows 11 with no Mapbox token, in headless
+Chromium with two isolated browser contexts standing in for two profiles. `demo:up` was ready about 31 s after it
+started (no pending migrations). Both passes completed every step:
+
+| Step | Pass 1 | Pass 2 |
+|---|---|---|
+| 1–2 Sign-in buttons, Coach tab live with the tokenless notice | ok (`GET /api/session` not checked) | ok, runner `…0001`, coach `…0002` |
+| 3 Capture `complete` after Start | 10.1 s, "segment 0 · 6 buffered" | 10.1 s, same |
+| 5 Coach card after the share was confirmed | 1.9 s, "6 points · rev 6", `confirmed` | 1.9 s, same |
+| 6 Offline 1.5 s after Resume, back online after Capture `complete` | 5 pending; coach at "7 points · rev 9" while offline; drained 0.2 s after reconnecting; coach "12 points · rev 10" 1.6 s after | 5 pending; same labels; 0.1 s; 1.5 s |
+| 7 Coach card gone after the revoke was confirmed | 1.9 s, run still `recording` | 2.1 s, same |
+| 9 Run listed in My runs after Finish | 26.4 s, the "still being processed" notice seen first | 41.8 s, same |
+| 10 Manage sharing: Share, Revoke, Close | ok; coach showed no live card | ok, same |
+| Script time, browser launch to sign-out | 70.4 s | 84.9 s |
+
+What this does not cover: a person following the steps in two real browser profiles, the DevTools throttling menu
+itself (the script used Playwright's `setOffline`, which in Chromium uses the same network emulation as DevTools),
+Firefox or any other browser, and the maps with a token. Treat a first pass by hand as a test and report what
+differs. The `demo:up` used for this was stopped by ending its process tree rather than with Ctrl+C, which left its
+lock file behind, as "Limits" in section 0 describes.
 
 ## 1. Create the demo people
 
