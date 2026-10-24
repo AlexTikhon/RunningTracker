@@ -41,7 +41,7 @@ export interface MainDependencies {
   loadConfig?: typeof loadEnvironment;
 }
 
-function listen(server: Server, port: number): Promise<void> {
+function listen(server: Server, port: number, host: string): Promise<void> {
   return new Promise((resolveListen, reject) => {
     const onError = (error: Error): void => {
       server.off('listening', onListening);
@@ -54,7 +54,7 @@ function listen(server: Server, port: number): Promise<void> {
 
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(port, '0.0.0.0');
+    server.listen(port, host);
   });
 }
 
@@ -236,7 +236,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   };
 
   try {
-    await listen(server, config.PORT);
+    await listen(server, config.PORT, config.API_HOST);
     if (config.METRICS_PORT !== undefined) {
       metricsListener = await startMetricsListener(metrics.registry, {
         host: config.METRICS_HOST,

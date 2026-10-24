@@ -335,6 +335,19 @@ describe('validateEnvironment', () => {
     }
   });
 
+  it('listens on every interface by default and on API_HOST when it is set', () => {
+    expect(validateEnvironment(validApplicationEnvironment).API_HOST).toBe('0.0.0.0');
+    expect(
+      validateEnvironment({ ...validApplicationEnvironment, API_HOST: '127.0.0.1' }),
+    ).toMatchObject({ API_HOST: '127.0.0.1' });
+
+    for (const invalid of ['', 'bad host', 'http://127.0.0.1']) {
+      expect(() =>
+        validateEnvironment({ ...validApplicationEnvironment, API_HOST: invalid }),
+      ).toThrow('API_HOST');
+    }
+  });
+
   it('keeps the metrics listener off by default and loopback-bound when enabled (P11.1)', () => {
     const defaults = validateEnvironment(validApplicationEnvironment);
     expect(defaults.METRICS_PORT).toBeUndefined();

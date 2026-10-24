@@ -4,8 +4,89 @@ Audience: anyone who wants to see the system work on one machine, and to know ex
 show. Related: `README.md` (setup), `docs/runbooks/identity-provider.md` (real sign-in).
 
 The demo walks one story: a runner records a run, a coach watches it live, the run is finished and summarized, and
-it appears in the archive. It needs Docker, the repository set up as in the README's "Start from a clean checkout",
-and about five minutes.
+it appears in the archive. It needs Docker, the dependencies installed (`npm ci`) and about five minutes. A `.env` is
+optional: without one, the database settings come from `.env.example`.
+
+## 0. One command
+
+```sh
+npm run demo:doctor   # read-only: is this machine ready?
+npm run demo:up       # start everything; Ctrl+C stops it
+```
+
+`demo:doctor` checks Node and npm against `engines`, the installed dependencies, the Docker CLI, engine and Compose,
+the PostgreSQL container and volume, ports 3000 and 5173 (and the database port, which may only be held by the
+Compose container), whether a `demo:up` is already running, and the demo configuration. It starts nothing, writes
+nothing and prints no password or token: database URLs are shown as `role@host:port/database` with where each came
+from. It exits 1 when `demo:up` would refuse to start, with a hint under each problem.
+
+`demo:up` runs the same checks first and stops before changing anything if one fails. Then it runs, in order and
+each with a deadline:
+
+| Step | Command it reuses | Deadline |
+|---|---|---|
+| PostgreSQL | `docker compose -f infra/compose/docker-compose.yml up -d --wait --wait-timeout 120 postgres` | 10 min (the first start may pull the image) |
+| Roles and PostGIS | `scripts/bootstrap-database.mjs` (`npm run db:bootstrap`) | 60 s |
+| Migrations | `scripts/migrate.mjs` (`npm run db:migrate`) | 120 s |
+| Demo people | `scripts/demo-seed.mjs` (`npm run demo:seed`) | 60 s |
+| Shared packages | `npm run build --workspace=@running-tracker/fixtures` (builds contracts too) | 180 s |
+| API | `node --import tsx src/entrypoint.ts` in `apps/api` (`npm run dev` without the watcher), ready when `/api/health/ready` answers 200 | 90 s |
+| Web | Vite in `apps/web`, ready when the page and `/api/health/ready` through its proxy answer 200 | 60 s + 15 s |
+
+When both answer it prints the app URL, `http://127.0.0.1:5173`, and the two demo identities. Sign in as in
+section 3, and play the runner with `npm run demo:run` (section 4) in another terminal.
+
+**Configuration.** `demo:up` never writes `.env`. It reads the four database URLs from the environment, then `.env`,
+then `.env.example`, refuses any that is not the plain `running_tracker` database on a loopback host with its
+expected role (the same guard as `demo:seed`), and refuses `APP_ENV=production`. It then passes these to its own
+child processes only, on top of everything else in `.env`:
+
+```text
+APP_ENV=development
+LOCAL_AUTH_ENABLED=true
+LOCAL_AUTH_USER_IDS=dddddddd-dddd-4ddd-8ddd-dddddddd0001,dddddddd-dddd-4ddd-8ddd-dddddddd0002
+ALLOWED_ORIGINS=http://127.0.0.1:5173
+API_HOST=127.0.0.1          PORT=3000          METRICS_HOST=127.0.0.1
+API_PROXY_TARGET=http://127.0.0.1:3000
+SESSION_COOKIE_SECURE=false
+RUN_SEARCH_AI_ENABLED=false
+```
+
+So local sign-in works for the demo runner and coach and nobody else, the API and Vite listen on `127.0.0.1` only
+(the database port is already loopback-only in the Compose file), and no AI provider, API key or Mapbox token is
+needed. A `VITE_MAPBOX_ACCESS_TOKEN` in `.env` is still used for the maps. `npm run dev` and every other command keep
+reading `.env` as before.
+
+**Stopping.** Ctrl+C stops the API and Vite, and only them: each is a child of this command, and on Windows a
+console Ctrl+C reaches them directly, so the API runs its own graceful shutdown. Anything still running after
+8 seconds is ended with its whole process tree (`taskkill /T /F` on Windows, the child's process group on Linux and
+macOS); a second Ctrl+C does that at once. PostgreSQL keeps running, and the database and its Docker volume are not
+touched: nothing in `demo:up` stops a container, removes a volume or resets data. `npm run db:down` stops the
+container and keeps the volume.
+
+**Repeating it.** Every setup step is idempotent: the roles get the same passwords, applied migrations are skipped,
+and the seed only inserts what is missing. Existing runs survive a restart. A second `demo:up` while one is running
+stops at once with the first one's process ID and changes nothing; the lock is `.local/demo/demo-up.lock` and is
+removed on exit.
+
+**When something is in the way.** If a port is taken, `demo:up` says which and how to find its owner
+(`netstat -ano | findstr :3000` on Windows, `lsof -nP -iTCP:3000 -sTCP:LISTEN` elsewhere) and starts nothing; it
+never stops another process to free a port. If a step fails or a server does not become ready in time, it prints that
+step's output, stops whatever it had already started and exits 1.
+
+**Limits.**
+
+- There is no sign-in page for the demo: signing in is still the console snippet in section 3.
+- The ports are fixed (3000 and 5173); the demo does not move to free ones.
+- The API runs without a file watcher; restart `demo:up` after changing API code. Vite still reloads the web app.
+- If the `demo:up` process itself is killed (for example from Task Manager) rather than stopped with Ctrl+C, it
+  cannot clean up and the API and Vite may keep running. Find them with the `netstat` command above and stop them by
+  process ID. A lock left behind by a process that no longer exists is replaced on the next start. Closing the
+  terminal window is handled like Ctrl+C, but Windows allows only a few seconds for it and that path was not tried.
+- Tried on Windows 11 only (see below); the Linux and macOS process-group path is covered by the same code and unit
+  tests but was not run on those systems.
+
+Sections 1 and 2 below are the same thing done by hand.
 
 ## What this demo is not
 
@@ -28,6 +109,16 @@ seed, the sign-in through the Vite proxy, a scripted run shared with the coach, 
 `unconfirmed` for the first point, then `confirmed`, and the run leaving the live state when finished), the summary
 being published, and a non-empty vector tile for the run. **The browser steps (the sign-in snippet, the Coach and
 Archive tabs) were not exercised in a browser.** Treat their first run as a test and report what differs.
+
+`demo:up` and `demo:doctor` (section 0) were run on Windows 11 with Docker Desktop on 2026-10-24: the doctor and
+`demo:up` with the Docker engine stopped (both report it, nothing started); a full start (it applied three pending
+migrations to the development database the first time and none the second); the API and Vite listening on
+`127.0.0.1` only; `POST /api/session` through the Vite proxy answering 201 for the coach and 403
+`LOCAL_IDENTITY_DENIED` for another identity; `npm run demo:run -- --points 3` to a published summary; a second
+`demo:up` refused while the first kept answering; a console Ctrl+C (the API logged its graceful shutdown, and the
+API, Vite and the API's `esbuild` helper were all gone within 1.3 seconds); a restart with the run count unchanged;
+ports 3000 and 5173 held by another process (reported, holder untouched); and an API that fails at startup (reported,
+nothing left running). `.env` was byte-for-byte unchanged throughout. The browser was not used for this either.
 
 ## 1. Create the demo people
 
@@ -198,6 +289,10 @@ await fetch('/api/session', { method: 'DELETE', headers: { 'x-csrf-token': csrf.
 
 | Symptom | Likely cause |
 |---|---|
+| `demo:up` says "Docker engine not reachable" | Docker Desktop (or the Docker service) is not running; start it and wait until it reports running |
+| `demo:up` says a port is in use | Another program (often an earlier `npm run dev`) holds 3000 or 5173; stop it yourself, `demo:up` will not |
+| `demo:up` says another demo:up is running | One is running in another terminal; use it or press Ctrl+C there. If none is, delete `.local/demo/demo-up.lock` |
+| `demo:up` reports a configuration problem | A database URL in the environment or `.env` is not the local `running_tracker` database with its expected role, or `APP_ENV=production` |
 | Sign-in snippet answers 404 | `LOCAL_AUTH_ENABLED` is not `true`, or the API was not restarted after editing `.env` |
 | Sign-in snippet answers 403 `ORIGIN_DENIED` | The page was opened as `localhost`; the allowed origin is exactly `http://127.0.0.1:5173` |
 | Sign-in snippet answers 403 `LOCAL_IDENTITY_DENIED` | The user ID is not in `LOCAL_AUTH_USER_IDS` |
@@ -216,4 +311,5 @@ the whole development database (this deletes everything in it, not only the demo
 docker compose -f infra/compose/docker-compose.yml down -v
 ```
 
-Set `LOCAL_AUTH_ENABLED` back to `false` in `.env` when you are done.
+If you followed sections 1 and 2 by hand, set `LOCAL_AUTH_ENABLED` back to `false` in `.env` when you are done;
+`demo:up` never changed it.

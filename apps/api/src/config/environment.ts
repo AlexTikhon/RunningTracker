@@ -165,6 +165,12 @@ const environmentSchema = z
   .object({
     APP_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().positive().max(65_535).default(3000),
+    // The default keeps containers reachable through their published port; `npm run demo:up` passes 127.0.0.1.
+    API_HOST: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9.:_-]+$/u, { message: 'must be a bare host name or IP address' })
+      .default('0.0.0.0'),
     DATABASE_URL: z.string(),
     MAINTENANCE_DATABASE_URL: z.string(),
     RUN_AUTO_FINISH_INTERVAL_MS: z.coerce

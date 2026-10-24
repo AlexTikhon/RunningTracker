@@ -40,6 +40,10 @@ npm run dev
 
 On POSIX systems, replace the first command with `cp .env.example .env`.
 
+For the local demo only, `npm run demo:doctor` (read-only) and `npm run demo:up` do the database steps above, seed
+the demo people and start the API and web app on loopback with local sign-in for those people, without editing
+`.env`; Ctrl+C stops what it started. See [docs/runbooks/demo.md](docs/runbooks/demo.md), section 0.
+
 The example `LIVE_TRACK_CURSOR_SIGNING_KEY` is a fixed local-only HMAC key. Every
 deployment must supply independent canonical base64url key material of at least
 32 bytes; production startup rejects the example value.
