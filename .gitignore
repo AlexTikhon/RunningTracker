@@ -11,6 +11,7 @@ coverage/
 .vscode/
 .local/
 test-results/
+smoke-results/
 playwright-report/
 
 # Raw GPS exports carry location and time and are private (see docs/runbooks/gps-traces.md).

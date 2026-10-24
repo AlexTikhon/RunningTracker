@@ -3,18 +3,14 @@ import { resolve } from 'node:path';
 import { defineConfig } from '@playwright/test';
 
 import { loadE2eEnvironment } from './support/environment.js';
+import { liveTrackCursorSigningKey, localSessionApi, suiteSettings, webApp } from './support/suite-config.js';
 
 // Throws before any server starts when the test database variables are missing or point elsewhere,
 // so a wrong database never reaches the API process.
 const environment = loadE2eEnvironment();
 
 const { oidc } = environment;
-const repositoryRoot =resolve(import.meta.dirname, '..', '..');
-const apiPort = new URL(environment.apiOrigin).port;
-const webPort = new URL(environment.webOrigin).port;
-
-// Fixed local-only HMAC key, the same fixture value as .env.example. Not valid for any deployment.
-const liveTrackCursorSigningKey = 'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE';
+const repositoryRoot = resolve(import.meta.dirname, '..', '..');
 
 // Shaped like a public Mapbox token so the runtime accepts it; it belongs to no account.
 const mapPlaceholderToken = 'pk.e2e-local-placeholder';
@@ -26,9 +22,7 @@ const firefoxCoreSpecs =
   /[\\/](record|reload-offline|second-tab|gps-recovery|run-sharing|archive-sharing|coach-map)\.spec\.ts$/;
 
 export default defineConfig({
-  expect: { timeout: 15_000 },
-  fullyParallel: false,
-  globalTeardown: './global-teardown.ts',
+  ...suiteSettings(environment),
   outputDir: 'test-results',
   projects: [
     // The development-session stack (a local session endpoint, no identity provider).
@@ -48,79 +42,25 @@ export default defineConfig({
       use: { browserName: 'firefox' },
     },
   ],
-  reporter: 'list',
-  retries: 0,
-  testDir: '.',
-  timeout: 60_000,
-  use: {
-    baseURL: environment.webOrigin,
-    screenshot: 'only-on-failure',
-    trace: 'retain-on-failure',
-  },
   webServer: [
-    {
-      // The dev script without --watch, so a file change cannot restart the API mid-test.
-      command: 'node --import tsx src/entrypoint.ts',
-      cwd: resolve(repositoryRoot, 'apps', 'api'),
-      env: {
-        // The map and demo origins sign in and out through the same API.
-        ALLOWED_ORIGINS: `${environment.webOrigin},${environment.mapWebOrigin},${environment.demoWebOrigin}`,
-        APP_ENV: 'test',
-        DATABASE_URL: environment.runtimeDatabaseUrl,
-        LIVE_TRACK_CURSOR_SIGNING_KEY: liveTrackCursorSigningKey,
-        LOCAL_AUTH_ENABLED: 'true',
-        // The suite users, and the demo people the demo sign-in buttons send (demoScenario creates them).
-        LOCAL_AUTH_USER_IDS: [
-          environment.runnerUserId,
-          environment.coachUserId,
-          environment.demoRunnerUserId,
-          environment.demoCoachUserId,
-        ].join(','),
-        MAINTENANCE_DATABASE_URL: environment.maintenanceDatabaseUrl,
-        PORT: apiPort,
-        // The in-process deterministic interpreter: describing a search in words works with no provider and no
-        // network. The real provider is never configured here (APP_ENV=test refuses nothing, so keep it explicit).
+    localSessionApi(environment, {
+      // The map and demo origins sign in and out through the same API.
+      allowedOrigins: [environment.webOrigin, environment.mapWebOrigin, environment.demoWebOrigin],
+      // The in-process deterministic interpreter: describing a search in words works with no provider and no
+      // network. The real provider is never configured here (APP_ENV=test refuses nothing, so keep it explicit).
+      runSearchAi: {
         RUN_SEARCH_AI_ENABLED: 'true',
         RUN_SEARCH_AI_PROVIDER: 'fake',
         RUN_SEARCH_AI_USER_RATE_PER_MINUTE: '60',
-        SESSION_COOKIE_SECURE: 'false',
       },
-      reuseExistingServer: false,
-      stderr: 'pipe',
-      stdout: 'pipe',
-      url: `${environment.apiOrigin}/api/health/ready`,
-    },
-    {
-      command: `npx vite --port ${webPort}`,
-      cwd: resolve(repositoryRoot, 'apps', 'web'),
-      // Explicitly off, whatever a developer's .env says: this is the ordinary `npm run dev` page.
-      env: { API_PROXY_TARGET: environment.apiOrigin, VITE_LOCAL_DEMO_ENABLED: 'false' },
-      reuseExistingServer: false,
-      stderr: 'pipe',
-      stdout: 'pipe',
-      url: environment.webOrigin,
-    },
-    {
-      // The same app with a placeholder public Mapbox token, for the Coach map tests. The token is not valid for
-      // any provider account; those tests answer or abort every provider request in the browser.
-      command: `npx vite --port ${new URL(environment.mapWebOrigin).port}`,
-      cwd: resolve(repositoryRoot, 'apps', 'web'),
-      env: { API_PROXY_TARGET: environment.apiOrigin, VITE_MAPBOX_ACCESS_TOKEN: mapPlaceholderToken },
-      reuseExistingServer: false,
-      stderr: 'pipe',
-      stdout: 'pipe',
-      url: environment.mapWebOrigin,
-    },
-    {
-      // The same app as `npm run demo:up` serves it: a dev server with the demo sign-in buttons turned on.
-      command: `npx vite --port ${new URL(environment.demoWebOrigin).port}`,
-      cwd: resolve(repositoryRoot, 'apps', 'web'),
-      env: { API_PROXY_TARGET: environment.apiOrigin, VITE_LOCAL_DEMO_ENABLED: 'true' },
-      reuseExistingServer: false,
-      stderr: 'pipe',
-      stdout: 'pipe',
-      url: environment.demoWebOrigin,
-    },
+    }),
+    // Explicitly off, whatever a developer's .env says: this is the ordinary `npm run dev` page.
+    webApp(environment.webOrigin, environment.apiOrigin, { VITE_LOCAL_DEMO_ENABLED: 'false' }),
+    // The same app with a placeholder public Mapbox token, for the Coach map tests. The token is not valid for
+    // any provider account; those tests answer or abort every provider request in the browser.
+    webApp(environment.mapWebOrigin, environment.apiOrigin, { VITE_MAPBOX_ACCESS_TOKEN: mapPlaceholderToken }),
+    // The same app as `npm run demo:up` serves it: a dev server with the demo sign-in buttons turned on.
+    webApp(environment.demoWebOrigin, environment.apiOrigin, { VITE_LOCAL_DEMO_ENABLED: 'true' }),
     {
       // OpenID Connect stack. The provider (oidc-provider with its development login pages) ...
       command: 'node --import tsx support/oidc-provider-server.ts',
@@ -160,16 +100,7 @@ export default defineConfig({
       stdout: 'pipe',
       url: `${oidc.apiOrigin}/api/health/ready`,
     },
-    {
-      // ... and the web app on its own origin.
-      command: `npx vite --port ${new URL(oidc.webOrigin).port}`,
-      cwd: resolve(repositoryRoot, 'apps', 'web'),
-      env: { API_PROXY_TARGET: oidc.apiOrigin, VITE_LOCAL_DEMO_ENABLED: 'false' },
-      reuseExistingServer: false,
-      stderr: 'pipe',
-      stdout: 'pipe',
-      url: oidc.webOrigin,
-    },
+    // ... and the web app on its own origin.
+    webApp(oidc.webOrigin, oidc.apiOrigin, { VITE_LOCAL_DEMO_ENABLED: 'false' }),
   ],
-  workers: 1,
 });
