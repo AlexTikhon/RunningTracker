@@ -63,13 +63,19 @@ export default defineConfig({
       command: 'node --import tsx src/entrypoint.ts',
       cwd: resolve(repositoryRoot, 'apps', 'api'),
       env: {
-        // The map origin signs out through the same API.
-        ALLOWED_ORIGINS: `${environment.webOrigin},${environment.mapWebOrigin}`,
+        // The map and demo origins sign in and out through the same API.
+        ALLOWED_ORIGINS: `${environment.webOrigin},${environment.mapWebOrigin},${environment.demoWebOrigin}`,
         APP_ENV: 'test',
         DATABASE_URL: environment.runtimeDatabaseUrl,
         LIVE_TRACK_CURSOR_SIGNING_KEY: liveTrackCursorSigningKey,
         LOCAL_AUTH_ENABLED: 'true',
-        LOCAL_AUTH_USER_IDS: `${environment.runnerUserId},${environment.coachUserId}`,
+        // The suite users, and the demo people the demo sign-in buttons send (demoScenario creates them).
+        LOCAL_AUTH_USER_IDS: [
+          environment.runnerUserId,
+          environment.coachUserId,
+          environment.demoRunnerUserId,
+          environment.demoCoachUserId,
+        ].join(','),
         MAINTENANCE_DATABASE_URL: environment.maintenanceDatabaseUrl,
         PORT: apiPort,
         // The in-process deterministic interpreter: describing a search in words works with no provider and no
@@ -87,7 +93,8 @@ export default defineConfig({
     {
       command: `npx vite --port ${webPort}`,
       cwd: resolve(repositoryRoot, 'apps', 'web'),
-      env: { API_PROXY_TARGET: environment.apiOrigin },
+      // Explicitly off, whatever a developer's .env says: this is the ordinary `npm run dev` page.
+      env: { API_PROXY_TARGET: environment.apiOrigin, VITE_LOCAL_DEMO_ENABLED: 'false' },
       reuseExistingServer: false,
       stderr: 'pipe',
       stdout: 'pipe',
@@ -103,6 +110,16 @@ export default defineConfig({
       stderr: 'pipe',
       stdout: 'pipe',
       url: environment.mapWebOrigin,
+    },
+    {
+      // The same app as `npm run demo:up` serves it: a dev server with the demo sign-in buttons turned on.
+      command: `npx vite --port ${new URL(environment.demoWebOrigin).port}`,
+      cwd: resolve(repositoryRoot, 'apps', 'web'),
+      env: { API_PROXY_TARGET: environment.apiOrigin, VITE_LOCAL_DEMO_ENABLED: 'true' },
+      reuseExistingServer: false,
+      stderr: 'pipe',
+      stdout: 'pipe',
+      url: environment.demoWebOrigin,
     },
     {
       // OpenID Connect stack. The provider (oidc-provider with its development login pages) ...
@@ -147,7 +164,7 @@ export default defineConfig({
       // ... and the web app on its own origin.
       command: `npx vite --port ${new URL(oidc.webOrigin).port}`,
       cwd: resolve(repositoryRoot, 'apps', 'web'),
-      env: { API_PROXY_TARGET: oidc.apiOrigin },
+      env: { API_PROXY_TARGET: oidc.apiOrigin, VITE_LOCAL_DEMO_ENABLED: 'false' },
       reuseExistingServer: false,
       stderr: 'pipe',
       stdout: 'pipe',

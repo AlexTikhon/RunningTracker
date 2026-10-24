@@ -129,10 +129,12 @@ export function resolveDemoConfiguration({ dotenv = {}, example = {}, processEnv
     PORT: String(demoPorts.api),
     RUN_SEARCH_AI_ENABLED: 'false',
     SESSION_COOKIE_SECURE: 'false',
+    // The web app's "Demo runner" and "Demo coach" buttons. Vite exposes it to the page; only a dev server shows them.
+    VITE_LOCAL_DEMO_ENABLED: 'true',
   };
   report.push(
     `Demo overrides (children only; .env is not changed): local auth for runner ${demoIds.runner} and coach ` +
-      `${demoIds.coach}, API on ${demoApiUrl}, web on ${demoAppUrl}, search interpreter off`,
+      `${demoIds.coach}, demo sign-in buttons on, API on ${demoApiUrl}, web on ${demoAppUrl}, search interpreter off`,
   );
 
   const databasePort = first === undefined ? undefined : Number(first.port);

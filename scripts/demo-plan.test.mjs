@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -15,6 +17,18 @@ test('the demo identities are distinct canonical UUIDs', () => {
   for (const value of values) {
     assert.match(value, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   }
+});
+
+// The web app cannot import this Node script, and the browser suite is TypeScript without allowJs, so both repeat the
+// two IDs. They must stay the ones demo:seed writes and demo:up allows.
+test('the web app demo buttons and the browser suite use these same demo identities', () => {
+  const root = join(import.meta.dirname, '..');
+  const web = readFileSync(join(root, 'apps', 'web', 'src', 'demo-sign-in.ts'), 'utf8');
+  assert.match(web, new RegExp(`coach: '${demoIds.coach}'`));
+  assert.match(web, new RegExp(`runner: '${demoIds.runner}'`));
+  const e2e = readFileSync(join(root, 'tests', 'e2e', 'support', 'environment.ts'), 'utf8');
+  assert.match(e2e, new RegExp(`const demoCoachUserId = '${demoIds.coach}'`));
+  assert.match(e2e, new RegExp(`const demoRunnerUserId = '${demoIds.runner}'`));
 });
 
 test('the route is a deterministic loop of consecutive points two seconds apart', () => {

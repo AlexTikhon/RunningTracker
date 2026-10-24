@@ -81,52 +81,80 @@ async function deleteOrganizations(client: pg.Client, orgIds: readonly string[])
   await client.query('DELETE FROM organizations WHERE id = ANY($1::uuid[])', ids);
 }
 
-// Organizations whose members are all one of the two fixed suite users. Only this suite creates such an
+export interface ScenarioPeople {
+  readonly coachUserId: string;
+  readonly runnerUserId: string;
+}
+
+// The fixed people this suite owns in the _test database, a runner and a coach per pair: the suite users, and the
+// demo people the web app's demo sign-in buttons send. Each pair has its own stored external identities.
+function suitePairs(environment: E2eEnvironment): ReadonlyArray<ScenarioPeople & { readonly identityPrefix: string }> {
+  return [
+    { coachUserId: environment.coachUserId, identityPrefix: 'e2e|', runnerUserId: environment.runnerUserId },
+    { coachUserId: environment.demoCoachUserId, identityPrefix: 'e2e|demo-', runnerUserId: environment.demoRunnerUserId },
+  ];
+}
+
+function suitePair(environment: E2eEnvironment, people: ScenarioPeople) {
+  const pair = suitePairs(environment).find(
+    (candidate) => candidate.runnerUserId === people.runnerUserId && candidate.coachUserId === people.coachUserId,
+  );
+  if (pair === undefined) {
+    throw new Error('A scenario can only be made of one of the fixed suite pairs');
+  }
+  return pair;
+}
+
+// Organizations whose members are all one of the two people of a pair. Only this suite creates such an
 // organization (a scenario whose cleanup never ran, for instance after the process was killed), so they
 // can be removed without touching another test's or a developer's rows. An organization with any other
-// member, and an organization with no member, is never matched.
-async function findStaleScenarioOrganizations(
-  client: pg.Client,
-  environment: E2eEnvironment,
-): Promise<string[]> {
+// member, and an organization with no member, is never matched; nor is one of the other pair.
+async function findStaleScenarioOrganizations(client: pg.Client, people: ScenarioPeople): Promise<string[]> {
   const result = await client.query<{ org_id: string }>(
     `SELECT org_id FROM memberships
      GROUP BY org_id
      HAVING bool_and(user_id IN ($1, $2))`,
-    [environment.runnerUserId, environment.coachUserId],
+    [people.runnerUserId, people.coachUserId],
   );
   return result.rows.map((row) => row.org_id);
 }
 
-// Removes what a killed or crashed earlier run left behind. The shared runner may have only one active
-// run across all organizations (runs_one_active_per_user_idx), so one leaked recording run would make every
-// later createRun fail with a conflict.
-export async function removeStaleScenarioData(environment: E2eEnvironment): Promise<void> {
+// Removes what a killed or crashed earlier run left behind for one pair (the suite users unless told otherwise).
+// The shared runner may have only one active run across all organizations (runs_one_active_per_user_idx), so one
+// leaked recording run would make every later createRun fail with a conflict.
+export async function removeStaleScenarioData(
+  environment: E2eEnvironment,
+  people: ScenarioPeople = environment,
+): Promise<void> {
   await withOwnerTransaction(environment, async (client) => {
-    await deleteOrganizations(client, await findStaleScenarioOrganizations(client, environment));
+    await deleteOrganizations(client, await findStaleScenarioOrganizations(client, people));
   });
 }
 
-// A fresh organization with an active runner and an active coach. The two users are shared by the whole
-// suite, so they are inserted with ON CONFLICT DO NOTHING and never removed per scenario.
-export async function createScenarioData(environment: E2eEnvironment): Promise<ScenarioData> {
+// A fresh organization with an active runner and an active coach, by default the suite users. The users of a pair
+// are shared by the whole suite, so they are inserted with ON CONFLICT DO NOTHING and never removed per scenario.
+export async function createScenarioData(
+  environment: E2eEnvironment,
+  people: ScenarioPeople = environment,
+): Promise<ScenarioData> {
+  const pair = suitePair(environment, people);
   const data: ScenarioData = {
-    coachUserId: environment.coachUserId,
+    coachUserId: pair.coachUserId,
     orgId: randomUUID(),
-    runnerUserId: environment.runnerUserId,
+    runnerUserId: pair.runnerUserId,
   };
 
   // Sweeps first so a test never depends on a clean database. This also removes the organization of any
-  // scenario still open in this process, so scenarios must not overlap (one worker, see
-  // playwright.config.ts).
-  await removeStaleScenarioData(environment);
+  // scenario of the same pair still open in this process, so such scenarios must not overlap (one worker, see
+  // playwright.config.ts). A scenario of the other pair is left alone.
+  await removeStaleScenarioData(environment, pair);
 
   await withOwnerTransaction(environment, async (client) => {
     await client.query(
       `INSERT INTO users (id, external_identity)
-       VALUES ($1, 'e2e|runner'), ($2, 'e2e|coach')
+       VALUES ($1, $3), ($2, $4)
        ON CONFLICT DO NOTHING`,
-      [data.runnerUserId, data.coachUserId],
+      [data.runnerUserId, data.coachUserId, `${pair.identityPrefix}runner`, `${pair.identityPrefix}coach`],
     );
     await client.query('INSERT INTO organizations (id) VALUES ($1)', [data.orgId]);
     await client.query(
@@ -319,17 +347,21 @@ export async function removeScenarioData(environment: E2eEnvironment, data: Scen
   await withOwnerTransaction(environment, (client) => deleteOrganizations(client, [data.orgId]));
 }
 
-// Used by the Playwright global teardown. Sweeps stale scenario organizations, then deletes only the two
-// fixed suite users. A suite user that still has a membership in an organization with another member is
-// not this suite's data: it is reported by organization id, not worked around by deleting rows this call
-// did not create.
+// Used by the Playwright global teardown. Sweeps stale scenario organizations of each pair, then deletes only
+// the fixed suite users of both pairs. A suite user that still has a membership in an organization with another
+// member is not this suite's data: it is reported by organization id, not worked around by deleting rows this
+// call did not create.
 export async function removeSuiteUsers(environment: E2eEnvironment): Promise<void> {
+  const pairs = suitePairs(environment);
+  const userIds = pairs.flatMap((pair) => [pair.runnerUserId, pair.coachUserId]);
   await withOwnerTransaction(environment, async (client) => {
-    await deleteOrganizations(client, await findStaleScenarioOrganizations(client, environment));
+    for (const pair of pairs) {
+      await deleteOrganizations(client, await findStaleScenarioOrganizations(client, pair));
+    }
 
     const remaining = await client.query<{ org_id: string }>(
-      'SELECT DISTINCT org_id FROM memberships WHERE user_id IN ($1, $2)',
-      [environment.runnerUserId, environment.coachUserId],
+      'SELECT DISTINCT org_id FROM memberships WHERE user_id = ANY($1::uuid[])',
+      [userIds],
     );
     if (remaining.rows.length > 0) {
       throw new Error(
@@ -338,10 +370,7 @@ export async function removeSuiteUsers(environment: E2eEnvironment): Promise<voi
       );
     }
 
-    await client.query('DELETE FROM users WHERE id IN ($1, $2)', [
-      environment.runnerUserId,
-      environment.coachUserId,
-    ]);
+    await client.query('DELETE FROM users WHERE id = ANY($1::uuid[])', [userIds]);
   });
 }
 

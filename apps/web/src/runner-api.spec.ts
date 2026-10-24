@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  createLocalSession,
   createRun,
   endSession,
   grantRunShare,
@@ -110,6 +111,43 @@ describe('runner API', () => {
     );
 
     await expect(endSession(csrf)).rejects.toMatchObject({ code: 'CSRF_DENIED', status: 403 });
+  });
+
+  it('asks for a local development session with only the user ID, and ignores what the answer says', async () => {
+    const userId = '11111111-1111-4111-8111-111111111111';
+    const signal = new AbortController().signal;
+    // Not a session the caller could use: it must read the session with GET /api/session afterwards.
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ anything: true }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const announced = vi.fn();
+    const unsubscribe = onAuthenticationRequired(announced);
+
+    await expect(createLocalSession(userId, signal)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith('/api/session', {
+      body: JSON.stringify({ userId }),
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      method: 'POST',
+      signal: expect.any(AbortSignal) as AbortSignal,
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'no', requestId: runId } }), { status: 401 }));
+    await expect(createLocalSession(userId, signal)).rejects.toMatchObject({ code: 'AUTH_REQUIRED', status: 401 });
+    expect(announced).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it.each([
+    [404, 'ROUTE_NOT_FOUND'],
+    [403, 'ORIGIN_DENIED'],
+    [403, 'LOCAL_IDENTITY_DENIED'],
+  ])('reports a refused local session (%i %s) as an API error', async (status, code) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ error: { code, message: 'no', requestId: runId } }), { status })),
+    );
+
+    await expect(createLocalSession(runId, new AbortController().signal)).rejects.toMatchObject({ code, status });
   });
 
   it('loads revision-bound archive metadata through the canonical period query', async () => {

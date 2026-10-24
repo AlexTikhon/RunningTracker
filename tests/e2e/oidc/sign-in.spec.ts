@@ -34,6 +34,9 @@ test.describe('OpenID Connect sign-in in a real browser', () => {
 
     await expect(page.getByText('Sign in required')).toBeVisible();
     await expect(page.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/api/auth/login');
+    // Not a demo server: no demo sign-in buttons.
+    await expect(page.getByRole('region', { name: 'Local demo sign-in' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^Demo / })).toHaveCount(0);
 
     const origin = environment.oidc.webOrigin;
     const session = await page.request.get(`${origin}/api/session`);

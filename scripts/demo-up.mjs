@@ -207,7 +207,9 @@ The demo is running.
   Runner:  ${demoIds.runner}
   Coach:   ${demoIds.coach}
 
-Sign in: docs/runbooks/demo.md, section 3 (a console snippet; there is no sign-in page for the demo).
+Sign in: open the app and press "Demo runner" or "Demo coach" (docs/runbooks/demo.md, section 3).
+  For both at once, use two browser profiles or an ordinary and a private window: tabs and windows
+  of one profile share the session cookie, so a second tab is the same person.
 Play the runner in another terminal: npm run demo:run
 
 Ctrl+C stops the API and the web app. PostgreSQL keeps running with its data (npm run db:down stops it).

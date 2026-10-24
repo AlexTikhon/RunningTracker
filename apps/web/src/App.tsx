@@ -5,6 +5,8 @@ import { loadHealth, type HealthSnapshot } from './health.js';
 import { ArchiveScreen } from './ArchiveScreen.js';
 import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
+import { localDemoEnabled } from './demo-sign-in.js';
+import { DemoSignIn } from './DemoSignIn.js';
 import { performFinishedRunClear } from './finished-run-clear.js';
 import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
 import type { CaptureSourceKind } from './capture-source-kind.js';
@@ -48,6 +50,10 @@ type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
 type ActiveView = 'archive' | 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
+
+// The local demo's sign-in buttons, only on a dev server started by `npm run demo:up`. DEV is also tested here, where
+// a production build replaces it with false, so the bundler drops the demo code and its identities altogether.
+const localDemo = import.meta.env.DEV && localDemoEnabled(import.meta.env);
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
@@ -809,6 +815,10 @@ export function App() {
       </div>
 
       {session.status === 'required' && <SignInNotice failure={signInFailure} message={session.message} />}
+      {/* Only while signed out: choosing another demo person always goes through Sign out first. */}
+      {localDemo && session.status === 'required' && (
+        <DemoSignIn onSignedIn={refreshSession} sessionUnknown={session.reason === 'unreachable'} />
+      )}
 
       <div hidden={activeView !== 'runner'}>
         <RunnerView

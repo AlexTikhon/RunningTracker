@@ -77,25 +77,26 @@ export function useRunnerSession(onSuspend: () => void, onSignedOut: () => void)
   // What an answer means is decided in session-revalidation.ts. Only an authoritative refusal, an expiry the page
   // already knows about, or having nothing confirmed to keep ends the session; an unreadable answer leaves the
   // session, the run, the writer lease and every queued request exactly as they were and only records that the
-  // server could not be asked.
-  const refreshSession = useCallback(async () => {
+  // server could not be asked. Resolves to whether the page holds a confirmed session once the check is done (the demo
+  // sign-in asks; nothing else needs it).
+  const refreshSession = useCallback(async (): Promise<boolean> => {
     const result = await (checker.current ??= new SessionChecker(loadSession)).check();
     const transition = decideSessionTransition(result, currentSession.current, Date.now());
     switch (transition.kind) {
       case 'ignore':
-        return;
+        break;
       case 'end':
         suspend(transition.reason);
-        return;
+        break;
       case 'degrade':
         setVerification({ retryAfterMs: transition.retryAfterMs, status: 'unavailable' });
-        return;
+        break;
       case 'confirm': {
         const next = transition.session;
         setVerification(confirmedVerification);
         const previous = currentSession.current;
         if (previous?.identity.userId === next.identity.userId && previous.expiresAt === next.expiresAt
-          && previous.csrf.token === next.csrf.token && !lifetime.current?.signal.aborted) return;
+          && previous.csrf.token === next.csrf.token && !lifetime.current?.signal.aborted) break;
         lifetime.current?.abort();
         onSuspend();
         lifetime.current = new AbortController();
@@ -104,6 +105,7 @@ export function useRunnerSession(onSuspend: () => void, onSignedOut: () => void)
         setSession({ session: next, signal: lifetime.current.signal, status: 'ready' });
       }
     }
+    return currentSession.current !== null;
   }, [onSuspend, suspend]);
 
   // Ends the server session first and only then the local one: a failed request leaves the person signed in,

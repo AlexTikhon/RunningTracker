@@ -13,6 +13,7 @@ import {
   isProcessAlive,
   parseComposePs,
   probePort,
+  readEnvFile,
   resolveDemoConfiguration,
   runStep,
   satisfiesRange,
@@ -90,10 +91,13 @@ test('the demo overrides enable local auth for the two demo people only and keep
       LOCAL_AUTH_USER_IDS: '11111111-1111-4111-8111-111111111111',
       METRICS_HOST: '0.0.0.0',
       RUN_SEARCH_AI_ENABLED: 'true',
+      VITE_LOCAL_DEMO_ENABLED: 'false',
     },
     example,
     processEnvironment: { API_HOST: '0.0.0.0', APP_ENV: 'test', API_PROXY_TARGET: 'http://example.org' },
   });
+  // The web app's demo sign-in buttons, for demo:up's Vite process only.
+  assert.equal(environment.VITE_LOCAL_DEMO_ENABLED, 'true');
   assert.equal(environment.LOCAL_AUTH_ENABLED, 'true');
   assert.equal(environment.LOCAL_AUTH_USER_IDS, `${demoIds.runner},${demoIds.coach}`);
   assert.equal(environment.API_HOST, '127.0.0.1');
@@ -104,6 +108,14 @@ test('the demo overrides enable local auth for the two demo people only and keep
   assert.equal(environment.APP_ENV, 'development');
   assert.equal(environment.RUN_SEARCH_AI_ENABLED, 'false');
   assert.equal(environment.SESSION_COOKIE_SECURE, 'false');
+});
+
+test('the demo sign-in flag is an override for the children, never something read from .env or the environment', () => {
+  const { environment, report } = resolveDemoConfiguration({ dotenv: {}, example, processEnvironment: {} });
+  assert.equal(environment.VITE_LOCAL_DEMO_ENABLED, 'true');
+  assert.ok(report.some((line) => line.includes('demo sign-in buttons')), JSON.stringify(report));
+  const plain = readEnvFile(join(import.meta.dirname, '..', '.env.example'));
+  assert.equal(plain.VITE_LOCAL_DEMO_ENABLED, undefined, '.env.example must not turn the demo buttons on for npm run dev');
 });
 
 test('the demo refuses any database but the local running_tracker one, and production', () => {

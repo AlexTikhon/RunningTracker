@@ -27,6 +27,12 @@ export interface E2eEnvironment {
   readonly ownerDatabaseUrl: string;
   readonly runnerUserId: string;
   readonly coachUserId: string;
+  // The fixed demo people the web app's demo sign-in buttons send (scripts/demo-plan.mjs). In this suite they are
+  // suite users of the _test database like the two above, created by the demoScenario fixture.
+  readonly demoRunnerUserId: string;
+  readonly demoCoachUserId: string;
+  // The same app served with VITE_LOCAL_DEMO_ENABLED=true, as `npm run demo:up` serves it, so it shows those buttons.
+  readonly demoWebOrigin: string;
   // The same app served with a placeholder public Mapbox token, so the Coach map code path runs. Tests on this
   // origin intercept every provider request inside the browser; nothing is sent to Mapbox.
   readonly mapWebOrigin: string;
@@ -36,6 +42,9 @@ export interface E2eEnvironment {
 // value created there would differ between the API process and the tests.
 const runnerUserId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeee0001';
 const coachUserId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeee0002';
+// Not chosen here: the web app sends these, so they are demoIds of scripts/demo-plan.mjs (its test checks the copy).
+const demoRunnerUserId = 'dddddddd-dddd-4ddd-8ddd-dddddddd0001';
+const demoCoachUserId = 'dddddddd-dddd-4ddd-8ddd-dddddddd0002';
 
 interface DatabaseTarget {
   readonly host: string;
@@ -96,6 +105,9 @@ export function resolveE2eEnvironment(source: Record<string, string | undefined>
   return {
     apiOrigin: 'http://127.0.0.1:3100',
     coachUserId,
+    demoCoachUserId,
+    demoRunnerUserId,
+    demoWebOrigin: 'http://127.0.0.1:5276',
     maintenanceDatabaseUrl: maintenance.url,
     mapWebOrigin: 'http://127.0.0.1:5275',
     oidc: {

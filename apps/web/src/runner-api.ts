@@ -151,6 +151,25 @@ export async function loadOrganizations(signal?: AbortSignal): Promise<string[]>
     .items.map((item) => item.organizationId);
 }
 
+// The local demo's development session (demo-sign-in.ts). The API has this route only with LOCAL_AUTH_ENABLED, never
+// in production, and only for the IDs in LOCAL_AUTH_USER_IDS. The answer sets the session cookie; its body is not
+// used, because the caller then reads the session with GET /api/session like any other page load. A 401 here is
+// not announced: there is no session yet to end.
+export async function createLocalSession(userId: string, signal: AbortSignal): Promise<void> {
+  const response = await requestJson(
+    '/api/session',
+    {
+      body: JSON.stringify({ userId }),
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      method: 'POST',
+      signal,
+    },
+    { announceUnauthorized: false },
+  );
+  requireSuccess(response);
+}
+
 // Ends the application session on the server; the answer clears the session cookie. This is not a logout at
 // the identity provider (ADR-0046).
 export async function endSession(csrf: CsrfCredentials, signal?: AbortSignal): Promise<void> {

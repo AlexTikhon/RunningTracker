@@ -27,10 +27,25 @@ interface E2eFixtures {
   // A fresh organization with an active runner and coach. Removed after the test whether it passed,
   // failed or timed out: Playwright runs fixture teardown in every case.
   readonly scenario: ScenarioData;
+  // The same for the demo people the web app's demo sign-in buttons send, in the _test database like every other
+  // scenario: never the development database or its seed. It can be used next to `scenario`.
+  readonly demoScenario: ScenarioData;
   readonly organizations: OrganizationFactory;
 }
 
 export const test = base.extend<E2eFixtures>({
+  demoScenario: async ({ environment }, use) => {
+    const data = await createScenarioData(environment, {
+      coachUserId: environment.demoCoachUserId,
+      runnerUserId: environment.demoRunnerUserId,
+    });
+    try {
+      await use(data);
+    } finally {
+      await removeScenarioData(environment, data);
+    }
+  },
+
   // eslint-disable-next-line no-empty-pattern
   environment: async ({}, use) => {
     await use(loadE2eEnvironment());

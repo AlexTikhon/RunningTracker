@@ -33,8 +33,9 @@ each with a deadline:
 | API | `node --import tsx src/entrypoint.ts` in `apps/api` (`npm run dev` without the watcher), ready when `/api/health/ready` answers 200 | 90 s |
 | Web | Vite in `apps/web`, ready when the page and `/api/health/ready` through its proxy answer 200 | 60 s + 15 s |
 
-When both answer it prints the app URL, `http://127.0.0.1:5173`, and the two demo identities. Sign in as in
-section 3, and play the runner with `npm run demo:run` (section 4) in another terminal.
+When both answer it prints the app URL, `http://127.0.0.1:5173`, and the two demo identities. Open the app and press
+**Demo runner** or **Demo coach** (section 3); no developer tools are needed. Play the runner with `npm run demo:run`
+(section 4) in another terminal.
 
 **Configuration.** `demo:up` never writes `.env`. It reads the four database URLs from the environment, then `.env`,
 then `.env.example`, refuses any that is not the plain `running_tracker` database on a loopback host with its
@@ -50,12 +51,13 @@ API_HOST=127.0.0.1          PORT=3000          METRICS_HOST=127.0.0.1
 API_PROXY_TARGET=http://127.0.0.1:3000
 SESSION_COOKIE_SECURE=false
 RUN_SEARCH_AI_ENABLED=false
+VITE_LOCAL_DEMO_ENABLED=true
 ```
 
-So local sign-in works for the demo runner and coach and nobody else, the API and Vite listen on `127.0.0.1` only
-(the database port is already loopback-only in the Compose file), and no AI provider, API key or Mapbox token is
-needed. A `VITE_MAPBOX_ACCESS_TOKEN` in `.env` is still used for the maps. `npm run dev` and every other command keep
-reading `.env` as before.
+So local sign-in works for the demo runner and coach and nobody else, the page shows the two demo sign-in buttons,
+the API and Vite listen on `127.0.0.1` only (the database port is already loopback-only in the Compose file), and no
+AI provider, API key or Mapbox token is needed. A `VITE_MAPBOX_ACCESS_TOKEN` in `.env` is still used for the maps.
+`npm run dev` and every other command keep reading `.env` as before, so a plain `npm run dev` shows no demo buttons.
 
 **Stopping.** Ctrl+C stops the API and Vite, and only them: each is a child of this command, and on Windows a
 console Ctrl+C reaches them directly, so the API runs its own graceful shutdown. Anything still running after
@@ -76,7 +78,8 @@ step's output, stops whatever it had already started and exits 1.
 
 **Limits.**
 
-- There is no sign-in page for the demo: signing in is still the console snippet in section 3.
+- One browser profile is one person at a time (section 3). Showing runner and coach side by side needs two profiles,
+  or an ordinary and a private window.
 - The ports are fixed (3000 and 5173); the demo does not move to free ones.
 - The API runs without a file watcher; restart `demo:up` after changing API code. Vite still reloads the web app.
 - If the `demo:up` process itself is killed (for example from Task Manager) rather than stopped with Ctrl+C, it
@@ -91,7 +94,8 @@ Sections 1 and 2 below are the same thing done by hand.
 ## What this demo is not
 
 - **Sign-in is the development session, not OpenID Connect.** No real identity provider exists for this project, so
-  the demo signs in with `POST /api/session` (local auth, development only, rejected in production). The OpenID
+  the demo buttons sign in with `POST /api/session` (local auth, development only, rejected in production; a
+  production build of the web app does not contain the buttons at all, whatever its environment says). The OpenID
   Connect flow is exercised against an in-process test provider by `npm run test:integration` (the
   `oidc-login` suite) and its production surface by `npm run deploy:verify`; neither is a real provider.
 - **The runner is a script, not the browser.** `npm run demo:run` plays the runner over HTTP with a simulated route.
@@ -119,6 +123,19 @@ migrations to the development database the first time and none the second); the 
 API, Vite and the API's `esbuild` helper were all gone within 1.3 seconds); a restart with the run count unchanged;
 ports 3000 and 5173 held by another process (reported, holder untouched); and an API that fails at startup (reported,
 nothing left running). `.env` was byte-for-byte unchanged throughout. The browser was not used for this either.
+
+The demo sign-in buttons (section 3) were exercised on 2026-10-24 against a real `demo:up` on Windows 11, in headless
+Chromium driven by a script, with two separate browser contexts standing in for two profiles: **Demo runner** and
+**Demo coach** each sent one `POST /api/session` with the fixed ID, were then reported by `GET /api/session` as exactly
+that person, and had organization `…0000` discovered and selected; the runner stayed the runner after the coach signed
+in elsewhere; a second tab of the runner's context was already signed in; the Coach tab opened; Sign out brought the
+buttons back. `.env` was unchanged. In the browser suite, `tests/e2e/demo-sign-in.spec.ts` covers the same flow on a
+dev server with the flag, plus a pending request (both buttons disabled, one request), a failure and a refusal with a
+retry, a late answer after the page moved on, an unanswered session check, and the absence of the buttons without the
+flag; the OpenID Connect project checks they are absent there too. A production build made with
+`VITE_LOCAL_DEMO_ENABLED=true` was byte-identical to one without it and contained neither the buttons nor the demo IDs;
+that check was run by hand and is not part of any suite. Nothing was tried by hand in Firefox, Safari or a real
+second browser profile.
 
 ## 1. Create the demo people
 
@@ -149,11 +166,33 @@ not `localhost`) and start both servers. The API reads `.env` at startup, so res
 npm run dev
 ```
 
+A plain `npm run dev` does not show the demo sign-in buttons of section 3. To have them when starting by hand, set
+`VITE_LOCAL_DEMO_ENABLED=true` for that command only (PowerShell: `$env:VITE_LOCAL_DEMO_ENABLED='true'; npm run dev`;
+other shells: `VITE_LOCAL_DEMO_ENABLED=true npm run dev`), or use the console snippet at the end of section 3.
+
 ## 3. Sign in as the coach
 
-Open `http://127.0.0.1:5173`. The page says "Sign in required"; its Sign in button goes to `/api/auth/login`, which
-does not exist here because OpenID Connect is not configured. Instead, open the browser's developer console on that
-page and run:
+Open `http://127.0.0.1:5173`. The page says "Sign in required" and, under it, shows a **Local demo** panel with two
+buttons. Press **Demo coach**. Both buttons are disabled until the sign-in has finished; the page then asks the server
+for its session exactly as after a reload, and shows the one organization this person belongs to, already selected
+(nothing is typed). Open the Coach tab. The stream opens with no runs.
+
+- **Demo runner** and **Demo coach** are the two fixed people `demo:seed` created (`…0001` and `…0002`). There is no
+  way to type or choose another identity, and the API accepts only those two.
+- The buttons are shown only while nobody is signed in. To change person, press **Sign out** first.
+- If the sign-in fails, the panel says why (for example that local sign-in is off on the API, or that the page was
+  opened as `localhost`) and the buttons work again for a retry.
+- **One browser profile is one person.** Its tabs and windows share the session cookie, so a second tab is the same
+  person, and signing in as the other one there changes who both tabs are. For runner and coach side by side, use two
+  browser profiles, or an ordinary window and a private (incognito) window.
+- The **Sign in** button next to it is the OpenID Connect sign-in. It goes to `/api/auth/login`, which does not
+  exist here because OpenID Connect is not configured.
+
+The buttons appear only on a development server started with `VITE_LOCAL_DEMO_ENABLED=true`, which `npm run demo:up`
+does. A production build never has them, and the API refuses local sign-in in production regardless.
+
+**Console fallback (optional, for diagnosis).** The buttons do exactly what this does from the browser's developer
+console on that page:
 
 ```js
 await fetch('/api/session', {
@@ -163,8 +202,8 @@ await fetch('/api/session', {
 }).then((response) => response.status)   // 201
 ```
 
-Reload. The page shows the one organization this person belongs to, already selected (nothing is typed). Open the Coach tab. The stream opens with no runs. The session cookie is
-`HttpOnly`, so the console cannot read it; that is the point.
+Then reload. The answer's status is the quickest way to tell the causes in the table at the end apart. The session
+cookie is `HttpOnly`, so the console cannot read it; that is the point.
 
 ## 4. Play the runner
 
@@ -196,8 +235,8 @@ runtime but a local empty style); it has not been followed by hand against a rea
 
 ## 4a. Share from the browser instead (optional)
 
-Sign in as the runner (step 3 with `…0001`) in a second browser or a private window, since one browser profile holds one
-session. Keep the coach in the first. In the Runner tab, start a run with the simulator. The **Share this run with a
+Press **Demo runner** in a second browser profile or a private window, since one browser profile holds one session
+(section 3). Keep the coach in the first. In the Runner tab, start a run with the simulator. The **Share this run with a
 coach** panel under the controls lists the organization's active coaches by role and the end of their identifier (no
 names exist), here `Coach …dddd0002`.
 
@@ -236,10 +275,10 @@ npm run demo:seed:search            # the current UTC month, the previous one an
 npm run demo:seed:search -- --month 2026-09   # a specific month
 ```
 
-It writes 67 runs for the demo runner (`…0001`, the same person you signed in as in step 3): 47 of the runner's own in
+It writes 67 runs for the demo runner (`…0001`, the **Demo runner** button): 47 of the runner's own in
 organization `dddddddd-dddd-4ddd-8ddd-dddddddd1000`, eight by two teammates (four shared with the runner, which the
-search must not list), and a second organization `…1001` with the runner's long runs and a stranger's. Sign in as the
-runner (step 3 with `…0001`), open Archive and:
+search must not list), and a second organization `…1001` with the runner's long runs and a stranger's. Sign in with
+**Demo runner** (section 3), open Archive and:
 
 1. Look at **My runs** with the defaults (this month, newest first). The browser's time zone is shown.
 2. Change the minimum to `5`, the maximum to `15`, the sort to *Longest first* and press **Apply filters**. The
@@ -276,7 +315,7 @@ not followed by hand.
 
 ## 6. Sign out
 
-Press **Sign out** in the bar under the title. The page asks the server to end the session, and then shows "Sign in required". Anything the runner had not uploaded stays in this browser for the same person.
+Press **Sign out** in the bar under the title. The page asks the server to end the session, and then shows "Sign in required" with the demo buttons again. Anything the runner had not uploaded stays in this browser for the same person.
 
 The same call from the console, if you prefer:
 
@@ -293,9 +332,13 @@ await fetch('/api/session', { method: 'DELETE', headers: { 'x-csrf-token': csrf.
 | `demo:up` says a port is in use | Another program (often an earlier `npm run dev`) holds 3000 or 5173; stop it yourself, `demo:up` will not |
 | `demo:up` says another demo:up is running | One is running in another terminal; use it or press Ctrl+C there. If none is, delete `.local/demo/demo-up.lock` |
 | `demo:up` reports a configuration problem | A database URL in the environment or `.env` is not the local `running_tracker` database with its expected role, or `APP_ENV=production` |
-| Sign-in snippet answers 404 | `LOCAL_AUTH_ENABLED` is not `true`, or the API was not restarted after editing `.env` |
-| Sign-in snippet answers 403 `ORIGIN_DENIED` | The page was opened as `localhost`; the allowed origin is exactly `http://127.0.0.1:5173` |
-| Sign-in snippet answers 403 `LOCAL_IDENTITY_DENIED` | The user ID is not in `LOCAL_AUTH_USER_IDS` |
+| No **Local demo** panel on the signed-out page | The web app was not started by `demo:up` (or with `VITE_LOCAL_DEMO_ENABLED=true`), or it is a production build; a page that is signed in shows no buttons either |
+| The demo buttons are disabled with "Press Retry session first" | The last session check got no answer, so the page cannot tell whether someone is signed in; press **Retry session** once the API answers |
+| The panel says local sign-in is off (the snippet answers 404) | `LOCAL_AUTH_ENABLED` is not `true`, or the API was not restarted after editing `.env` |
+| The panel says the address is not accepted (403 `ORIGIN_DENIED`) | The page was opened as `localhost`; the allowed origin is exactly `http://127.0.0.1:5173` |
+| The panel says the identity is not allowed (403 `LOCAL_IDENTITY_DENIED`) | The user ID is not in `LOCAL_AUTH_USER_IDS` |
+| The panel says the session check did not confirm the sign-in | The browser did not keep the cookie, typically because the API sends `Secure` cookies over plain http (`SESSION_COOKIE_SECURE` is not `false`); `demo:up` turns that off |
+| The other window or tab changed person too | They share one browser profile and so one session cookie; use a second profile or a private window |
 | `demo:run` says it cannot reach the API | The API is not running at `http://127.0.0.1:3000` (`--api-url` changes it; only loopback hosts are accepted) |
 | `demo:run` answers 403 `ORG_ACCESS_DENIED` | `demo:seed` was not run against the database the API uses |
 | The summary is not published within 150 s | The API process is not running its maintenance jobs, or the database is not the one the script's run was written to |
