@@ -2754,6 +2754,71 @@ the pending deletion across searches, but its confirmation is shown only in the 
 | `npm run verify` | exit 0. Scripts 83; API 1332; web 801 = 799 + 2; contracts 132; fixtures 14; simulator 3; build |
 | `git diff --check` | clean |
 
+## Local demo: a two-minute browser simulator (2026-10-28)
+
+Web app, E2E and the demo runbook only, uncommitted on top of `d4a27b2`. The working tree was clean at the start:
+the pending-delete sharing fix above is already committed as `d4a27b2`, so there was no uncommitted change to
+preserve. No backend, API, SQL, migration, contract, authentication, dependency, service worker, Mapbox, AI,
+deployment or process-management change. The CLI runner (`npm run demo:run`, `scripts/demo-plan.mjs`) and the shared
+fixtures (`packages/fixtures`, six points per scenario) are unchanged.
+
+**Problem.** The browser Simulator gave six points over ten seconds per capture session. The rehearsal's offline step
+therefore needed a Pause and Resume and a switch to Offline within about a second of the confirmed Resume.
+
+**Behaviour.**
+- Only where `localDemoEnabled` holds (a dev server with `VITE_LOCAL_DEMO_ENABLED=true`, the guard of the demo sign-in
+  buttons), the Capture source menu offers **Simulator · local demo · about 2 min** instead of
+  **Simulator · normal · seed 1**. Each capture session, from Start or Resume, gets 60 measurements: one at once, then
+  one every two seconds, 118 s from first to last. After the last one Capture reads `complete`, and the run stays
+  `recording`. Finish, Pause, a reload, a lost writer and a lost session end it early through the existing paths.
+- The route is one lap of a 57 m loop near Warsaw in 60 even steps of about 6 m (3 m/s), with accuracy 4–6 m. Each
+  timestamp is the session's start plus 2 s per point. The last point is one step from the first, so a session that
+  starts again after a complete one does not jump. A session that starts after Pause starts the lap again from its
+  first point, in a new segment, as the six-point simulator did.
+- `DemoSimulatorCaptureSource` (`apps/web/src/demo-simulator.ts`) supplies measurements only. The existing
+  `CaptureController` proves the writer lease, allocates the segment and appends each point through
+  `appendPointForWriter`, which assigns the sequence number; the existing upload worker sends them. The stored choice
+  is still `'simulator'`; no storage change. Stopping a subscription clears all its pending timers.
+- Ordinary development (`npm run dev`), the full browser suite's main page and production keep the six-point
+  simulator. `App.tsx` chooses the source with the same `localDemo` constant as the sign-in buttons. A production
+  build replaces it with `false`, so the demo source is not in the bundle.
+
+**Files.** New: `apps/web/src/demo-simulator.ts`, `demo-simulator.spec.ts`, `tests/e2e/demo-simulator.spec.ts`.
+Changed: `App.tsx` (`createSimulatorSource`, and the menu label from the source it creates), `RunnerView.tsx` (a
+`simulatorLabel` prop instead of the fixed option text), `App.spec.tsx`, `RunnerView.spec.tsx`,
+`tests/e2e/support/runner-page.ts` (`open` takes an optional origin; `/` by default, so existing callers are
+unchanged) and `docs/runbooks/demo.md`.
+
+**Runbook.** The rehearsal now uses the demo simulator: Start, confirm Capture reads `capturing`, choose Offline in
+DevTools with no Pause or Resume, watch Upload's pending count grow, go back online and watch it drain while the
+coach's track catches up. Step 8 says Finish ends capture early. The steps give no exact point counts or revisions.
+The 2026-10-24 results are kept and labelled as the earlier procedure, and the runbook says the new steps have not been
+rehearsed against `demo:up`.
+
+**Executed** (Windows 11, Node 24, Docker Desktop, local PostGIS, `_test` database; Playwright from PowerShell).
+
+| Check | Result |
+|---|---|
+| `demo-simulator.spec.ts` (web, fake timers) | 14 passed: 60 measurements 2 s apart, strictly increasing from the start; steps 5.5–6.5 m, a closed loop, 55–60 m from the centre, 60 distinct points; no `seq` or `segmentId`; deterministic; first at 0 ms, the second at 2000 ms and not 1999; complete exactly once and only after the 60th; nothing after stop, or after a stop from inside a measurement; a separate route per subscription; the default timers called with the global object. Through the real `CaptureController` with a numbering storage stand-in: 60 appends with the proven lease and segment, sequences 1–60 from storage, `complete` once; a stop after 11 points and a lost writer after 3 end capture with no timers left |
+| `App.spec.tsx` gating (+5) | the demo label with `DEV` and the flag `true`; the six-point label without the flag, with `false`, with `TRUE`, and with `DEV` false |
+| `npm run verify` | first run failed at lint (four errors in the new spec's storage mocks); fixed. Second run: exit 0. Scripts 83; API 1332; web 820 = 801 + 19 (14 + 5); contracts 132; fixtures 14; simulator 3; build |
+| Production bundle, built without and with `VITE_LOCAL_DEMO_ENABLED=true` (scratch scan, exact strings) | byte-identical file hashes; "local demo", "about 2 min", "Demo runner" and the demo IDs absent; the six-point label template present |
+| `npx playwright test demo-simulator.spec.ts --project=chromium` (demo origin 5276, `demoScenario`) | 1 passed (28.1 s); `--repeat-each=3` 3 passed, 0 flaky (27.9–28.0 s each). The test checks: the option label; more than 6 captured and still `capturing`; offline with no Pause or Resume, pending growing, the server count unchanged and capture still `capturing`; reconnected, drained, unique and gap-free from seq 1, one segment, still capturing; Finish before the end, Capture `idle`, fewer than 60 points, all gap-free; 4.5 s later nothing more on the server |
+| The same test with the six-point source on the demo origin (temporary edit, reverted) | failed as expected: the captured count stayed at 6 |
+| `demo-sign-in`, `record`, `reload-offline`, `second-tab` (Chromium) | 12 passed (1.9 min) |
+| `git diff --check` (new files included with `git add -N`, then reset) | clean |
+
+**Not run / limits.**
+- Not run: the full browser suite (`npm run test:e2e`, now 115 tests with `chromium-oidc`), Firefox, the pre-demo
+  smoke and the integration suite. The new spec is not in the smoke or the `firefox-core` allowlist, so `test:e2e:smoke` still exercises only
+  the six-point simulator.
+- The new rehearsal was not driven against `npm run demo:up`, by script or by hand. The DevTools throttling menu was
+  not used; the browser test uses Playwright's `setOffline`.
+- The browser test covers about 30 s of the two minutes. Exhaustion after 60 points is proven with fake timers only.
+- After Pause and Resume, the demo route starts its lap again in a new segment. The coach's track is broken there, as
+  it was with the six-point simulator.
+- Timers in a hidden tab may be throttled by the browser. The simulator is meant for a visible, foreground tab.
+
 New tests:
 - `RunSearchResults.spec.tsx` +2: with `open: null` and `pendingRunId` set, the pending run's Manage sharing is
   disabled, the other run's is not, both Delete run buttons are disabled and no confirmation is shown; with nothing

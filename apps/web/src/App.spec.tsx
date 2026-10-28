@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App.js';
 
@@ -35,5 +35,41 @@ describe('App', () => {
 
     expect(markup).toContain('Checking session');
     expect(markup).not.toContain('Sign out');
+  });
+});
+
+describe('App simulator choice', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  // The choice is made when the module loads, from the same guard as the demo sign-in buttons, so each case loads a
+  // fresh copy of App under its own environment.
+  async function markupWith(env: { DEV: boolean; VITE_LOCAL_DEMO_ENABLED?: string }): Promise<string> {
+    vi.stubEnv('DEV', env.DEV);
+    if (env.VITE_LOCAL_DEMO_ENABLED !== undefined) vi.stubEnv('VITE_LOCAL_DEMO_ENABLED', env.VITE_LOCAL_DEMO_ENABLED);
+    vi.resetModules();
+    const { App: FreshApp } = await import('./App.js');
+    return renderToStaticMarkup(<FreshApp />);
+  }
+
+  it('offers the two-minute demo simulator on a dev server with the local demo flag', async () => {
+    const markup = await markupWith({ DEV: true, VITE_LOCAL_DEMO_ENABLED: 'true' });
+
+    expect(markup).toContain('<option value="simulator">Simulator · local demo · about 2 min</option>');
+    expect(markup).not.toContain('Simulator · normal · seed 1');
+  });
+
+  it.each([
+    { DEV: true },
+    { DEV: true, VITE_LOCAL_DEMO_ENABLED: 'false' },
+    { DEV: true, VITE_LOCAL_DEMO_ENABLED: 'TRUE' },
+    { DEV: false, VITE_LOCAL_DEMO_ENABLED: 'true' },
+  ])('keeps the six-point seeded simulator otherwise (%o)', async (env) => {
+    const markup = await markupWith(env);
+
+    expect(markup).toContain('<option value="simulator">Simulator · normal · seed 1</option>');
+    expect(markup).not.toContain('local demo');
   });
 });

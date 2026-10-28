@@ -77,6 +77,7 @@ function render(
       rejected={{ canDiscard: true, canExport: true, onDiscard: noop, onExport: noop }}
       runner={runner}
       sessionReady
+      simulatorLabel="Simulator · normal · seed 1"
       storage={{ status: 'ready' }}
       writer={writer}
     />,

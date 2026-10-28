@@ -7,8 +7,9 @@ import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { localDemoEnabled } from './demo-sign-in.js';
 import { DemoSignIn } from './DemoSignIn.js';
+import { DemoSimulatorCaptureSource } from './demo-simulator.js';
 import { performFinishedRunClear } from './finished-run-clear.js';
-import { GeolocationCaptureSource, SimulatorCaptureSource } from './capture-source.js';
+import { GeolocationCaptureSource, SimulatorCaptureSource, type CaptureSource } from './capture-source.js';
 import type { CaptureSourceKind } from './capture-source-kind.js';
 import { organizationLabel, organizationPrompt } from './organization-selection.js';
 import { OrganizationPicker } from './OrganizationPicker.js';
@@ -54,6 +55,14 @@ const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 // The local demo's sign-in buttons, only on a dev server started by `npm run demo:up`. DEV is also tested here, where
 // a production build replaces it with false, so the bundler drops the demo code and its identities altogether.
 const localDemo = import.meta.env.DEV && localDemoEnabled(import.meta.env);
+
+// The Simulator choice: in the local demo a two-minute loop, so the offline step has time; everywhere else the
+// six-point seeded scenario. Both are stored as 'simulator' and go through the same capture controller.
+function createSimulatorSource(): CaptureSource {
+  return localDemo ? new DemoSimulatorCaptureSource() : new SimulatorCaptureSource({ name: 'normal', seed: 1 });
+}
+
+const simulatorLabel = createSimulatorSource().label;
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
@@ -369,7 +378,7 @@ export function App() {
     };
     const source = captureSourceKind === 'geolocation'
       ? new GeolocationCaptureSource()
-      : new SimulatorCaptureSource({ name: 'normal', seed: 1 });
+      : createSimulatorSource();
     const controller = new CaptureController({
       assertOwnedLease: async () => await writerCoordinator.current?.assertOwnedLease() ?? null,
       onPoint: () => {
@@ -854,6 +863,7 @@ export function App() {
           }}
           runner={runner}
           sessionReady={session.status === 'ready'}
+          simulatorLabel={simulatorLabel}
           storage={storage}
           writer={writer}
         />

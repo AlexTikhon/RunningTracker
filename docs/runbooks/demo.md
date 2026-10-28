@@ -141,15 +141,18 @@ second browser profile.
 
 One pass through the browser story for a demo or an interview: two people, a simulated run, live sharing, an offline
 gap, the archive, and sharing a finished run. It uses only the browser and `demo:up`; `demo:run` is not needed. The
-5–7 minutes are a plan for a person who talks while doing it. Driven by a script, the same steps took 70 s and 85 s
-(see "Rehearsal results" below). The only fixed waits are the simulator's ten seconds (steps 3 and 6) and the summary
-worker (step 9).
+5–7 minutes are a plan for a person who talks while doing it. Driven by a script, the earlier procedure took 70 s
+and 85 s (see "Rehearsal results" below). The only fixed wait is the summary worker (step 9).
 
-Two facts shape the steps. The browser's Simulator produces **six points per capture session**, the first at once
-and then one every two seconds, so about ten seconds after Start or Resume it reads `complete` and stops; the run
-stays `recording` and sends nothing more until the next Resume. And capture starts only once the server has confirmed
-that the run is recording, so going offline *before* Resume would leave the Resume request queued and record
-nothing. The offline gap therefore has to start a moment *after* Resume.
+Two facts shape the steps. In the local demo, the Runner tab's Simulator is **Simulator · local demo · about 2 min**:
+one point at once and then one every two seconds, for about two minutes per capture session (each Start or Resume).
+After that Capture reads `complete` and the run stays `recording` without new points until the next Resume. Finish
+stops it at any time. Steps 3 to 7 fit well inside the two minutes. And capture starts only once the server has
+confirmed that the run is recording. So go offline once Capture reads `capturing`, never before Start or Resume has
+been confirmed: no Pause or Resume is needed for the offline step. The points are synthetic, an even loop of about
+57 m radius near Warsaw at running pace. They go through the same capture, local storage and upload path as Device
+GPS. This simulator is offered only where the demo sign-in buttons are (section 3). A plain `npm run dev` keeps the
+six-point **Simulator · normal · seed 1**, which stops about ten seconds after Start or Resume.
 
 **The day before, or an hour before: run the automated smoke.** It needs the test database (`npm run
 db:bootstrap:test` and `npm run db:migrate:test` once) and the browsers (`cd tests/e2e; npx playwright install
@@ -181,12 +184,12 @@ Two tabs of one profile are one person (section 3).
 |---|---|---|
 | 1 | Runner window: **Demo runner**. Coach window: **Demo coach**. | Each shows "Signed in" and organization `…0000` selected; nothing is typed. |
 | 2 | Coach: open the Coach tab. | The stream is live; the position board says "No active runs are currently shared with this identity." Without a token the **Live map** panel says "Map unavailable. Positions and tracks are listed below." |
-| 3 | Runner: first open the developer tools (F12) → **Network** and leave its throttling menu (*No throttling*) in view; step 6 needs it within a second or two. Then Runner tab, **Capture source** → *Simulator · normal · seed 1*, **Start run**. | Recording reads `recording`. After about ten seconds Capture reads `complete` ("segment 0 · 6 buffered") and Upload "No buffered points". Nothing more is captured until step 6; the run stays `recording`. |
+| 3 | Runner: first open the developer tools (F12) → **Network** and leave its throttling menu (*No throttling*) in view for step 6. Then Runner tab, **Capture source** → *Simulator · local demo · about 2 min*, **Start run**. | Recording reads `recording`, then Capture reads `capturing` and its "buffered" count goes up every two seconds. Upload reads "No buffered points" between points: each one leaves as soon as it is stored. |
 | 4 | Runner: in **Share this run with a coach**, press **Share** next to `Coach …dddd0002`. | The row reads "Live and history". |
-| 5 | Coach: watch the board, then tick the run under **Track selection**. | Within a poll interval (two seconds) one run card with its position appears; the track option reads "6 points · rev R" and "1 selected". About ten seconds after the last point the marker turns `stale`, which is correct: capture has ended. With a token the position and the track are drawn on the map; without one they are only listed. |
-| 6 | Runner: **Pause**, then **Resume**. As soon as Recording reads `recording` again, choose *Offline* in the throttling menu. Wait until Capture reads `complete` again (about ten seconds), then choose *No throttling*. | An "Offline" notice, and Upload reads "N pending", usually 5: the first point of the new session leaves before the switch. Meanwhile the coach's track stops at that point ("7 points") and the card stays, because a recording run is still live. Back online, the notice goes, Upload returns to "No buffered points" within about a second, and within a poll the coach's track jumps to "12 points" with a revision one higher: the pending points went as one batch and one revision. If Upload never showed pending, the switch came after the last point: Pause and Resume again for six more. |
+| 5 | Coach: watch the board, then tick the run under **Track selection**. | Within a poll interval (two seconds) one run card with its position appears; the track option reads "N points · rev R" and "1 selected", and both numbers go up while the runner captures. With a token the position and the track are drawn on the map; without one they are only listed. |
+| 6 | Runner: while Capture reads `capturing`, choose *Offline* in the throttling menu. No Pause or Resume. Talk for about ten seconds, then choose *No throttling*. | An "Offline" notice, and Upload reads "N pending", one more every two seconds, while Capture stays `capturing`: the points are kept on this device. Meanwhile the coach's track stops growing and the card stays, because a recording run is still live; after about ten seconds without a new position its marker turns `stale`. Back online, the notice goes and Upload returns to "No buffered points" within about a second (a point captured meanwhile may show briefly as pending). Within a poll the coach's track catches up by all the points from the gap at once, with a newer revision, and capture goes on. If Capture already reads `complete`, the two minutes are over: **Pause** and **Resume** start another two minutes, and step 6 can then be done the same way. |
 | 7 | Runner: **Revoke**. | The row reads "Not shared". The coach's card, track option and selection disappear within a poll interval, and the board says no runs are shared again; the run keeps recording. |
-| 8 | Runner: **Finish**, then **New run**. | Recording reads `finished`; **New run** is enabled only when nothing is pending, and the sharing panel leaves the Runner tab. |
+| 8 | Runner: **Finish**, then **New run**. | Recording reads `finished` and Capture `idle`: Finish ends the capture even if the simulator's two minutes are not over. **New run** is enabled only when nothing is pending, and the sharing panel leaves the Runner tab. |
 | 9 | Runner: Archive tab, **My runs**, press **Apply filters** every few seconds until the run is listed. | The summary worker runs once a minute (`RUN_SUMMARY_INTERVAL_MS`, 60 s in `.env.example`), so allow up to about a minute; until then a notice says the run "is still being processed". The card then shows the date, a distance of about 0.08 km, the observed duration and **Manage sharing**. Talk through the Archive map meanwhile: with a token it draws the archive, without one it says "Map provider not configured". |
 | 10 | Runner: **Manage sharing** on the new card, then **Share**, then **Revoke**. | The panel opens inside the card; the coach row reads "Not shared" (the grant was revoked in step 7), then "Live and history", then "Not shared". **Close** or Escape closes it. The run never becomes the active run. The coach's window shows nothing new: a finished run is not live. |
 
@@ -202,19 +205,24 @@ The offline step uses the Chromium (Chrome, Edge) DevTools throttling menu. Othe
 and none of them was tried.
 
 **Automated and manual, step by step.** The smoke covers the same behaviour in the browser it runs, but not the same
-way a person does it:
+way a person does it. Its `record` and `reload-offline` tests use the ordinary six-point simulator. The demo
+simulator itself is tested by `demo-simulator.spec.ts`, which is in the full Chromium suite (`npm run test:e2e`) but
+not in the smoke. Its full two minutes are covered by unit tests with fake timers (`apps/web/src/demo-simulator.spec.ts`).
 
 | Step | Covered by the smoke | Only in the rehearsal |
 |---|---|---|
 | 1 Demo sign-in | `demo-sign-in` (both buttons, the organization, Sign out, a pending, failed and late sign-in, no buttons without the flag) | Two real browser profiles: the tests use two browser contexts |
-| 3, 8 Record, finish | `record`, `reload-offline` (a reload during recording) | — |
+| 3, 8 Record, finish | `record`, `reload-offline` (a reload during recording); outside the smoke, `demo-simulator` (the demo simulator past six points, and Finish before its end) | — |
 | 4, 5, 7 Share, coach sees the track, revoke | `run-sharing` | The coach's map with a real token; the tests run without one |
-| 6 Offline and reconnect | `reload-offline` (offline buffering, a failed upload) | The developer tools' Offline switch: the tests switch the browser context offline, and they go offline without the Pause and Resume or a coach watching |
+| 6 Offline and reconnect | `reload-offline` (offline buffering, a failed upload); outside the smoke, `demo-simulator` (offline during demo capture with no Pause or Resume, drained with unique, gap-free sequence numbers) | The developer tools' Offline switch: the tests switch the browser context offline, and no coach is watching |
 | 9 Summary wait, My runs | `archive-sharing`, which waits up to 120 s for the real summary worker | — |
 | 10 Manage sharing | `archive-sharing` (after New run and a reload, one panel at a time, a deleted run, a held answer) | — |
 | A second tab cannot record | `second-tab` | Not part of the rehearsal |
 
-**Rehearsal results (2026-10-24).** Steps 1–10 and the sign-out were driven twice by a throwaway Playwright script
+**Rehearsal results (2026-10-24, the earlier procedure).** These results are from the procedure as it was then: the
+six-point *Simulator · normal · seed 1*, with the offline gap started 1.5 s after a Pause and Resume. The steps above,
+with the two-minute demo simulator and no Pause or Resume, have not been rehearsed against `demo:up` yet; only
+`demo-simulator.spec.ts` covers their offline part. Steps 1–10 and the sign-out were driven twice by a throwaway Playwright script
 (not part of the repository), against a real `npm run demo:up` on Windows 11 with no Mapbox token, in headless
 Chromium with two isolated browser contexts standing in for two profiles. `demo:up` was ready about 31 s after it
 started (no pending migrations). Both passes completed every step:

@@ -27,8 +27,9 @@ function coachLabel(userId: string): string {
 export class RunnerPage {
   constructor(private readonly page: Page) {}
 
-  async open(orgId: string): Promise<void> {
-    await this.openRunnerView();
+  // `origin` is another web server of the suite, such as the demo one; by default the page's base URL.
+  async open(orgId: string, origin = '/'): Promise<void> {
+    await this.openRunnerView(origin);
     // The person belongs to this one organization, so it is selected without any click or typing.
     await expectOrganizationSelected(this.page, orgId);
   }
@@ -39,8 +40,8 @@ export class RunnerPage {
     await this.openRunnerView();
   }
 
-  private async openRunnerView(): Promise<void> {
-    await this.page.goto('/');
+  private async openRunnerView(origin = '/'): Promise<void> {
+    await this.page.goto(origin);
     await this.page.getByRole('navigation', { name: 'Application view' }).getByRole('button', { name: 'Runner' }).click();
   }
 

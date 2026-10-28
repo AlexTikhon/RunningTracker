@@ -43,6 +43,8 @@ interface RunnerViewProps {
   rejectedStart: { canAbandon: boolean; failure: string | null; onAbandon: () => void };
   runner: RunnerState;
   sessionReady: boolean;
+  // What the Capture source menu calls the Simulator: the label of the source App creates for it.
+  simulatorLabel: string;
   storage: StorageState;
   writer: WriterOwnershipState;
   onChooseCaptureSource: (kind: CaptureSourceKind) => void;
@@ -71,6 +73,7 @@ export function RunnerView({
   rejectedStart,
   runner,
   sessionReady,
+  simulatorLabel,
   storage,
   writer,
   onChooseCaptureSource,
@@ -135,7 +138,7 @@ export function RunnerView({
               value={captureSourceKind ?? DEFAULT_CAPTURE_SOURCE_KIND}
             >
               <option value="geolocation">Device GPS</option>
-              <option value="simulator">Simulator · normal · seed 1</option>
+              <option value="simulator">{simulatorLabel}</option>
             </select>
             <span>Foreground only. Pausing or losing the writer lease stops capture.</span>
           </div>
