@@ -2837,3 +2837,68 @@ New tests:
 path changed). The suite now has 114 Chromium/OIDC tests; the last full run is still the README's 109. The React
 handler guards are not reachable through a disabled button in a browser, so they are covered by reading only, not by
 a test: the web tests have no DOM library.
+
+## Local demo: the two-minute simulator rehearsed through `demo:up`, Ctrl+C and restart (2026-10-28)
+
+Verification only, on top of `d088ba5` (the two-minute simulator, committed; the working tree was clean at the
+start). No application, script, test, harness, dependency or configuration change: no defect was reproduced. Only
+`docs/runbooks/demo.md` (the rehearsal evidence) and this entry changed. The 2026-10-24 results there are kept and
+labelled as the earlier procedure.
+
+**Executed** (Windows 11, Node 24.11.1, npm 11.6.2, Docker Desktop, the development database `running_tracker`, no
+Mapbox token, search interpreter off; PowerShell).
+
+| Check | Result |
+|---|---|
+| `npm run demo:doctor` | every check ok, exit 0 |
+| `npm run demo:up`, started with `npm-cli.js` in a hidden console of its own | ready about 19 s after start, 0 of 25 migrations pending; API and Vite listening on `127.0.0.1` only; `/api/health/ready` 200 directly and through the Vite proxy |
+| Rehearsal steps 1–9 and sign-out, throwaway Playwright script, two headless Chromium contexts | 20 of 20 checks, 67.2 s. Demo simulator option label; coach card 1.5 s after the share; past 7 captured points still `capturing`; **runner context only** offline for 13.1 s with Playwright's `setOffline` (scripted emulation, not DevTools): up to 6 pending, server count held, coach stream live, marker `stale` after 10.0 s, track held; drained 0.15 s after reconnecting, 13 points, seq 1–13, unique, gap-free, one segment (read from the database); coach track 7 → 14 points, rev 7 → 9; coach cleared 1.9 s after the revoke, coach's points read 404; Finish at 15 points, seq 1–15, gap-free, nothing added afterwards; listed in **My runs** 30.6 s after Finish |
+| A second `npm run demo:up` while the first ran | refused after 2.4 s, exit 1, naming the first one's process; the first one's lock, processes and health answer unchanged |
+| Console Ctrl+C, first `demo:up` | `CTRL_C_EVENT` via `GenerateConsoleCtrlEvent` from a process attached to the demo's console (the event a keypress raises; no person pressed a key and nothing was killed). "SIGINT: stopping the demo", API `shutdown.started` (SIGINT), no `shutdown.forced`/`failed`, "API and web app stopped". All owned processes gone within about 0.9 s, ports free within about 1.6 s, lock removed (coarse polling; exit codes not captured) |
+| Restart | ready in about 18 s, 0 migrations pending; the rehearsal run still `finished` with 15 points (API) and the first card in **My runs**; both sign-in buttons and the Coach stream worked |
+| Console Ctrl+C, second `demo:up` (50 ms polling, times from the event) | npm, cmd and Vite gone after 18–19 ms; ports 3000 and 5173 free after 23 ms and 25 ms; API (exit 0) and `demo:up` (exit 0) after 83 ms; lock removed after 84 ms; console host after 329 ms. npm and cmd exited 1, Vite 1 |
+| Persistence and integrity | PostgreSQL container up throughout (since 2026-10-27), volume kept (created 2026-09-19); runs 6 → 7 (the rehearsal run), none recording; two Node processes that predated the session untouched; `.env` SHA-256, size and modification time identical before and after |
+| `node --test scripts/demo-stack.test.mjs` | 14 passed |
+
+**Observed, not changed.** npm and its `cmd /c` wrapper return on Ctrl+C about 65 ms before `demo:up` has finished
+its stop, with exit 1, so an interactive prompt may come back just before the final "API and web app stopped" line.
+`demo:up` still completed the stop and removed the lock. This is npm's behaviour, not the demo's, and it was not watched
+in a real terminal window. The API had no esbuild helper process in this run (the 2026-10-24 entry in the runbook
+saw one).
+
+**Not run / limits.** `npm run verify`, integration and browser suites (nothing changed). Not covered: a person in two
+real browser profiles, the DevTools throttling menu, rehearsal step 10 (Manage sharing on the finished card), other
+browsers, maps with a token, a Ctrl+C typed into an interactive terminal window, and closing the terminal window. The
+scratch scripts and their logs were deleted afterwards.
+
+## Pause verification: smoke gains the two newest features, full matrix (2026-10-28)
+
+Base `d088ba5`, uncommitted. One harness change: `tests/e2e/playwright.smoke.config.ts` adds `demo-simulator` and
+`run-deletion` to the smoke allowlist, reused unchanged in both `smoke-chromium` and `smoke-firefox` (18 → 24 tests
+each; `--list` showed `demo-simulator` 1 and `run-deletion` 5 added to the six earlier files). Servers, the `_test`
+guard, preflight, timeouts, retries, cleanup and output directories are unchanged; `firefox-core` stays at 18. No
+application code, test, retry or timeout changed. Full record: `docs/reports/pause-verification.md`.
+
+**Executed** (Windows 11, Node 24.11.1, PostgreSQL 17.5/PostGIS 3.5.2, Playwright 1.63.0 with Chromium 153 and
+Firefox 155; `running_tracker_test` already at 25 of 25 migrations; sequential, from PowerShell, each once).
+
+| Command | Result |
+|---|---|
+| `npm run verify` | exit 0, 350 s; scripts 83, API 1332, web 820, contracts 132, fixtures 14, simulator 3; build |
+| `npm run test:integration` | exit 0, 202 s; 463 passed in 45 files, 0 skipped (the restore-drill variables are set, so its 9 tests ran) |
+| `npm run test:e2e` | exit 0, 611 s; 115 passed (106 `chromium` + 9 `chromium-oidc`) in 10.1 min; `harness.spec.ts:66` is the intentional `test.fail()` |
+| `npm run test:e2e:firefox` | exit 0, 198 s; 18 passed in 3.2 min |
+| `npm run test:e2e:smoke` | exit 0, 192 s; preflight ok; 24 passed in 3.1 min |
+| `npm run test:e2e:smoke:firefox` | exit 0, 201 s; preflight ok; 24 passed in 3.3 min (the first Firefox smoke run, and the first Firefox run of `demo-sign-in`, `demo-simulator` and `run-deletion`) |
+
+No failure, flaky result, retry or skip on the first attempts, so nothing was repeated or fixed. Afterwards no suite
+port listened and no Playwright browser was left; unrelated processes and the development database were untouched.
+
+**Documentation.** README (smoke membership and results, latest full-suite run, the Firefox boundary, the suite
+size), `docs/runbooks/demo.md` (smoke membership, results and its coverage table) and `docs/interview.md` (the
+"How is it tested?" figures) now state the 2026-10-28 numbers next to the earlier ones and their commits.
+
+**Not run / limits.** One run each; no hosted CI run of this version (the last hosted run is still `83f804f`, and
+the Firefox CI entry has never run hosted). The Docker verifiers (`deploy:verify`, `transport:verify`,
+`proxy:verify-error-log`) were not part of this matrix. Safari/WebKit, mobile, real devices, a real identity
+provider and a real Mapbox basemap remain uncovered.

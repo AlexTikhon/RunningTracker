@@ -141,8 +141,9 @@ second browser profile.
 
 One pass through the browser story for a demo or an interview: two people, a simulated run, live sharing, an offline
 gap, the archive, and sharing a finished run. It uses only the browser and `demo:up`; `demo:run` is not needed. The
-5–7 minutes are a plan for a person who talks while doing it. Driven by a script, the earlier procedure took 70 s
-and 85 s (see "Rehearsal results" below). The only fixed wait is the summary worker (step 9).
+5–7 minutes are a plan for a person who talks while doing it. Driven by a script, steps 1–9 of this procedure took
+67 s on 2026-10-28, and the earlier procedure 70 s and 85 s (see "Rehearsal results" below). The only fixed wait is
+the summary worker (step 9).
 
 Two facts shape the steps. In the local demo, the Runner tab's Simulator is **Simulator · local demo · about 2 min**:
 one point at once and then one every two seconds, for about two minutes per capture session (each Start or Resume).
@@ -163,8 +164,8 @@ npm run test:e2e:smoke            # Chromium
 npm run test:e2e:smoke:firefox    # Firefox, optional
 ```
 
-Each runs the 18 existing tests of `demo-sign-in`, `record`, `reload-offline`, `second-tab`, `run-sharing` and
-`archive-sharing`, unchanged, with the full suite's timeouts, one worker and no retries. It starts its own API (port
+Each runs the 24 existing tests of `demo-sign-in`, `demo-simulator`, `record`, `reload-offline`, `second-tab`,
+`run-sharing`, `archive-sharing` and `run-deletion`, unchanged, with the full suite's timeouts, one worker and no retries. It starts its own API (port
 3100, run-search interpreter off) and two Vite servers (5273 without and 5276 with the demo buttons, both with no
 Mapbox token), uses only the `running_tracker_test` database through the same `_test` guard as the full suite, removes
 its scenario data after each test and its suite users at the end, and never runs `demo:up` or `demo:seed`. A check
@@ -174,7 +175,10 @@ and screenshots go to `tests/e2e/smoke-results/chromium` or `…/firefox`, apart
 `tests/e2e/test-results`. The ports differ from `demo:up`'s (3000, 5173), so the smoke can run while the demo is up,
 but its data is in the test database, not the demo's. A pass says those flows work in that browser on this machine
 today; it is not a promise about the next run. Recorded so far: `npm run test:e2e:smoke` on 2026-10-24 (Windows 11,
-commit `4ee4d94`), 18 passed in 2.8 min, 176 s including server start-up. `test:e2e:smoke:firefox` has not been run.
+commit `4ee4d94`, when the smoke had 18 tests), 18 passed in 2.8 min, 176 s including server start-up. On 2026-10-28
+(base `d088ba5` with `demo-simulator` and `run-deletion` added to the smoke, Windows 11): `npm run test:e2e:smoke` 24
+passed in 3.1 min (192 s with preflight and start-up), and `npm run test:e2e:smoke:firefox`, its first run, 24 passed
+in 3.3 min (201 s); see `docs/reports/pause-verification.md`.
 
 **Before the audience:** `npm run demo:up` (section 0) and wait for the app URL. Open `http://127.0.0.1:5173` in two
 separate browser profiles, or an ordinary and a private window, side by side: one for the Runner, one for the Coach.
@@ -206,23 +210,77 @@ and none of them was tried.
 
 **Automated and manual, step by step.** The smoke covers the same behaviour in the browser it runs, but not the same
 way a person does it. Its `record` and `reload-offline` tests use the ordinary six-point simulator. The demo
-simulator itself is tested by `demo-simulator.spec.ts`, which is in the full Chromium suite (`npm run test:e2e`) but
-not in the smoke. Its full two minutes are covered by unit tests with fake timers (`apps/web/src/demo-simulator.spec.ts`).
+simulator itself is tested by `demo-simulator.spec.ts`, which is in the smoke (since 2026-10-28) and in the full
+Chromium suite, but not in `firefox-core`; it covers about 30 s of the two minutes. The full two minutes are covered by
+unit tests with fake timers (`apps/web/src/demo-simulator.spec.ts`). The smoke also runs `run-deletion`, which is not
+a rehearsal step.
 
 | Step | Covered by the smoke | Only in the rehearsal |
 |---|---|---|
 | 1 Demo sign-in | `demo-sign-in` (both buttons, the organization, Sign out, a pending, failed and late sign-in, no buttons without the flag) | Two real browser profiles: the tests use two browser contexts |
-| 3, 8 Record, finish | `record`, `reload-offline` (a reload during recording); outside the smoke, `demo-simulator` (the demo simulator past six points, and Finish before its end) | — |
+| 3, 8 Record, finish | `record`, `reload-offline` (a reload during recording), `demo-simulator` (the demo simulator past six points, and Finish before its end) | — |
 | 4, 5, 7 Share, coach sees the track, revoke | `run-sharing` | The coach's map with a real token; the tests run without one |
-| 6 Offline and reconnect | `reload-offline` (offline buffering, a failed upload); outside the smoke, `demo-simulator` (offline during demo capture with no Pause or Resume, drained with unique, gap-free sequence numbers) | The developer tools' Offline switch: the tests switch the browser context offline, and no coach is watching |
+| 6 Offline and reconnect | `reload-offline` (offline buffering, a failed upload), `demo-simulator` (offline during demo capture with no Pause or Resume, drained with unique, gap-free sequence numbers) | The developer tools' Offline switch: the tests switch the browser context offline, and no coach is watching |
 | 9 Summary wait, My runs | `archive-sharing`, which waits up to 120 s for the real summary worker | — |
 | 10 Manage sharing | `archive-sharing` (after New run and a reload, one panel at a time, a deleted run, a held answer) | — |
 | A second tab cannot record | `second-tab` | Not part of the rehearsal |
 
+**Rehearsal results (2026-10-28, this procedure, commit `d088ba5`).** Steps 1–9 above and the sign-out, with the
+two-minute demo simulator and no Pause or Resume, were driven once by a throwaway Playwright script (not part of the
+repository) against a real `npm run demo:up` on Windows 11 with no Mapbox token and no AI provider, in headless
+Chromium with two isolated browser contexts standing in for two profiles. **The offline gap was scripted:**
+Playwright's `setOffline(true)` on the runner's context only, not a person using the DevTools throttling menu; the
+coach's context stayed online. Point sequences were read from the database. `npm run demo:doctor` reported every
+check ok first, and `demo:up` was ready about 19 s after it started (0 of 25 migrations pending).
+
+| Step | Result |
+|---|---|
+| 1–2 Sign-in buttons, Coach tab | `GET /api/session` reported runner `…0001` and coach `…0002`, organization `…0000` shown; the stream live, the empty-board text and the tokenless map notice |
+| 3 Start with *Simulator · local demo · about 2 min* | that exact option label; Recording `recording` and Capture `capturing` 0.3 s after Start |
+| 4–5 Share, coach card and track | "Live and history"; one card 1.5 s after the share was confirmed (`unconfirmed` at first); "1 selected", track "1 points · rev 1" then "3 points · rev 3" 4.5 s later |
+| Past six points | Capture "segment 0 · 7 buffered", still `capturing` |
+| 6 Offline, runner context only, 13.1 s | the Offline notice; Upload up to "6 pending"; the server's count stayed at 7; Capture `capturing` throughout. The coach's stream stayed live, its marker turned `stale` 10.0 s after the switch and its track held at "7 points · rev 7" |
+| 6 Back online | "No buffered points" 0.15 s after reconnecting; 13 points on the server, seq 1–13, unique, gap-free, one segment; Capture still `capturing`; the coach's track went from 7 to 14 points and rev 7 to 9, 0.7 s after reconnecting, marker `confirmed` |
+| 7 Revoke | the coach's card, track option and selection gone 1.9 s after the revoke was confirmed, the empty-board text back, the coach's read of the run's points answered 404; the run still `recording` and capturing |
+| 8 Finish, New run | `finished` and `idle`; 15 points, seq 1–15, gap-free, one segment, none added in the next 4.5 s; New run enabled, the sharing panel gone |
+| 9 My runs | listed 30.6 s after Finish (seven presses of Apply filters), the "still being processed" notice seen first; the first of seven cards, 0.08 km, 0:28 |
+| Script time, browser launch to sign-out | 67.2 s; 20 of 20 checks passed |
+
+Step 10 (Manage sharing on the finished card) was not part of this pass. While that `demo:up` was running, a second
+`npm run demo:up` stopped after 2.4 s with exit 1, naming the first one's process; the first one's lock, processes
+and health answer were unchanged. Both `demo:up` processes of the day were then stopped with a console Ctrl+C (see
+"Ctrl+C and restart, 2026-10-28" below), and after the restart the run was still `finished` with 15 points and the
+first card in **My runs**, and both sign-in buttons and the Coach stream worked again. Not covered: a person in two
+real browser profiles, the DevTools menu itself, step 10, other browsers and the maps with a token.
+
+**Ctrl+C and restart, 2026-10-28.** `npm run demo:up` (Node running `npm-cli.js`, as `npm.ps1` does) was started in
+a new hidden console of its own with its output redirected to files. To stop it, a separate process attached to that
+console and called `GenerateConsoleCtrlEvent(CTRL_C_EVENT)`, which delivers the event the console raises for a Ctrl+C
+keypress to every process attached to it. No person pressed a key, and nothing was killed by the harness. Each time,
+`demo:up` printed "SIGINT: stopping the demo", the API logged `shutdown.started` with `SIGINT` and neither
+`shutdown.forced` nor `shutdown.failed`, `demo:up` printed "API and web app stopped", and the 8-second grace period
+was never reached.
+
+| | First stop | Second stop (after the restart) |
+|---|---|---|
+| Owned processes (npm, cmd, `demo:up`, API, Vite, the console host) | all gone within about 0.9 s of the event (coarse polling) | npm, cmd and Vite 18–19 ms after the event, API and `demo:up` 83 ms, the console host 329 ms |
+| Exit codes | not captured | API 0, `demo:up` 0; Vite 1; npm and cmd 1 |
+| Ports 3000 and 5173 | free within about 1.6 s | free after 23 ms and 25 ms |
+| `.local/demo/demo-up.lock` | removed | removed after 84 ms |
+
+The API had no esbuild helper process in this run; the tree was npm, its `cmd /c`, `demo:up`, the API and Vite. npm
+and its `cmd` wrapper return on Ctrl+C before `demo:up` has finished (here about 65 ms earlier, with exit 1), so in an
+interactive terminal the prompt may come back just before the last line is printed; that was not watched in a real
+terminal window. The restart was ready in about 18 s with 0 migrations pending. PostgreSQL kept running throughout
+(the same container, up since 2026-10-27), its volume was kept, the development database went from 6 to 7 runs (the
+rehearsal run) with none left recording, two unrelated Node processes that were running before were untouched, and
+`.env` had the same SHA-256, size and modification time before and after. `node --test scripts/demo-stack.test.mjs`:
+14 passed.
+
 **Rehearsal results (2026-10-24, the earlier procedure).** These results are from the procedure as it was then: the
-six-point *Simulator · normal · seed 1*, with the offline gap started 1.5 s after a Pause and Resume. The steps above,
-with the two-minute demo simulator and no Pause or Resume, have not been rehearsed against `demo:up` yet; only
-`demo-simulator.spec.ts` covers their offline part. Steps 1–10 and the sign-out were driven twice by a throwaway Playwright script
+six-point *Simulator · normal · seed 1*, with the offline gap started 1.5 s after a Pause and Resume. The current
+steps, with the two-minute demo simulator and no Pause or Resume, were first rehearsed against `demo:up` on
+2026-10-28 (above). Steps 1–10 and the sign-out were driven twice by a throwaway Playwright script
 (not part of the repository), against a real `npm run demo:up` on Windows 11 with no Mapbox token, in headless
 Chromium with two isolated browser contexts standing in for two profiles. `demo:up` was ready about 31 s after it
 started (no pending migrations). Both passes completed every step:

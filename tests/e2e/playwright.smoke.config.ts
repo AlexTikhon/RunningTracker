@@ -12,8 +12,10 @@ import { localSessionApi, suiteSettings, webApp } from './support/suite-config.j
 // so a wrong database never reaches the API process.
 const environment = loadE2eEnvironment();
 
-// Demo sign-in, recording, reload and offline recovery, the second tab, live sharing and sharing from My runs.
-const smokeSpecs = /[\\/](demo-sign-in|record|reload-offline|second-tab|run-sharing|archive-sharing)\.spec\.ts$/;
+// Demo sign-in, the demo's two-minute simulator, recording, reload and offline recovery, the second tab, live
+// sharing, sharing from My runs and deleting a run from My runs.
+const smokeSpecs =
+  /[\\/](demo-sign-in|demo-simulator|record|reload-offline|second-tab|run-sharing|archive-sharing|run-deletion)\.spec\.ts$/;
 
 // Neither the run-search interpreter nor a Mapbox token is used by these specs, and none is passed on from a
 // developer's .env: the API has the interpreter off, and both pages have no token (the tokenless map notice).

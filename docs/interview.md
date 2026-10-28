@@ -430,11 +430,13 @@ from the same commands. The other candidates (page-limited track reads, a GiST-f
 index) were measured and deliberately not changed. Ingestion p95 was about 95–105 ms against a 500 ms goal, on one
 machine running the runner, the API and PostgreSQL together.
 
-**"How is it tested?"** Unit tests per workspace (`npm run verify`: 2,321 tests at the demo sign-in change, commit
-`eff3a71`); PostgreSQL/PostGIS integration as the real roles (463); Playwright against the real API and database
-(109 tests in Chromium plus OIDC, about 12.3 min in the latest supplied report); an 18-test Firefox core gate (two
-clean runs on 2026-10-22); Docker verifiers for the production profile, the TLS/HTTP/2 transport and the restore
-drill. One GitHub-hosted CI run passed, on 2026-10-14 for commit `83f804f`, with 87 browser tests then; later commits
+**"How is it tested?"** Unit tests per workspace (`npm run verify`: 2,384 tests on 2026-10-28 at base `d088ba5`;
+2,321 earlier at commit `eff3a71`); PostgreSQL/PostGIS integration as the real roles (463, restore drill included);
+Playwright against the real API and database (115 tests in Chromium plus OIDC, 10.1 min on 2026-10-28; 109 in about
+12.3 min in the earlier supplied report); an 18-test Firefox core gate (two clean runs on 2026-10-22, a third on
+2026-10-28) and a 24-test pre-demo smoke in Chromium and Firefox (both passed once on 2026-10-28; see
+`docs/reports/pause-verification.md`); Docker verifiers for the production profile, the TLS/HTTP/2 transport and the
+restore drill. One GitHub-hosted CI run passed, on 2026-10-14 for commit `83f804f`, with 87 browser tests then; later commits
 have workstation runs only.
 
 **"Is the sign-in real?"** The production path is OpenID Connect with PKCE, state and nonce, invite-only. It was
