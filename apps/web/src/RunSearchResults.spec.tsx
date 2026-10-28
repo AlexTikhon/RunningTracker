@@ -253,11 +253,11 @@ describe('RunSearchResults', () => {
     };
     const renderWith = (
       open: { runId: string; snapshot: RunDeletionSnapshot } | null,
-      { busy = false, items = [runItem(), second] }: { busy?: boolean; items?: RunSearchItem[] } = {},
+      { items = [runItem(), second], pendingRunId = null }: { items?: RunSearchItem[]; pendingRunId?: string | null } = {},
     ) =>
       renderToStaticMarkup(
         <RunSearchResults
-          deletion={{ busy, onCancel: noop, onConfirm: noop, onToggle: noop, open }}
+          deletion={{ onCancel: noop, onConfirm: noop, onToggle: noop, open, pendingRunId }}
           filters={filters}
           onLoadMore={noop}
           onRetry={noop}
@@ -301,9 +301,29 @@ describe('RunSearchResults', () => {
     });
 
     it('disables every Delete run while a deletion is on its way', () => {
-      const markup = renderWith({ runId: second.runId, snapshot: { message: null, phase: 'pending' } }, { busy: true });
+      const markup = renderWith(
+        { runId: second.runId, snapshot: { message: null, phase: 'pending' } },
+        { pendingRunId: second.runId },
+      );
       expect(button(markup, 'Delete your run of 1 Nov 2026, 00:30')).toContain('disabled');
       expect(button(markup, 'Delete your run of 20 Oct 2026, 08:00')).toContain('disabled');
+    });
+
+    // A DELETE outlives the search it was confirmed from: a new search can list the same run again with no
+    // confirmation open, and the run must still not be shared while it is being deleted.
+    it('keeps the pending run’s sharing shut when its confirmation is not shown; other runs still can', () => {
+      const markup = renderWith(null, { pendingRunId: second.runId });
+      expect(markup).not.toContain('Confirm delete');
+      expect(markup).not.toContain('run-card--deleting');
+      expect(button(markup, 'Manage sharing for your run of 20 Oct 2026, 08:00')).toContain('disabled');
+      expect(button(markup, 'Manage sharing for your run of 1 Nov 2026, 00:30')).not.toContain('disabled');
+      expect(button(markup, 'Delete your run of 1 Nov 2026, 00:30')).toContain('disabled');
+      expect(button(markup, 'Delete your run of 20 Oct 2026, 08:00')).toContain('disabled');
+    });
+
+    it('offers sharing and deletion again on every card once nothing is pending', () => {
+      const markup = renderWith(null);
+      expect(markup).not.toMatch(/<button[^>]*disabled/u);
     });
 
     it('shows no confirmation for a run the list does not show', () => {

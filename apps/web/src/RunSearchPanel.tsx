@@ -124,6 +124,9 @@ export function RunSearchPanel({ csrf, onRunDeleted, orgId, signal, userId }: Ru
     ? deletionState.snapshot
     : confirmingDeletion;
   const deletionPending = deletion !== null && deletionSnapshot.phase === 'pending';
+  // The run being deleted, for as long as its DELETE is on its way, whichever search is shown: its sharing stays shut
+  // even where a newer search lists it without its confirmation. Derived, so it clears as soon as the attempt settles.
+  const pendingRunId = deletionPending ? deletion.runId : null;
   // Its confirmation is shown only in the card of the search it was opened from, while that search lists the run.
   const deletionShown = deletion !== null
     && deletion.searchKey === scopeKey
@@ -298,20 +301,22 @@ export function RunSearchPanel({ csrf, onRunDeleted, orgId, signal, userId }: Ru
       <div className="search-panel__results" ref={resultsArea}>
         <RunSearchResults
           deletion={{
-            busy: deletionPending,
             onCancel: cancelDeletion,
             onConfirm: () => deleter.current?.confirm(),
             onToggle: toggleDeletion,
             open: deletion !== null && deletionShown ? { runId: deletion.runId, snapshot: deletionSnapshot } : null,
+            pendingRunId,
           }}
           filters={applied.filters}
           onLoadMore={() => controller.current?.loadMore()}
           onRetry={() => controller.current?.retry()}
           sharing={{
             onClose: () => setSharing(null),
-            onToggle: (runId) =>
+            onToggle: (runId) => {
+              if (runId === pendingRunId) return;
               setSharing((current) =>
-                current?.runId === runId && current.searchKey === scopeKey ? null : { runId, searchKey: scopeKey }),
+                current?.runId === runId && current.searchKey === scopeKey ? null : { runId, searchKey: scopeKey });
+            },
             openRunId: sharedItem?.runId ?? null,
             scope: { csrfToken: csrf.token, orgId, signal, userId },
           }}

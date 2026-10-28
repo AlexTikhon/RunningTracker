@@ -51,6 +51,10 @@ class MyRuns {
     return this.panel().locator('p.search-panel__notice[role="status"]');
   }
 
+  alert(): Locator {
+    return this.panel().locator('p.search-panel__notice[role="alert"]');
+  }
+
   async open(): Promise<void> {
     await this.page.getByRole('navigation', { name: 'Application view' }).getByRole('button', { name: 'Archive' }).click();
     await expect(this.page.getByRole('heading', { name: 'My runs' })).toBeVisible();
@@ -73,6 +77,44 @@ function runRequests(page: Page, runId: string, method: string): { count: () => 
     if (request.method() === method && new URL(request.url()).pathname.endsWith(`/runs/${runId}`)) seen += 1;
   });
   return { count: () => seen };
+}
+
+// Holds every DELETE of one run until `release` is called, then lets it through or drops the connection. `arrived`
+// resolves when the first one reaches the route, so a test waits on the request itself rather than on time.
+async function holdDeletes(
+  page: Page,
+  orgId: string,
+  runId: string,
+): Promise<{ arrived: Promise<void>; release: (outcome: 'continue' | 'drop') => void }> {
+  let arrive!: () => void;
+  const arrived = new Promise<void>((resolve) => {
+    arrive = resolve;
+  });
+  let release!: (outcome: 'continue' | 'drop') => void;
+  const released = new Promise<'continue' | 'drop'>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**/api/orgs/${orgId}/runs/${runId}`, async (route: Route) => {
+    if (route.request().method() !== 'DELETE') {
+      await route.continue();
+      return;
+    }
+    arrive();
+    const outcome = await released;
+    await (outcome === 'drop' ? route.abort('connectionreset') : route.continue());
+  });
+  return { arrived, release };
+}
+
+// The next search answer that lists the given run: the fresh results of a search applied after this was called.
+function searchListing(page: Page, runId: string): Promise<void> {
+  return page
+    .waitForResponse(async (response) => {
+      if (!new URL(response.url()).pathname.endsWith('/runs/search') || response.status() !== 200) return false;
+      const body = (await response.json()) as { items?: Array<{ runId: string }> };
+      return body.items?.some((item) => item.runId === runId) === true;
+    })
+    .then(() => undefined);
 }
 
 function metadataReads(page: Page): { count: () => number } {
@@ -328,4 +370,145 @@ test('run deletion: a run the server will not delete for this person shows only 
   await confirmation.getByRole('button', { name: 'Close' }).click();
   await expect(myRuns.confirmations()).toHaveCount(0);
   await expect(myRuns.deleteButton(label(3))).toBeFocused();
+});
+
+test('run deletion: a run whose DELETE is on its way cannot be shared from a newer search listing it again', async ({
+  context,
+  environment,
+  page,
+  scenario,
+}) => {
+  const [runA, runB] = await createFinishedRuns(environment, scenario.orgId, [
+    { distanceM: 8_000, startedAt: day(3), userId: scenario.runnerUserId },
+    { distanceM: 9_000, startedAt: day(4), userId: scenario.runnerUserId },
+  ]);
+  if (runA === undefined || runB === undefined) throw new Error('The runs were not created');
+  await signIn(context, environment, scenario.runnerUserId);
+  const ownerApi = await authedApi(context, environment);
+  const deletes = runRequests(page, runA, 'DELETE');
+  const sharePanels = page.getByRole('region', { name: /^Sharing for your run of / });
+
+  await page.goto('/');
+  await expectSignedIn(page);
+  const myRuns = new MyRuns(page);
+  await myRuns.open();
+  await myRuns.applyMarch();
+  await expect(myRuns.cards()).toHaveCount(2);
+
+  const hold = await holdDeletes(page, scenario.orgId, runA);
+  await myRuns.deleteButton(label(3)).click();
+  await myRuns.confirmation(label(3)).getByRole('button', { name: 'Confirm delete' }).click();
+  await hold.arrived;
+
+  // A new search while the DELETE is held: its results list the same run, without the confirmation.
+  const fresh = searchListing(page, runA);
+  await myRuns.panel().getByRole('button', { name: 'Apply filters' }).click();
+  await fresh;
+  await expect(myRuns.cards()).toHaveCount(2);
+  await expect(myRuns.confirmations()).toHaveCount(0);
+  await expect(myRuns.status()).toHaveText(`Deleting your run of ${label(3)}…`);
+  await expect(myRuns.manage(label(3))).toBeDisabled();
+  await expect(myRuns.manage(label(4))).toBeEnabled();
+  // No other deletion can start, but the filters stay usable.
+  await expect(myRuns.deleteButton(label(3))).toBeDisabled();
+  await expect(myRuns.deleteButton(label(4))).toBeDisabled();
+  await expect(myRuns.panel().getByLabel('Minimum distance')).toBeEditable();
+  await expect(myRuns.panel().getByRole('button', { name: 'Apply filters' })).toBeEnabled();
+
+  // The other run's sharing still opens and closes; the pending run's never opens.
+  await myRuns.manage(label(4)).click();
+  await expect(sharePanels).toHaveCount(1);
+  await expect(myRuns.card(label(4)).getByRole('region', { name: /^Sharing for your run of / })).toHaveCount(1);
+  await myRuns.manage(label(4)).click();
+  await expect(sharePanels).toHaveCount(0);
+  await myRuns.manage(label(3)).dispatchEvent('click');
+  await expect(sharePanels).toHaveCount(0);
+  await expect(myRuns.manage(label(3))).toBeDisabled();
+
+  // A draft edit made while it is pending is not applied by the refresh that follows the confirmed deletion.
+  await myRuns.panel().getByLabel('Minimum distance').fill('1');
+  const deleted = page.waitForResponse(
+    (response) => response.request().method() === 'DELETE' && response.url().endsWith(`/runs/${runA}`),
+  );
+  hold.release('continue');
+  expect((await deleted).status()).toBe(204);
+
+  await expect(myRuns.status()).toHaveText(`Your run of ${label(3)} was deleted.`);
+  await expect(myRuns.cards()).toHaveCount(1);
+  await expect(myRuns.card(label(3))).toHaveCount(0);
+  await expect(myRuns.manage(label(4))).toBeEnabled();
+  await expect(myRuns.deleteButton(label(4))).toBeEnabled();
+  await expect(myRuns.panel().getByLabel('Minimum distance')).toHaveValue('1');
+  await expect(myRuns.panel().getByText('Changes are not applied yet.')).toBeVisible();
+  expect(deletes.count()).toBe(1);
+  expect(await ownerApi.getRunStatus(scenario.orgId, runA)).toBe(410);
+  expect(await ownerApi.getRunStatus(scenario.orgId, runB)).toBe(200);
+});
+
+test('run deletion: a DELETE that fails after a newer search listed the run again leaves no control stuck', async ({
+  context,
+  environment,
+  page,
+  scenario,
+}) => {
+  const [runA, runB] = await createFinishedRuns(environment, scenario.orgId, [
+    { distanceM: 8_000, startedAt: day(3), userId: scenario.runnerUserId },
+    { distanceM: 9_000, startedAt: day(4), userId: scenario.runnerUserId },
+  ]);
+  if (runA === undefined || runB === undefined) throw new Error('The runs were not created');
+  await signIn(context, environment, scenario.runnerUserId);
+  const ownerApi = await authedApi(context, environment);
+  const deletes = runRequests(page, runA, 'DELETE');
+  const sharePanels = page.getByRole('region', { name: /^Sharing for your run of / });
+
+  await page.goto('/');
+  await expectSignedIn(page);
+  const myRuns = new MyRuns(page);
+  const alert = myRuns.alert();
+  await myRuns.open();
+  await myRuns.applyMarch();
+  await expect(myRuns.cards()).toHaveCount(2);
+
+  const hold = await holdDeletes(page, scenario.orgId, runA);
+  await myRuns.deleteButton(label(3)).click();
+  await myRuns.confirmation(label(3)).getByRole('button', { name: 'Confirm delete' }).click();
+  await hold.arrived;
+  const fresh = searchListing(page, runA);
+  await myRuns.panel().getByRole('button', { name: 'Apply filters' }).click();
+  await fresh;
+  await expect(myRuns.status()).toHaveText(`Deleting your run of ${label(3)}…`);
+  await expect(myRuns.manage(label(3))).toBeDisabled();
+
+  // The connection drops: the outcome is unknown, said once at the panel, and nothing is shown as deleted.
+  hold.release('drop');
+  await expect(alert).toContainText(`Your run of ${label(3)}: The deletion was not confirmed`);
+  await expect(alert).toContainText('Trying again is safe');
+  await expect(myRuns.status()).toHaveText('');
+  await expect(myRuns.cards()).toHaveCount(2);
+  await expect(myRuns.confirmations()).toHaveCount(0);
+  expect(deletes.count()).toBe(1);
+  expect(await ownerApi.getRunStatus(scenario.orgId, runA)).toBe(200);
+
+  // Every control is back: the run's sharing opens, and either run's deletion can be asked for again.
+  await expect(myRuns.manage(label(3))).toBeEnabled();
+  await expect(myRuns.deleteButton(label(3))).toBeEnabled();
+  await expect(myRuns.deleteButton(label(4))).toBeEnabled();
+  await myRuns.manage(label(3)).click();
+  await expect(myRuns.card(label(3)).getByRole('region', { name: /^Sharing for your run of / })).toHaveCount(1);
+
+  // Retrying from the card sends the same DELETE for the same run, which now reaches the server.
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  await myRuns.deleteButton(label(3)).click();
+  await expect(sharePanels).toHaveCount(0);
+  const deleted = page.waitForResponse(
+    (response) => response.request().method() === 'DELETE' && response.url().endsWith(`/runs/${runA}`),
+  );
+  await myRuns.confirmation(label(3)).getByRole('button', { name: 'Confirm delete' }).click();
+  expect((await deleted).status()).toBe(204);
+  await expect(myRuns.status()).toHaveText(`Your run of ${label(3)} was deleted.`);
+  await expect(myRuns.cards()).toHaveCount(1);
+  await expect(myRuns.card(label(3))).toHaveCount(0);
+  await expect(myRuns.deleteButton(label(4))).toBeEnabled();
+  expect(deletes.count()).toBe(2);
+  expect(await ownerApi.getRunStatus(scenario.orgId, runB)).toBe(200);
 });

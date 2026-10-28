@@ -85,13 +85,14 @@ export interface RunSearchSharing {
 // Deleting one of the person's own finished runs. At most one card has its confirmation open, and while a deletion
 // is on its way no other can be started.
 export interface RunSearchDeletion {
-  // A DELETE is on its way, for this run or another.
-  busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
   onToggle: (runId: string, startedAtLabel: string) => void;
   // The run whose confirmation is open, and how far its deletion got; null when none is open.
   open: { runId: string; snapshot: RunDeletionSnapshot } | null;
+  // The run whose DELETE is on its way, whether or not its confirmation is shown: a newer search can list it again
+  // without one. Null when none is.
+  pendingRunId: string | null;
 }
 
 function RunCard({
@@ -112,6 +113,8 @@ function RunCard({
   const startedAt = formatStartedAt(item.startedAt, filters.timeZone);
   const open = sharing !== undefined && sharing.openRunId === item.runId;
   const deleting = deletion?.open?.runId === item.runId ? deletion.open.snapshot : null;
+  // Sharing a run that is being deleted would race the deletion.
+  const shareBlocked = deleting !== null || deletion?.pendingRunId === item.runId;
   const className = open ? 'run-card run-card--sharing' : deleting === null ? 'run-card' : 'run-card run-card--deleting';
   return (
     <li className={className}>
@@ -137,9 +140,10 @@ function RunCard({
               aria-expanded={open}
               aria-label={`Manage sharing for your run of ${startedAt}`}
               className="run-card__share"
-              // Sharing a run that is being deleted would race the deletion.
-              disabled={deleting !== null}
-              onClick={() => sharing.onToggle(item.runId)}
+              disabled={shareBlocked}
+              onClick={() => {
+                if (!shareBlocked) sharing.onToggle(item.runId);
+              }}
               ref={manage}
               type="button"
             >
@@ -152,7 +156,7 @@ function RunCard({
               aria-expanded={deleting !== null}
               aria-label={`Delete your run of ${startedAt}`}
               className="run-card__delete"
-              disabled={deletion.busy}
+              disabled={deletion.pendingRunId !== null}
               onClick={() => deletion.onToggle(item.runId, startedAt)}
               ref={remove}
               type="button"

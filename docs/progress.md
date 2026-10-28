@@ -2649,8 +2649,9 @@ in this checkout, so the other documents named in the task were read instead.
   permanent and cannot be undone, and has **Cancel** and **Confirm delete**. Opening moves focus to its heading.
   Cancel and Escape close it and return focus to the button. Opening or cancelling sends nothing.
 - Opening the confirmation closes that run's own sharing panel, and Manage sharing for that run stays disabled
-  while the confirmation is open. While the DELETE is on its way, Cancel, Confirm, Escape and every card's
-  Delete run do nothing. Only one deletion can be in flight.
+  while the confirmation is open and while its DELETE is on its way, even in a newer search that lists the run
+  without the confirmation (fixed the same day, below). While the DELETE is on its way, Cancel, Confirm, Escape and
+  every card's Delete run do nothing. Only one deletion can be in flight.
 - Failures:
   - A 4xx refusal reads "The run was not deleted: …".
   - A 5xx, a lost connection, the existing 15 s deadline or an unreadable answer reads "The deletion was not
@@ -2719,3 +2720,55 @@ One unit test was removed while building: a guard for a deleter throwing synchro
 - If the session signal ends while a DELETE is pending and the panel stays mounted, its buttons stay disabled. In
   practice the Archive unmounts or remounts on session end or replacement (ADR-0064 §3).
 - No undo, bulk or soft deletion. A deletion is permanent within the server's tombstone rules (ADR-0036).
+
+### Fix: sharing reopened for a run whose DELETE was still pending (2026-10-28)
+
+Web app and E2E only, uncommitted on top of `8e6e4a3`. No backend, SQL, migration, contract, dependency, simulator
+or authentication change.
+
+**Reproduced.** With a finished run's DELETE held, pressing Apply filters again (the new search still lists the run)
+left the panel saying "Deleting your run of {date}…" while that run's Manage sharing became enabled. The panel keeps
+the pending deletion across searches, but its confirmation is shown only in the search it was opened from, so
+`RunSearchResults` received `open: null`, and `RunCard` blocked sharing only for the run whose confirmation was shown.
+
+**Changed.**
+- `RunSearchDeletion.busy` is replaced by `pendingRunId`: the run whose DELETE is on its way, whether or not its
+  confirmation is shown. `RunSearchPanel` derives it from the deletion selection and the controller's `pending`
+  phase, so it clears as soon as the attempt settles and never outlives it.
+- `RunCard` disables Manage sharing when its confirmation is shown or its run is `pendingRunId`, and its click
+  handler checks the same condition. The panel's sharing `onToggle` also ignores the pending run.
+- Unchanged: every card's Delete run is still disabled while any DELETE is pending; filters, Apply and the
+  interpretation stay usable; other runs' sharing stays available; a confirmed deletion still refreshes page one with
+  the applied filters and keeps unapplied edits; an unknown outcome is still said once at the panel when its card is
+  not shown; session and scope cancellation still dispose the controller.
+
+**Executed** (Windows 11, Node 24, Docker Desktop, local PostGIS; E2E and `verify` run one after the other).
+
+| Check | Result |
+|---|---|
+| New `RunSearchResults.spec.tsx` tests before the fix | 2 failed as expected (Manage sharing enabled for the pending run with `open: null`) |
+| New Chromium test 1 against the unfixed `RunSearchPanel.tsx`/`RunSearchResults.tsx` | failed at `manage(3 Mar) toBeDisabled`: received enabled, with the "Deleting…" status shown |
+| Focused web tests (`RunSearchResults`, `RunSearchPanel`, `run-deletion` specs) after the fix | 58 passed in 3 files; `tsc --noEmit` for `apps/web` clean |
+| `npx playwright test run-deletion.spec.ts archive-sharing.spec.ts --project=chromium` | 9 passed (5 deletion + 4 archive sharing, 2.5 min) |
+| The two new Chromium tests with `--repeat-each=3` | 6 passed, 0 flaky (50 s) |
+| `npm run verify` | exit 0. Scripts 83; API 1332; web 801 = 799 + 2; contracts 132; fixtures 14; simulator 3; build |
+| `git diff --check` | clean |
+
+New tests:
+- `RunSearchResults.spec.tsx` +2: with `open: null` and `pendingRunId` set, the pending run's Manage sharing is
+  disabled, the other run's is not, both Delete run buttons are disabled and no confirmation is shown; with nothing
+  pending, no button is disabled. The existing "disables every Delete run" test now passes `pendingRunId`.
+- `run-deletion.spec.ts` +2, both holding the DELETE with a request barrier (resolved when the request reaches the
+  route) and waiting for the fresh search answer that lists the run, with no timed sleeps:
+  1. After reapplying the filters: one card list with no confirmation, the "Deleting…" status, the pending run's
+     sharing disabled (a dispatched click opens nothing), the other run's sharing opens and closes, Delete run
+     disabled on both cards, filters editable. Releasing the DELETE gives 204, the deleted status, one card, the
+     other run's controls enabled, the unapplied minimum distance kept, and owner reads of 410 and 200.
+  2. The held DELETE is dropped instead: the panel alert says the deletion was not confirmed and trying again is
+     safe, the status is empty, both cards stay, the run is still 200, Manage sharing and both Delete run buttons are
+     enabled again and the run's sharing opens. Deleting it again from its card closes that panel and gets 204.
+
+**Not run / limits.** The full Chromium suite, `chromium-oidc`, Firefox and integration were not run (no API or SQL
+path changed). The suite now has 114 Chromium/OIDC tests; the last full run is still the README's 109. The React
+handler guards are not reachable through a disabled button in a browser, so they are covered by reading only, not by
+a test: the web tests have no DOM library.
