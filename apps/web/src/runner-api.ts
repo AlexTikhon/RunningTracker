@@ -305,6 +305,21 @@ export async function revokeRunShare(target: RunShareTarget, csrf: CsrfCredentia
   requireSuccess(response);
 }
 
+// Owner only, and permanent (ADR-0035). The server answers 204 for a run it deleted now or earlier for this owner,
+// so sending it again with the same run ID is safe; anyone else's run, or one that never existed, is 404.
+export async function deleteRun(scope: LiveTrackScope, csrf: CsrfCredentials, signal: AbortSignal): Promise<void> {
+  const response = await requestJson(
+    `/api/orgs/${encodeURIComponent(scope.orgId)}/runs/${encodeURIComponent(scope.runId)}`,
+    {
+      credentials: 'same-origin',
+      headers: { [csrf.headerName]: csrf.token },
+      method: 'DELETE',
+      signal,
+    },
+  );
+  requireSuccess(response);
+}
+
 export async function readRun(orgId: string, runId: string, signal?: AbortSignal): Promise<RunView> {
   const response = await requestJson(
     `/api/orgs/${encodeURIComponent(orgId)}/runs/${encodeURIComponent(runId)}`,

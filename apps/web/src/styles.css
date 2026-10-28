@@ -306,7 +306,23 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .run-card__quality--poor { border-color: #6b5a2f; color: #f1d27b; }
 .run-card__quality--insufficient { border-color: #75433e; color: #ffaca4; }
 .run-card__share { justify-self: start; }
+.run-card__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .run-card--sharing { grid-column: 1 / -1; border-color: #6a8d3b; }
+.run-card--deleting { border-color: #75433e; }
+.run-delete { display: grid; gap: 0.6rem; padding-top: 0.9rem; border-top: 1px solid #2e3831; }
+.run-delete h5 { margin: 0; font-size: 1rem; }
+.run-delete h5:focus { outline: none; }
+.run-delete h5:focus-visible { outline: 2px solid #b8f264; outline-offset: 3px; }
+.run-delete p { margin: 0; font-size: 0.84rem; line-height: 1.45; }
+.run-delete__warning { color: #dfe6e0; }
+.run-delete__failure { color: #ffaca4; }
+.run-delete__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.search-panel__notice { margin: 0; color: #dfe6e0; font-size: 0.86rem; }
+/* Empty, it takes no row in the panel's grid but stays in the accessibility tree, so its first message is announced. */
+.search-panel__notice:empty { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.search-panel__notice--alert { color: #ffaca4; }
+.search-panel__heading h2:focus { outline: none; }
+.search-panel__heading h2:focus-visible { outline: 2px solid #b8f264; outline-offset: 3px; }
 .archive-share { display: grid; gap: 0.8rem; padding-top: 0.9rem; border-top: 1px solid #2e3831; }
 .archive-share__header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem; }
 .archive-share__header h5 { margin: 0; font-size: 1rem; }

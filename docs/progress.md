@@ -2633,3 +2633,89 @@ cover changed). The figures quoted in the new documents come from the runs that 
 P12.4 restore drill; and the 2,321 unit tests recorded at `eff3a71`. Not covered by the rehearsal: a person in two
 real browser profiles, the DevTools throttling menu itself (the script used Playwright's offline emulation), other
 browsers and the maps with a token.
+
+## Deleting a finished run from Archive → My runs (2026-10-28)
+
+Web app only, uncommitted on top of `8c3681e`. The browser now uses the existing owner route
+`DELETE /api/orgs/:orgId/runs/:runId` (ADR-0035/0036). No route, contract, SQL, migration, RLS policy, dependency,
+active-run storage, writer lease, capture or offline queue changed. No ADR was added: the feature follows ADR-0064's
+patterns (a controller per scope, disposed on scope change; focus and Escape as in the sharing panel). The new rule
+is that a confirmed deletion refreshes My runs. That is not a new architectural decision. `AGENTS.md` does not exist
+in this checkout, so the other documents named in the task were read instead.
+
+**Behaviour.**
+- Each My runs card has **Delete run** (`aria-expanded`, named "Delete your run of {date}"). It opens an inline
+  confirmation inside the card, headed "Delete your run of {date}?". The confirmation says the deletion is
+  permanent and cannot be undone, and has **Cancel** and **Confirm delete**. Opening moves focus to its heading.
+  Cancel and Escape close it and return focus to the button. Opening or cancelling sends nothing.
+- Opening the confirmation closes that run's own sharing panel, and Manage sharing for that run stays disabled
+  while the confirmation is open. While the DELETE is on its way, Cancel, Confirm, Escape and every card's
+  Delete run do nothing. Only one deletion can be in flight.
+- Failures:
+  - A 4xx refusal reads "The run was not deleted: …".
+  - A 5xx, a lost connection, the existing 15 s deadline or an unreadable answer reads "The deletion was not
+    confirmed: … The run may already be deleted. Trying again is safe." Neither is ever shown as a deletion.
+  - **Retry delete** sends the same DELETE for the same run ID, which the server answers with 204 if the run was
+    already deleted.
+  - 404 `RUN_NOT_FOUND`, and 403 `ORG_ACCESS_DENIED`, leave only an "unavailable" message and Close. The 404 text
+    does not say whose run it is or whether it existed.
+  - A 401 still goes through the shared `requestJson` announcement, so session expiry is handled as before.
+- After a confirmed deletion:
+  - the confirmation and the run's sharing panel close;
+  - the current search starts over from page one with the applied filters and no cursor, through the new
+    `RunSearchController.refresh()`. It aborts and drops any page already on its way. `retry()` is unchanged and
+    still does nothing for a successful search;
+  - unapplied filter edits and the interpretation stay as they were;
+  - `ArchiveScreen` refreshes the archive metadata at once through the new `onRunDeleted` callback;
+  - an always-present `role="status"` region says "Your run of {date} was deleted.";
+  - focus moves to the My runs heading if it was in the list (every card unmounts) or already lost.
+- Scope: one `RunDeletionController` per person (the panel's key), organization, session signal and run. Unmount,
+  a new organization or person, or the session signal ending disposes it, which aborts the request and drops any late
+  answer. A DELETE already on its way is not abandoned when the search changes. If its card is no longer shown, the
+  panel says "Deleting your run of {date}…", and then the result or the failure.
+- Another card's open sharing panel closes after a deletion, because the first page is read again (ADR-0064 §4).
+  ADR-0064's "the search does not refresh by itself" still holds for a run deleted somewhere else.
+
+**Files.** New: `apps/web/src/run-deletion.ts` (controller), `ArchiveRunDelete.tsx` (confirmation), their specs,
+and `tests/e2e/run-deletion.spec.ts`. Changed: `runner-api.ts` (`deleteRun`), `run-search-controller.ts`
+(`refresh`), `RunSearchResults.tsx`, `RunSearchPanel.tsx`, `ArchiveScreen.tsx`, `styles.css`, and the existing
+specs listed below.
+
+**Executed** (Windows 11, Node 24, Docker Desktop, local PostGIS; integration and E2E run one after the other on the
+`_test` database).
+
+| Check | Result |
+|---|---|
+| Focused web unit tests (`runner-api`, `run-search-controller`, `run-deletion`) while building | 74 passed, then 73 after one test was removed (below) |
+| `npm run verify` | exit 0. Scripts 83; API 1332; web 799 = 757 + 42; contracts 132; fixtures 14; simulator 3; build |
+| New web tests (+42) | `run-deletion.spec.ts` 20: confirming sends nothing; one DELETE carrying the current token; duplicate confirms ignored; four unknown-outcome failures; three 4xx refusals; retry with the same run ID; 404 and lost membership as unavailable; late success or failure after dispose; a replacement controller. Three of the 20 combine the deletion controller with the real `RunSearchController`: the refresh is asked for only after the 204 and before the archive refresh, and a search page sent before it, arriving last, does not bring the card back. Also `run-search-controller.spec.ts` +5 (`refresh`, and `retry` does nothing after a success), `runner-api.spec.ts` +5, `ArchiveRunDelete.spec.tsx` 5, `RunSearchResults.spec.tsx` +6, `RunSearchPanel.spec.tsx` +1 |
+| `npx playwright test run-deletion.spec.ts --project=chromium` | 3 passed (34 s); then `--repeat-each=3`: 9 passed, 0 flaky (54 s) |
+| Neighbouring Chromium specs (`archive-sharing`, `run-search`, `run-search-interpretation`) | 15 passed (1.8 min) |
+| `npm run test:integration --` the five deletion files (`run-deletion`, `run-tombstone-expiry`, `run-commands-tombstones-access`, `run-deletion-journal`, `run-read-share`) | 78 passed in 5 files |
+| `git diff --check` (new files included with `git add -N`, then reset) | clean |
+
+The three E2E tests:
+1. Cancel and Escape send no DELETE and the run stays. Opening the confirmation closes the run's sharing panel.
+   Confirm gives a 204, the status message, one card left, focus on the heading, a metadata read, the unapplied
+   minimum distance kept, and owner reads of 410 and 200. After a reload the run is still gone.
+2. Attempt 1 is held, which shows the pending state with nothing pressable and no second request, then aborted: a
+   failure, the run still 200, Retry focused. In attempt 2 the server deletes the run (`route.fetch`) but the answer
+   is dropped: still a failure, no list refresh, the run 410 on the server. Attempt 3 gets 204 and only now shows
+   the deletion.
+3. A 404 shows only the unavailable text and Close.
+
+One unit test was removed while building: a guard for a deleter throwing synchronously. Lint rejected its
+`Promise.reject(error)`, and the repo's other controllers rely on the async API helpers instead.
+
+**Not run / limits.**
+- Not run: the full Chromium suite, `chromium-oidc`, Firefox (the spec is not in the `firefox-core` allowlist) and the
+  full integration suite (463 last time). The README's "109 passed" is still the earlier full run; the suite now has
+  112 tests.
+- The success-ordering and stale-response rules are proven in unit tests over the two controllers and in Chromium.
+  The React glue in `RunSearchPanel` has no DOM unit test, because the web tests run in Node with static markup and
+  adding a DOM library would be a new dependency.
+- After a network failure the UI cannot know whether the server deleted the run. It says so, and the card stays until
+  a retry succeeds or the list is refreshed.
+- If the session signal ends while a DELETE is pending and the panel stays mounted, its buttons stay disabled. In
+  practice the Archive unmounts or remounts on session end or replacement (ADR-0064 §3).
+- No undo, bulk or soft deletion. A deletion is permanent within the server's tombstone rules (ADR-0036).

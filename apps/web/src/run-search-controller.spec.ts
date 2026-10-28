@@ -305,7 +305,103 @@ describe('RunSearchController', () => {
       controller.dispose();
       controller.loadMore();
       controller.retry();
+      controller.refresh();
       expect(loader).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('refresh after the list is known to be out of date', () => {
+    it('is needed because retry does nothing for a search that succeeded', async () => {
+      const loader = vi.fn<RunSearchLoader>(() => Promise.resolve(page([item(1)], 'c1')));
+      const { controller } = harness(loader);
+      controller.start();
+      await flush();
+      controller.retry();
+      expect(loader).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts over from page one with the same filters, no cursor and nothing of the old list shown', async () => {
+      const loader = vi
+        .fn<RunSearchLoader>()
+        .mockResolvedValueOnce(page([item(3), item(2)], 'c1'))
+        .mockResolvedValueOnce(page([item(1)], 'c2'))
+        .mockResolvedValueOnce(page([item(3)], null));
+      const { controller, latest } = harness(loader);
+      controller.start();
+      await flush();
+      controller.loadMore();
+      await flush();
+      expect(latest().items).toHaveLength(3);
+
+      controller.refresh();
+      expect(latest()).toMatchObject({ hasMore: false, items: [], loadingMore: false, status: 'loading' });
+      expect(loader).toHaveBeenCalledTimes(3);
+      expect(loader.mock.calls[2]![0]).toEqual(loader.mock.calls[0]![0]);
+      expect(loader.mock.calls[2]![0].params).not.toHaveProperty('cursor');
+
+      await flush();
+      expect(latest()).toMatchObject({ hasMore: false, status: 'ready' });
+      expect(latest().items.map((entry) => entry.runId)).toEqual([runUuid(3)]);
+      // The old cursor is gone with the old pages.
+      controller.loadMore();
+      expect(loader).toHaveBeenCalledTimes(3);
+    });
+
+    it('drops a first page that was already on its way, so it cannot bring back a deleted run', async () => {
+      const stale = deferred<RunSearchResponse>();
+      const fresh = deferred<RunSearchResponse>();
+      const signals: AbortSignal[] = [];
+      const loader = vi
+        .fn<RunSearchLoader>()
+        .mockImplementationOnce((_input, signal) => {
+          signals.push(signal);
+          return stale.promise;
+        })
+        .mockImplementationOnce((_input, signal) => {
+          signals.push(signal);
+          return fresh.promise;
+        });
+      const { controller, latest, snapshots } = harness(loader);
+      controller.start();
+
+      controller.refresh();
+      expect(signals[0]?.aborted).toBe(true);
+      expect(signals[1]?.aborted).toBe(false);
+
+      fresh.resolve(page([item(2)]));
+      await flush();
+      const settled = snapshots.length;
+      // The stale answer still lists the deleted run 1; it arrives last and changes nothing.
+      stale.resolve(page([item(2), item(1)]));
+      await flush();
+      expect(snapshots).toHaveLength(settled);
+      expect(latest().items.map((entry) => entry.runId)).toEqual([runUuid(2)]);
+    });
+
+    it('drops a next page that was on its way', async () => {
+      const staleMore = deferred<RunSearchResponse>();
+      const loader = vi
+        .fn<RunSearchLoader>()
+        .mockResolvedValueOnce(page([item(3)], 'c1'))
+        .mockReturnValueOnce(staleMore.promise)
+        .mockResolvedValueOnce(page([item(3), item(2)]));
+      const { controller, latest } = harness(loader);
+      controller.start();
+      await flush();
+      controller.loadMore();
+      controller.refresh();
+      await flush();
+      staleMore.resolve(page([item(1)]));
+      await flush();
+      expect(latest()).toMatchObject({ loadingMore: false, status: 'ready' });
+      expect(latest().items.map((entry) => entry.runId)).toEqual([runUuid(3), runUuid(2)]);
+    });
+
+    it('does nothing before the search started', () => {
+      const loader = vi.fn<RunSearchLoader>(() => Promise.resolve(page([])));
+      const { controller } = harness(loader);
+      controller.refresh();
+      expect(loader).not.toHaveBeenCalled();
     });
   });
 });

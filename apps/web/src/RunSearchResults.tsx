@@ -1,7 +1,9 @@
 import type { GpsQuality, RunSearchItem } from '@running-tracker/contracts';
 import { useId, useRef } from 'react';
 
+import { ArchiveRunDelete } from './ArchiveRunDelete.js';
 import { ArchiveRunShare, type ArchiveShareScope } from './ArchiveRunShare.js';
+import type { RunDeletionSnapshot } from './run-deletion.js';
 import type { RunSearchSnapshot } from './run-search-controller.js';
 import {
   describeAppliedFilters,
@@ -80,21 +82,39 @@ export interface RunSearchSharing {
   scope: ArchiveShareScope;
 }
 
+// Deleting one of the person's own finished runs. At most one card has its confirmation open, and while a deletion
+// is on its way no other can be started.
+export interface RunSearchDeletion {
+  // A DELETE is on its way, for this run or another.
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onToggle: (runId: string, startedAtLabel: string) => void;
+  // The run whose confirmation is open, and how far its deletion got; null when none is open.
+  open: { runId: string; snapshot: RunDeletionSnapshot } | null;
+}
+
 function RunCard({
+  deletion,
   filters,
   item,
   sharing,
 }: {
+  deletion: RunSearchDeletion | undefined;
   filters: RunSearchFilters;
   item: RunSearchItem;
   sharing: RunSearchSharing | undefined;
 }) {
   const manage = useRef<HTMLButtonElement>(null);
+  const remove = useRef<HTMLButtonElement>(null);
   const panelId = useId();
+  const confirmationId = useId();
   const startedAt = formatStartedAt(item.startedAt, filters.timeZone);
   const open = sharing !== undefined && sharing.openRunId === item.runId;
+  const deleting = deletion?.open?.runId === item.runId ? deletion.open.snapshot : null;
+  const className = open ? 'run-card run-card--sharing' : deleting === null ? 'run-card' : 'run-card run-card--deleting';
   return (
-    <li className={open ? 'run-card run-card--sharing' : 'run-card'}>
+    <li className={className}>
       <h4>
         <time dateTime={item.startedAt}>{startedAt}</time>
       </h4>
@@ -109,18 +129,50 @@ function RunCard({
         </div>
       </dl>
       <p className={`run-card__quality run-card__quality--${item.gpsQuality}`}>{qualityText[item.gpsQuality]}</p>
-      {sharing !== undefined && (
-        <button
-          aria-controls={open ? panelId : undefined}
-          aria-expanded={open}
-          aria-label={`Manage sharing for your run of ${startedAt}`}
-          className="run-card__share"
-          onClick={() => sharing.onToggle(item.runId)}
-          ref={manage}
-          type="button"
-        >
-          Manage sharing
-        </button>
+      {(sharing !== undefined || deletion !== undefined) && (
+        <div className="run-card__actions">
+          {sharing !== undefined && (
+            <button
+              aria-controls={open ? panelId : undefined}
+              aria-expanded={open}
+              aria-label={`Manage sharing for your run of ${startedAt}`}
+              className="run-card__share"
+              // Sharing a run that is being deleted would race the deletion.
+              disabled={deleting !== null}
+              onClick={() => sharing.onToggle(item.runId)}
+              ref={manage}
+              type="button"
+            >
+              Manage sharing
+            </button>
+          )}
+          {deletion !== undefined && (
+            <button
+              aria-controls={deleting === null ? undefined : confirmationId}
+              aria-expanded={deleting !== null}
+              aria-label={`Delete your run of ${startedAt}`}
+              className="run-card__delete"
+              disabled={deletion.busy}
+              onClick={() => deletion.onToggle(item.runId, startedAt)}
+              ref={remove}
+              type="button"
+            >
+              Delete run
+            </button>
+          )}
+        </div>
+      )}
+      {deletion !== undefined && deleting !== null && (
+        <ArchiveRunDelete
+          id={confirmationId}
+          onCancel={() => {
+            deletion.onCancel();
+            remove.current?.focus();
+          }}
+          onConfirm={deletion.onConfirm}
+          snapshot={deleting}
+          startedAtLabel={startedAt}
+        />
       )}
       {open && (
         <ArchiveRunShare
@@ -139,6 +191,8 @@ function RunCard({
 }
 
 export interface RunSearchResultsProps {
+  // Absent: the cards offer no deletion.
+  deletion?: RunSearchDeletion;
   // The filters the shown results were produced with.
   filters: RunSearchFilters;
   onLoadMore: () => void;
@@ -148,7 +202,7 @@ export interface RunSearchResultsProps {
   snapshot: RunSearchSnapshot;
 }
 
-export function RunSearchResults({ filters, onLoadMore, onRetry, sharing, snapshot }: RunSearchResultsProps) {
+export function RunSearchResults({ deletion, filters, onLoadMore, onRetry, sharing, snapshot }: RunSearchResultsProps) {
   const distanceFiltered = filters.minDistance !== null || filters.maxDistance !== null;
 
   if (snapshot.status === 'loading') {
@@ -195,7 +249,7 @@ export function RunSearchResults({ filters, onLoadMore, onRetry, sharing, snapsh
       </p>
       <ol aria-label="My runs" className="run-cards">
         {snapshot.items.map((item) => (
-          <RunCard filters={filters} item={item} key={item.runId} sharing={sharing} />
+          <RunCard deletion={deletion} filters={filters} item={item} key={item.runId} sharing={sharing} />
         ))}
       </ol>
       {snapshot.moreMessage !== null && (

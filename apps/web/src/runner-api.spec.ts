@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createLocalSession,
   createRun,
+  deleteRun,
   endSession,
   grantRunShare,
   interpretRunSearch,
@@ -517,6 +518,69 @@ describe('runner API', () => {
       await expect(
         revokeRunShare({ orgId, runId, userId: coachId }, csrf, new AbortController().signal),
       ).rejects.toMatchObject({ code: 'RUN_NOT_FOUND', requestId: coachId, status: 404 });
+    });
+  });
+
+  describe('deleting a finished run', () => {
+    it('sends a DELETE to the run path with the CSRF header and same-origin credentials, and accepts the empty 204', async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(deleteRun({ orgId, runId }, csrf, new AbortController().signal)).resolves.toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/runs/${runId}`, {
+        credentials: 'same-origin',
+        headers: { 'x-csrf-token': csrf.token },
+        method: 'DELETE',
+        signal: expect.any(AbortSignal) as AbortSignal,
+      });
+    });
+
+    it('encodes the path segments', async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await deleteRun({ orgId: 'a/b', runId: 'c?d' }, csrf, new AbortController().signal);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/orgs/a%2Fb/runs/c%3Fd');
+    });
+
+    it('reports a refusal with its status, code and request id', async () => {
+      const refusal = { error: { code: 'RUN_NOT_FOUND', message: 'Run not found.', requestId: runId } };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(refusal), { status: 404 })),
+      );
+
+      await expect(deleteRun({ orgId, runId }, csrf, new AbortController().signal)).rejects.toMatchObject({
+        code: 'RUN_NOT_FOUND',
+        name: 'RunnerApiError',
+        requestId: runId,
+        status: 404,
+      });
+    });
+
+    it('announces a 401 like every other request, so session expiry is handled in one place', async () => {
+      const refusal = { error: { code: 'AUTH_REQUIRED', message: 'no', requestId: runId } };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(refusal), { status: 401 })),
+      );
+      const announced = vi.fn();
+      const unsubscribe = onAuthenticationRequired(announced);
+      try {
+        await expect(deleteRun({ orgId, runId }, csrf, new AbortController().signal)).rejects.toMatchObject({ status: 401 });
+        expect(announced).toHaveBeenCalledTimes(1);
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it('rejects with an AbortError when the caller aborts, without waiting for the server', async () => {
+      vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(() => new Promise<Response>(() => undefined)));
+      const abort = new AbortController();
+      const sent = deleteRun({ orgId, runId }, csrf, abort.signal);
+      abort.abort();
+      await expect(sent).rejects.toMatchObject({ name: 'AbortError' });
     });
   });
 });

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import { AppliedFilters, RunSearchResults } from './RunSearchResults.js';
+import type { RunDeletionSnapshot } from './run-deletion.js';
 import type { RunSearchSnapshot } from './run-search-controller.js';
 import type { RunSearchFilters } from './run-search.js';
 
@@ -234,6 +235,88 @@ describe('RunSearchResults', () => {
 
     it('offers nothing about sharing when the caller gives no sharing scope', () => {
       expect(render(snapshot({ items: [runItem()] }))).not.toContain('Manage sharing');
+    });
+  });
+
+  describe('deleting a run from a card', () => {
+    const second = runItem({ runId: 'c2000000-0000-4000-8000-000000000002', startedAt: '2026-10-20T06:00:00.000Z' });
+    const sharing = {
+      onClose: noop,
+      onToggle: noop,
+      openRunId: null,
+      scope: {
+        csrfToken: 't'.repeat(43),
+        orgId: '11111111-1111-4111-8111-111111111111',
+        signal: new AbortController().signal,
+        userId: '22222222-2222-4222-8222-222222222222',
+      },
+    };
+    const renderWith = (
+      open: { runId: string; snapshot: RunDeletionSnapshot } | null,
+      { busy = false, items = [runItem(), second] }: { busy?: boolean; items?: RunSearchItem[] } = {},
+    ) =>
+      renderToStaticMarkup(
+        <RunSearchResults
+          deletion={{ busy, onCancel: noop, onConfirm: noop, onToggle: noop, open }}
+          filters={filters}
+          onLoadMore={noop}
+          onRetry={noop}
+          sharing={sharing}
+          snapshot={snapshot({ items })}
+        />,
+      );
+    const cards = (markup: string) => markup.split('<li class="run-card').slice(1);
+    const button = (markup: string, name: string) =>
+      new RegExp(`<button[^>]*aria-label="${name}"[^>]*>`, 'u').exec(markup)?.[0] ?? '';
+
+    it('offers Delete run on every card, named by the run’s date, with no confirmation open', () => {
+      const markup = renderWith(null);
+      expect(markup.match(/>Delete run<\/button>/gu)).toHaveLength(2);
+      expect(markup).toContain('aria-label="Delete your run of 1 Nov 2026, 00:30"');
+      expect(markup).toContain('aria-label="Delete your run of 20 Oct 2026, 08:00"');
+      expect(markup).not.toContain('Delete your run of 1 Nov 2026, 00:30?');
+      expect(markup).not.toContain('Confirm delete');
+      expect(button(markup, 'Delete your run of 20 Oct 2026, 08:00')).toContain('aria-expanded="false"');
+    });
+
+    it('opens the confirmation only inside the chosen card, which its button controls', () => {
+      const markup = renderWith({ runId: second.runId, snapshot: { message: null, phase: 'confirming' } });
+      expect(markup.match(/Confirm delete/gu)).toHaveLength(1);
+      const [first, chosen] = cards(markup);
+      expect(first).not.toContain('Confirm delete');
+      expect(chosen).toMatch(/^ run-card--deleting"/u);
+      const toggle = button(chosen ?? '', 'Delete your run of 20 Oct 2026, 08:00');
+      expect(toggle).toContain('aria-expanded="true"');
+      const controls = /aria-controls="([^"]+)"/u.exec(toggle)?.[1];
+      expect(controls).toBeDefined();
+      expect(chosen).toContain(`id="${controls}"`);
+      expect(chosen).toContain('Delete your run of 20 Oct 2026, 08:00?');
+      expect(chosen).toMatch(/permanently deletes/u);
+    });
+
+    it('does not let the run being deleted open its sharing; other runs still can', () => {
+      const markup = renderWith({ runId: second.runId, snapshot: { message: null, phase: 'confirming' } });
+      expect(button(markup, 'Manage sharing for your run of 20 Oct 2026, 08:00')).toContain('disabled');
+      expect(button(markup, 'Manage sharing for your run of 1 Nov 2026, 00:30')).not.toContain('disabled');
+    });
+
+    it('disables every Delete run while a deletion is on its way', () => {
+      const markup = renderWith({ runId: second.runId, snapshot: { message: null, phase: 'pending' } }, { busy: true });
+      expect(button(markup, 'Delete your run of 1 Nov 2026, 00:30')).toContain('disabled');
+      expect(button(markup, 'Delete your run of 20 Oct 2026, 08:00')).toContain('disabled');
+    });
+
+    it('shows no confirmation for a run the list does not show', () => {
+      const markup = renderWith(
+        { runId: second.runId, snapshot: { message: null, phase: 'confirming' } },
+        { items: [runItem()] },
+      );
+      expect(markup).not.toContain('Confirm delete');
+      expect(markup).not.toContain('aria-expanded="true"');
+    });
+
+    it('offers nothing about deletion when the caller gives no deletion', () => {
+      expect(render(snapshot({ items: [runItem()] }))).not.toContain('Delete run');
     });
   });
 });

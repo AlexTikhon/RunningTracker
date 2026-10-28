@@ -42,6 +42,12 @@ describe('RunSearchPanel', () => {
     expect(markup).toMatch(/<button[^>]*>Apply filters</u);
   });
 
+  it('has an empty status region from the start, for announcing a deletion, and a heading focus can move to', () => {
+    expect(markup).toContain('<p class="search-panel__notice" role="status"></p>');
+    expect(markup).toContain('<h2 id="my-runs-title" tabindex="-1">My runs</h2>');
+    expect(markup).not.toContain('role="alert"');
+  });
+
   it('never puts the CSRF token on the screen', () => {
     expect(markup).not.toContain('a'.repeat(43));
   });

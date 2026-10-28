@@ -121,6 +121,16 @@ export class RunSearchController {
     }
   }
 
+  // The list is known to be out of date (a run was deleted): whatever is on its way or shown, start over from page one
+  // with the same filters and no cursor. An answer to a request sent before this is dropped, even one already sent
+  // for the first page, so it cannot bring back what the server has since removed.
+  public refresh(): void {
+    if (!this.#started || this.#disposed) {
+      return;
+    }
+    this.#loadFirstPage();
+  }
+
   public dispose(): void {
     this.#disposed = true;
     this.#request?.abort();

@@ -177,7 +177,16 @@ export function ArchiveScreen({ accessToken, csrf, orgId, signal, userId }: Arch
         <span>Metadata refreshes every 30 seconds and immediately on tab focus.</span>
       </footer>
 
-      <RunSearchPanel csrf={csrf} key={`${userId}/${orgId}`} orgId={orgId} signal={signal} userId={userId} />
+      <RunSearchPanel
+        csrf={csrf}
+        key={`${userId}/${orgId}`}
+        // A deletion advances the archive revision; reading the metadata now replaces the map's tiles without waiting
+        // for the next poll. A read already on its way is followed by another (ArchiveSourceController).
+        onRunDeleted={() => controller.current?.refreshNow()}
+        orgId={orgId}
+        signal={signal}
+        userId={userId}
+      />
     </section>
   );
 }
