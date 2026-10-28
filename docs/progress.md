@@ -1,6 +1,7 @@
 # Implementation progress
 
-Last updated: 2026-10-06.
+Last updated: 2026-10-28 (pause closeout, the last section; returning: `docs/pause-handoff.md`). The paragraphs
+below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
 the reducer and IndexedDB; shared session suspension preserves durable recovery; JSON requests
@@ -2902,3 +2903,32 @@ size), `docs/runbooks/demo.md` (smoke membership, results and its coverage table
 the Firefox CI entry has never run hosted). The Docker verifiers (`deploy:verify`, `transport:verify`,
 `proxy:verify-error-log`) were not part of this matrix. Safari/WebKit, mobile, real devices, a real identity
 provider and a real Mapbox basemap remain uncovered.
+
+## Pause closeout: the five-step plan is complete (2026-10-28)
+
+Documentation only, on top of `d2438da`, uncommitted. No application code, test, dependency or configuration change;
+no suite was rerun.
+
+**The plan, all done.** (1) Owner deletion of a finished run from My runs (`8e6e4a3`); (2) sharing kept blocked
+while that DELETE is pending (`d4a27b2`); (3) the two-minute local demo simulator (`d088ba5`); (4) the `demo:up`
+rehearsal with console Ctrl+C and restart and (5) the final regression with the 24-test smoke (both recorded in
+`d2438da`; the tested snapshot is `d088ba5` plus the smoke allowlist change, the only non-documentation change in
+`d2438da`). **No
+further product work is required for this pause.**
+
+**Written and reconciled.** New `docs/pause-handoff.md`: status, the tested snapshot, how to return, what persists,
+the remaining limits and three deferred options. README: a status line under the introduction pointing to it and to
+`docs/reports/pause-verification.md`; the stage list names the demo simulator and owner deletion; the "does not
+establish" paragraph now says Firefox runs the 18-test core gate *and* the 24-test smoke, still without OpenID
+Connect sign-in or the real map runtime. `docs/interview.md`, "What is not established": the same browser statement,
+plus a line on hosted CI. The header of this file now points to this entry. Earlier entries, results and their
+dates and commits are unchanged.
+
+**Validation.** Relative links and anchors in the changed files plus the report and the demo runbook (scratch
+checker): 131, 0 broken. Every npm script the handoff names exists in `package.json`. `git diff --check` clean, the
+new file included.
+
+**Deferred, not required.** No hosted CI run of this version (last hosted run `83f804f`; the Firefox CI entry never
+ran hosted); D10 PARTIAL without physical GPS recordings; no Safari/WebKit, mobile or real device; OpenID Connect only
+against test providers and only in Chromium; no real Mapbox basemap rendered; OpenAI never called and no live AI
+evaluation (the local Ollama run missed its deadline). Options if work resumes are listed in `docs/pause-handoff.md`.

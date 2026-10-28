@@ -513,7 +513,11 @@ all (point to the drill report instead).
   Geolocation, and the D10 real-device pilot is waiting for physical recordings
   ([real-device-pilot.md](reports/real-device-pilot.md)).
 - A real identity provider and provider-side logout: never tested.
-- Browsers: the full suite runs in Chromium. Firefox runs only the 18-test core gate, on Windows. Nothing was run in
-  Safari or a mobile browser, OIDC sign-in in Firefox was not tested, and neither was the real Mapbox basemap anywhere.
+- Browsers: the full suite runs in Chromium. Firefox, on Windows, runs the 18-test core gate and the 24-test pre-demo
+  smoke, not the rest of the suite. Nothing was run in Safari or a mobile browser, OIDC sign-in in Firefox was not
+  tested, the real map runtime ran only in Chromium (against a local empty style), and the real Mapbox basemap was
+  not rendered anywhere.
+- CI: one GitHub-hosted run passed, for `83f804f` on 2026-10-14; later commits, including the pause verification of
+  2026-10-28 ([pause-verification.md](reports/pause-verification.md)), have workstation runs only.
 - AI search quality: no OpenAI call has ever been made, and local Ollama missed the deadline on this CPU.
 - Production: no host, no users, no traffic model, no RPO or RTO. Everything measured ran on one workstation.
