@@ -330,3 +330,20 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .archive-share__header h5:focus-visible { outline: 2px solid #b8f264; outline-offset: 3px; }
 .archive-share .run-id { margin-left: 0.3rem; font-weight: 500; }
 .run-share--embedded { margin-top: 0; padding-top: 0; border-top: 0; }
+/* Finished-run review keeps statistics readable with or without a map provider. */
+.archive-overview:not([hidden]) { display: grid; gap: 1.5rem; }
+.run-detail { padding: clamp(1.2rem, 3vw, 2.5rem); background: var(--panel, #162019); border-radius: 1rem; }
+.run-detail-heading { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; }
+.run-detail-heading h1 { flex: 1 1 12rem; font-size: clamp(1.8rem, 4vw, 3rem); }
+.run-detail h2 { margin-top: 1.5rem; }
+.run-detail p { max-width: 72ch; line-height: 1.6; }
+.run-detail-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.run-detail-stats div { padding: 1rem; border: 1px solid #43513d; border-radius: .75rem; }
+.run-detail-stats dt { color: #bac8af; font-size: .85rem; }
+.run-detail-stats dd { margin: .5rem 0 0; font-size: 1.2rem; }
+.run-detail-map { height: clamp(18rem, 50vh, 32rem); border-radius: .75rem; overflow: hidden; margin-bottom: 1rem; }
+.run-detail details { margin-top: 1.5rem; }
+.run-detail [tabindex="-1"]:focus { outline: 2px solid #b8f264; outline-offset: .3rem; }
+@media (max-width: 600px) {
+  .run-detail-heading h1 { order: -1; flex-basis: 100%; margin: .25rem 0; }
+}

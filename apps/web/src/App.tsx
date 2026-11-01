@@ -904,6 +904,7 @@ export function App() {
       {activeView === 'archive' && (
         session.status === 'ready' && selectedOrgId !== null ? (
           <ArchiveScreen
+            key={`${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`}
             accessToken={mapboxAccessToken}
             csrf={session.session.csrf}
             orgId={selectedOrgId}

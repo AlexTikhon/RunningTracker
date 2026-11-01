@@ -11,7 +11,7 @@ The user selected the first improvement from `docs/reports/architecture-review-2
 Its first bounded slice is the published archive-track read (ADR-0066): a coherent GeoJSON response with explicit
 pending/stale/ready summary state, existing history authorization and operation after raw purge. No migration or
 web change belongs to this slice. Verification and completion evidence are in the final section of `docs/progress.md`.
-The following slice is the owner detail screen; it remains unimplemented. Physical GPS validation, deployment,
+The following owner detail screen slice is implemented in ADR-0067: View details in My runs, applied-unit/time-zone statistics and GPS quality, optional route display, explicit summary/error states and Back with filters/pages/draft retained. Physical GPS validation, deployment,
 algorithm changes, derived analytics and AI remain separate work.
 
 ## 1. Execution mode

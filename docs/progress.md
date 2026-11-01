@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-01 (resumed archive-track read, the last section; historical pause: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-01 (owner finished-run review, the last section; historical pause: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -2976,3 +2976,48 @@ checks that geometry alone fits while the full Feature is rejected.
 deployment verifiers were not run for this API-only change. The existing large-chunk Vite warning remains; builds
 exit 0. The owner detail screen, list navigation and map selection are the next bounded slice, not delivered here.
 No commit or push was performed. The pre-existing architecture review report remains preserved in the working tree.
+
+## Owner finished-run detail screen (2026-11-01)
+
+At the user's request the verified API slice and its supporting architecture report were committed locally as
+`1180470` (`feat(api): expose revision-aware published archive tracks`), 14 files. The staged manifest and whitespace
+were audited; no migration, dependency manifest/lockfile or environment file was included. The worktree was clean
+immediately after commit, with local `origin/main...HEAD` divergence 0 behind / 1 ahead. No push was run.
+
+**Implemented next (ADR-0067), on that base.** View details in My runs opens a finished-run view using ADR-0066's
+published Feature. It shows start/finish, distance and observed duration in the applied search's unit/time zone,
+GPS quality, a collapsible quality breakdown and optional complete route. Pending/stale/empty and transient,
+deleted/unavailable/too-complex results are distinct. Refresh clears the previous read before asking again.
+Text remains useful without a map token; no provider/runtime request is made then.
+
+Back preserves the mounted search's filters, unapplied draft, loaded pages and focus. The overview map is removed
+while details are open, avoiding a hidden second map instance. Detail selection/read results are scoped to run,
+organization, identity and session; refresh, closing or session end aborts the displayed map lifetime too. Late
+results are ignored even when cancellation is disregarded. The map draws the published disconnected chains,
+fits the shortest longitude arc across the antimeridian and clamps only the camera at the Mercator latitude limit.
+
+**Scope.** Web application, strict browser adapter/controllers, focused unit tests, seven new browser scenarios,
+one guarded per-run fixture helper and the fake map's vector-source methods for Archive-to-detail transitions.
+No API, SQL, migration, dependency, retention, metric algorithm or real provider configuration change. The new
+navigation is local to Archive; deep links and browser URL routing are not added.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| `npm test --workspace=@running-tracker/web -- src/run-detail-controller.spec.ts src/run-detail-map.spec.ts src/RunSearchResults.spec.tsx src/ArchiveScreen.spec.tsx` | 58 passed in 4 files, including 25 new controller/adapter/map tests |
+| `npm run verify` | exit 0: lint, all workspace typechecks, 2,421 tests (scripts 83, API 1,332, web 845, contracts 144, fixtures 14, simulator 3), production builds |
+| `node node_modules/typescript/bin/tsc --noEmit -p tests/e2e/tsconfig.json` | passed after the final browser-test changes |
+| `npm run e2e --workspace=@running-tracker/e2e -- --project=chromium run-details.spec.ts` (initial) | 6 passed, 1 failed: the new test expected a unit label in an unbounded distance filter, which is intentionally shown as "any distance"; corrected the setup to apply a 1 mi minimum, retaining a meaningful unit assertion |
+| `npm run e2e --workspace=@running-tracker/e2e -- --project=chromium run-details.spec.ts run-search.spec.ts archive-sharing.spec.ts run-deletion.spec.ts coach-map.spec.ts` | exit 0: 25 passed in 4.1 min, including all 7 new scenarios and both selected real-runtime map smokes; retries 0 |
+| `git diff --check` | passed; new-file whitespace also checked |
+
+Desktop, 375 px viewport and real-runtime route screenshots were inspected. The real Mapbox runtime draws the
+two disconnected lines in headless Chromium with a local empty style and external requests blocked. The mobile
+layout has no horizontal overflow in the recorded viewport; the diagnostic breakdown is collapsed by default.
+These are synthetic fixtures/viewport checks, not physical-phone GPS or a real provider basemap.
+
+**Coverage limits.** The full Chromium/OIDC suite, Firefox, Safari/mobile devices, hosted CI and deployment/restore
+verifiers were not run for this UI slice. The 478-test database run belongs to the preceding API slice on this
+same base; SQL/RLS are unchanged here. The existing Mapbox large-chunk warning remains, with a successful build.
+This screen work is left uncommitted for review; the API commit above remains local and unpushed.

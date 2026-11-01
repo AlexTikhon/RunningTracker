@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { DistanceUnit } from '@running-tracker/contracts';
 
 import { openSharingItem, type ArchiveShareSelection } from './ArchiveRunShare.js';
 import { RunSearchFilters } from './RunSearchFilters.js';
@@ -50,6 +51,7 @@ export interface RunSearchPanelProps {
   // Told once after the server confirmed that one of the person's runs was deleted, so the archive map can read its
   // metadata again at once rather than at its next poll.
   onRunDeleted?: () => void;
+  onOpenDetails?: (runId: string, unit: DistanceUnit, timeZone: string) => void;
   orgId: string;
   // The session's signal, from when the session was issued: ending or replacing the session silences sharing and
   // deletion.
@@ -80,7 +82,7 @@ const idleInterpretation: InterpretationSnapshot = { status: 'idle' };
 // different person or organization starts from a clean draft with no results, cursors or requests carried over.
 // The editable draft and the applied filters are separate state: results always belong to the applied filters.
 // Describing the search in words only ever replaces the draft; applying it stays the person's explicit step.
-export function RunSearchPanel({ csrf, onRunDeleted, orgId, signal, userId }: RunSearchPanelProps) {
+export function RunSearchPanel({ csrf, onRunDeleted, onOpenDetails, orgId, signal, userId }: RunSearchPanelProps) {
   const timeZone = useMemo(() => defaultTimeZone(), []);
   const [draft, setDraft] = useState<RunSearchDraft>(defaultDraft);
   const [text, setText] = useState('');
@@ -309,6 +311,7 @@ export function RunSearchPanel({ csrf, onRunDeleted, orgId, signal, userId }: Ru
           }}
           filters={applied.filters}
           onLoadMore={() => controller.current?.loadMore()}
+          onOpenDetails={onOpenDetails === undefined ? undefined : (runId) => onOpenDetails(runId, applied.filters.unit, applied.filters.timeZone)}
           onRetry={() => controller.current?.retry()}
           sharing={{
             onClose: () => setSharing(null),

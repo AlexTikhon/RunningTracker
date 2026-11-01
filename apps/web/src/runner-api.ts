@@ -1,6 +1,7 @@
 import {
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
+  archiveTrackResponseSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
   organizationCoachListResponseSchema,
@@ -13,6 +14,7 @@ import {
   runViewSchema,
   sessionResponseSchema,
   type ArchiveMetadataResponse,
+  type ArchiveTrackResponse,
   type IngestPointsResponse,
   type LiveTrackResponse,
   type PointInput,
@@ -212,6 +214,16 @@ export async function searchRuns(
     },
   );
   return runSearchResponseSchema.parse(requireSuccess(response));
+}
+
+export async function loadArchiveTrack(scope: LiveTrackScope, signal: AbortSignal): Promise<ArchiveTrackResponse> {
+  const response = await requestJson(
+    `/api/orgs/${encodeURIComponent(scope.orgId)}/runs/${encodeURIComponent(scope.runId)}/track?mode=archive`,
+    { credentials: 'same-origin', cache: 'no-store', signal },
+  );
+  const feature = archiveTrackResponseSchema.parse(requireSuccess(response));
+  if (feature.properties.runId !== scope.runId) throw new Error('The server returned a different run');
+  return feature;
 }
 
 // Asks the server to turn a sentence into a filter proposal. Sends only the text and the zone; the owner comes from

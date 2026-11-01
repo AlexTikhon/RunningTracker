@@ -36,6 +36,7 @@ class FakeMap {
     probe.created += 1;
     this.handlers = new Map();
     this.sourceData = new Map();
+    this.layers = new Set();
     this.loaded = false;
     this.removed = false;
     setTimeout(() => {
@@ -45,7 +46,10 @@ class FakeMap {
     }, 50);
   }
   addControl() {}
-  addLayer() {}
+  addLayer(layer) { this.layers.add(layer.id); }
+  getLayer(id) { return this.layers.has(id) ? {} : undefined; }
+  removeLayer(id) { this.layers.delete(id); }
+  removeSource(id) { this.sourceData.delete(id); delete probe.sources[id]; }
   addSource(id, source) {
     const map = this;
     this.sourceData.set(id, {
@@ -53,8 +57,9 @@ class FakeMap {
         if (map.removed) throw new Error('setData on a removed map');
         probe.sources[id] = JSON.parse(JSON.stringify(data));
       },
+      setTiles() {},
     });
-    probe.sources[id] = JSON.parse(JSON.stringify(source.data));
+    if (source.data !== undefined) probe.sources[id] = JSON.parse(JSON.stringify(source.data));
   }
   fitBounds() { probe.fitBounds += 1; }
   getSource(id) { return this.sourceData.get(id); }
@@ -71,7 +76,7 @@ class FakeMap {
   remove() {
     this.removed = true;
     probe.removed += 1;
-    probe.sources = {};
+    for (const id of this.sourceData.keys()) delete probe.sources[id];
   }
 }
 class NavigationControl {}

@@ -99,11 +99,13 @@ function RunCard({
   deletion,
   filters,
   item,
+  onOpenDetails,
   sharing,
 }: {
   deletion: RunSearchDeletion | undefined;
   filters: RunSearchFilters;
   item: RunSearchItem;
+  onOpenDetails: ((runId: string) => void) | undefined;
   sharing: RunSearchSharing | undefined;
 }) {
   const manage = useRef<HTMLButtonElement>(null);
@@ -132,8 +134,16 @@ function RunCard({
         </div>
       </dl>
       <p className={`run-card__quality run-card__quality--${item.gpsQuality}`}>{qualityText[item.gpsQuality]}</p>
-      {(sharing !== undefined || deletion !== undefined) && (
+      {(sharing !== undefined || deletion !== undefined || onOpenDetails !== undefined) && (
         <div className="run-card__actions">
+          {onOpenDetails !== undefined && (
+            <button
+              aria-label={`View details for your run of ${startedAt}`}
+              disabled={shareBlocked}
+              onClick={() => onOpenDetails(item.runId)}
+              type="button"
+            >View details</button>
+          )}
           {sharing !== undefined && (
             <button
               aria-controls={open ? panelId : undefined}
@@ -200,13 +210,14 @@ export interface RunSearchResultsProps {
   // The filters the shown results were produced with.
   filters: RunSearchFilters;
   onLoadMore: () => void;
+  onOpenDetails?: ((runId: string) => void) | undefined;
   onRetry: () => void;
   // Absent: the cards offer no sharing.
   sharing?: RunSearchSharing;
   snapshot: RunSearchSnapshot;
 }
 
-export function RunSearchResults({ deletion, filters, onLoadMore, onRetry, sharing, snapshot }: RunSearchResultsProps) {
+export function RunSearchResults({ deletion, filters, onLoadMore, onOpenDetails, onRetry, sharing, snapshot }: RunSearchResultsProps) {
   const distanceFiltered = filters.minDistance !== null || filters.maxDistance !== null;
 
   if (snapshot.status === 'loading') {
@@ -253,7 +264,7 @@ export function RunSearchResults({ deletion, filters, onLoadMore, onRetry, shari
       </p>
       <ol aria-label="My runs" className="run-cards">
         {snapshot.items.map((item) => (
-          <RunCard deletion={deletion} filters={filters} item={item} key={item.runId} sharing={sharing} />
+          <RunCard deletion={deletion} filters={filters} item={item} key={item.runId} onOpenDetails={onOpenDetails} sharing={sharing} />
         ))}
       </ol>
       {snapshot.moreMessage !== null && (

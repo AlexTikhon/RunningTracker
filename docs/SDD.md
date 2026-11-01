@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Date: September 21, 2026
-Status: agreed architecture, implemented through P12 and extended through ADR-0066. `docs/progress.md` records current verification; `docs/reports/pause-verification.md` records the 2026-10-28 Chromium/OIDC, bounded desktop Firefox and smoke baseline. Workstation evidence does not establish a real host, real identity provider, physical GPS, provider basemap or production RPO/RTO. D01-D09 are resolved as scoped in `docs/decision-backlog.md`; D10 remains PARTIAL with synthetic measurements only. The published archive-track read was added on 2026-11-01 (ADR-0066); `/archive/runs` and `/live/nearby` remain unimplemented. Stage-by-stage design notes follow.
+Status: agreed architecture, implemented through P12 and extended through ADR-0067. `docs/progress.md` records current verification; `docs/reports/pause-verification.md` records the 2026-10-28 Chromium/OIDC, bounded desktop Firefox and smoke baseline. Workstation evidence does not establish a real host, real identity provider, physical GPS, provider basemap or production RPO/RTO. D01-D09 are resolved as scoped in `docs/decision-backlog.md`; D10 remains PARTIAL with synthetic measurements only. The published archive-track read and owner detail screen were added on 2026-11-01 (ADR-0066/0067); `/archive/runs` and `/live/nearby` remain unimplemented. Stage-by-stage design notes follow.
 Scope: a personal learning project for practicing backend, geospatial, and full-stack architecture.
 
 This document supersedes fragments v0.1–v0.5. In case of discrepancy, v1.0 governs. Numeric limits not specified by the user are initial design parameters, subject to verification.

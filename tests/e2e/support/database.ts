@@ -191,6 +191,31 @@ export async function createExtraOrganization(
   return orgId;
 }
 
+// A finished-run detail fixture, scoped to one scenario run and guarded by the same live _test connection check.
+export async function setArchiveTrackFixture(
+  environment: E2eEnvironment,
+  orgId: string,
+  runId: string,
+  state: 'ready' | 'pending' | 'stale',
+  geometry: { type: 'MultiLineString'; coordinates: number[][][] } | null,
+): Promise<void> {
+  await withOwnerTransaction(environment, async (client) => {
+    const run = await client.query(
+      "UPDATE runs SET raw_state = 'purged', data_revision = $3 WHERE org_id = $1 AND id = $2 AND status = 'finished'",
+      [orgId, runId, state === 'stale' ? 2 : 1],
+    );
+    if (run.rowCount !== 1) throw new Error('The scenario run was not found');
+    if (state === 'pending') {
+      await client.query('DELETE FROM run_summaries WHERE org_id = $1 AND run_id = $2', [orgId, runId]);
+    } else {
+      await client.query(
+        'UPDATE run_summaries SET display_geom = public.ST_SetSRID(public.ST_GeomFromGeoJSON($3::text), 4326) WHERE org_id = $1 AND run_id = $2',
+        [orgId, runId, geometry === null ? null : JSON.stringify(geometry)],
+      );
+    }
+  });
+}
+
 export interface FinishedRunSeed {
   // null: no summary at all, so the run is "still being processed" as far as search is concerned.
   readonly distanceM: number | null;

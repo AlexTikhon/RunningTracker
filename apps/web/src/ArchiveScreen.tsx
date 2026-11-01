@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { DistanceUnit } from '@running-tracker/contracts';
 
 import { ArchiveMap } from './ArchiveMap.js';
 import {
@@ -7,6 +8,7 @@ import {
   type ArchiveSourceSnapshot,
 } from './archive-source.js';
 import { RunSearchPanel } from './RunSearchPanel.js';
+import { RunDetailScreen } from './RunDetailScreen.js';
 import { loadArchiveMetadata, type CsrfCredentials } from './runner-api.js';
 
 const initialSnapshot: ArchiveSourceSnapshot = {
@@ -59,6 +61,11 @@ export interface ArchiveScreenProps {
 }
 
 export function ArchiveScreen({ accessToken, csrf, orgId, signal, userId }: ArchiveScreenProps) {
+  const [detail, setDetail] = useState<{ runId: string; unit: DistanceUnit; timeZone: string; scope: string; session: AbortSignal } | null>(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const identityScope = `${userId}|${orgId}`;
+  const selectedDetail = detail?.scope === identityScope && detail.session === signal && !signal.aborted ? detail : null;
+  if (detail !== null && selectedDetail === null) setDetail(null);
   const defaults = useMemo(initialDates, []);
   const [fromDate, setFromDate] = useState(defaults.fromDate);
   const [toDate, setToDate] = useState(defaults.toDate);
@@ -103,6 +110,7 @@ export function ArchiveScreen({ accessToken, csrf, orgId, signal, userId }: Arch
 
   return (
     <section className="archive-shell" aria-labelledby="archive-title">
+      <div className="archive-overview" hidden={selectedDetail !== null}>
       <div className="archive-heading">
         <div>
           <p className="eyebrow">Archive map · P09.5</p>
@@ -162,11 +170,11 @@ export function ArchiveScreen({ accessToken, csrf, orgId, signal, userId }: Arch
         </section>
       )}
 
-      <ArchiveMap
+      {selectedDetail === null && <ArchiveMap
         accessToken={accessToken}
         metadata={snapshot.metadata}
         onTileError={(status) => controller.current?.handleTileError(status)}
-      />
+      />}
 
       <footer className="archive-source-detail">
         <span>
@@ -183,10 +191,35 @@ export function ArchiveScreen({ accessToken, csrf, orgId, signal, userId }: Arch
         // A deletion advances the archive revision; reading the metadata now replaces the map's tiles without waiting
         // for the next poll. A read already on its way is followed by another (ArchiveSourceController).
         onRunDeleted={() => controller.current?.refreshNow()}
+        onOpenDetails={(runId, unit, timeZone) => {
+          returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          setDetail({ runId, unit, timeZone, scope: identityScope, session: signal });
+        }}
         orgId={orgId}
         signal={signal}
         userId={userId}
       />
+      </div>
+      {selectedDetail !== null && (
+        <RunDetailScreen
+          accessToken={accessToken}
+          key={`${identityScope}|${selectedDetail.runId}`}
+          onBack={() => {
+            setDetail(null);
+            requestAnimationFrame(() => {
+              const trigger = returnFocus.current;
+              if (trigger?.isConnected) trigger.focus();
+              else document.getElementById('my-runs-title')?.focus();
+            });
+          }}
+          orgId={orgId}
+          runId={selectedDetail.runId}
+          signal={signal}
+          timeZone={selectedDetail.timeZone}
+          unit={selectedDetail.unit}
+          userId={userId}
+        />
+      )}
     </section>
   );
 }
