@@ -1,4 +1,5 @@
 import {
+  archiveTrackQuerySchema,
   createRunRequestSchema,
   ingestPointsRequestSchema,
   liveTrackChangesQuerySchema,
@@ -36,6 +37,7 @@ import { measureIngestion } from './ingestion-metrics.js';
 import type { InterpretationService } from './interpretation/interpretation-service.js';
 import { LiveTrackCursorCodec } from './live-track-cursor.js';
 import { searchRuns } from './run-search-service.js';
+import { readArchiveTrack } from './archive-track-service.js';
 import {
   applyRunCommand,
   createRun,
@@ -217,6 +219,23 @@ export function createRunRouter({
       const session = getAuthenticatedSession(request);
       const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
         readRun(client, orgId, runId),
+      );
+      response.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/:runId/track', (_request, response, next) => {
+    response.setHeader('Cache-Control', 'private, no-store');
+    next();
+  }, authenticate, async (request, response, next) => {
+    try {
+      const { orgId, runId } = routeInput(request);
+      parseContract(archiveTrackQuerySchema, request.query, 'archive-track query');
+      const result = await withAuthenticatedTenantTransaction(
+        pool, getAuthenticatedSession(request), orgId,
+        (client) => readArchiveTrack(client, orgId, runId),
       );
       response.status(200).json(result);
     } catch (error) {

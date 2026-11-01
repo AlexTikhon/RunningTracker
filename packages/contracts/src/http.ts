@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { pointInputSchema, runStatusSchema, runViewSchema, trackPageSchema } from './models.js';
+import { pointInputSchema, qualityStatsSchema, rawStateSchema, runStatusSchema, runViewSchema, trackPageSchema } from './models.js';
 import {
   coordinatesSchema,
   cursorSchema,
@@ -329,17 +329,79 @@ export const liveTrackChangesQuerySchema = z.union([
 ]);
 
 export const archiveTrackQuerySchema = z.strictObject({ mode: z.literal('archive') });
+// Bounds apply to the complete JSON response (UTF-8, before transport compression) and the total vertices.
+export const ARCHIVE_TRACK_MAX_BYTES = 1_048_576;
+export const ARCHIVE_TRACK_MAX_VERTICES = 100_000;
 export const multiLineStringSchema = z.strictObject({
   coordinates: z.array(z.array(coordinatesSchema).min(2)).min(1),
   type: z.literal('MultiLineString'),
 });
-export const archiveTrackResponseSchema = z.strictObject({
-  geometry: multiLineStringSchema.nullable(),
-  properties: z.strictObject({
-    algorithmVersion: z.string().min(1).max(128),
-    sourceRevision: revisionSchema,
+const archiveTrackProperties = {
+  dataRevision: revisionSchema,
+  finishedAt: timestampSchema,
+  rawState: rawStateSchema,
+  runId: uuidSchema,
+  startedAt: timestampSchema,
+};
+const publishedTrackProperties = {
+  algorithmVersion: z.string().min(1).max(128),
+  sourceRevision: revisionSchema,
+};
+const unavailableTrackMetrics = {
+  distanceM: z.null(),
+  observedDurationS: z.null(),
+  qualityStats: z.null(),
+};
+// A stale summary carries provenance only; its old metrics and geometry cannot be mistaken for current data.
+export const archiveTrackResponseSchema = z.union([
+  z.strictObject({
+    geometry: z.null(),
+    properties: z.strictObject({
+      ...archiveTrackProperties,
+      ...unavailableTrackMetrics,
+      algorithmVersion: z.null(),
+      sourceRevision: z.null(),
+      summaryState: z.literal('pending'),
+    }),
+    type: z.literal('Feature'),
   }),
-  type: z.literal('Feature'),
+  z.strictObject({
+    geometry: z.null(),
+    properties: z.strictObject({
+      ...archiveTrackProperties,
+      ...unavailableTrackMetrics,
+      ...publishedTrackProperties,
+      summaryState: z.literal('stale'),
+    }),
+    type: z.literal('Feature'),
+  }),
+  z.strictObject({
+    geometry: multiLineStringSchema.nullable(),
+    properties: z.strictObject({
+      ...archiveTrackProperties,
+      ...publishedTrackProperties,
+      distanceM: nonnegativeFiniteSchema,
+      observedDurationS: nonnegativeFiniteSchema,
+      qualityStats: qualityStatsSchema,
+      summaryState: z.literal('ready'),
+    }),
+    type: z.literal('Feature'),
+  }),
+]).superRefine((feature, context) => {
+  const properties = feature.properties;
+  if (Date.parse(properties.finishedAt) < Date.parse(properties.startedAt)) {
+    context.addIssue({ code: 'custom', message: 'Finish precedes start', path: ['properties', 'finishedAt'] });
+  }
+  if (properties.sourceRevision !== null) {
+    const matches = BigInt(properties.sourceRevision) === BigInt(properties.dataRevision);
+    if ((properties.summaryState === 'ready') !== matches) {
+      context.addIssue({ code: 'custom', message: 'Summary state must agree with its source revision', path: ['properties', 'summaryState'] });
+    }
+  }
+  const vertices = feature.geometry?.coordinates.reduce((count, line) => count + line.length, 0) ?? 0;
+  if (vertices > ARCHIVE_TRACK_MAX_VERTICES) {
+    context.addIssue({ code: 'custom', message: 'Archive track exceeds the vertex limit', path: ['geometry'] });
+  }
 });
 
 function validBbox(value: string): boolean {

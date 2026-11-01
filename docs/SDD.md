@@ -1,7 +1,7 @@
 # Running Tracker — System Design Document v1.0
 
 Date: September 21, 2026
-Status: agreed architecture, implemented through P12 and verified on one workstation; `docs/progress.md` holds the evidence for each stage and the ADRs (0001–0057) record the decisions. Nothing has run on a real host, against a real identity provider, with a production backup schedule, or in any browser but Chromium (a Playwright suite covers recording, reload, offline, a second tab, the coach live view, the OpenID Connect sign-in against a test provider, organization discovery and sign-out there; its CI job last passed on a GitHub-hosted runner with 36 of today's 79 tests, before ADR-0048), and the measured limits (P11) come from a local dataset. No production RPO or RTO is claimed. Decisions D01–D09 are resolved as recorded in `docs/decision-backlog.md` (D03b and D09 for the mechanism and the local drill only); D10, real-world GPS tolerances, is PARTIAL: measured on synthetic worldwide tracks (`docs/reports/d10-gps-tolerances.md`), not on recorded device traces; privacy-safe tooling to sanitize and replay recorded traces exists (`docs/runbooks/gps-traces.md`) but none has been analysed yet. Three read endpoints of §11.3 (`/runs/{runId}/track`, `/archive/runs`, `/live/nearby`) are specified but were never built. Stage-by-stage design notes follow in the sections below.
+Status: agreed architecture, implemented through P12 and extended through ADR-0066. `docs/progress.md` records current verification; `docs/reports/pause-verification.md` records the 2026-10-28 Chromium/OIDC, bounded desktop Firefox and smoke baseline. Workstation evidence does not establish a real host, real identity provider, physical GPS, provider basemap or production RPO/RTO. D01-D09 are resolved as scoped in `docs/decision-backlog.md`; D10 remains PARTIAL with synthetic measurements only. The published archive-track read was added on 2026-11-01 (ADR-0066); `/archive/runs` and `/live/nearby` remain unimplemented. Stage-by-stage design notes follow.
 Scope: a personal learning project for practicing backend, geospatial, and full-stack architecture.
 
 This document supersedes fragments v0.1–v0.5. In case of discrepancy, v1.0 governs. Numeric limits not specified by the user are initial design parameters, subject to verification.
@@ -467,7 +467,7 @@ DELETE is idempotent for the owner, accounting for the tombstone, for as long as
 | GET /runs/{runId}/points | cursor, limit≤1000 | { dataRevision, points: PointInput[], nextCursor } |
 | GET /runs/{runId}/live-track | cursor, limit≤1000 | TrackPage |
 | GET /runs/{runId}/live-track/changes | afterRevision or cursor, limit≤1000 | TrackPage |
-| GET /runs/{runId}/track (**not implemented**) | mode=archive | GeoJSON Feature with MultiLineString/null, sourceRevision, algorithmVersion |
+| GET /runs/{runId}/track | mode=archive (required) | Finished-run GeoJSON Feature with dataRevision, sourceRevision, algorithmVersion, pending/stale/ready summaryState; only ready carries published metrics and MultiLineString/null; works after raw purge, private/no-store, 1 MiB and 100,000 vertices maximum (ADR-0066) |
 | GET /archive/runs (**not implemented**) | bbox, from, to, limit≤100, cursor | { items: RunView[], nextCursor } |
 | GET /live/nearby (**not implemented**) | longitude, latitude, radiusM≤5000 | { serverTime, items: [{ runId, coordinates, recordedAt, distanceM }] } |
 

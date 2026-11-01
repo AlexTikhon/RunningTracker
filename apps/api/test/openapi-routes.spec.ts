@@ -103,7 +103,7 @@ describe('the OpenAPI document and the mounted routes', () => {
     },
   );
 
-  it('flags exactly the three read operations the SDD specifies but the service never built', () => {
+  it('flags exactly the two remaining unimplemented read operations', () => {
     expect(
       all
         .filter((operation) => !operation.implemented)
@@ -112,7 +112,6 @@ describe('the OpenAPI document and the mounted routes', () => {
     ).toEqual([
       'get /api/orgs/{id}/archive/runs',
       'get /api/orgs/{id}/live/nearby',
-      'get /api/orgs/{id}/runs/{id}/track',
     ]);
   });
 });

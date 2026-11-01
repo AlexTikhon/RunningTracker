@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-10-28 (pause closeout, the last section; returning: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-01 (resumed archive-track read, the last section; historical pause: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -2932,3 +2932,47 @@ new file included.
 ran hosted); D10 PARTIAL without physical GPS recordings; no Safari/WebKit, mobile or real device; OpenID Connect only
 against test providers and only in Chromium; no real Mapbox basemap rendered; OpenAI never called and no live AI
 evaluation (the local Ollama run missed its deadline). Options if work resumes are listed in `docs/pause-handoff.md`.
+
+## Resumed improvement: published archive-track read (2026-11-01)
+
+The user selected the first improvement from the architecture review after `2691432`. This is its first bounded
+backend slice (ADR-0066), before the owner detail screen: `GET /api/orgs/:orgId/runs/:runId/track?mode=archive`.
+No web behavior, migration, dependency, recording algorithm or existing retention/access policy changed.
+
+**Implemented.** A strict GeoJSON contract with run timestamps, data revision and raw state, plus summary state:
+pending (no summary), stale (source revision differs; provenance only), ready (matching published metrics and
+MultiLineString/null). One SQL statement reads the run and summary together, without raw-point access. Published
+algorithm provenance is preserved after raw purge. Existing authenticated tenant transactions and runtime-role
+RLS retain owner/history access, live-only/coach denial and owner-only tombstone semantics. Responses are
+private/no-store; 100,000 vertices or 1 MiB UTF-8 complete JSON is the maximum, with typed 422 errors rather than
+partial geometry. SQL guards geometry encoding/transfer and the service checks the full Feature envelope.
+
+**Documentation.** ADR-0066 records the response, snapshot/revocation checkpoint and limits. Runtime schemas,
+generated OpenAPI and the real-route coverage test now agree that archive-track is implemented; `/archive/runs`
+and `/live/nearby` remain unimplemented. README, SDD and the resumed plan identify the new slice and next work.
+
+**Local verification.** Node 24.11.1/npm 11.6.2, existing Compose PostgreSQL/PostGIS. Docker Desktop was initially
+stopped and was started for verification. Before fixture writes, a read-only check confirmed the configured test
+owner as `running_tracker_owner` on `running_tracker_test`, with 25 migrations already applied; no bootstrap or
+migration was run. Integration fixture setup retains its own database/role guards. The development database and
+local environment file were not modified by this work.
+
+| Command | Result |
+|---|---|
+| `npm test --workspace=@running-tracker/contracts -- src/archive-track.spec.ts` | 12 passed |
+| `npm run typecheck --workspace=@running-tracker/api` | passed |
+| `npm run test:integration --workspace=@running-tracker/api -- test/archive-track.integration.test.ts` | 15 passed (14 initially; a complete-envelope size boundary test was then added and all 15 passed) |
+| `npm run verify` | exit 0: lint, workspace typechecks, scripts 83, API 1,332, web 820, contracts 144, fixtures 14, simulator 3 (2,396 tests), production builds |
+| `npm run test:integration` | exit 0: 478 passed in 46 files, 0 skipped; PostgreSQL 17.5/PostGIS 3.5.2, including the configured local restore-drill tests |
+| `git diff --check` | passed; new-file whitespace and report relative links also checked |
+
+The real-role tests exercise owner/history reads, live-only and unshared coach denial, tenant/membership denial,
+authentication/validation, active-run exclusion, pending/stale/empty results, actual maintenance raw purge,
+historical algorithm provenance, uncommitted publication/deletion visibility, owner-only tombstones, committed
+revocation, vertex/byte rejection and a large accepted response below the cap. The envelope test independently
+checks that geometry alone fits while the full Feature is rejected.
+
+**Limits / next slice.** Browser E2E, hosted CI, provider basemaps, physical GPS, real identity providers and
+deployment verifiers were not run for this API-only change. The existing large-chunk Vite warning remains; builds
+exit 0. The owner detail screen, list navigation and map selection are the next bounded slice, not delivered here.
+No commit or push was performed. The pre-existing architecture review report remains preserved in the working tree.

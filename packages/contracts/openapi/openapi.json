@@ -883,8 +883,7 @@
           "Archive"
         ],
         "summary": "Read published archive geometry",
-        "description": "NOT IMPLEMENTED. Specified in SDD section 11 but not mounted by the service; the request is answered 404 ROUTE_NOT_FOUND. Archive display uses /archive/metadata and the revision-bound /tiles instead; live positions come from the /live stream.",
-        "x-implemented": false,
+        "description": "Finished runs only, under active membership and history authorization. One statement snapshot returns a GeoJSON Feature with run metadata and pending/stale/ready summary state. Only ready carries metrics and geometry; null geometry in ready is a valid empty track. Reads published summaries even after raw purge. Source revision equality determines readiness; algorithmVersion identifies the published algorithm. Private/no-store, at most 1 MiB UTF-8 JSON and 100,000 vertices; oversized tracks fail without truncation.",
         "parameters": [
           {
             "$ref": "#/components/parameters/OrgId"
@@ -905,7 +904,26 @@
                 }
               }
             },
-            "description": "GeoJSON Feature with published geometry metadata."
+            "description": "GeoJSON Feature with explicit summary state."
+          },
+          "400": {
+            "$ref": "#/components/responses/ApiError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ApiError"
+          },
+          "403": {
+            "$ref": "#/components/responses/ApiError"
+          },
+          "404": {
+            "$ref": "#/components/responses/ApiError"
+          },
+          "410": {
+            "$ref": "#/components/responses/ApiError"
+          },
+          "422": {
+            "$ref": "#/components/responses/ApiError",
+            "description": "ARCHIVE_TRACK_TOO_COMPLEX: response exceeds 1 MiB or 100,000 vertices."
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -3016,86 +3034,377 @@
         "additionalProperties": false
       },
       "ArchiveTrackResponse": {
-        "type": "object",
-        "properties": {
-          "geometry": {
-            "anyOf": [
-              {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "geometry": {
+                "type": "null"
+              },
+              "properties": {
                 "type": "object",
                 "properties": {
-                  "coordinates": {
-                    "minItems": 1,
-                    "type": "array",
-                    "items": {
-                      "minItems": 2,
-                      "type": "array",
-                      "items": {
-                        "type": "array",
-                        "prefixItems": [
-                          {
-                            "type": "number",
-                            "minimum": -180,
-                            "maximum": 180
-                          },
-                          {
-                            "type": "number",
-                            "minimum": -90,
-                            "maximum": 90
-                          }
-                        ],
-                        "items": false,
-                        "minItems": 2,
-                        "maxItems": 2
-                      }
-                    }
-                  },
-                  "type": {
+                  "dataRevision": {
                     "type": "string",
-                    "const": "MultiLineString"
+                    "pattern": "^\\d+$",
+                    "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                  },
+                  "finishedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "rawState": {
+                    "type": "string",
+                    "enum": [
+                      "available",
+                      "purging",
+                      "purged"
+                    ]
+                  },
+                  "runId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "startedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "distanceM": {
+                    "type": "null"
+                  },
+                  "observedDurationS": {
+                    "type": "null"
+                  },
+                  "qualityStats": {
+                    "type": "null"
+                  },
+                  "algorithmVersion": {
+                    "type": "null"
+                  },
+                  "sourceRevision": {
+                    "type": "null"
+                  },
+                  "summaryState": {
+                    "type": "string",
+                    "const": "pending"
                   }
                 },
                 "required": [
-                  "coordinates",
-                  "type"
+                  "dataRevision",
+                  "finishedAt",
+                  "rawState",
+                  "runId",
+                  "startedAt",
+                  "distanceM",
+                  "observedDurationS",
+                  "qualityStats",
+                  "algorithmVersion",
+                  "sourceRevision",
+                  "summaryState"
                 ],
                 "additionalProperties": false
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "algorithmVersion": {
+              "type": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "sourceRevision": {
-                "type": "string",
-                "pattern": "^\\d+$",
-                "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                "const": "Feature"
               }
             },
             "required": [
-              "algorithmVersion",
-              "sourceRevision"
+              "geometry",
+              "properties",
+              "type"
             ],
             "additionalProperties": false
           },
-          "type": {
-            "type": "string",
-            "const": "Feature"
+          {
+            "type": "object",
+            "properties": {
+              "geometry": {
+                "type": "null"
+              },
+              "properties": {
+                "type": "object",
+                "properties": {
+                  "dataRevision": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                  },
+                  "finishedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "rawState": {
+                    "type": "string",
+                    "enum": [
+                      "available",
+                      "purging",
+                      "purged"
+                    ]
+                  },
+                  "runId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "startedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "distanceM": {
+                    "type": "null"
+                  },
+                  "observedDurationS": {
+                    "type": "null"
+                  },
+                  "qualityStats": {
+                    "type": "null"
+                  },
+                  "algorithmVersion": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "sourceRevision": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                  },
+                  "summaryState": {
+                    "type": "string",
+                    "const": "stale"
+                  }
+                },
+                "required": [
+                  "dataRevision",
+                  "finishedAt",
+                  "rawState",
+                  "runId",
+                  "startedAt",
+                  "distanceM",
+                  "observedDurationS",
+                  "qualityStats",
+                  "algorithmVersion",
+                  "sourceRevision",
+                  "summaryState"
+                ],
+                "additionalProperties": false
+              },
+              "type": {
+                "type": "string",
+                "const": "Feature"
+              }
+            },
+            "required": [
+              "geometry",
+              "properties",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "geometry": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "coordinates": {
+                        "minItems": 1,
+                        "type": "array",
+                        "items": {
+                          "minItems": 2,
+                          "type": "array",
+                          "items": {
+                            "type": "array",
+                            "prefixItems": [
+                              {
+                                "type": "number",
+                                "minimum": -180,
+                                "maximum": 180
+                              },
+                              {
+                                "type": "number",
+                                "minimum": -90,
+                                "maximum": 90
+                              }
+                            ],
+                            "items": false,
+                            "minItems": 2,
+                            "maxItems": 2
+                          }
+                        }
+                      },
+                      "type": {
+                        "type": "string",
+                        "const": "MultiLineString"
+                      }
+                    },
+                    "required": [
+                      "coordinates",
+                      "type"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "properties": {
+                "type": "object",
+                "properties": {
+                  "dataRevision": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                  },
+                  "finishedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "rawState": {
+                    "type": "string",
+                    "enum": [
+                      "available",
+                      "purging",
+                      "purged"
+                    ]
+                  },
+                  "runId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "startedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "algorithmVersion": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "sourceRevision": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "PostgreSQL bigint serialized as a decimal string in the inclusive range 0..9223372036854775807."
+                  },
+                  "distanceM": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "observedDurationS": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "qualityStats": {
+                    "type": "object",
+                    "properties": {
+                      "acceptedEdgeCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "acceptedPointCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "excessiveSpeedCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "excessiveTimeGapCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "insufficientData": {
+                        "type": "boolean"
+                      },
+                      "nonpositiveTimeDeltaCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "poorAccuracyPointCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "rawPointCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "segmentBreakCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "seqGapCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "acceptedEdgeCount",
+                      "acceptedPointCount",
+                      "excessiveSpeedCount",
+                      "excessiveTimeGapCount",
+                      "insufficientData",
+                      "nonpositiveTimeDeltaCount",
+                      "poorAccuracyPointCount",
+                      "rawPointCount",
+                      "segmentBreakCount",
+                      "seqGapCount"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "summaryState": {
+                    "type": "string",
+                    "const": "ready"
+                  }
+                },
+                "required": [
+                  "dataRevision",
+                  "finishedAt",
+                  "rawState",
+                  "runId",
+                  "startedAt",
+                  "algorithmVersion",
+                  "sourceRevision",
+                  "distanceM",
+                  "observedDurationS",
+                  "qualityStats",
+                  "summaryState"
+                ],
+                "additionalProperties": false
+              },
+              "type": {
+                "type": "string",
+                "const": "Feature"
+              }
+            },
+            "required": [
+              "geometry",
+              "properties",
+              "type"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "geometry",
-          "properties",
-          "type"
-        ],
-        "additionalProperties": false
+        ]
       },
       "NearbyResponse": {
         "type": "object",
