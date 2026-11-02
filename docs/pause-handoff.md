@@ -2,12 +2,24 @@
 
 Audience: whoever returns to this project after the pause, including its author. It says where things stand, how to
 get the demo running again, and what is still not established. History is in [progress.md](progress.md); the last
-verification for the latest slice is in [reports/freeze-verification-2026-11-02.md](reports/freeze-verification-2026-11-02.md).
+verification for the latest slice is in [reports/maintenance-sql-budgets-2026-11-02.md](reports/maintenance-sql-budgets-2026-11-02.md).
 The earlier full demo matrix is preserved in [reports/pause-verification.md](reports/pause-verification.md).
 
-## Latest freeze: finished-run review (2026-11-02)
+## Latest bounded closeout: maintenance SQL budgets (2026-11-02)
 
-Work stops after ADR-0068. The accepted P00-P12 architecture remains a React/Express modular monolith
+After the ADR-0068 freeze, the user requested one additional step and local commit. Work pauses
+again after ADR-0069: the API maintenance pool now has independent PostgreSQL statement/lock
+deadlines, defaulting to 60 s / 5 s. See [the deployment runbook](runbooks/deployment.md#maintenance-sql-budgets-adr-0069)
+for settings and tuning. Existing worker rollback and scheduler behavior handle SQL timeouts.
+No database migration or environment-file edit is needed to get the defaults.
+
+This is the first maintenance safeguard. Whole-job/filesystem deadlines, retry backoff, persisted
+attempts, candidate fairness and durable sessions remain deferred. The finished-run flow below is
+unchanged; its checks are preserved in [the earlier freeze report](reports/freeze-verification-2026-11-02.md).
+
+## Previous freeze: finished-run review (2026-11-02)
+
+That freeze stopped after ADR-0068. The accepted P00-P12 architecture remains a React/Express modular monolith
 with PostgreSQL/PostGIS. The resumed work adds a revision-aware archive track read (`1180470`), owner
 details (`9d20877`) and Runner's explicit **Finish → View result → Back to Runner → New run** journey.
 The ADR-0068 commit also confirms restored finished runs on reload/reconnection, so View result is

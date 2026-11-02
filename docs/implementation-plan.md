@@ -23,6 +23,16 @@ work belongs to this slice. Results are recorded in `docs/progress.md` and
 `docs/reports/freeze-verification-2026-11-02.md`. The project is paused after this slice; the architecture
 review's later proposals remain deferred until a new task is selected.
 
+## Additional bounded closeout: maintenance SQL budgets (2026-11-02)
+
+The user reopened the pause for one additional step and one local commit. ADR-0069 adds independent
+server-side statement/lock budgets to the API maintenance pool, configuration validation and
+production environment pass-through. Real-role checks cover cancellation, rollback/claim release,
+connection recovery and the next healthy scheduler cycle. No schema, role, API or UI change belongs
+to this slice. Per-task/whole-job and filesystem deadlines, persisted retries/fairness and durable
+sessions remain deferred. The project pauses again after this slice; fresh evidence is in
+`docs/reports/maintenance-sql-budgets-2026-11-02.md` and `docs/progress.md`.
+
 ## 1. Execution mode
 
 The unit of work is a single Pxx stage, explicitly named in the assignment. By default, the first assignment covers P00–P01. Later stages may be combined at the user's request; do not attempt to implement the entire SDD in a single change.

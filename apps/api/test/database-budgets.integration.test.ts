@@ -18,6 +18,8 @@ import { classifyDatabaseTimeout } from '../src/database/database-errors.js';
 import { createDatabasePool, createMaintenanceDatabasePool } from '../src/database/database.js';
 import { withAuthenticatedTenantTransaction } from '../src/database/authenticated-tenant-transaction.js';
 import { withTenantTransaction } from '../src/database/tenant-transaction.js';
+import { PeriodicRunner } from '../src/maintenance/periodic-runner.js';
+import { createApiMetrics } from '../src/observability/api-metrics.js';
 import {
   prepareTenantIsolationFixtures,
   tenantIsolationIds as ids,
@@ -57,7 +59,7 @@ function checkedOut(pool: Pool): number {
   return pool.totalCount - pool.idleCount;
 }
 
-describe('runtime SQL execution and lock-wait budgets', () => {
+describe('runtime and maintenance SQL execution and lock-wait budgets', () => {
   let config: Environment;
   let integrationMaintenanceUrl: string;
   let ownerPool: Pool;
@@ -66,6 +68,16 @@ describe('runtime SQL execution and lock-wait budgets', () => {
 
   function runtimePool(max: number): Pool {
     const pool = createDatabasePool({ ...config, DB_POOL_MAX: max });
+    openedPools.push(pool);
+    return pool;
+  }
+
+  function maintenancePool(): Pool {
+    const pool = createMaintenanceDatabasePool({
+      ...config,
+      MAINTENANCE_DB_LOCK_TIMEOUT_MS: LOCK_BUDGET_MS,
+      MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: STATEMENT_BUDGET_MS,
+    });
     openedPools.push(pool);
     return pool;
   }
@@ -140,7 +152,7 @@ describe('runtime SQL execution and lock-wait budgets', () => {
   });
 
   describe('the configured budgets', () => {
-    it('are in force on every fresh runtime connection and absent from the maintenance pool', async () => {
+    it('keep runtime settings separate from maintenance defaults, including replacement connections', async () => {
       const pool = runtimePool(1);
       const maintenance = createMaintenanceDatabasePool(
         validateEnvironment({
@@ -150,14 +162,20 @@ describe('runtime SQL execution and lock-wait budgets', () => {
         }),
       );
       openedPools.push(maintenance);
-      const settings =
-        "SELECT current_setting('statement_timeout') AS statement, current_setting('lock_timeout') AS lock";
+      const settings = `SELECT
+        (SELECT setting::integer FROM pg_settings WHERE name = 'statement_timeout') AS statement,
+        (SELECT setting::integer FROM pg_settings WHERE name = 'lock_timeout') AS lock`;
 
       await expect(pool.query(settings)).resolves.toMatchObject({
-        rows: [{ lock: `${LOCK_BUDGET_MS}ms`, statement: `${STATEMENT_BUDGET_MS}ms` }],
+        rows: [{ lock: LOCK_BUDGET_MS, statement: STATEMENT_BUDGET_MS }],
       });
       await expect(maintenance.query(settings)).resolves.toMatchObject({
-        rows: [{ lock: '0', statement: '0' }],
+        rows: [{ lock: 5_000, statement: 60_000 }],
+      });
+      const replaced = await maintenance.connect();
+      replaced.release(true);
+      await expect(maintenance.query(settings)).resolves.toMatchObject({
+        rows: [{ lock: 5_000, statement: 60_000 }],
       });
     });
 
@@ -175,6 +193,60 @@ describe('runtime SQL execution and lock-wait budgets', () => {
         { id: 1, note: 'seed' },
         { id: 2, note: 'committed' },
       ]);
+    });
+  });
+
+  describe('maintenance progress after a statement timeout', () => {
+    it('cancels pooled work on the server and replaces the failed connection for healthy work', async () => {
+      const pool = maintenancePool();
+      const before = await pool.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const slow = await timed(() => pool.query('SELECT pg_sleep(5)'));
+      expect(classifyDatabaseTimeout(slow.error)).toBe('statement');
+      expect(slow.elapsedMs).toBeGreaterThanOrEqual(STATEMENT_BUDGET_MS - 100);
+      expect(slow.elapsedMs).toBeLessThan(SETTLE_LIMIT_MS);
+      expect(checkedOut(pool)).toBe(0);
+      const after = await pool.query<{ pid: number; role: string }>('SELECT pg_backend_pid() AS pid, current_user AS role');
+      // pg's pool.query releases a failed query with its error, discarding that client. Explicit worker
+      // transactions instead roll back and may reuse their connection (tested with the production worker).
+      expect(after.rows[0]?.pid).not.toBe(before.rows[0]?.pid);
+      expect(after.rows[0]?.role).toBe('running_tracker_maintenance');
+      expect(pool.totalCount).toBe(pool.idleCount);
+    });
+
+    it('lets PeriodicRunner record the database timeout and execute the next healthy cycle without overlap', async () => {
+      const pool = maintenancePool();
+      const metrics = createApiMetrics();
+      const errors: unknown[] = [];
+      let attempts = 0;
+      let active = 0;
+      let maxActive = 0;
+      let succeeded = false;
+      const runner = new PeriodicRunner({
+        clock: systemClock, intervalMs: 25, metrics: metrics.maintenance,
+        onError: (error) => { errors.push(error); },
+        runOnce: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          try {
+            attempts += 1;
+            await pool.query(attempts === 1 ? 'SELECT pg_sleep(5)' : 'SELECT 1');
+            succeeded = true;
+          } finally { active -= 1; }
+        },
+        taskName: 'Maintenance budget probe',
+      });
+      runner.start();
+      try {
+        await waitUntil(() => succeeded, SETTLE_LIMIT_MS);
+        expect(errors.map(classifyDatabaseTimeout)).toEqual(['statement']);
+        expect(maxActive).toBe(1);
+        expect(metrics.registry.render()).toContain('maintenance_cycles_total{task="maintenance_budget_probe",outcome="error"} 1');
+        expect(metrics.registry.render()).toContain('maintenance_last_success_timestamp_seconds{task="maintenance_budget_probe"}');
+      } finally {
+        runner.stop();
+        await waitUntil(() => active === 0);
+      }
+      expect(checkedOut(pool)).toBe(0);
     });
   });
 

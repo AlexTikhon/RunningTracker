@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-02 (Finish-to-result and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-02 (maintenance SQL budgets and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3080,3 +3080,33 @@ review baseline; a separate full integration run is not claimed for this web-onl
 stops after ADR-0068. The final scope, verification and deferred architecture work are recorded in
 `docs/reports/freeze-verification-2026-11-02.md`. One local commit contains this slice and its handoff;
 no push or deployment is included.
+
+
+## Additional closeout: maintenance SQL budgets (2026-11-02)
+
+After the local ADR-0068 commit `9776af9`, the user requested one more bounded step and local commit.
+ADR-0069 adds independent server-side SQL statement/lock limits to the API maintenance pool, defaulting
+to 60000/5000 ms. Configuration rejects zero, non-integers, out-of-range values and lock > statement.
+Production Compose passes defaults/overrides through; example environment files and the deployment
+runbook document configuration and tuning. Runtime SQL limits remain independent.
+
+**Verified behavior.** Real maintenance-role tests cover cancellation, replacement connection defaults,
+pool recovery and the next healthy PeriodicRunner cycle without overlap. An actual production summary
+worker blocked by an owner-held row lock times out, rolls back without partial publication, releases
+its advisory claim for another session and publishes later through its original connection.
+
+**Evidence.** Focused unit tests: 30 passed; focused integration: 23 passed after correcting one test's
+assumption about pg's standalone pool.query error path (it discards the failed client). The production
+worker's explicit transaction instead rolls back and reuses its client. Production Compose rendering
+verified both defaults and operator overrides without starting services. Full command results and
+coverage limits are recorded in [the verification report](reports/maintenance-sql-budgets-2026-11-02.md).
+Full local verification passed: lint, workspace typechecks, 2,437 tests and production builds;
+the separate full database suite passed 481 tests in 46 files, 0 skipped (193.25 s).
+Read-only preflight verified live test roles/database before fixtures. No migration, bootstrap,
+development-database reset, local .env edit, dependency, UI, HTTP or role-grant change was performed.
+
+**Paused again.** This is a per-statement safeguard, not a whole-job/filesystem deadline or a retry/
+fairness solution. The SDD now states those limits precisely. Persisted retries/backoff, candidate
+fairness, task-specific/whole-job and I/O deadlines, durable sessions and physical GPS remain deferred.
+The README, implementation plan and handoff point to the latest evidence. Delivery is one local
+commit on the above base; no push or deployment.

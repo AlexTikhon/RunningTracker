@@ -2,7 +2,8 @@ import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Clock } from '../src/clock.js';
-import { loadIntegrationTestConfiguration } from '../src/config/environment.js';
+import { loadIntegrationTestConfiguration, validateEnvironment } from '../src/config/environment.js';
+import { createMaintenanceDatabasePool } from '../src/database/database.js';
 import {
   runSummaryPublicationBatch,
   runSummaryPublicationOnce,
@@ -182,6 +183,56 @@ describe('P06.4 revision-checked run summary publication', () => {
     }
     throw new Error('Summary publication did not reach the expected run lock wait');
   }
+
+  it('rolls back a lock-timed-out production worker, releases its claim and publishes on the same connection afterwards', async () => {
+    const configuration = loadIntegrationTestConfiguration();
+    const budgeted = createMaintenanceDatabasePool(validateEnvironment({
+      APP_ENV: 'test',
+      DATABASE_URL: configuration.runtime.connectionString,
+      MAINTENANCE_DATABASE_URL: configuration.maintenance.connectionString,
+      MAINTENANCE_DB_LOCK_TIMEOUT_MS: 300,
+      MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: 2_000,
+    }));
+    const holder = await ownerPool.connect();
+    let holding = false;
+    try {
+      await insertRun({ id: runIds.endToEnd });
+      const before = await budgeted.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      await holder.query('BEGIN');
+      holding = true;
+      await holder.query('SELECT id FROM organizations WHERE id = $1 FOR UPDATE', [fixtureIds.orgA]);
+      await expect(runSummaryPublicationOnce(budgeted, clock)).rejects.toMatchObject({ code: '55P03' });
+      const unpublished = await ownerPool.query(
+        'SELECT 1 FROM run_summaries WHERE org_id = $1 AND run_id = $2',
+        [fixtureIds.orgA, runIds.endToEnd],
+      );
+      const archive = await ownerPool.query<{ archive_revision: string }>(
+        'SELECT archive_revision FROM organizations WHERE id = $1', [fixtureIds.orgA],
+      );
+      expect(unpublished.rowCount).toBe(0);
+      expect(archive.rows[0]?.archive_revision).toBe('0');
+      await holder.query('ROLLBACK');
+      holding = false;
+      // A second maintenance session must be able to claim the same candidate after the timeout rollback.
+      await expect(runSummaryPublicationOnce(maintenancePool, clock)).resolves.toMatchObject({
+        runId: runIds.endToEnd, status: 'published',
+      });
+      const after = await budgeted.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      expect(after.rows[0]?.pid).toBe(before.rows[0]?.pid);
+      // Make it stale again and verify the formerly aborted connection also completes the production worker.
+      await ownerPool.query(
+        'UPDATE runs SET data_revision = data_revision + 1 WHERE org_id = $1 AND id = $2',
+        [fixtureIds.orgA, runIds.endToEnd],
+      );
+      await expect(runSummaryPublicationOnce(budgeted, clock)).resolves.toMatchObject({
+        runId: runIds.endToEnd, status: 'published',
+      });
+    } finally {
+      if (holding) await holder.query('ROLLBACK');
+      holder.release();
+      await budgeted.end();
+    }
+  });
 
   it('exposes only narrow discovery/publication capabilities and validates quality shape', async () => {
     const privileges = await ownerPool.query<{

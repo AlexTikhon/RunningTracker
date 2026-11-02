@@ -53,6 +53,8 @@ describe('validateEnvironment', () => {
       DB_POOL_MAX: 10,
       DB_QUERY_TIMEOUT_MS: 1_000,
       DB_STATEMENT_TIMEOUT_MS: 5_000,
+      MAINTENANCE_DB_LOCK_TIMEOUT_MS: 5_000,
+      MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: 60_000,
       PORT: 3_100,
       LIVE_TRACK_CURSOR_SIGNING_KEY:
         'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE',
@@ -101,6 +103,32 @@ describe('validateEnvironment', () => {
         DB_STATEMENT_TIMEOUT_MS: '2000',
       }),
     ).toThrow('DB_LOCK_TIMEOUT_MS must not exceed DB_STATEMENT_TIMEOUT_MS');
+  });
+
+  it('bounds maintenance SQL budgets independently and refuses disabled or unreachable limits', () => {
+    expect(validateEnvironment({
+      ...validApplicationEnvironment,
+      DB_LOCK_TIMEOUT_MS: '100', DB_STATEMENT_TIMEOUT_MS: '200',
+      MAINTENANCE_DB_LOCK_TIMEOUT_MS: '750', MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: '120000',
+    })).toMatchObject({
+      DB_LOCK_TIMEOUT_MS: 100, DB_STATEMENT_TIMEOUT_MS: 200,
+      MAINTENANCE_DB_LOCK_TIMEOUT_MS: 750, MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: 120_000,
+    });
+    for (const invalid of [
+      { MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: '0' },
+      { MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: '300001' },
+      { MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: 'soon' },
+      { MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: '1.5' },
+      { MAINTENANCE_DB_LOCK_TIMEOUT_MS: '0' },
+      { MAINTENANCE_DB_LOCK_TIMEOUT_MS: '-1' },
+      { MAINTENANCE_DB_LOCK_TIMEOUT_MS: '60001' },
+    ]) {
+      expect(() => validateEnvironment({ ...validApplicationEnvironment, ...invalid })).toThrow('Invalid environment configuration');
+    }
+    expect(() => validateEnvironment({
+      ...validApplicationEnvironment,
+      MAINTENANCE_DB_LOCK_TIMEOUT_MS: '3000', MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: '2000',
+    })).toThrow('MAINTENANCE_DB_LOCK_TIMEOUT_MS must not exceed MAINTENANCE_DB_STATEMENT_TIMEOUT_MS');
   });
 
   it('rejects startup without a PostgreSQL URL', () => {

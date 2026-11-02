@@ -26,7 +26,7 @@ export class DatabaseQueryTimeoutError extends Error {
  * this codebase issues a session-level SET, so they cannot drift between borrowers. A transaction may tighten
  * them with SET LOCAL (the archive tile render does); PostgreSQL restores these values when it ends.
  * `statement_timeout` also covers time spent waiting for a lock, so `lock_timeout` is the earlier, finer bound.
- * Maintenance work has different cost profiles and deliberately gets no runtime budget here.
+ * Maintenance has separate, longer budgets; it never inherits the runtime settings.
  * `idle_in_transaction_session_timeout` is intentionally not set: when the server ends a checked-out
  * connection, pg raises an unhandled client 'error' that terminates the process.
  */
@@ -52,7 +52,9 @@ export function createMaintenanceDatabasePool(config: Environment): Pool {
     application_name: 'running-tracker-maintenance',
     connectionString: config.MAINTENANCE_DATABASE_URL,
     connectionTimeoutMillis: config.DB_CONNECTION_TIMEOUT_MS,
+    lock_timeout: config.MAINTENANCE_DB_LOCK_TIMEOUT_MS,
     max: config.RUN_SUMMARY_CONCURRENCY + 2,
+    statement_timeout: config.MAINTENANCE_DB_STATEMENT_TIMEOUT_MS,
   });
 
   pool.on('error', (error) => {

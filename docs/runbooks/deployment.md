@@ -54,6 +54,20 @@ verified on a real host, so no production RPO/RTO is claimed.
 5. Make the journal directory writable by uid 1000 (`chown 1000:1000 <dir>`); the API refuses to
    start if it cannot write there.
 
+## Maintenance SQL budgets (ADR-0069)
+
+Production Compose passes `MAINTENANCE_DB_STATEMENT_TIMEOUT_MS` (default 60000, integer 1..300000)
+and `MAINTENANCE_DB_LOCK_TIMEOUT_MS` (default 5000, integer 1..60000) to the API. Lock must not exceed
+statement; zero cannot disable either. Set overrides in the private operator environment file and
+recreate/restart the API to apply them to new connections. Runtime request budgets are independent.
+
+These are PostgreSQL per-statement limits, including lock waits. A timeout fails the current cycle;
+workers roll back and the existing scheduler can try a later cycle. Watch `maintenance_cycles_total`
+error counts, `maintenance_cycle_duration_seconds` and `maintenance_last_success_timestamp_seconds`
+when tuning against actual task costs. The defaults have local regression evidence, not production
+capacity evidence. They do not bound a complete multi-statement job or journal filesystem I/O, and
+do not provide retry backoff or fair selection beside a repeatedly failing candidate.
+
 ## Deploy and update
 
 ```sh

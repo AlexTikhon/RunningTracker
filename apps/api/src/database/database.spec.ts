@@ -57,7 +57,7 @@ describe('DatabaseProbe', () => {
     await pool.end();
   });
 
-  it('hands the runtime SQL budgets to PostgreSQL as connection parameters, and not to the maintenance pool', async () => {
+  it('gives each pool its own SQL budgets as PostgreSQL connection parameters', async () => {
     const environment = validateEnvironment({
       APP_ENV: 'test',
       DATABASE_URL:
@@ -66,13 +66,14 @@ describe('DatabaseProbe', () => {
         'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/running_tracker_test',
       DB_LOCK_TIMEOUT_MS: 111,
       DB_STATEMENT_TIMEOUT_MS: 222,
+      MAINTENANCE_DB_LOCK_TIMEOUT_MS: 333,
+      MAINTENANCE_DB_STATEMENT_TIMEOUT_MS: 444,
     });
     const runtime = createDatabasePool(environment);
     const maintenance = createMaintenanceDatabasePool(environment);
 
     expect(runtime.options).toMatchObject({ lock_timeout: 111, statement_timeout: 222 });
-    expect(maintenance.options.statement_timeout).toBeUndefined();
-    expect(maintenance.options.lock_timeout).toBeUndefined();
+    expect(maintenance.options).toMatchObject({ lock_timeout: 333, statement_timeout: 444 });
     await Promise.all([runtime.end(), maintenance.end()]);
   });
 });
