@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import pg from 'pg';
+import { publishCandidateSql } from '../../../apps/api/src/maintenance/run-summary-publication.js';
 
 import type { E2eEnvironment } from './environment.js';
 
@@ -189,6 +190,20 @@ export async function createExtraOrganization(
     }
   });
   return orgId;
+}
+
+// Uses the production calculation/publication SQL on one scenario run, without waiting for the periodic timer.
+// Raw points, revisions and ingestion remain real; no seeded metric or geometry is substituted.
+export async function publishFinishedRunSummary(environment: E2eEnvironment, orgId: string, runId: string): Promise<void> {
+  await withOwnerTransaction(environment, async (client) => {
+    const run = await client.query<{ data_revision: string; algorithm_version: string }>(
+      `SELECT data_revision, app_private.current_track_algorithm_version() AS algorithm_version
+       FROM runs WHERE org_id = $1 AND id = $2 AND status = 'finished'`, [orgId, runId],
+    );
+    const row = run.rows[0];
+    if (row === undefined) throw new Error('The finished scenario run was not found');
+    await client.query(publishCandidateSql, [orgId, runId, row.data_revision, row.algorithm_version, new Date().toISOString()]);
+  });
 }
 
 // A finished-run detail fixture, scoped to one scenario run and guarded by the same live _test connection check.

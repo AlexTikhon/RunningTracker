@@ -1,8 +1,30 @@
-# Pause handoff (2026-10-28)
+# Pause handoff (updated 2026-11-02)
 
 Audience: whoever returns to this project after the pause, including its author. It says where things stand, how to
 get the demo running again, and what is still not established. History is in [progress.md](progress.md); the last
-verification, with its environment and tables, is in [reports/pause-verification.md](reports/pause-verification.md).
+verification for the latest slice is in [reports/freeze-verification-2026-11-02.md](reports/freeze-verification-2026-11-02.md).
+The earlier full demo matrix is preserved in [reports/pause-verification.md](reports/pause-verification.md).
+
+## Latest freeze: finished-run review (2026-11-02)
+
+Work stops after ADR-0068. The accepted P00-P12 architecture remains a React/Express modular monolith
+with PostgreSQL/PostGIS. The resumed work adds a revision-aware archive track read (`1180470`), owner
+details (`9d20877`) and Runner's explicit **Finish → View result → Back to Runner → New run** journey.
+The ADR-0068 commit also confirms restored finished runs on reload/reconnection, so View result is
+not permanently disabled by an IndexedDB restore or an offline period.
+
+Opening the result leaves the durable run pointer, pending commands, buffered points and uploader
+intact. A result keeps route/statistics hidden until this tab's upload state settles and its read
+includes acknowledged revisions; publication may still be pending or stale. Use Refresh run to
+read again. Return to Runner for export/recovery or New run. A read-only second tab cannot certify
+synchronization. Direct navigation uses kilometres and the browser timezone; My runs keeps its
+applied units/timezone. There are no URL deep links or automatic result polling.
+
+The latest verification report identifies the exact checked scope. The 2026-10-28 figures below
+remain historical; they do not describe coverage of the later detail/result screens. Deferred work
+in the [architecture review](reports/architecture-review-2026-11-02.md) is not required for this freeze:
+physical-phone GPS evidence, durable sessions and bounded/fair maintenance before unattended use,
+then actual HTTPS/OIDC/basemap/backup/restore evidence before admitting participants.
 
 ## Status
 

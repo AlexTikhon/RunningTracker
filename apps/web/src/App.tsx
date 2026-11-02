@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 
 import { loadHealth, type HealthSnapshot } from './health.js';
 import { ArchiveScreen } from './ArchiveScreen.js';
+import { RunDetailScreen } from './RunDetailScreen.js';
+import { defaultTimeZone } from './run-search.js';
 import { CoachScreen } from './CoachScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { localDemoEnabled } from './demo-sign-in.js';
@@ -108,6 +110,8 @@ export function App() {
   // before then, or a restored Simulator run would briefly start the Device GPS.
   const [captureSourceKind, setCaptureSourceKind] = useState<CaptureSourceKind | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>('runner');
+  const [runnerResult, setRunnerResult] = useState<{ orgId: string; runId: string; signal: AbortSignal; userId: string } | null>(null);
+  const resultTimeZone = useMemo(() => defaultTimeZone(), []);
   const captureController = useRef<CaptureController | null>(null);
   const restoredUserId = useRef<string | null>(null);
   const uploadWorker = useRef<PointUploadWorker | null>(null);
@@ -124,6 +128,7 @@ export function App() {
   // completion neither reports nor releases anything; no lifecycle request begins while it is set.
   const clearingRun = useRef<object | null>(null);
   const suspendRunner = useCallback(() => {
+    setRunnerResult(null);
     const operation = requestOperation.current;
     requestOperation.current = null;
     clearingRun.current = null;
@@ -177,6 +182,11 @@ export function App() {
   // Capture runs only for a lifecycle the server has confirmed (or, offline, one that will be confirmed on reconnection).
   const captureAllowed = captureMayRun(runner);
   const mapboxAccessToken = (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '').trim() || null;
+  const selectedRunnerResult = runnerResult !== null && session.status === 'ready' && !session.signal.aborted
+    && runnerResult.signal === session.signal && runnerResult.userId === session.session.identity.userId
+    && runnerResult.orgId === scopeOrgId && runnerResult.runId === runner.run?.runId
+    && runner.run.status === 'finished' && runner.authority.status !== 'refused'
+    ? runnerResult : null;
   // A stable number per session lifetime signal, for keying views that must not outlive their session.
   const sessionGenerations = useRef<{ next: number; bySignal: WeakMap<AbortSignal, number> }>({ bySignal: new WeakMap(), next: 0 });
   const sessionGeneration = (signal: AbortSignal): number => {
@@ -779,21 +789,21 @@ export function App() {
         <nav className="view-switcher" aria-label="Application view">
           <button
             aria-current={activeView === 'runner' ? 'page' : undefined}
-            onClick={() => setActiveView('runner')}
+            onClick={() => { setRunnerResult(null); setActiveView('runner'); }}
             type="button"
           >
             Runner
           </button>
           <button
             aria-current={activeView === 'coach' ? 'page' : undefined}
-            onClick={() => setActiveView('coach')}
+            onClick={() => { setRunnerResult(null); setActiveView('coach'); }}
             type="button"
           >
             Coach
           </button>
           <button
             aria-current={activeView === 'archive' ? 'page' : undefined}
-            onClick={() => setActiveView('archive')}
+            onClick={() => { setRunnerResult(null); setActiveView('archive'); }}
             type="button"
           >
             Archive
@@ -830,56 +840,90 @@ export function App() {
       )}
 
       <div hidden={activeView !== 'runner'}>
-        <RunnerView
-          canStart={scopeOrgId !== null}
-          capture={capture}
-          captureNowMs={captureNowMs}
-          captureSourceKind={captureSourceKind}
-          controlsDisabled={controlsDisabled}
-          elapsed={elapsed}
-          onChooseCaptureSource={chooseCaptureSource}
-          onClearFinishedRun={() => void clearFinishedRun()}
-          onConfirmRun={confirmRun}
-          onCommand={command}
-          onRetryCapture={retryCapture}
-          onRetryOwnership={() => void claimWriter()}
-          onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
-          onStart={() => void start()}
-          organizationNote={organizationNote}
-          refused={{
-            canDiscard: rejectedScope !== null,
-            onDiscard: () => void discardRefusedRecovery(),
-          }}
-          rejectedStart={{
-            canAbandon: session.status === 'ready',
-            failure: abandonFailure,
-            onAbandon: () => void abandonRejectedStart(),
-          }}
-          rejected={{
-            canDiscard: rejectedScope !== null,
-            canExport: rejectedScope !== null,
-            onDiscard: () => void discardRejectedPoints(),
-            onExport: () => void exportRejectedPoints(),
-          }}
-          runner={runner}
-          sessionReady={session.status === 'ready'}
-          simulatorLabel={simulatorLabel}
-          storage={storage}
-          writer={writer}
-        />
-        {/* Sharing is the owner's server-side decision, outside the lifecycle queue and the writer lease (ADR-0063).
-            The key makes a new user, organization or run a new panel; the session signal silences a replaced session. */}
-        {session.status === 'ready'
-          && restoredUserId.current === session.session.identity.userId
-          && runner.run !== null
-          && scopeOrgId !== null
-          && runner.authority.status !== 'refused' && (
-          <RunSharePanel
-            csrfToken={session.session.csrf.token}
-            key={`${session.session.identity.userId}|${scopeOrgId}|${runner.run.runId}`}
-            orgId={scopeOrgId}
-            runId={runner.run.runId}
-            signal={session.signal}
+        {/* Presentation changes only: the uploader, request queue and writer lifetime remain owned by App. */}
+        <div hidden={selectedRunnerResult !== null}>
+          <RunnerView
+            canStart={scopeOrgId !== null}
+            capture={capture}
+            captureNowMs={captureNowMs}
+            captureSourceKind={captureSourceKind}
+            controlsDisabled={controlsDisabled}
+            elapsed={elapsed}
+            onChooseCaptureSource={chooseCaptureSource}
+            onClearFinishedRun={() => void clearFinishedRun()}
+            onConfirmRun={confirmRun}
+            onCommand={command}
+            onRetryCapture={retryCapture}
+            onRetryOwnership={() => void claimWriter()}
+            onRetryRequest={() => { if (runner.error !== null) void executeRequest(runner.error.request); }}
+            onStart={() => void start()}
+            onViewResult={() => {
+              if (session.status !== 'ready' || session.signal.aborted || storage.status !== 'ready'
+                || runner.run?.status !== 'finished' || runner.authority.status !== 'confirmed'
+                || busy || runner.error !== null || scopeOrgId === null) return;
+              setRunnerResult({ orgId: scopeOrgId, runId: runner.run.runId, signal: session.signal, userId: session.session.identity.userId });
+            }}
+            organizationNote={organizationNote}
+            refused={{
+              canDiscard: rejectedScope !== null,
+              onDiscard: () => void discardRefusedRecovery(),
+            }}
+            rejectedStart={{
+              canAbandon: session.status === 'ready',
+              failure: abandonFailure,
+              onAbandon: () => void abandonRejectedStart(),
+            }}
+            rejected={{
+              canDiscard: rejectedScope !== null,
+              canExport: rejectedScope !== null,
+              onDiscard: () => void discardRejectedPoints(),
+              onExport: () => void exportRejectedPoints(),
+            }}
+            runner={runner}
+            sessionReady={session.status === 'ready'}
+            simulatorLabel={simulatorLabel}
+            storage={storage}
+            writer={writer}
+          />
+          {/* Sharing is the owner's server-side decision, outside the lifecycle queue and the writer lease (ADR-0063).
+              The key makes a new user, organization or run a new panel; the session signal silences a replaced session. */}
+          {session.status === 'ready'
+            && restoredUserId.current === session.session.identity.userId
+            && runner.run !== null
+            && scopeOrgId !== null
+            && runner.authority.status !== 'refused' && (
+            <RunSharePanel
+              csrfToken={session.session.csrf.token}
+              key={`${session.session.identity.userId}|${scopeOrgId}|${runner.run.runId}`}
+              orgId={scopeOrgId}
+              runId={runner.run.runId}
+              signal={session.signal}
+            />
+          )}
+        </div>
+        {activeView === 'runner' && selectedRunnerResult !== null && runner.run !== null && (
+          <RunDetailScreen
+            accessToken={mapboxAccessToken}
+            backLabel="Back to Runner"
+            key={`${selectedRunnerResult.userId}|${selectedRunnerResult.orgId}|${selectedRunnerResult.runId}`}
+            onBack={() => {
+              setRunnerResult(null);
+              requestAnimationFrame(() => {
+                if (!selectedRunnerResult.signal.aborted) document.getElementById('runner-result-trigger')?.focus();
+              });
+            }}
+            orgId={selectedRunnerResult.orgId}
+            runId={selectedRunnerResult.runId}
+            signal={selectedRunnerResult.signal}
+            synchronization={{
+              connectivity: runner.connectivity,
+              dataRevision: runner.run.dataRevision,
+              upload: runner.upload,
+              writerOwned: writer.status === 'owned' && !writerSyncing,
+            }}
+            timeZone={resultTimeZone}
+            unit="km"
+            userId={selectedRunnerResult.userId}
           />
         )}
       </div>

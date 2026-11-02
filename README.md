@@ -2,7 +2,7 @@
 
 A learning project: record a run in the browser (or from a simulator), let a coach with explicit permission watch it live, and keep an archive of finished runs drawn on a map. A React web app and an Express 5 API sit on PostgreSQL/PostGIS, with row-level security as the tenant and sharing boundary.
 
-**Status (2026-11-01): development resumed** with finished-run review: the published archive-track API (ADR-0066) and the owner detail screen (ADR-0067), opened with View details in My runs. The 2026-10-28 pause remains the historical local demo baseline. Returning? Start with [docs/pause-handoff.md](docs/pause-handoff.md) (Git state, how to restart the demo, what is not established). The pause verification is [docs/reports/pause-verification.md](docs/reports/pause-verification.md); current change verification is in [docs/progress.md](docs/progress.md).
+**Status (2026-11-02): paused as a local demo/portfolio project.** Finished-run review now includes the published archive-track API (ADR-0066), owner details from My runs (ADR-0067), and View result after a confirmed Finish in Runner (ADR-0068), with separate device synchronization and summary states, including reload/reconnection recovery. Returning? Start with [docs/pause-handoff.md](docs/pause-handoff.md). Current checks and deferred architecture work are recorded in [docs/reports/freeze-verification-2026-11-02.md](docs/reports/freeze-verification-2026-11-02.md); the earlier full demo matrix remains in [docs/reports/pause-verification.md](docs/reports/pause-verification.md).
 
 What exists, stage by stage (the evidence for each is in [docs/progress.md](docs/progress.md), the design in [docs/SDD.md](docs/SDD.md) and the ADRs in [docs/adr/](docs/adr/)):
 

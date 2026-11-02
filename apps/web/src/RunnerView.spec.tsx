@@ -71,6 +71,7 @@ function render(
       onRetryOwnership={noop}
       onRetryRequest={noop}
       onStart={noop}
+      onViewResult={noop}
       organizationNote="note"
       refused={{ canDiscard: true, onDiscard: noop }}
       rejectedStart={rejectedStart}
@@ -83,6 +84,30 @@ function render(
     />,
   );
 }
+
+describe('RunnerView finished result entry', () => {
+  const finished: RunnerState = {
+    ...createInitialRunnerState('online'),
+    authority: { status: 'confirmed' },
+    run: { ...run, status: 'finished', finishedAt: '2026-10-06T09:00:00.000Z' },
+  };
+
+  it('opens a confirmed result while uploads are pending but keeps New run disabled', () => {
+    const markup = render({ ...finished, upload: { message: null, pendingCount: 4, status: 'uploading' } });
+    expect(markup).toContain('View result');
+    expect(markup).not.toMatch(/<button[^>]*disabled=""[^>]*>View result/u);
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>New run/u);
+  });
+
+  it('does not offer a result for an unfinished run', () => {
+    expect(render({ ...finished, run })).not.toContain('View result');
+  });
+
+  it.each(['restored', 'unreachable', 'refused'] as const)('waits for server confirmation after %s', (status) => {
+    const authority = status === 'restored' ? { status } : { status, message: 'Not confirmed', code: 'RUN_NOT_FOUND' };
+    expect(render({ ...finished, authority })).toMatch(/<button[^>]*disabled=""[^>]*>View result/u);
+  });
+});
 
 describe('RunnerView for a run the server refuses', () => {
   it.each(['RUN_DELETED', 'RUN_NOT_FOUND', 'ORG_ACCESS_DENIED'])('%s offers check again, export and the local discard to the writer', (code) => {

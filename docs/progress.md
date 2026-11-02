@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-01 (owner finished-run review, the last section; historical pause: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-02 (Finish-to-result and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3021,3 +3021,62 @@ These are synthetic fixtures/viewport checks, not physical-phone GPS or a real p
 verifiers were not run for this UI slice. The 478-test database run belongs to the preceding API slice on this
 same base; SQL/RLS are unchanged here. The existing Mapbox large-chunk warning remains, with a successful build.
 This screen work is left uncommitted for review; the API commit above remains local and unpushed.
+
+## Finish directly to the current run result (2026-11-02)
+
+On `9d20877`, the user requested an architectural review, one bounded slice in one local commit and
+a project freeze. The closeout completes the existing uncommitted Finish-to-result work, the first
+recommendation of the November 2 review. ADR-0068 records this bounded web slice.
+The earlier owner detail screen is already committed as `9d20877`; the previous section's uncommitted
+status describes its delivery snapshot, not the current checkout.
+
+**Implemented.** A server-confirmed finished run offers View result in Runner, even while its points
+are buffered. It opens the existing detail screen for that run, in kilometres and the browser timezone.
+Back to Runner preserves the finished controls and restores focus. New run retains its existing
+writer-fenced clear and pending-buffer checks. Session suspension and top-level navigation close the
+selection; user, organization, run and session must match before it can be displayed.
+
+**Synchronization and publication.** The direct result separately explains buffered/offline/retrying,
+rejected/suspended and lost-writer work. Metrics, quality and route remain hidden until known local
+uploads settle. A displayed ready summary that predates the run revision acknowledged by an upload
+also stays hidden, with an explicit Refresh action. The current published read still determines
+pending/stale/ready. The uploader, capture and command queue remain owned by App, independent of result
+presentation. Archive details keep their existing units, list navigation and publication behavior.
+
+**Closeout correction.** The initial result entry required server confirmation, but existing recovery
+deliberately skipped finished runs. Consequently View result could stay disabled after reload or an
+offline period. Finished recovery now uses the existing authoritative read and numbered-attempt
+checks, without restarting capture or changing the terminal lifecycle. Browser coverage also checks
+reload/reconnection and a read-only second tab that must not certify another tab's synchronization.
+
+**Scope.** Five application implementation files, focused synchronization/Runner/authority tests, six new
+Chromium scenarios, one guarded test helper invoking the production calculation/publication SQL,
+ADR/README/SDD/plan/progress documentation and the preceding architecture review report. No API code,
+HTTP contract, SQL/migration, retention, GPS algorithm, package/lockfile or environment changes.
+
+**Executed checks.** Read-only preflight confirmed the owner/runtime/maintenance connections use
+`running_tracker_test` and their expected roles before browser fixture writes. No bootstrap, migration
+or development-database reset was run.
+
+| Command | Result |
+|---|---|
+| Authority regressions before the correction | 2 failed / 48 passed, reproducing reload/reconnection confirmation gaps |
+| Focused web tests (`runner-authority`, `run-result-sync`, `RunnerView`) after the correction | 88 passed in 3 files |
+| `npm run verify` | Exit 0: lint, all workspace typechecks, 2,436 tests (web 860), production builds |
+| Sequential Chromium selection (new/existing details, record, reload/offline, runner recovery, lifecycle takeover, New run takeover, second-tab, sign-out) | Exit 0: 33 passed in 5.5 min; retries 0 |
+
+Earlier browser attempts overlapped workspace builds/source changes, including a still-running test
+process from a second session. Rebuilding imported contracts/fixtures causes Vite HMR to refresh the
+application. Those attempts are excluded from final browser evidence; the abandoned process tree
+was stopped after the user stopped the other session. The final browser run starts after builds
+finish, without source mutations. Current logs are ignored under `.local/freeze-*.log`.
+
+The production build retains the existing Mapbox chunk-size warning. This slice does not establish
+physical-phone capture, real provider basemaps/OIDC, Firefox coverage for the new scenario, hosted CI,
+deployment or production recovery. The earlier 478 integration tests belong to the architecture
+review baseline; a separate full integration run is not claimed for this web-only change.
+
+**Paused.** README, the accepted implementation plan and `docs/pause-handoff.md` now agree that work
+stops after ADR-0068. The final scope, verification and deferred architecture work are recorded in
+`docs/reports/freeze-verification-2026-11-02.md`. One local commit contains this slice and its handoff;
+no push or deployment is included.

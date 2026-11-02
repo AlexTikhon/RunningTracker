@@ -5,19 +5,22 @@ import { loadArchiveTrack } from './runner-api.js';
 import { RunDetailController, type RunDetailSnapshot } from './run-detail-controller.js';
 import { RunDetailMap } from './RunDetailMap.js';
 import { formatDistance, formatDuration, formatStartedAt } from './run-search.js';
+import { runResultSynchronization, type RunResultSynchronization } from './run-result-sync.js';
 
 export interface RunDetailScreenProps {
   accessToken: string | null;
+  backLabel?: string;
   onBack: () => void;
   orgId: string;
   runId: string;
   signal: AbortSignal;
+  synchronization?: RunResultSynchronization;
   timeZone: string;
   unit: DistanceUnit;
   userId: string;
 }
 
-export function RunDetailScreen({ accessToken, onBack, orgId, runId, signal, timeZone, unit, userId }: RunDetailScreenProps) {
+export function RunDetailScreen({ accessToken, backLabel = 'Back to My runs', onBack, orgId, runId, signal, synchronization, timeZone, unit, userId }: RunDetailScreenProps) {
   const scopeKey = `${userId}|${orgId}|${runId}`;
   const [state, setState] = useState<{ key: string; session: AbortSignal; snapshot: RunDetailSnapshot } | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -38,15 +41,24 @@ export function RunDetailScreen({ accessToken, onBack, orgId, runId, signal, tim
   }, [orgId, runId, scopeKey, signal]);
   const feature = snapshot.status === 'ready' ? snapshot.feature : null;
   const properties = feature?.properties;
+  const sync = synchronization === undefined ? null : runResultSynchronization(synchronization);
+  const behindUploads = synchronization !== undefined && properties !== undefined
+    && BigInt(properties.dataRevision) < BigInt(synchronization.dataRevision);
   return (
     <section aria-labelledby="run-detail-title" className="run-detail">
       <div className="run-detail-heading">
-        <button onClick={onBack} type="button">Back to My runs</button>
+        <button onClick={onBack} type="button">{backLabel}</button>
         <h1 id="run-detail-title" ref={heading} tabIndex={-1}>Run details</h1>
         {(snapshot.status !== 'error' || snapshot.retryable) && (
           <button disabled={snapshot.status === 'loading'} onClick={() => void controller.current?.refresh()} type="button">{snapshot.status === 'error' ? 'Retry' : 'Refresh run'}</button>
         )}
       </div>
+      {sync !== null && (
+        <section aria-label="GPS synchronization">
+          <h2>Synchronization</h2>
+          <p role={sync.alert ? 'alert' : 'status'}>{sync.message}</p>
+        </section>
+      )}
       {snapshot.status === 'loading' && <p role="status">Loading run details…</p>}
       {snapshot.status === 'error' && <p role="alert">{snapshot.message}</p>}
       {properties !== undefined && feature !== null && (
@@ -55,7 +67,11 @@ export function RunDetailScreen({ accessToken, onBack, orgId, runId, signal, tim
             <div><dt>Started</dt><dd><time dateTime={properties.startedAt}>{formatStartedAt(properties.startedAt, timeZone)}</time></dd></div>
             <div><dt>Finished</dt><dd><time dateTime={properties.finishedAt}>{formatStartedAt(properties.finishedAt, timeZone)}</time></dd></div>
           </dl>
-          {properties.summaryState !== 'ready' ? (
+          {sync !== null && !sync.settled ? (
+            <p role="status">Your route and statistics will be available after synchronization and processing.</p>
+          ) : behindUploads ? (
+            <p role="status">The latest GPS measurements have uploaded. Refresh run to load their updated summary.</p>
+          ) : properties.summaryState !== 'ready' ? (
             <p role="status">{properties.summaryState === 'pending' ? 'This run’s summary is still being prepared.' : 'New GPS data arrived. This run’s summary is being updated.'} Refresh this run to check again.</p>
           ) : (
             <>

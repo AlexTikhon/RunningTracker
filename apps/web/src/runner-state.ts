@@ -199,11 +199,11 @@ export function rejectedStartMayBeAbandoned(state: RunnerState): boolean {
     && isDefinitiveStartRejectionCode(state.error.rejection.code);
 }
 
-// Whether the run must be asked about now: a restored or offline-recorded lifecycle, once the browser is online.
+// A restored lifecycle (including finished) or one last seen offline needs an online confirmation.
+// Finished is terminal, but its result can still disappear through deletion or membership revocation.
 export function needsAuthoritativeRead(state: RunnerState): boolean {
   return state.connectivity === 'online'
     && state.run !== null
-    && state.run.status !== 'finished'
     && (state.authority.status === 'restored' || state.authority.status === 'offline');
 }
 
@@ -407,13 +407,12 @@ export function runnerReducer(state: RunnerState, event: RunnerEvent): RunnerSta
       return { ...state, authority: { status: 'confirmed' }, run: mergeRunSnapshot(state.run, event.run) };
     case 'authority-requested':
       // The reads are numbered by the coordinator that owns them (run-authority.ts), so a number is accepted when
-      // it is newer than every one seen; a repeated or older number, a request for a finished run and one for a
-      // confirmed run change nothing. A newer request while one is in flight supersedes it (the coordinator
+      // it is newer than every one seen; a repeated or older number and a request for a confirmed run change
+      // nothing. A newer request while one is in flight supersedes it (the coordinator
       // restarts a read after a writer change); the capture an offline read kept running stays running.
       if (
         event.attempt <= state.authorityAttempt
         || state.run === null
-        || state.run.status === 'finished'
         || state.authority.status === 'confirmed'
       ) {
         return state;

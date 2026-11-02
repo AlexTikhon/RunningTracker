@@ -251,10 +251,30 @@ describe('recovery authority', () => {
     expect(apply(second, { attempt: 2, run: run('recording', 3, 9), type: 'authority-confirmed' }).authority).toEqual({ status: 'confirmed' });
   });
 
-  it('does not ask about a finished run', () => {
+  it('confirms a restored finished run before allowing its result to open', () => {
     const state = restored('online', run('finished', 4, 7));
-    expect(needsAuthoritativeRead(state)).toBe(false);
-    expect(runnerReducer(state, { attempt: 1, type: 'authority-requested' })).toBe(state);
+    expect(needsAuthoritativeRead(state)).toBe(true);
+    const confirming = apply(state, { attempt: 1, type: 'authority-requested' });
+    expect(confirming.authority.status).toBe('confirming');
+    const confirmed = apply(confirming, { attempt: 1, run: run('finished', 4, 9), type: 'authority-confirmed' });
+    expect(confirmed.authority.status).toBe('confirmed');
+    expect(confirmed.run?.dataRevision).toBe('9');
+    expect(needsAuthoritativeRead(confirmed)).toBe(false);
+    expect([state, confirming, confirmed].map(captureMayRun)).toEqual([false, false, false]);
+  });
+
+  it('reconfirms a finished run after an offline period, without restarting capture', () => {
+    const state = apply(restored('online', run('finished', 4, 7)), { run: run('finished', 4, 7), type: 'run-reconciled' });
+    const offline = apply(state, { connectivity: 'offline', type: 'connectivity-changed' });
+    expect(needsAuthoritativeRead(offline)).toBe(false);
+    const online = apply(offline, { connectivity: 'online', type: 'connectivity-changed' });
+    expect(needsAuthoritativeRead(online)).toBe(true);
+    const confirmed = apply(online,
+      { attempt: 1, type: 'authority-requested' },
+      { attempt: 1, run: run('finished', 4, 7), type: 'authority-confirmed' },
+    );
+    expect(confirmed.authority.status).toBe('confirmed');
+    expect([offline, online, confirmed].map(captureMayRun)).toEqual([false, false, false]);
   });
 });
 

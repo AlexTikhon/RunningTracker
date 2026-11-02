@@ -56,6 +56,7 @@ interface RunnerViewProps {
   onRetryOwnership: () => void;
   onRetryRequest: () => void;
   onStart: () => void;
+  onViewResult: () => void;
 }
 
 // The Runner screen. It only renders and reports intent: the capture, upload, writer-lease and request
@@ -84,6 +85,7 @@ export function RunnerView({
   onRetryOwnership,
   onRetryRequest,
   onStart,
+  onViewResult,
 }: RunnerViewProps) {
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const phase = runnerPhase(runner);
@@ -170,6 +172,14 @@ export function RunnerView({
                 <button className="finish-action" disabled={controlsDisabled} onClick={() => onCommand('finish')} type="button">
                   {phase === 'finishing' ? 'Finishing…' : 'Finish'}
                 </button>
+              )}
+              {runner.run.status === 'finished' && (
+                <button
+                  disabled={!sessionReady || storage.status !== 'ready' || busy || runner.error !== null || runner.authority.status !== 'confirmed'}
+                  id="runner-result-trigger"
+                  onClick={onViewResult}
+                  type="button"
+                >View result</button>
               )}
               {runner.run.status === 'finished' && (
                 <button

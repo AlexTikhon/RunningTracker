@@ -14,6 +14,15 @@ web change belongs to this slice. Verification and completion evidence are in th
 The following owner detail screen slice is implemented in ADR-0067: View details in My runs, applied-unit/time-zone statistics and GPS quality, optional route display, explicit summary/error states and Back with filters/pages/draft retained. Physical GPS validation, deployment,
 algorithm changes, derived analytics and AI remain separate work.
 
+The final selected slice before the renewed pause (2026-11-02, ADR-0068) connects a confirmed Finish to that same detail screen
+through View result in Runner. Synchronization and publication are separate: local pending/rejected
+measurements and a detail response predating known upload revisions cannot be presented as a complete
+result. Restored finished runs are confirmed again on reload/reconnection. Back and New run preserve
+the existing upload/request/writer lifetimes. No API/SQL, router, algorithm, dependency or deployment
+work belongs to this slice. Results are recorded in `docs/progress.md` and
+`docs/reports/freeze-verification-2026-11-02.md`. The project is paused after this slice; the architecture
+review's later proposals remain deferred until a new task is selected.
+
 ## 1. Execution mode
 
 The unit of work is a single Pxx stage, explicitly named in the assignment. By default, the first assignment covers P00–P01. Later stages may be combined at the user's request; do not attempt to implement the entire SDD in a single change.
