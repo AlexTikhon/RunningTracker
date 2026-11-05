@@ -128,6 +128,86 @@ describe('P11.1 periodic runner observability', () => {
   });
 });
 
+describe('maintenance retry visibility', () => {
+  it('exposes failure streak and pending retry, logs recovery once and resumes normal polling', async () => {
+    const clock = createControlledClock();
+    const metrics = createApiMetrics();
+    const logged: string[] = [];
+    const logger = createLogger({ clock, write: (_level, line) => void logged.push(line) });
+    const failure = Object.assign(new Error('postgresql://user:secret@host/private GPS body'), { code: '57014' });
+    let resolve!: (value: unknown) => void;
+    const runOnce = vi.fn<() => Promise<unknown>>()
+      .mockRejectedValueOnce(failure)
+      .mockRejectedValueOnce(failure)
+      .mockImplementationOnce(() => new Promise((done) => { resolve = done; }))
+      .mockResolvedValue({ status: 'idle' });
+    const runner = new PeriodicRunner({
+      clock, intervalMs: 1_000, random: () => 1, logger, metrics: metrics.maintenance,
+      runOnce, taskName: 'Journal export',
+    });
+    const gauge = (name: string, value: number) =>
+      expect(metrics.registry.render()).toContain(`${name}{task="journal_export"} ${value}\n`);
+    gauge('maintenance_consecutive_failures', 0);
+    runner.start();
+    gauge('maintenance_retry_delay_seconds', 0);
+    clock.advanceBy(1_000);
+    await settle();
+    gauge('maintenance_consecutive_failures', 1);
+    gauge('maintenance_retry_delay_seconds', 2);
+    expect(metrics.registry.render()).not.toContain('maintenance_last_success_timestamp_seconds{task="journal_export"}');
+    clock.advanceBy(2_000);
+    await settle();
+    gauge('maintenance_consecutive_failures', 2);
+    gauge('maintenance_retry_delay_seconds', 4);
+    runner.stop();
+    gauge('maintenance_retry_delay_seconds', 0);
+    gauge('maintenance_consecutive_failures', 2);
+    runner.start();
+    gauge('maintenance_retry_delay_seconds', 4);
+    clock.advanceBy(4_000);
+    await settle();
+    gauge('maintenance_retry_delay_seconds', 0);
+    gauge('maintenance_consecutive_failures', 2);
+    resolve({ status: 'idle' });
+    await settle();
+    gauge('maintenance_consecutive_failures', 0);
+    gauge('maintenance_retry_delay_seconds', 0);
+    expect(metrics.registry.render()).toContain('maintenance_last_success_timestamp_seconds{task="journal_export"}');
+    clock.advanceBy(1_000);
+    await settle();
+    expect(runOnce).toHaveBeenCalledTimes(4);
+    const entries = logged.map((line: string) => JSON.parse(line) as Record<string, unknown>);
+    expect(entries).toHaveLength(3);
+    expect(entries[1]).toMatchObject({ event: 'maintenance.cycle.failed', count: 2, retryDelayMs: 4_000, errorCode: '57014' });
+    expect(entries[2]).toMatchObject({ event: 'maintenance.cycle.recovered', count: 2, task: 'journal_export' });
+    expect(logged.join('')).not.toMatch(/postgresql|secret|GPS|private/u);
+    runner.stop();
+  });
+
+  it('contains a throwing error observer and continues to a healthy cycle', async () => {
+    const clock = createControlledClock();
+    const logged: string[] = [];
+    const logger = createLogger({ clock, write: (_level, line) => void logged.push(line) });
+    const runOnce = vi.fn<() => Promise<unknown>>().mockRejectedValueOnce(new Error('job failure')).mockResolvedValue(1);
+    const runner = new PeriodicRunner({
+      clock, intervalMs: 1_000, random: () => 1, logger, runOnce, taskName: 'Probe',
+      onError: () => { throw new Error('observer secret'); },
+    });
+    runner.start();
+    clock.advanceBy(1_000);
+    await settle();
+    clock.advanceBy(2_000);
+    await settle();
+    expect(runOnce).toHaveBeenCalledTimes(2);
+    expect(logged.map((line: string) => JSON.parse(line) as Record<string, unknown>)).toEqual([
+      expect.objectContaining({ event: 'maintenance.error_handler.failed', task: 'probe', errorName: 'Error' }),
+      expect.objectContaining({ event: 'maintenance.cycle.recovered', count: 1 }),
+    ]);
+    expect(logged.join('')).not.toContain('secret');
+    runner.stop();
+  });
+});
+
 describe('maintenance failure backoff', () => {
   function setup(intervalMs = 1_000, random = () => 1) {
     const clock = createControlledClock();
@@ -135,6 +215,7 @@ describe('maintenance failure backoff', () => {
     const runOnce = vi.fn<() => Promise<unknown>>().mockRejectedValue(new Error('unavailable'));
     const runner = new PeriodicRunner({
       clock, intervalMs, random, runOnce, onError: () => undefined, taskName: 'Probe',
+      logger: createLogger({ clock, write: () => undefined }),
     });
     return { clock, schedule, runOnce, runner };
   }

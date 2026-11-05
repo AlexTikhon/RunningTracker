@@ -132,6 +132,11 @@ export function createApiMetrics(registry: MetricsRegistry = new MetricsRegistry
       }),
     },
     maintenance: {
+      consecutiveFailures: registry.gauge({
+        help: 'Consecutive rejected maintenance cycles in this process; zero after a fulfilled cycle.',
+        labelNames: ['task'],
+        name: 'maintenance_consecutive_failures',
+      }),
       cycles: registry.counter({
         help: 'Background job cycles by outcome.',
         labelNames: ['task', 'outcome'],
@@ -151,6 +156,11 @@ export function createApiMetrics(registry: MetricsRegistry = new MetricsRegistry
       rawPurgeBlocked: registry.counter({
         help: 'Raw purge cycles blocked because a current summary was unavailable (retention overrun).',
         name: 'raw_purge_blocked_total',
+      }),
+      retryDelaySeconds: registry.gauge({
+        help: 'Selected delay of a pending failure retry, not a countdown; zero while running, stopped or polling normally.',
+        labelNames: ['task'],
+        name: 'maintenance_retry_delay_seconds',
       }),
     },
     pool: {

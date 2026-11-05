@@ -66,7 +66,32 @@ workers roll back and the existing scheduler can try a later cycle. Watch `maint
 error counts, `maintenance_cycle_duration_seconds` and `maintenance_last_success_timestamp_seconds`
 when tuning against actual task costs. The defaults have local regression evidence, not production
 capacity evidence. They do not bound a complete multi-statement job or journal filesystem I/O, and
-do not provide retry backoff or fair selection beside a repeatedly failing candidate.
+do not provide fair selection beside a repeatedly failing candidate.
+
+## Maintenance failure retries (ADR-0070)
+
+Each task independently backs off after a rejected cycle, doubling its retry
+ceiling to 300 seconds (or its normal interval if longer). Equal jitter chooses
+half to all of that ceiling, with the normal interval as a floor. A fulfilled
+cycle, including idle/blocked results, resets normal polling. Retry timers start
+after settlement; a stuck filesystem operation still owns its worker. Backoff
+state is process-local and resets on API restart. There is no attempt limit.
+
+Scrape `maintenance_consecutive_failures{task}` and
+`maintenance_retry_delay_seconds{task}` alongside cycle errors and last success.
+The delay is the selected pending retry interval, not remaining seconds; zero
+means no failure timer is pending, including during an attempt or after stop.
+Default `maintenance.cycle.failed` logs contain `count` and `retryDelayMs`;
+`maintenance.cycle.recovered` records the preceding failure count once.
+
+For example, investigate `maintenance_consecutive_failures >= 3` sustained for
+five minutes; choose thresholds for each task's normal cadence. Check SQLSTATE
+and pool pressure for SQL failures, directory permissions/storage health for
+journal failures. A process restart clears the streak and cannot certify recovery:
+require a new successful cycle and, for journals, actual off-host files/backlog
+checks. A successful idle cycle proves dependency access, not backlog progress.
+One failing summary worker backs off the whole summary task; candidate fairness
+and per-run quarantine remain separate work.
 
 ## Deploy and update
 

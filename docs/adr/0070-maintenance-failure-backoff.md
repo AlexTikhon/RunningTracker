@@ -31,7 +31,14 @@ Retries continue indefinitely at a bounded frequency; a recovered dependency can
 wait up to the selected delay plus actual cycle time before it is used again.
 Each maintenance task has independent state, so another task retains its cadence.
 Cycle success/error, duration and last-success metrics keep their existing meaning.
-The follow-up observability slice exposes failure streak and scheduled retry delay.
+The observability slice exposes `maintenance_consecutive_failures` and
+`maintenance_retry_delay_seconds`, labeled only by the static task name. The latter
+is the selected pending retry delay, not a countdown; it is zero while stopped,
+running or polling normally. A stopped runner retains its failure streak.
+Default error logs include the streak and delay; the first subsequent fulfilled
+cycle logs recovery once. An injected error observer may replace default failure
+logging, but cannot break scheduling by throwing. Logs retain the allow-list and
+never include error messages, SQL text or journal bodies.
 
 This does not cancel a hung SQL transaction or filesystem operation, persist
 attempts across restarts, quarantine a failing run, or make candidate selection

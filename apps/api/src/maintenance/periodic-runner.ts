@@ -19,6 +19,7 @@ export interface PeriodicRunnerOptions {
 export class PeriodicRunner {
   readonly #clock: Clock;
   readonly #intervalMs: number;
+  readonly #logger: Logger;
   readonly #metrics: ApiMetrics['maintenance'] | undefined;
   readonly #onError: (error: unknown) => void;
   readonly #random: () => number;
@@ -26,6 +27,7 @@ export class PeriodicRunner {
   readonly #taskLabel: string;
   #retryCeilingMs: number;
   #nextDelayMs: number;
+  #consecutiveFailures = 0;
   #running = false;
   #started = false;
   #timer: ReturnType<typeof setTimeout> | undefined;
@@ -35,6 +37,7 @@ export class PeriodicRunner {
       throw new Error(`${options.taskName} interval must be an integer between 1 and ${MAX_TIMER_DELAY_MS}`);
     }
     const logger = options.logger ?? defaultLogger;
+    this.#logger = logger;
     this.#clock = options.clock;
     this.#intervalMs = options.intervalMs;
     this.#retryCeilingMs = options.intervalMs;
@@ -45,8 +48,13 @@ export class PeriodicRunner {
     this.#onError =
       options.onError ??
       ((error) =>
-        logger.error('maintenance.cycle.failed', { task: this.#taskLabel, ...describeError(error) }));
+        logger.error('maintenance.cycle.failed', {
+          task: this.#taskLabel, count: this.#consecutiveFailures,
+          retryDelayMs: this.#nextDelayMs, ...describeError(error),
+        }));
     this.#runOnce = options.runOnce;
+    this.#metrics?.consecutiveFailures.set({ task: this.#taskLabel }, 0);
+    this.#metrics?.retryDelaySeconds.set({ task: this.#taskLabel }, 0);
   }
 
   public start(): void {
@@ -59,6 +67,7 @@ export class PeriodicRunner {
 
   public stop(): void {
     this.#started = false;
+    this.#metrics?.retryDelaySeconds.set({ task: this.#taskLabel }, 0);
     if (this.#timer !== undefined) {
       this.#clock.clearTimeout(this.#timer);
       this.#timer = undefined;
@@ -69,8 +78,12 @@ export class PeriodicRunner {
     if (!this.#started || this.#running || this.#timer !== undefined) {
       return;
     }
+    this.#metrics?.retryDelaySeconds.set(
+      { task: this.#taskLabel }, this.#consecutiveFailures > 0 ? this.#nextDelayMs / 1_000 : 0,
+    );
     this.#timer = this.#clock.setTimeout(() => {
       this.#timer = undefined;
+      this.#metrics?.retryDelaySeconds.set({ task: this.#taskLabel }, 0);
       void this.#executeCycle();
     }, this.#nextDelayMs);
   }
@@ -83,10 +96,16 @@ export class PeriodicRunner {
     const startedAt = this.#clock.monotonicNow();
     try {
       await this.#runOnce();
+      const failures = this.#consecutiveFailures;
+      this.#consecutiveFailures = 0;
       this.#retryCeilingMs = this.#intervalMs;
       this.#nextDelayMs = this.#intervalMs;
       this.#record('ok', startedAt);
+      if (failures > 0) {
+        this.#logger.info('maintenance.cycle.recovered', { task: this.#taskLabel, count: failures });
+      }
     } catch (error) {
+      this.#consecutiveFailures = Math.min(Number.MAX_SAFE_INTEGER, this.#consecutiveFailures + 1);
       this.#retryCeilingMs = Math.min(
         Math.max(this.#intervalMs, MAX_FAILURE_DELAY_MS),
         this.#retryCeilingMs * 2,
@@ -96,7 +115,12 @@ export class PeriodicRunner {
       const random = Number.isFinite(sample) ? Math.max(0, Math.min(1, sample)) : 0.5;
       this.#nextDelayMs = Math.max(this.#intervalMs, Math.floor(this.#retryCeilingMs * (0.5 + random / 2)));
       this.#record('error', startedAt);
-      this.#onError(error);
+      try {
+        this.#onError(error);
+      } catch (observerError) {
+        // An observer cannot turn a settled job failure into an unhandled scheduler rejection.
+        this.#logger.error('maintenance.error_handler.failed', { task: this.#taskLabel, ...describeError(observerError) });
+      }
     } finally {
       this.#running = false;
       this.#scheduleNext();
@@ -109,6 +133,7 @@ export class PeriodicRunner {
       return;
     }
     const task = this.#taskLabel;
+    metrics.consecutiveFailures.set({ task }, this.#consecutiveFailures);
     metrics.cycles.inc({ outcome, task });
     metrics.durationSeconds.observe({ task }, Math.max(0, (this.#clock.monotonicNow() - startedAt) / 1_000));
     if (outcome === 'ok') {

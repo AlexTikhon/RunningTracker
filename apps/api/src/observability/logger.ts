@@ -25,6 +25,7 @@ const allowedFields = new Set([
   'port',
   'reason',
   'requestId',
+  'retryDelayMs',
   'route',
   'runId',
   'signal',
