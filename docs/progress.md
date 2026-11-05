@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-02 (maintenance SQL budgets and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-05 (four-commit maintenance closeout and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3110,3 +3110,49 @@ fairness solution. The SDD now states those limits precisely. Persisted retries/
 fairness, task-specific/whole-job and I/O deadlines, durable sessions and physical GPS remain deferred.
 The README, implementation plan and handoff point to the latest evidence. Delivery is one local
 commit on the above base; no push or deployment.
+
+## Four-commit maintenance closeout and freeze (2026-11-05)
+
+The user requested an architectural review, exactly four local commits and another
+freeze. The starting checkout was clean at `1c97264`, with no local divergence
+from the existing `origin/main` reference. The review followed composition,
+tenancy/RLS, capture/durability, ingestion/processing, SSE, archive/review,
+retention/recovery, AI and delivery boundaries; its scope and deferred priorities
+are in [the architecture report](reports/architecture-review-2026-11-05.md).
+
+The selected bounded continuation of ADR-0069 is ADR-0070:
+
+1. `442c120`: independent exponential failure backoff with equal jitter, a
+   five-minute ceiling (or normal interval if longer), success reset, safe timer
+   bounds, retained stop/start state and no overlapping unsettled work.
+2. `e36f6cd`: failure-streak and selected pending-delay gauges, sanitized retry
+   logs, one recovery log, error-observer containment and operator guidance.
+3. `eecacb7`: real maintenance-role SQL timeout/recovery and independent-task
+   progress; production journal-export transactions retain rows through injected
+   unsettled/failed sink writes and acknowledge only after success.
+4. The documentation commit containing this section: current architecture review,
+   verified freeze report and reconciled README/SDD/plan/interview/pause handoff.
+
+`npm run verify` passed lint, workspace typechecks, 2,455 tests and production
+builds. The new integration test file then passed focused ESLint/API typecheck and
+its two scenarios; the full database suite passed 483 tests in 47 files, none
+skipped. Read-only live test-role/database preflight and `demo:doctor` passed.
+Exact commands, browser results and snapshot provenance are in
+[the current verification report](reports/freeze-verification-2026-11-05.md).
+No runtime/unit code changed after full verification. No migrations, dependency/
+lockfile, HTTP/UI, private environment or development-database changes belong to
+this closeout. Database and browser suites execute sequentially.
+
+Browser closeout passed 24 Chromium smoke scenarios, 13 Chromium finish/result/
+detail scenarios and 24 Firefox smoke scenarios, all with retries disabled.
+The first Chromium smoke attempt had 23 passes and one publication-wait timeout
+while residual integration summaries occupied the default worker cycles; the
+complete rerun passed once that backlog drained, without application changes.
+The real-map detail assertion passed, but Mapbox emitted a container warning and
+two unhandled library rejections; the current report preserves that limitation.
+
+**Paused.** Backoff is per task, process-local and exception-based; fulfilled idle,
+blocked or stale results reset it. It cannot prove backlog progress or cancel
+hung I/O. Candidate fairness/quarantine, persisted attempts, whole-job/I/O bounds,
+durable sessions, physical-device D10 and target-environment evidence remain
+deferred. Exactly four local commits end this task; no push or deployment.

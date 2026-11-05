@@ -43,6 +43,9 @@ dependencies or product-flow changes are needed. Candidate fairness, persisted
 attempts, whole-job/I/O cancellation, durable sessions and physical-device D10
 remain deferred. Completion evidence is recorded in `docs/progress.md`.
 
+This four-commit closeout is complete and the project is paused again. The final
+checks and limits are in [the freeze report](reports/freeze-verification-2026-11-05.md).
+
 ## 1. Execution mode
 
 The unit of work is a single Pxx stage, explicitly named in the assignment. By default, the first assignment covers P00–P01. Later stages may be combined at the user's request; do not attempt to implement the entire SDD in a single change.

@@ -50,6 +50,7 @@ force; whole-job/I/O deadlines, candidate fairness and durable sessions are defe
 ## Verification
 
 Controlled-clock tests cover growth/cap/jitter, success reset, long intervals,
-stop/start, unsettled work and timer overflow. Real-role integration verification
-will cover actual SQL failures, independent-task progress and recovery. Results
-belong in the final freeze report, not in an inferred production-readiness claim.
+stop/start, unsettled work and timer overflow. Real-role integration verifies
+actual SQL failures, independent-task progress and recovery, plus journal rollback
+and acknowledgement around injected sink failures. Exact checks and limits are
+recorded in [the freeze report](../reports/freeze-verification-2026-11-05.md).
