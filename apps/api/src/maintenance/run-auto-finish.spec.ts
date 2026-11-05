@@ -118,6 +118,7 @@ describe('RunAutoFinishRunner', () => {
       clock,
       intervalMs: 1_000,
       onError,
+      random: () => 0,
       runOnce,
     });
 

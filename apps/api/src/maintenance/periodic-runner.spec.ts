@@ -113,6 +113,7 @@ describe('P11.1 periodic runner observability', () => {
       intervalMs: 1_000,
       logger: createLogger({ clock, write: () => undefined }),
       runOnce,
+      random: () => 0,
       taskName: 'Job',
     });
 
@@ -124,5 +125,112 @@ describe('P11.1 periodic runner observability', () => {
 
     expect(runOnce).toHaveBeenCalledTimes(2);
     runner.stop();
+  });
+});
+
+describe('maintenance failure backoff', () => {
+  function setup(intervalMs = 1_000, random = () => 1) {
+    const clock = createControlledClock();
+    const schedule = vi.spyOn(clock, 'setTimeout');
+    const runOnce = vi.fn<() => Promise<unknown>>().mockRejectedValue(new Error('unavailable'));
+    const runner = new PeriodicRunner({
+      clock, intervalMs, random, runOnce, onError: () => undefined, taskName: 'Probe',
+    });
+    return { clock, schedule, runOnce, runner };
+  }
+
+  it('backs off consecutive failures, caps the delay, and resets after a successful idle cycle', async () => {
+    const { clock, schedule, runOnce, runner } = setup();
+    runner.start();
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 300_000, 300_000]) {
+      expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), delay);
+      const attempts = runOnce.mock.calls.length;
+      clock.advanceBy(delay - 1);
+      await settle();
+      expect(runOnce).toHaveBeenCalledTimes(attempts);
+      clock.advanceBy(1);
+      await settle();
+      expect(runOnce).toHaveBeenCalledTimes(attempts + 1);
+    }
+    runOnce.mockResolvedValueOnce({ status: 'idle' });
+    clock.advanceBy(300_000);
+    await settle();
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), 1_000);
+    clock.advanceBy(1_000);
+    await settle();
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), 2_000);
+    runner.stop();
+  });
+
+  it.each([
+    { sample: 0, expected: 1_000 },
+    { sample: 0.5, expected: 1_500 },
+    { sample: 1, expected: 2_000 },
+    { sample: -1, expected: 1_000 },
+    { sample: 5, expected: 2_000 },
+    { sample: NaN, expected: 1_500 },
+  ])('uses bounded jitter for random sample $sample', async ({ sample, expected }) => {
+    const { clock, schedule, runner } = setup(1_000, () => sample);
+    runner.start();
+    clock.advanceBy(1_000);
+    await settle();
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), expected);
+    runner.stop();
+  });
+
+  it('never accelerates a task whose normal interval exceeds the failure cap', async () => {
+    const { clock, schedule, runner } = setup(600_000, () => 0);
+    runner.start();
+    clock.advanceBy(600_000);
+    await settle();
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), 600_000);
+    runner.stop();
+  });
+
+  it('preserves backoff across stop/start and cancels a pending retry', async () => {
+    const { clock, schedule, runOnce, runner } = setup();
+    runner.start();
+    runner.start();
+    clock.advanceBy(1_000);
+    await settle();
+    runner.stop();
+    clock.advanceBy(10_000);
+    await settle();
+    expect(runOnce).toHaveBeenCalledOnce();
+    runner.start();
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), 2_000);
+    clock.advanceBy(1_999);
+    await settle();
+    expect(runOnce).toHaveBeenCalledOnce();
+    clock.advanceBy(1);
+    await settle();
+    expect(runOnce).toHaveBeenCalledTimes(2);
+    runner.stop();
+  });
+
+  it('does not schedule another attempt while failed work is still unsettled, even after stop/start', async () => {
+    const { clock, runOnce, runner } = setup();
+    let reject!: (error: Error) => void;
+    runOnce.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    runner.start();
+    clock.advanceBy(1_000);
+    runner.stop();
+    runner.start();
+    clock.advanceBy(1_000_000);
+    await settle();
+    expect(runOnce).toHaveBeenCalledOnce();
+    reject(new Error('settled'));
+    await settle();
+    clock.advanceBy(1_999);
+    await settle();
+    expect(runOnce).toHaveBeenCalledOnce();
+    clock.advanceBy(1);
+    await settle();
+    expect(runOnce).toHaveBeenCalledTimes(2);
+    runner.stop();
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, 2_147_483_648])('rejects an unsafe timer interval %s', (intervalMs) => {
+    expect(() => setup(intervalMs)).toThrow(/interval must be an integer/u);
   });
 });

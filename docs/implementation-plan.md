@@ -33,6 +33,16 @@ to this slice. Per-task/whole-job and filesystem deadlines, persisted retries/fa
 sessions remain deferred. The project pauses again after this slice; fresh evidence is in
 `docs/reports/maintenance-sql-budgets-2026-11-02.md` and `docs/progress.md`.
 
+## Four-commit maintenance closeout (2026-11-05)
+
+The user reopened the project for exactly four local commits, then another freeze.
+The selected slice follows ADR-0069: bounded per-task failure backoff (ADR-0070),
+operator-visible retry/recovery state, real-role failure/recovery verification,
+and a reconciled pause handoff with final regression evidence. No migrations,
+dependencies or product-flow changes are needed. Candidate fairness, persisted
+attempts, whole-job/I/O cancellation, durable sessions and physical-device D10
+remain deferred. Completion evidence is recorded in `docs/progress.md`.
+
 ## 1. Execution mode
 
 The unit of work is a single Pxx stage, explicitly named in the assignment. By default, the first assignment covers P00–P01. Later stages may be combined at the user's request; do not attempt to implement the entire SDD in a single change.
