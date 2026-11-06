@@ -1,5 +1,26 @@
 # Pause handoff (updated 2026-11-06)
 
+## Resumed on 2026-11-06 with a new direction
+
+The pause below has ended. The project is resumed as a broader activity, health and nutrition tracker with an AI
+coach on a local Ollama model; the roadmap and the principles every later slice must follow are in
+[product-direction.md](product-direction.md). Work proceeds one small vertical slice at a time.
+
+- **Step 1 (done, uncommitted at hand-off):** owner-only manual activities, [ADR-0072](adr/0072-owner-only-manual-activities.md):
+  migration `0025_activities.sql`, strict contracts and OpenAPI, `/api/orgs/:orgId/activities`, an **Activity** tab, and
+  tests at every layer. Runs, ingestion, the GPS algorithm, SSE, tiles, retention and AI search are unchanged. Evidence
+  is in the [progress entry](progress.md) "Resumed: owner-only manual activities (step 1)".
+- **Migration state:** `0025` was applied to the `running_tracker_test` database only. The development database is
+  not migrated by that work; `npm run demo:up` (or `npm run db:migrate`) applies it on the next start.
+- **Known limitation introduced:** activity deletion is a hard delete without tombstone or journal, so a restored
+  backup can resurrect deleted activities. Revisit before real participants record health data.
+- **Suggested step 2:** `daily_metrics` (weight, sleep, mood, soreness), owner-only, with the same template.
+
+The rest of this document is the pause handoff as written for the map lifecycle closeout. Its restart and
+verification instructions still apply; "no further product work" no longer does.
+
+## Paused state before resuming
+
 The project is paused as a locally verified demo/portfolio application after four
 new map lifecycle commits. The architecture remains React + Express +
 PostgreSQL/PostGIS. Start with the [current verification report](reports/freeze-verification-2026-11-06.md)

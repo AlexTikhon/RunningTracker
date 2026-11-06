@@ -12,6 +12,7 @@ type Method = (typeof methods)[number];
 
 const uuid = '11111111-1111-4111-8111-111111111111';
 const pathValues: Record<string, string> = {
+  activityId: uuid,
   orgId: uuid,
   runId: uuid,
   userId: uuid,

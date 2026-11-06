@@ -72,6 +72,7 @@ async function deleteOrganizations(client: pg.Client, orgIds: readonly string[])
     return;
   }
   const ids = [orgIds];
+  await client.query('DELETE FROM activities WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM run_commands WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM run_shares WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM runs WHERE org_id = ANY($1::uuid[])', ids);

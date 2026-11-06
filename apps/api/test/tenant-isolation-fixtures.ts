@@ -59,6 +59,7 @@ export async function prepareTenantIsolationFixtures(
       );
     }
 
+    await client.query('DELETE FROM activities');
     await client.query('DELETE FROM run_commands');
     await client.query('DELETE FROM run_summaries');
     await client.query('DELETE FROM run_points');

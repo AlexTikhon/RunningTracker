@@ -348,3 +348,19 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 @media (max-width: 600px) {
   .run-detail-heading h1 { order: -1; flex-basis: 100%; margin: .25rem 0; }
 }
+/* Manual activities (ADR-0072): the search panel's form and card styles, plus a duration group and notes. */
+.activity-shell { display: grid; gap: 1.5rem; }
+.activity-shell h1 { margin: 0; font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -0.04em; }
+.activity-shell h1:focus { outline: none; }
+.activity-shell h1:focus-visible { outline: 2px solid #b8f264; outline-offset: 3px; }
+.activity-shell .search-results h2 { margin: 0; font-size: 1.4rem; }
+.activity-form__duration { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; min-width: 0; margin: 0; padding: 0; border: 0; }
+.activity-form__duration legend { margin-bottom: 0.4rem; padding: 0; color: #dfe6e0; font-size: 0.76rem; font-weight: 800; }
+.activity-form__notes { grid-column: 1 / -1; }
+.activity-form textarea { min-width: 0; resize: vertical; border: 1px solid #465149; border-radius: 0.7rem; padding: 0.72rem 0.85rem; color: #f4f7f3; color-scheme: dark; background: #0e1410; font: inherit; font-weight: 500; }
+.activity-form__actions { display: flex; flex-wrap: wrap; grid-column: 1 / -1; align-items: center; gap: 0.9rem; }
+.activity-form__status, .activity-form__failure { margin: 0; font-size: 0.84rem; line-height: 1.45; }
+.activity-form__status { color: #b8f264; }
+.activity-form__failure { color: #ffaca4; }
+.activity-form__warning { grid-column: 1 / -1; margin: 0; padding: 0.7rem 0.9rem; border: 1px solid #6b5a2f; border-radius: 0.8rem; color: #e8d9a8; background: #2c2718; font-size: 0.84rem; line-height: 1.45; }
+.activity-card__notes { margin: 0; color: #b8c2bb; font-size: 0.84rem; line-height: 1.45; overflow-wrap: anywhere; }

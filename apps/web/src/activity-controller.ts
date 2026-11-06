@@ -1,0 +1,458 @@
+import type { ActivityListResponse, ActivityView, CreateActivityRequest } from '@running-tracker/contracts';
+
+import { sameActivityRequest } from './activity-form.js';
+import { RunnerApiError, type ActivityTarget, type CsrfCredentials } from './runner-api.js';
+
+// Framework-free controllers for the Activity tab (ADR-0072). Each belongs to one organization and one session: a
+// change of person, organization or session means new controllers, and disposing an old one (or ending its session)
+// aborts its request and silences it, so a late answer can never reach the new scope.
+
+function isAbort(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function reference(error: RunnerApiError): string {
+  return error.requestId === null ? '' : ` Reference ${error.requestId}.`;
+}
+
+function serverText(error: RunnerApiError): string {
+  return `${error.message.replace(/[.\s]+$/u, '')}.${reference(error)}`;
+}
+
+// The controller stops for good when the session it was created for ends.
+function followSession(signal: AbortSignal | undefined, dispose: () => void): void {
+  if (signal === undefined) return;
+  if (signal.aborted) {
+    dispose();
+    return;
+  }
+  signal.addEventListener('abort', dispose, { once: true });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The list of the person's own activities, newest first, one page at a time.
+
+export type ActivityLoader = (
+  input: { cursor: string | null; orgId: string },
+  signal: AbortSignal,
+) => Promise<ActivityListResponse>;
+
+export type ActivityListStatus = 'access-denied' | 'error' | 'loading' | 'ready';
+
+export interface ActivityListSnapshot {
+  hasMore: boolean;
+  items: ActivityView[];
+  loadingMore: boolean;
+  // Why the first page could not be shown (error, lost access); null otherwise.
+  message: string | null;
+  // Why the next page could not be added; the pages already shown stay.
+  moreMessage: string | null;
+  // The server no longer accepts the cursor: only starting over is meaningful.
+  outdated: boolean;
+  status: ActivityListStatus;
+}
+
+export const loadingActivityList: ActivityListSnapshot = {
+  hasMore: false,
+  items: [],
+  loadingMore: false,
+  message: null,
+  moreMessage: null,
+  outdated: false,
+  status: 'loading',
+};
+
+export interface ActivityListControllerOptions {
+  load: ActivityLoader;
+  onChange: (snapshot: ActivityListSnapshot) => void;
+  orgId: string;
+  // The session's lifetime: when it ends, the controller is disposed.
+  signal?: AbortSignal;
+}
+
+export class ActivityListController {
+  readonly #load: ActivityLoader;
+  readonly #onChange: (snapshot: ActivityListSnapshot) => void;
+  readonly #orgId: string;
+  #cursor: string | null = null;
+  #disposed = false;
+  #request: AbortController | null = null;
+  #snapshot: ActivityListSnapshot = loadingActivityList;
+  #started = false;
+
+  public constructor(options: ActivityListControllerOptions) {
+    this.#load = options.load;
+    this.#onChange = options.onChange;
+    this.#orgId = options.orgId;
+    followSession(options.signal, () => this.dispose());
+  }
+
+  public get snapshot(): ActivityListSnapshot {
+    return this.#snapshot;
+  }
+
+  public start(): void {
+    if (this.#started || this.#disposed) return;
+    this.#started = true;
+    this.#loadFirstPage();
+  }
+
+  public loadMore(): void {
+    const s = this.#snapshot;
+    if (!this.#started || this.#disposed || this.#request !== null || s.status !== 'ready' || s.outdated || this.#cursor === null) {
+      return;
+    }
+    const controller = new AbortController();
+    this.#request = controller;
+    this.#emit({ loadingMore: true, moreMessage: null });
+    void this.#run(controller, this.#cursor, 'next');
+  }
+
+  // A failed first page, lost access or an outdated cursor start over; a failed next page asks again.
+  public retry(): void {
+    const s = this.#snapshot;
+    if (!this.#started || this.#disposed || this.#request !== null) return;
+    if (s.outdated || s.status === 'error' || s.status === 'access-denied') {
+      this.#loadFirstPage();
+    } else if (s.moreMessage !== null) {
+      this.loadMore();
+    }
+  }
+
+  // The list is known to be out of date (an activity was saved or deleted): start over from page one and drop the
+  // answer to anything sent before, so it cannot bring back what the server has since changed.
+  public refresh(): void {
+    if (!this.#started || this.#disposed) return;
+    this.#loadFirstPage();
+  }
+
+  public dispose(): void {
+    this.#disposed = true;
+    this.#request?.abort();
+    this.#request = null;
+  }
+
+  #emit(patch: Partial<ActivityListSnapshot>): void {
+    this.#snapshot = { ...this.#snapshot, ...patch };
+    this.#onChange(this.#snapshot);
+  }
+
+  #loadFirstPage(): void {
+    this.#request?.abort();
+    this.#cursor = null;
+    const controller = new AbortController();
+    this.#request = controller;
+    this.#snapshot = loadingActivityList;
+    this.#emit({});
+    void this.#run(controller, null, 'first');
+  }
+
+  #current(controller: AbortController): boolean {
+    return !this.#disposed && this.#request === controller && !controller.signal.aborted;
+  }
+
+  async #run(controller: AbortController, cursor: string | null, kind: 'first' | 'next'): Promise<void> {
+    let response: ActivityListResponse;
+    try {
+      response = await this.#load({ cursor, orgId: this.#orgId }, controller.signal);
+    } catch (error) {
+      if (!this.#current(controller) || isAbort(error)) return;
+      this.#request = null;
+      this.#fail(error, kind);
+      return;
+    }
+    if (!this.#current(controller)) return;
+    this.#request = null;
+    this.#cursor = response.nextCursor;
+    const known = new Set(this.#snapshot.items.map((item) => item.activityId));
+    const added = response.items.filter((item) => !known.has(item.activityId));
+    this.#emit({
+      hasMore: response.nextCursor !== null,
+      items: kind === 'first' ? response.items : [...this.#snapshot.items, ...added],
+      loadingMore: false,
+      message: null,
+      moreMessage: null,
+      outdated: false,
+      status: 'ready',
+    });
+  }
+
+  #fail(error: unknown, kind: 'first' | 'next'): void {
+    if (error instanceof RunnerApiError && (error.status === 401 || error.status === 403)) {
+      this.#cursor = null;
+      this.#snapshot = loadingActivityList;
+      this.#emit({ message: 'You no longer have access to your activities in this organization.', status: 'access-denied' });
+      return;
+    }
+    if (kind === 'first') {
+      this.#emit({
+        message:
+          error instanceof RunnerApiError
+            ? serverText(error)
+            : 'Your activities could not be loaded. Check your connection and try again.',
+        status: 'error',
+      });
+      return;
+    }
+    if (error instanceof RunnerApiError && error.code === 'INVALID_CURSOR') {
+      this.#emit({
+        loadingMore: false,
+        moreMessage: 'This list is out of date. Refresh to see your current activities.',
+        outdated: true,
+      });
+      return;
+    }
+    this.#emit({
+      loadingMore: false,
+      moreMessage:
+        error instanceof RunnerApiError
+          ? serverText(error)
+          : 'More activities could not be loaded. Check your connection and try again.',
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Saving one activity. The client id is bound to one payload: after an unknown outcome the same details are sent again
+// under the same id (idempotent on the server); changed details get a new id.
+
+export type ActivityCreator = (
+  target: ActivityTarget,
+  request: Required<CreateActivityRequest>,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+) => Promise<{ activity: ActivityView; created: boolean }>;
+
+export type ActivitySubmissionPhase = 'failed' | 'idle' | 'pending' | 'saved';
+
+export interface ActivitySubmissionSnapshot {
+  message: string | null;
+  phase: ActivitySubmissionPhase;
+  // An earlier attempt's outcome is unknown: it may already be saved.
+  uncertain: boolean;
+}
+
+export const idleSubmission: ActivitySubmissionSnapshot = { message: null, phase: 'idle', uncertain: false };
+
+export interface ActivitySubmissionControllerOptions {
+  create: ActivityCreator;
+  // Read when the request is sent, so a refreshed token needs no new controller.
+  csrf: () => CsrfCredentials;
+  newId: () => string;
+  onChange: (snapshot: ActivitySubmissionSnapshot) => void;
+  // Called once per confirmed save, after the `saved` snapshot.
+  onSaved: (activity: ActivityView, created: boolean) => void;
+  orgId: string;
+  signal?: AbortSignal;
+}
+
+interface Attempt {
+  activityId: string;
+  request: Required<CreateActivityRequest>;
+}
+
+function definitiveSaveRefusal(error: unknown): string | null {
+  if (!(error instanceof RunnerApiError)) return null;
+  if (error.status === 401) return 'The activity was not saved: sign in again, then save.';
+  if (error.status === 403) return 'The activity was not saved: you no longer have access to this organization.';
+  // The id is taken: by a different payload of this person's (409) or by someone else's activity (404).
+  if (error.code === 'ACTIVITY_CONFLICT' || error.code === 'ACTIVITY_NOT_FOUND') {
+    return 'The activity was not saved because its identifier was already used. Save again to retry.';
+  }
+  // Any other 4xx is a refusal before anything was written, except those that say "try later".
+  if (error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status)) {
+    return `The activity was not saved: ${serverText(error)}`;
+  }
+  return null;
+}
+
+function unknownOutcomeText(error: unknown): string {
+  const reason = error instanceof RunnerApiError
+    ? serverText(error)
+    : error instanceof DOMException && error.name === 'TimeoutError'
+      ? 'the server did not answer in time.'
+      : 'the connection failed.';
+  return `The save was not confirmed: ${reason} The activity may already be saved. Saving the same details again is safe and will not create a duplicate.`;
+}
+
+export class ActivitySubmissionController {
+  readonly #create: ActivityCreator;
+  readonly #csrf: () => CsrfCredentials;
+  readonly #newId: () => string;
+  readonly #onChange: (snapshot: ActivitySubmissionSnapshot) => void;
+  readonly #onSaved: (activity: ActivityView, created: boolean) => void;
+  readonly #orgId: string;
+  // The attempt whose outcome is unknown, kept for an exact retry.
+  #retained: Attempt | null = null;
+  #disposed = false;
+  #request: AbortController | null = null;
+  #snapshot: ActivitySubmissionSnapshot = idleSubmission;
+
+  public constructor(options: ActivitySubmissionControllerOptions) {
+    this.#create = options.create;
+    this.#csrf = options.csrf;
+    this.#newId = options.newId;
+    this.#onChange = options.onChange;
+    this.#onSaved = options.onSaved;
+    this.#orgId = options.orgId;
+    followSession(options.signal, () => this.dispose());
+  }
+
+  public get snapshot(): ActivitySubmissionSnapshot {
+    return this.#snapshot;
+  }
+
+  /** Whether saving these details now would repeat the uncertain earlier attempt rather than create a new activity. */
+  public wouldReuse(request: Required<CreateActivityRequest>): boolean {
+    return this.#retained !== null && sameActivityRequest(this.#retained.request, request);
+  }
+
+  /** Sends the request unless one is already on its way. Returns whether it was sent. */
+  public submit(request: Required<CreateActivityRequest>): boolean {
+    if (this.#disposed || this.#request !== null) return false;
+    const attempt: Attempt = this.wouldReuse(request)
+      ? this.#retained!
+      : { activityId: this.#newId(), request };
+    this.#retained = attempt;
+    const controller = new AbortController();
+    this.#request = controller;
+    this.#emit({ message: null, phase: 'pending', uncertain: false });
+    void this.#create({ activityId: attempt.activityId, orgId: this.#orgId }, attempt.request, this.#csrf(), controller.signal).then(
+      ({ activity, created }) => {
+        if (!this.#current(controller)) return;
+        this.#request = null;
+        this.#retained = null;
+        this.#emit({ message: 'Activity saved.', phase: 'saved', uncertain: false });
+        this.#onSaved(activity, created);
+      },
+      (error: unknown) => {
+        if (!this.#current(controller)) return;
+        this.#request = null;
+        const refusal = definitiveSaveRefusal(error);
+        if (refusal !== null) {
+          this.#retained = null;
+          this.#emit({ message: refusal, phase: 'failed', uncertain: false });
+        } else {
+          this.#emit({ message: unknownOutcomeText(error), phase: 'failed', uncertain: true });
+        }
+      },
+    );
+    return true;
+  }
+
+  // Aborting does not undo a PUT the server already received; it only stops this controller from reporting it.
+  public dispose(): void {
+    this.#disposed = true;
+    this.#request?.abort();
+    this.#request = null;
+  }
+
+  #current(controller: AbortController): boolean {
+    return !this.#disposed && this.#request === controller;
+  }
+
+  #emit(snapshot: ActivitySubmissionSnapshot): void {
+    this.#snapshot = snapshot;
+    this.#onChange(snapshot);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Deleting one activity after an explicit confirmation. The server answers 204 whether or not the row still existed
+// (no tombstone, ADR-0072), so a repeat is always safe.
+
+export type ActivityDeletionPhase = 'confirming' | 'deleted' | 'failed' | 'pending' | 'unavailable';
+
+export interface ActivityDeletionSnapshot {
+  message: string | null;
+  phase: ActivityDeletionPhase;
+}
+
+export const confirmingActivityDeletion: ActivityDeletionSnapshot = { message: null, phase: 'confirming' };
+
+export interface ActivityDeletionControllerOptions extends ActivityTarget {
+  csrf: () => CsrfCredentials;
+  deleteActivity: (target: ActivityTarget, csrf: CsrfCredentials, signal: AbortSignal) => Promise<void>;
+  onChange: (snapshot: ActivityDeletionSnapshot) => void;
+  onDeleted: () => void;
+  signal?: AbortSignal;
+}
+
+function deletionFailureText(error: unknown): string {
+  if (error instanceof RunnerApiError && error.status >= 400 && error.status < 500) {
+    return `The activity was not deleted: ${serverText(error)}`;
+  }
+  const reason = error instanceof RunnerApiError
+    ? serverText(error)
+    : error instanceof DOMException && error.name === 'TimeoutError'
+      ? 'the server did not answer in time.'
+      : 'the connection failed.';
+  return `The deletion was not confirmed: ${reason} Trying again is safe.`;
+}
+
+export class ActivityDeletionController {
+  readonly #csrf: () => CsrfCredentials;
+  readonly #deleteActivity: ActivityDeletionControllerOptions['deleteActivity'];
+  readonly #onChange: (snapshot: ActivityDeletionSnapshot) => void;
+  readonly #onDeleted: () => void;
+  readonly #target: ActivityTarget;
+  #disposed = false;
+  #request: AbortController | null = null;
+  #snapshot: ActivityDeletionSnapshot = confirmingActivityDeletion;
+
+  public constructor(options: ActivityDeletionControllerOptions) {
+    this.#csrf = options.csrf;
+    this.#deleteActivity = options.deleteActivity;
+    this.#onChange = options.onChange;
+    this.#onDeleted = options.onDeleted;
+    this.#target = { activityId: options.activityId, orgId: options.orgId };
+    followSession(options.signal, () => this.dispose());
+  }
+
+  public get snapshot(): ActivityDeletionSnapshot {
+    return this.#snapshot;
+  }
+
+  public confirm(): void {
+    const { phase } = this.#snapshot;
+    if (this.#disposed || this.#request !== null || (phase !== 'confirming' && phase !== 'failed')) return;
+    const controller = new AbortController();
+    this.#request = controller;
+    this.#emit({ message: null, phase: 'pending' });
+    void this.#deleteActivity(this.#target, this.#csrf(), controller.signal).then(
+      () => {
+        if (!this.#current(controller)) return;
+        this.#request = null;
+        this.#emit({ message: null, phase: 'deleted' });
+        this.#onDeleted();
+      },
+      (error: unknown) => {
+        if (!this.#current(controller)) return;
+        this.#request = null;
+        if (error instanceof RunnerApiError && (error.status === 401 || error.status === 403)) {
+          this.#emit({
+            message: 'You no longer have access to this organization, so this activity cannot be deleted.',
+            phase: 'unavailable',
+          });
+          return;
+        }
+        this.#emit({ message: deletionFailureText(error), phase: 'failed' });
+      },
+    );
+  }
+
+  public dispose(): void {
+    this.#disposed = true;
+    this.#request?.abort();
+    this.#request = null;
+  }
+
+  #current(controller: AbortController): boolean {
+    return !this.#disposed && this.#request === controller;
+  }
+
+  #emit(snapshot: ActivityDeletionSnapshot): void {
+    this.#snapshot = snapshot;
+    this.#onChange(snapshot);
+  }
+}

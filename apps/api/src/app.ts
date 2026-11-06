@@ -1,6 +1,7 @@
 import express, { type Express, type Router } from 'express';
 import type { Pool } from 'pg';
 
+import { createActivityRouter } from './activities/activity.routes.js';
 import { createArchiveRouter } from './archive/archive.routes.js';
 import {
   ArchiveTileCache,
@@ -171,6 +172,15 @@ export function createApp({
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
       ...(testOnlyFaultInjector ? { testOnlyFaultInjector } : {}),
+    }),
+  );
+  app.use(
+    '/api/orgs/:orgId/activities',
+    createActivityRouter({
+      clock,
+      config,
+      pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
     }),
   );
   if (testOnlyRouter) {

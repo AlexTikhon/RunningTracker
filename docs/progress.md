@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-06 (four-commit map lifecycle closeout and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-06 (resumed with a new product direction; step 1, owner-only manual activities, is the last section; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3197,3 +3197,59 @@ sessions and target-environment evidence remain deferred. See the
 [architecture review](reports/architecture-review-2026-11-06.md) and
 [restart handoff](pause-handoff.md). Exactly four additional local commits end
 this task; further product work stops at this freeze.
+
+## Resumed: owner-only manual activities (step 1) (2026-11-06)
+
+Base: clean `087a048` on `main`. The user resumed the project with a new direction (activity, health and nutrition
+tracking with a local-model AI coach; [product direction](product-direction.md)) and asked for step 1 only: a generic
+`activities` entity with manual entry as one vertical slice, without changing anything about runs. The plan was
+reviewed before code; the user fixed the bounds, moved the future-start rule out of SQL, chose `204` for every
+DELETE and asked for a third, RLS-level mutation check. ADR-0072 records the decisions.
+
+**Implemented.** Migration `0025_activities.sql`: table keyed `(org_id, id)` with the runs-style membership foreign
+key (`ON DELETE RESTRICT`), named CHECKs (type list, start finite and not before 2000-01-01, duration 1..172800 s,
+distance NULL or 0..1,000,000 m and not NaN, RPE 1..10, notes 1..1000 characters, source `manual`, finite
+`created_at`), an owner index, RLS with three owner-only policies (SELECT, INSERT, DELETE) for the runtime role, and
+`SELECT, INSERT, DELETE` as its only grants; nothing for maintenance. The 24-hour future bound lives in the service
+against the injected clock. Strict contracts and OpenAPI (`Activities` tag, two paths, regenerated artifact);
+`/api/orgs/:orgId/activities` with idempotent PUT (`201`/`200`/`409 ACTIVITY_CONFLICT`, `404` for another member's
+id), keyset list with a person/organization-bound cursor, read and hard delete (`204` always), all `no-store`. Web:
+an **Activity** tab keyed by session, person and organization; framework-free list, save and delete controllers; a
+form with exact km/mi conversion. Cleanup lists gained `activities` where a RESTRICT key would otherwise block them:
+the tenant fixture, the browser suite's organization cleanup and the load seeder's `TRUNCATE` list (additions only).
+
+**Not changed.** Runs, run points, summaries, ingestion, the GPS algorithm and its version, SSE, tiles, retention,
+AI search, dependencies, lockfile, `.env`/`.local` configuration, the development database. No commit, push or
+deployment.
+
+**Executed checks.** A read-only preflight confirmed `running_tracker_test` with the owner, runtime and maintenance
+roles before any fixture write; `npm run db:migrate:test` applied only `0025` on top of 0024. Baselines were taken on
+the clean base before any change.
+
+| Command | Before | After |
+|---|---|---|
+| `npm run verify` (lint, typechecks, tests, builds) | 2,463: scripts 83, API 1,351, web 868, contracts 144, fixtures 14, simulator 3 | 2,536: scripts 83, API 1,360 (+9), web 915 (+47), contracts 161 (+17), fixtures 14, simulator 3 |
+| `npm run test:integration` | 483 in 47 files, none skipped | 559 in 49 files, none skipped (+32 RLS/ACL, +44 HTTP) |
+| `npx playwright test activity.spec.ts --project=chromium` | n/a | 1 passed |
+| Chromium `activity`, `demo-sign-in`, `organizations`, `sign-out` (final source, after the mutation checks) | n/a | 17 passed in 1.6 min |
+
+The integration run includes the restore drill: its "current" case migrates new databases from zero, and its
+"previous" case restores a backup taken before the newest migration and applies exactly that one (now `0025`).
+
+**Mutation checks** (each shown red, then restored and shown green):
+
+1. Web list controller with its stale-answer guard disabled: 3 of 20 controller tests failed (organization or person
+   switch, session end, refresh), 20 passed after the restore.
+2. Cursor context without the person: 2 of 5 cursor unit tests and the HTTP cross-person cursor test failed; 5 and
+   44 passed after the restore.
+3. RLS weakened with `ALTER POLICY` on the test database to `org_id = current_org_id()` for all three policies: 7 of
+   32 ACL tests failed, among them the grantee reading three rows that are not theirs and deleting two of the
+   owner's. The HTTP suite stayed green (44/44) under this mutation, because the service also states the owner in
+   every statement. The original expressions were snapshotted from `pg_policies` first and re-applied; the live
+   catalog then compared equal to the snapshot, and the full integration run above was executed after that restore.
+
+**Not established.** No full browser suite run (it now lists 130 tests: 121 `chromium`, 9 `chromium-oidc`); no
+Firefox, WebKit or mobile run of the Activity tab; no hosted CI. The development database was not migrated. No load
+measurement. Restored backups can resurrect deleted activities; there is no per-person activity cap, no edit, no
+import and no link to runs (`type = run` overlaps with `runs`; a unified read model is planned for analytics). The
+suggested step 2 is `daily_metrics` with the same owner-only template.

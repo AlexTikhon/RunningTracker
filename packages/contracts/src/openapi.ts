@@ -2,6 +2,11 @@ import { z } from 'zod';
 import type { ZodType } from 'zod';
 
 import {
+  activityListResponseSchema,
+  activityViewSchema,
+  createActivityRequestSchema,
+} from './activities.js';
+import {
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
   archiveTrackResponseSchema,
@@ -82,6 +87,7 @@ export const openApiDocument = {
     { name: 'Session' },
     { name: 'Organizations' },
     { name: 'Runs' },
+    { name: 'Activities' },
     { name: 'Shares' },
     { name: 'Live reads' },
     { name: 'Archive' },
@@ -279,6 +285,46 @@ export const openApiDocument = {
         responses: { '204': noContentResponse, ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/activities': {
+      get: {
+        tags: ['Activities'],
+        summary: "List the signed-in person's own activities, newest first",
+        description:
+          "Owner-only health data (ADR-0072): the owner is the session's identity and is never a parameter; coaches and other members never see another person's activities, whatever run sharing grants they hold. Ordered by `startedAt` descending, then activity id descending. `limit` 1 to 50, default 20. The keyset cursor is bound to the person and organization; a tampered or foreign cursor is a 400 INVALID_CURSOR. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), parameterRef('Limit50'), parameterRef('Cursor')],
+        responses: { '200': jsonResponse('One page of activities.', 'ActivityListResponse'), ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/activities/{activityId}': {
+      put: {
+        tags: ['Activities'],
+        summary: 'Create an idempotent client-identified manual activity',
+        description:
+          'The id is a client-generated UUID. 201 when created; 200 with the stored activity when the same id is sent again with an equal payload (omitted and null optional fields are equal); 409 ACTIVITY_CONFLICT when the id already holds a different payload. An id that belongs to another member answers 404 ACTIVITY_NOT_FOUND, the same as runs. `startedAt` must not be before 2000-01-01T00:00:00Z or more than 24 hours after server time. Unknown fields are refused; the source is always `manual`.',
+        parameters: [parameterRef('OrgId'), parameterRef('ActivityId'), ...csrfParameters],
+        requestBody: requestBody('CreateActivityRequest'),
+        responses: {
+          '200': jsonResponse('Existing activity returned for an equivalent retry.', 'ActivityView'),
+          '201': jsonResponse('Activity created.', 'ActivityView'),
+          ...defaultErrors,
+        },
+      },
+      get: {
+        tags: ['Activities'],
+        summary: "Read one of the signed-in person's activities",
+        description: "Anyone else's activity, or an unknown id, is 404 ACTIVITY_NOT_FOUND. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), parameterRef('ActivityId')],
+        responses: { '200': jsonResponse('The activity.', 'ActivityView'), ...defaultErrors },
+      },
+      delete: {
+        tags: ['Activities'],
+        summary: "Delete one of the signed-in person's activities",
+        description:
+          'A permanent hard delete without a tombstone. 204 in every case: deleted now, already deleted, never existed, or another member\'s (which is left untouched). A restored backup can bring a deleted activity back (ADR-0072).',
+        parameters: [parameterRef('OrgId'), parameterRef('ActivityId'), ...csrfParameters],
+        responses: { '204': noContentResponse, ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/runs/{runId}/commands': {
       post: {
         tags: ['Runs'],
@@ -468,6 +514,7 @@ export const openApiDocument = {
     parameters: {
       OrgId: { name: 'orgId', in: 'path', required: true, schema: schemaRef('UUID') },
       RunId: { name: 'runId', in: 'path', required: true, schema: schemaRef('UUID') },
+      ActivityId: { name: 'activityId', in: 'path', required: true, schema: schemaRef('UUID') },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
       CsrfToken: { name: 'x-csrf-token', in: 'header', required: true, schema: { type: 'string' } },
@@ -578,6 +625,9 @@ export const openApiDocument = {
       UpsertRunShareRequest: jsonSchema(upsertRunShareRequestSchema),
       RunShareResponse: jsonSchema(runShareResponseSchema),
       RunListResponse: jsonSchema(runListResponseSchema),
+      CreateActivityRequest: jsonSchema(createActivityRequestSchema),
+      ActivityView: jsonSchema(activityViewSchema),
+      ActivityListResponse: jsonSchema(activityListResponseSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
       RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),
       RunSearchInterpretationResponse: jsonSchema(runSearchInterpretationResponseSchema),

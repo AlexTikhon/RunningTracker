@@ -1,4 +1,6 @@
 import {
+  activityListResponseSchema,
+  activityViewSchema,
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
   archiveTrackResponseSchema,
@@ -13,7 +15,10 @@ import {
   runShareResponseSchema,
   runViewSchema,
   sessionResponseSchema,
+  type ActivityListResponse,
+  type ActivityView,
   type ArchiveMetadataResponse,
+  type CreateActivityRequest,
   type ArchiveTrackResponse,
   type IngestPointsResponse,
   type LiveTrackResponse,
@@ -329,6 +334,62 @@ export async function deleteRun(scope: LiveTrackScope, csrf: CsrfCredentials, si
       signal,
     },
   );
+  requireSuccess(response);
+}
+
+// Manual activities (ADR-0072): owner-only, so no owner is ever sent; the server takes it from the session.
+export interface ActivityTarget {
+  activityId: string;
+  orgId: string;
+}
+
+function activityPath(orgId: string, activityId?: string): string {
+  const base = `/api/orgs/${encodeURIComponent(orgId)}/activities`;
+  return activityId === undefined ? base : `${base}/${encodeURIComponent(activityId)}`;
+}
+
+// Idempotent create: the client chose the id, so sending the same id and payload again after an unknown outcome is
+// safe (200 with the stored activity). 409 ACTIVITY_CONFLICT means the id already holds a different payload.
+export async function createActivity(
+  target: ActivityTarget,
+  request: CreateActivityRequest,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<{ activity: ActivityView; created: boolean }> {
+  const response = await requestJson(activityPath(target.orgId, target.activityId), {
+    body: JSON.stringify(request),
+    credentials: 'same-origin',
+    headers: mutationHeaders(csrf),
+    method: 'PUT',
+    signal,
+  });
+  const activity = activityViewSchema.parse(requireSuccess(response));
+  if (activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
+  return { activity, created: response.response.status === 201 };
+}
+
+export async function listActivities(
+  input: { cursor: string | null; orgId: string },
+  signal: AbortSignal,
+): Promise<ActivityListResponse> {
+  const query = new URLSearchParams(input.cursor === null ? {} : { cursor: input.cursor });
+  const suffix = query.size === 0 ? '' : `?${query.toString()}`;
+  const response = await requestJson(`${activityPath(input.orgId)}${suffix}`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  return activityListResponseSchema.parse(requireSuccess(response));
+}
+
+// 204 in every case, including an activity that is already gone (there is no tombstone), so a retry is always safe.
+export async function deleteActivity(target: ActivityTarget, csrf: CsrfCredentials, signal: AbortSignal): Promise<void> {
+  const response = await requestJson(activityPath(target.orgId, target.activityId), {
+    credentials: 'same-origin',
+    headers: { [csrf.headerName]: csrf.token },
+    method: 'DELETE',
+    signal,
+  });
   requireSuccess(response);
 }
 
