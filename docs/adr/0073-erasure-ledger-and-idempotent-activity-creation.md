@@ -4,6 +4,9 @@
 - Date: 2026-11-06
 - Amends: ADR-0072 sections 2 and 4 (the hard-delete limitation is closed for the recovery path; the create contract
   gains a required idempotency key). RLS semantics of ADR-0072 are unchanged: the 32 access tests pass unmodified.
+- Amended by: [ADR-0074](0074-daily-check-in-local-date-and-put-replace.md), which uses the extension point for daily
+  check-ins (`daily_metric`) and makes activity creation instants come from the database clock (migration 0029), so the
+  "frozen or repeating application clock" item below no longer applies to activities created through the API.
 - Scope: migrations 0026 and 0027, `apps/api` (maintenance export, restore replay command, activity service, restore
   drill), `packages/contracts`, `apps/web`, tests, docs. No new dependency and no new infrastructure service.
 

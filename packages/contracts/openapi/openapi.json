@@ -29,6 +29,9 @@
       "name": "Activities"
     },
     {
+      "name": "Daily metrics"
+    },
+    {
       "name": "Shares"
     },
     {
@@ -712,6 +715,158 @@
         }
       }
     },
+    "/api/orgs/{orgId}/daily-metrics": {
+      "get": {
+        "tags": [
+          "Daily metrics"
+        ],
+        "summary": "List the signed-in person's own daily check-ins in a date range",
+        "description": "Owner-only health data (ADR-0074): the owner is the session's identity and is never a parameter; coaches and other members never see another person's check-ins, whatever run sharing grants they hold. `from` and `to` are inclusive local dates (YYYY-MM-DD), not before 2000-01-01, `from` not after `to`, at most 92 days. Only days with a record are returned, ordered by `localDate` ascending. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/DailyMetricsFrom"
+          },
+          {
+            "$ref": "#/components/parameters/DailyMetricsTo"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyMetricsListResponse"
+                }
+              }
+            },
+            "description": "The days with a record in the range."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/daily-metrics/{localDate}": {
+      "put": {
+        "tags": [
+          "Daily metrics"
+        ],
+        "summary": "Create or fully replace the signed-in person's check-in for one local date",
+        "description": "Naturally idempotent: the body is the whole day, so sending it again changes nothing (not even `updatedAt`). Omitted and null value fields are equal and clear the field; at least one value is required. 201 when the day is first written, 200 when it is replaced or unchanged. `timeZone` is the IANA zone the person is in now: `localDate` must not be before 2000-01-01 nor after today in that zone by server time (400 INVALID_REQUEST). The zone is stored with the day when it is first written and never rewritten, also not when a later replacement or the person uses another zone (ADR-0074). Unknown fields are refused.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/LocalDate"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutDailyMetricsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyMetricsView"
+                }
+              }
+            },
+            "description": "The day was replaced, or already held these values."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyMetricsView"
+                }
+              }
+            },
+            "description": "The day was written for the first time."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Daily metrics"
+        ],
+        "summary": "Read the signed-in person's check-in for one local date",
+        "description": "A day without a record is 404 DAILY_METRICS_NOT_FOUND; so is anyone else's. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/LocalDate"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyMetricsView"
+                }
+              }
+            },
+            "description": "The day."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Daily metrics"
+        ],
+        "summary": "Delete the signed-in person's check-in for one local date",
+        "description": "A permanent hard delete. 204 in every case: deleted now, already deleted, never written, or a date in the future. The erasure is recorded in the erasure ledger in the same statement and exported off the database host, so a restored backup is cleaned by `restore:reapply-erasures` (ADR-0073). If the ledger cannot be written the deletion is not performed and the request fails (5xx); retrying is safe.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/LocalDate"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The operation completed successfully."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/runs/{runId}/commands": {
       "post": {
         "tags": [
@@ -1295,6 +1450,36 @@
         "required": true,
         "schema": {
           "$ref": "#/components/schemas/UUID"
+        }
+      },
+      "LocalDate": {
+        "name": "localDate",
+        "in": "path",
+        "required": true,
+        "description": "Local calendar date (YYYY-MM-DD), not before 2000-01-01.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "DailyMetricsFrom": {
+        "name": "from",
+        "in": "query",
+        "required": true,
+        "description": "First local date of the range, inclusive (YYYY-MM-DD), not before 2000-01-01.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "DailyMetricsTo": {
+        "name": "to",
+        "in": "query",
+        "required": true,
+        "description": "Last local date of the range, inclusive (YYYY-MM-DD). Not before `from`; at most 92 days from it.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
         }
       },
       "UserId": {
@@ -3067,6 +3252,319 @@
         "required": [
           "items",
           "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "PutDailyMetricsRequest": {
+        "type": "object",
+        "properties": {
+          "mood": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sleepMinutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1440
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sleepQuality": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "soreness": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timeZone": {
+            "type": "string"
+          },
+          "weightKg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 20,
+                "maximum": 400
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "timeZone"
+        ],
+        "additionalProperties": false
+      },
+      "DailyMetricsView": {
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "localDate": {
+            "type": "string"
+          },
+          "mood": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sleepMinutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1440
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sleepQuality": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "soreness": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timeZone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "weightKg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 20,
+                "maximum": 400
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "createdAt",
+          "localDate",
+          "mood",
+          "note",
+          "sleepMinutes",
+          "sleepQuality",
+          "soreness",
+          "timeZone",
+          "updatedAt",
+          "weightKg"
+        ],
+        "additionalProperties": false
+      },
+      "DailyMetricsListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "maxItems": 92,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "localDate": {
+                  "type": "string"
+                },
+                "mood": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "note": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "sleepMinutes": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1440
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "sleepQuality": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "soreness": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "timeZone": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "updatedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "weightKg": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 20,
+                      "maximum": 400
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "createdAt",
+                "localDate",
+                "mood",
+                "note",
+                "sleepMinutes",
+                "sleepQuality",
+                "soreness",
+                "timeZone",
+                "updatedAt",
+                "weightKg"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "items"
         ],
         "additionalProperties": false
       },

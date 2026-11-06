@@ -188,7 +188,11 @@ describe('ADR-0072 activities HTTP API', () => {
     it('creates with 201, then answers an equal retry with 200 and the same stored activity', async () => {
       const created = await put(owner, activityId(1), body).expect(201);
       const view = activityViewSchema.parse(created.body);
-      expect(view).toEqual({ ...body, activityId: activityId(1), createdAt: now, source: 'manual' });
+      // createdAt comes from the database clock (migration 0029, ADR-0074), not the injected clock (fixed a month back).
+      expect(view).toEqual({ ...body, activityId: activityId(1), createdAt: view.createdAt, source: 'manual' });
+      expect(view.createdAt).not.toBe(now);
+      const database = await ownerPool.query<{ now: Date }>('SELECT clock_timestamp() AS now');
+      expect(Math.abs(Date.parse(view.createdAt) - database.rows[0]!.now.getTime())).toBeLessThan(60_000);
 
       const replay = await put(owner, activityId(1), body).expect(200);
       expect(replay.body).toEqual(created.body);

@@ -300,12 +300,12 @@ describe('ADR-0073 erasure ledger and idempotency keys', () => {
 
     it('refuses an entity type it does not know instead of skipping it', async () => {
       await expect(
-        ownerPool.query(`SELECT app_private.reapply_erasure('daily_metric', $1, $2, $3, $4)`, [ids.orgA, activity(31), ids.userOrgA, createdAt]),
+        ownerPool.query(`SELECT app_private.reapply_erasure('meal', $1, $2, $3, $4)`, [ids.orgA, activity(31), ids.userOrgA, createdAt]),
       ).rejects.toMatchObject({ code: '22023' });
       await expect(
         ownerPool.query(
           `INSERT INTO erasure_ledger (entity_type, org_id, record_id, owner_user_id, record_created_at, erased_at)
-           VALUES ('daily_metric', $1, $2, $3, now(), now())`,
+           VALUES ('meal', $1, $2, $3, now(), now())`,
           [ids.orgA, activity(31), ids.userOrgA],
         ),
       ).rejects.toMatchObject({ code: '23514', constraint: 'erasure_ledger_entity_type_known' });

@@ -7,6 +7,11 @@ import {
   createActivityRequestSchema,
 } from './activities.js';
 import {
+  dailyMetricsListResponseSchema,
+  dailyMetricsViewSchema,
+  putDailyMetricsRequestSchema,
+} from './daily-metrics.js';
+import {
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
   archiveTrackResponseSchema,
@@ -88,6 +93,7 @@ export const openApiDocument = {
     { name: 'Organizations' },
     { name: 'Runs' },
     { name: 'Activities' },
+    { name: 'Daily metrics' },
     { name: 'Shares' },
     { name: 'Live reads' },
     { name: 'Archive' },
@@ -325,6 +331,46 @@ export const openApiDocument = {
         responses: { '204': noContentResponse, ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/daily-metrics': {
+      get: {
+        tags: ['Daily metrics'],
+        summary: "List the signed-in person's own daily check-ins in a date range",
+        description:
+          "Owner-only health data (ADR-0074): the owner is the session's identity and is never a parameter; coaches and other members never see another person's check-ins, whatever run sharing grants they hold. `from` and `to` are inclusive local dates (YYYY-MM-DD), not before 2000-01-01, `from` not after `to`, at most 92 days. Only days with a record are returned, ordered by `localDate` ascending. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), parameterRef('DailyMetricsFrom'), parameterRef('DailyMetricsTo')],
+        responses: { '200': jsonResponse('The days with a record in the range.', 'DailyMetricsListResponse'), ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/daily-metrics/{localDate}': {
+      put: {
+        tags: ['Daily metrics'],
+        summary: "Create or fully replace the signed-in person's check-in for one local date",
+        description:
+          'Naturally idempotent: the body is the whole day, so sending it again changes nothing (not even `updatedAt`). Omitted and null value fields are equal and clear the field; at least one value is required. 201 when the day is first written, 200 when it is replaced or unchanged. `timeZone` is the IANA zone the person is in now: `localDate` must not be before 2000-01-01 nor after today in that zone by server time (400 INVALID_REQUEST). The zone is stored with the day when it is first written and never rewritten, also not when a later replacement or the person uses another zone (ADR-0074). Unknown fields are refused.',
+        parameters: [parameterRef('OrgId'), parameterRef('LocalDate'), ...csrfParameters],
+        requestBody: requestBody('PutDailyMetricsRequest'),
+        responses: {
+          '200': jsonResponse('The day was replaced, or already held these values.', 'DailyMetricsView'),
+          '201': jsonResponse('The day was written for the first time.', 'DailyMetricsView'),
+          ...defaultErrors,
+        },
+      },
+      get: {
+        tags: ['Daily metrics'],
+        summary: "Read the signed-in person's check-in for one local date",
+        description: 'A day without a record is 404 DAILY_METRICS_NOT_FOUND; so is anyone else\'s. Answers `Cache-Control: no-store`.',
+        parameters: [parameterRef('OrgId'), parameterRef('LocalDate')],
+        responses: { '200': jsonResponse('The day.', 'DailyMetricsView'), ...defaultErrors },
+      },
+      delete: {
+        tags: ['Daily metrics'],
+        summary: "Delete the signed-in person's check-in for one local date",
+        description:
+          'A permanent hard delete. 204 in every case: deleted now, already deleted, never written, or a date in the future. The erasure is recorded in the erasure ledger in the same statement and exported off the database host, so a restored backup is cleaned by `restore:reapply-erasures` (ADR-0073). If the ledger cannot be written the deletion is not performed and the request fails (5xx); retrying is safe.',
+        parameters: [parameterRef('OrgId'), parameterRef('LocalDate'), ...csrfParameters],
+        responses: { '204': noContentResponse, ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/runs/{runId}/commands': {
       post: {
         tags: ['Runs'],
@@ -515,6 +561,27 @@ export const openApiDocument = {
       OrgId: { name: 'orgId', in: 'path', required: true, schema: schemaRef('UUID') },
       RunId: { name: 'runId', in: 'path', required: true, schema: schemaRef('UUID') },
       ActivityId: { name: 'activityId', in: 'path', required: true, schema: schemaRef('UUID') },
+      LocalDate: {
+        name: 'localDate',
+        in: 'path',
+        required: true,
+        description: 'Local calendar date (YYYY-MM-DD), not before 2000-01-01.',
+        schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+      },
+      DailyMetricsFrom: {
+        name: 'from',
+        in: 'query',
+        required: true,
+        description: 'First local date of the range, inclusive (YYYY-MM-DD), not before 2000-01-01.',
+        schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+      },
+      DailyMetricsTo: {
+        name: 'to',
+        in: 'query',
+        required: true,
+        description: 'Last local date of the range, inclusive (YYYY-MM-DD). Not before `from`; at most 92 days from it.',
+        schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+      },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
       CsrfToken: { name: 'x-csrf-token', in: 'header', required: true, schema: { type: 'string' } },
@@ -628,6 +695,9 @@ export const openApiDocument = {
       CreateActivityRequest: jsonSchema(createActivityRequestSchema),
       ActivityView: jsonSchema(activityViewSchema),
       ActivityListResponse: jsonSchema(activityListResponseSchema),
+      PutDailyMetricsRequest: jsonSchema(putDailyMetricsRequestSchema),
+      DailyMetricsView: jsonSchema(dailyMetricsViewSchema),
+      DailyMetricsListResponse: jsonSchema(dailyMetricsListResponseSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
       RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),
       RunSearchInterpretationResponse: jsonSchema(runSearchInterpretationResponseSchema),

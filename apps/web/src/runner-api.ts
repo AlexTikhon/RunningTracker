@@ -4,6 +4,9 @@ import {
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
   archiveTrackResponseSchema,
+  DAILY_METRICS_NOT_FOUND,
+  dailyMetricsListResponseSchema,
+  dailyMetricsViewSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
   organizationCoachListResponseSchema,
@@ -19,6 +22,9 @@ import {
   type ActivityView,
   type ArchiveMetadataResponse,
   type CreateActivityRequest,
+  type DailyMetricsListResponse,
+  type DailyMetricsView,
+  type PutDailyMetricsRequest,
   type ArchiveTrackResponse,
   type IngestPointsResponse,
   type LiveTrackResponse,
@@ -409,6 +415,66 @@ export async function deleteActivity(target: ActivityTarget, csrf: CsrfCredentia
     signal,
   });
   requireSuccess(response);
+}
+
+// Daily check-ins (ADR-0074): owner-only, one record per person per local date, replaced as a whole.
+export interface DailyMetricsTarget {
+  localDate: string;
+  orgId: string;
+}
+
+function dailyMetricsPath(orgId: string, localDate?: string): string {
+  const base = `/api/orgs/${encodeURIComponent(orgId)}/daily-metrics`;
+  return localDate === undefined ? base : `${base}/${encodeURIComponent(localDate)}`;
+}
+
+// Naturally idempotent: the body is the whole day, so sending it again after an unknown outcome is always safe.
+// 201 when the day was first written, 200 when it was replaced or already held these values.
+export async function putDailyMetrics(
+  target: DailyMetricsTarget,
+  request: PutDailyMetricsRequest,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<{ created: boolean; view: DailyMetricsView }> {
+  const response = await requestJson(dailyMetricsPath(target.orgId, target.localDate), {
+    body: JSON.stringify(request),
+    credentials: 'same-origin',
+    headers: mutationHeaders(csrf),
+    method: 'PUT',
+    signal,
+  });
+  const view = dailyMetricsViewSchema.parse(requireSuccess(response));
+  if (view.localDate !== target.localDate) throw new Error('The server returned a different date');
+  return { created: response.response.status === 201, view };
+}
+
+// A day without a record is not an error for the form: it answers null.
+export async function readDailyMetrics(target: DailyMetricsTarget, signal: AbortSignal): Promise<DailyMetricsView | null> {
+  const response = await requestJson(dailyMetricsPath(target.orgId, target.localDate), {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  if (response.response.status === 404) {
+    const refusal = apiErrorResponseSchema.safeParse(response.payload);
+    if (refusal.success && refusal.data.error.code === DAILY_METRICS_NOT_FOUND) return null;
+  }
+  const view = dailyMetricsViewSchema.parse(requireSuccess(response));
+  if (view.localDate !== target.localDate) throw new Error('The server returned a different date');
+  return view;
+}
+
+export async function listDailyMetrics(
+  input: { from: string; orgId: string; to: string },
+  signal: AbortSignal,
+): Promise<DailyMetricsListResponse> {
+  const query = new URLSearchParams({ from: input.from, to: input.to });
+  const response = await requestJson(`${dailyMetricsPath(input.orgId)}?${query.toString()}`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  return dailyMetricsListResponseSchema.parse(requireSuccess(response));
 }
 
 export async function readRun(orgId: string, runId: string, signal?: AbortSignal): Promise<RunView> {

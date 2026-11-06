@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 
 import { loadHealth, type HealthSnapshot } from './health.js';
 import { ActivityScreen } from './ActivityScreen.js';
+import { DailyCheckInScreen } from './DailyCheckInScreen.js';
 import { ArchiveScreen } from './ArchiveScreen.js';
 import { RunDetailScreen } from './RunDetailScreen.js';
 import { defaultTimeZone } from './run-search.js';
@@ -51,7 +52,7 @@ import {
 } from './writer-lease.js';
 
 type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
-type ActiveView = 'activity' | 'archive' | 'coach' | 'runner';
+type ActiveView = 'activity' | 'archive' | 'checkin' | 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 
@@ -816,6 +817,13 @@ export function App() {
           >
             Activity
           </button>
+          <button
+            aria-current={activeView === 'checkin' ? 'page' : undefined}
+            onClick={() => { setRunnerResult(null); setActiveView('checkin'); }}
+            type="button"
+          >
+            Check-in
+          </button>
         </nav>
         <div className="service-health" aria-label="Service health">
           <StatusDot label="API" value={health.api} />
@@ -980,6 +988,21 @@ export function App() {
           />
         ) : (
           <section className="coach-prerequisite" role="status">{viewPrerequisite('activity log')}</section>
+        )
+      )}
+
+      {activeView === 'checkin' && (
+        session.status === 'ready' && selectedOrgId !== null ? (
+          // Owner-only daily check-ins (ADR-0074), keyed like the Activity tab: a new session, person or organization is
+          // a new screen with no request carried over.
+          <DailyCheckInScreen
+            key={`${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`}
+            csrf={session.session.csrf}
+            orgId={selectedOrgId}
+            signal={session.signal}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('daily check-in')}</section>
         )
       )}
     </main>

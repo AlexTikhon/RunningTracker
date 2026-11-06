@@ -119,16 +119,20 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         applied: 0,
         skipped_unknown_organization: 0,
       });
-      // ADR-0073: activity E was created before the backup and deleted after it. The restored backup brought it back,
-      // the ledger replay removed it again, and a second replay changed nothing.
-      expect(report.erasures.exportedEntries).toBe(1);
-      expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 1, skipped_different_record: 0 });
-      expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 1, erased: 0, skipped_different_record: 0 });
+      // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G (the
+      // backup is at 0028, which has daily_metrics). The restored backup brought both back, the ledger replay removed
+      // them again, and a second replay changed nothing.
+      expect(report.erasures.exportedEntries).toBe(2);
+      expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 2, skipped_different_record: 0 });
+      expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 2, erased: 0, skipped_different_record: 0 });
       const erasureCheckIds = [
         'erased-activity-existed-in-backup',
+        'erased-daily-metric-existed-in-backup',
         'erasure-first-pass-outcomes',
         'erased-activity-absent',
+        'erased-daily-metric-absent',
         'surviving-activity-untouched',
+        'surviving-daily-metric-untouched',
         'erasure-journaled-again',
         'erasure-second-pass-idempotent',
         'erasure-second-pass-changes-nothing',

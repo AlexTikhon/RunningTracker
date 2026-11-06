@@ -90,12 +90,24 @@ export interface ReapplyAccessRun {
  */
 export type ActivityLabel = 'E' | 'F';
 
+/**
+ * The fixture check-in days of the same scenario (ADR-0074): G is in the backup and its owner deletes it after the
+ * backup; H is in the backup and untouched.
+ */
+export type DailyMetricLabel = 'G' | 'H';
+
+/** The number of owner-only records the scenario deletes after the backup: activity E and day G. */
+export const ERASURES_AFTER_BACKUP = 2;
+
 export interface ActivityState {
   /** Rows waiting in the restored database's own erasure-ledger outbox. */
   outboxRows: number;
   present: Record<ActivityLabel, boolean>;
+  presentDays: Record<DailyMetricLabel, boolean>;
   /** Digest over the surviving activity's row, so its content is compared, not just its presence. */
   survivorDigest: string;
+  /** Digest over the surviving day's row. */
+  survivorDayDigest: string;
 }
 
 export interface ReapplyErasureRun {
@@ -112,7 +124,7 @@ export interface ErasureEvaluationInput {
   second: ReapplyErasureRun;
 }
 
-/** Pure comparison of the activities in the restored database before and after each erasure replay pass. */
+/** Pure comparison of the activities and check-in days in the restored database before and after each erasure replay. */
 export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] {
   const { afterFirst, afterSecond, first, restored, second } = input;
   const checks: Check[] = [];
@@ -128,9 +140,16 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
     restored.present.E && restored.present.F,
   );
   add(
+    'erased-daily-metric-existed-in-backup',
+    'Check-in day G, deleted after the backup, and the surviving day H are both in the restored backup',
+    restored.presentDays.G && restored.presentDays.H,
+  );
+  add(
     'erasure-first-pass-outcomes',
-    'The first erasure replay erased exactly the one activity deleted after the backup and reported no other outcome',
-    first.entries === 1 && first.outcomes.erased === 1 && othersZero(first, 'erased'),
+    'The first erasure replay erased exactly the activity and the check-in day deleted after the backup and reported no other outcome',
+    first.entries === ERASURES_AFTER_BACKUP &&
+      first.outcomes.erased === ERASURES_AFTER_BACKUP &&
+      othersZero(first, 'erased'),
   );
   add(
     'erased-activity-absent',
@@ -138,9 +157,19 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
     !afterFirst.present.E,
   );
   add(
+    'erased-daily-metric-absent',
+    'After the replay, check-in day G is gone from the restored database',
+    !afterFirst.presentDays.G,
+  );
+  add(
     'surviving-activity-untouched',
     'The surviving activity F is present and unchanged',
     afterFirst.present.F && afterFirst.survivorDigest === restored.survivorDigest,
+  );
+  add(
+    'surviving-daily-metric-untouched',
+    'The surviving check-in day H is present and unchanged',
+    afterFirst.presentDays.H && afterFirst.survivorDayDigest === restored.survivorDayDigest,
   );
   add(
     'erasure-journaled-again',
@@ -154,7 +183,7 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
   );
   add(
     'erasure-second-pass-changes-nothing',
-    'The activities and the erasure outbox after the second replay are identical to those after the first',
+    'The activities, the check-in days and the erasure outbox after the second replay are identical to those after the first',
     deepEqual(afterSecond, afterFirst),
   );
   return checks;

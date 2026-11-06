@@ -7,8 +7,8 @@ const utcMicrosecondPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u;
 
 export const erasureLedgerFileNamePattern = /^erasure-ledger-[0-9A-Za-z._-]+\.ndjson$/u;
 
-/** The owner-only entities whose erasures are journaled (ADR-0073). The next one is added here and in SQL. */
-export const erasureEntityTypes = ['activity'] as const;
+/** The owner-only entities whose erasures are journaled (ADR-0073, ADR-0074). The next one is added here and in SQL. */
+export const erasureEntityTypes = ['activity', 'daily_metric'] as const;
 
 /**
  * One exported erasure. Identifiers and timestamps only: no record content. `seq` is the source database's outbox

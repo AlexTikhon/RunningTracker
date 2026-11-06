@@ -1,4 +1,5 @@
 export * from './activities.js';
+export * from './daily-metrics.js';
 export * from './http.js';
 export * from './models.js';
 export * from './openapi.js';

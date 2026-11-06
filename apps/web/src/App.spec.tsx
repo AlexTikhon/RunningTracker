@@ -21,6 +21,7 @@ describe('App', () => {
     expect(markup).toContain('Coach');
     expect(markup).toContain('Archive');
     expect(markup).toMatch(/<button type="button">Activity<\/button>/u);
+    expect(markup).toMatch(/<button type="button">Check-in<\/button>/u);
   });
 
   it('never asks for an organization identifier', () => {

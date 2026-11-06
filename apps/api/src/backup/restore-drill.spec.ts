@@ -103,17 +103,29 @@ const accessOutcomes = (overrides: Partial<ReapplyAccessRun['outcomes']>): Reapp
 const firstAccessRun: ReapplyAccessRun = { entries: 5, files: 1, outcomes: accessOutcomes({ already_applied: 2, applied: 3 }) };
 const secondAccessRun: ReapplyAccessRun = { entries: 5, files: 1, outcomes: accessOutcomes({ already_applied: 5 }) };
 
-// ADR-0073: E is deleted after the backup, F survives.
-const restoredActivities: ActivityState = { outboxRows: 0, present: { E: true, F: true }, survivorDigest: 'digest-f' };
-const activitiesAfterFirst: ActivityState = { outboxRows: 1, present: { E: false, F: true }, survivorDigest: 'digest-f' };
+// ADR-0073: activity E is deleted after the backup, F survives. ADR-0074: check-in day G likewise, H survives.
+const restoredActivities: ActivityState = {
+  outboxRows: 0,
+  present: { E: true, F: true },
+  presentDays: { G: true, H: true },
+  survivorDayDigest: 'digest-h',
+  survivorDigest: 'digest-f',
+};
+const activitiesAfterFirst: ActivityState = {
+  outboxRows: 2,
+  present: { E: false, F: true },
+  presentDays: { G: false, H: true },
+  survivorDayDigest: 'digest-h',
+  survivorDigest: 'digest-f',
+};
 const erasureOutcomes = (overrides: Partial<ReapplyErasureRun['outcomes']>): ReapplyErasureRun['outcomes'] => ({
   absent: 0,
   erased: 0,
   skipped_different_record: 0,
   ...overrides,
 });
-const firstErasureRun: ReapplyErasureRun = { entries: 1, files: 1, outcomes: erasureOutcomes({ erased: 1 }) };
-const secondErasureRun: ReapplyErasureRun = { entries: 1, files: 1, outcomes: erasureOutcomes({ absent: 1 }) };
+const firstErasureRun: ReapplyErasureRun = { entries: 2, files: 1, outcomes: erasureOutcomes({ erased: 2 }) };
+const secondErasureRun: ReapplyErasureRun = { entries: 2, files: 1, outcomes: erasureOutcomes({ absent: 2 }) };
 
 function evaluateErasures(overrides: Partial<Parameters<typeof evaluateErasureRecovery>[0]> = {}) {
   return evaluateErasureRecovery({
@@ -134,9 +146,12 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
     expect(failed(checks)).toEqual([]);
     expect(checks.map((check) => check.id)).toEqual([
       'erased-activity-existed-in-backup',
+      'erased-daily-metric-existed-in-backup',
       'erasure-first-pass-outcomes',
       'erased-activity-absent',
+      'erased-daily-metric-absent',
       'surviving-activity-untouched',
+      'surviving-daily-metric-untouched',
       'erasure-journaled-again',
       'erasure-second-pass-idempotent',
       'erasure-second-pass-changes-nothing',
@@ -152,8 +167,22 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
   it('fails when the erased activity is still there after the replay (resurrection)', () => {
     const resurrected = { ...activitiesAfterFirst, present: { E: true, F: true } };
     const noReplay = erasureOutcomes({});
-    expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: resurrected, first: { entries: 1, files: 1, outcomes: noReplay } }))).toEqual(
+    expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: resurrected, first: { entries: 2, files: 1, outcomes: noReplay } }))).toEqual(
       expect.arrayContaining(['erasure-first-pass-outcomes', 'erased-activity-absent']),
+    );
+  });
+
+  it('fails when the erased check-in day was not in the backup, or is still there after the replay (ADR-0074)', () => {
+    expect(failed(evaluateErasures({ restored: { ...restoredActivities, presentDays: { G: false, H: true } } }))).toContain(
+      'erased-daily-metric-existed-in-backup',
+    );
+    const resurrected = { ...activitiesAfterFirst, presentDays: { G: true, H: true } };
+    const onlyActivity = { entries: 2, files: 1, outcomes: erasureOutcomes({ erased: 1, skipped_different_record: 1 }) };
+    expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: resurrected, first: onlyActivity }))).toEqual(
+      expect.arrayContaining(['erasure-first-pass-outcomes', 'erased-daily-metric-absent']),
+    );
+    expect(failed(evaluateErasures({ afterFirst: { ...activitiesAfterFirst, survivorDayDigest: 'other' } }))).toContain(
+      'surviving-daily-metric-untouched',
     );
   });
 
@@ -166,7 +195,7 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
 
   it('fails when the second replay erases again or changes the state', () => {
     expect(failed(evaluateErasures({ second: firstErasureRun }))).toContain('erasure-second-pass-idempotent');
-    expect(failed(evaluateErasures({ afterSecond: { ...activitiesAfterFirst, outboxRows: 2 } }))).toContain('erasure-second-pass-changes-nothing');
+    expect(failed(evaluateErasures({ afterSecond: { ...activitiesAfterFirst, outboxRows: 3 } }))).toContain('erasure-second-pass-changes-nothing');
   });
 });
 
@@ -296,7 +325,7 @@ function harness(fail?: { at: keyof DrillOperations; error?: Error }): Harness {
     copyJournalReadOnly: step('copyJournalReadOnly', {
       accessEntries: 5,
       entries: 3,
-      erasureEntries: 1,
+      erasureEntries: 2,
       files: 2,
       manifestDigest: 'm1',
       readOnlyEnforced: true,
@@ -304,7 +333,7 @@ function harness(fail?: { at: keyof DrillOperations; error?: Error }): Harness {
     createSourceDatabase: step('createSourceDatabase', { migrationsBehind: 1 }),
     createTargetDatabase: step('createTargetDatabase', undefined),
     deleteAfterBackup: step('deleteAfterBackup', { deletedAt: ['2026-10-01T10:05:00.000Z'] }),
-    exportJournal: step('exportJournal', { accessEntries: 5, entries: 3, erasureEntries: 1, files: 2, manifestDigest: 'm1' }),
+    exportJournal: step('exportJournal', { accessEntries: 5, entries: 3, erasureEntries: 2, files: 2, manifestDigest: 'm1' }),
     inspectActivities: (() => {
       const states = [restoredActivities, activitiesAfterFirst, activitiesAfterFirst];
       let index = 0;
@@ -461,7 +490,7 @@ describe('restore drill orchestration', () => {
       'verifyReadiness',
       'cleanup',
     ]);
-    expect(result.report.erasures).toEqual({ exportedEntries: 1, firstPass: firstErasureRun, secondPass: secondErasureRun });
+    expect(result.report.erasures).toEqual({ exportedEntries: 2, firstPass: firstErasureRun, secondPass: secondErasureRun });
     expect(result.report.recovery.completedSteps).toEqual(recoverySteps);
     expect(result.report.recovery.pendingSteps).toEqual([]);
     // Recovery is complete, yet the drill never reopens the database: that is an explicit operator step.
@@ -645,7 +674,7 @@ describe('restore drill orchestration', () => {
   it('aborts when the recovery copy holds a different number of access entries than were exported', async () => {
     const { calls, operations } = harness();
     operations.copyJournalReadOnly = () =>
-      Promise.resolve({ accessEntries: 4, entries: 3, erasureEntries: 1, files: 2, manifestDigest: 'm1', readOnlyEnforced: true });
+      Promise.resolve({ accessEntries: 4, entries: 3, erasureEntries: 2, files: 2, manifestDigest: 'm1', readOnlyEnforced: true });
 
     const result = await runRestoreDrill({ clock: fakeClock(), operations, options });
 

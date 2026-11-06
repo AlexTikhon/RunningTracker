@@ -10,17 +10,23 @@ coach on a local Ollama model; the roadmap and the principles every later slice 
   migration `0025_activities.sql`, strict contracts and OpenAPI, `/api/orgs/:orgId/activities`, an **Activity** tab, and
   tests at every layer. Runs, ingestion, the GPS algorithm, SSE, tiles, retention and AI search are unchanged. Evidence
   is in the [progress entry](progress.md) "Resumed: owner-only manual activities (step 1)".
-- **Integrity follow-up (done, uncommitted at hand-off):** [ADR-0073](adr/0073-erasure-ledger-and-idempotent-activity-creation.md):
+- **Integrity follow-up (done, committed as `66f274e`):** [ADR-0073](adr/0073-erasure-ledger-and-idempotent-activity-creation.md):
   migration `0026_erasure_ledger.sql` records every activity deletion in an outbox exported beside the run deletion
   journal, and `npm run restore:reapply-erasures` replays it after a restore (the restore drill covers it); migration
   `0027_activity_idempotency_keys.sql` and a per-form-session key stop duplicates after an unknown save outcome.
   Evidence: the progress entry "Integrity follow-up: erasure ledger and idempotent activity creation".
-- **Migration state:** `0025`-`0027` were applied to the `running_tracker_test` database only. The development
+- **Step 2 (done, uncommitted at hand-off):** daily check-in, [ADR-0074](adr/0074-daily-check-in-local-date-and-put-replace.md):
+  migration `0028_daily_metrics.sql` (one row per person per local date, owner-only RLS, value-column-only UPDATE,
+  database timestamps, erasures in the ledger as `daily_metric`), `0029_activity_created_at_database_clock.sql`
+  (activity creation instants from the database clock), `/api/orgs/:orgId/daily-metrics`, a **Check-in** tab, and a
+  restore drill that also erases a check-in day. Evidence: the progress entry "Step 2: daily check-in metrics".
+- **Migration state:** `0025`-`0029` were applied to the `running_tracker_test` database only. The development
   database is not migrated by that work; `npm run demo:up` (or `npm run db:migrate`) applies them on the next start.
-- **Remaining limitation:** an activity erasure committed but not yet exported when the node is lost (one export
-  interval while healthy) can still come back with an old backup, as for run deletions (ADR-0037).
-- **Suggested step 2:** `daily_metrics` (weight, sleep, mood, soreness), owner-only, with the same template; its
-  erasures use the ledger's extension point (ADR-0073).
+- **Remaining limitations:** an erasure committed but not yet exported when the node is lost (one export interval
+  while healthy) can still come back with an old backup, as for run deletions (ADR-0037). There is no stored profile
+  time zone (the browser's zone is sent with each check-in write), and two devices editing one day overwrite each other.
+- **Suggested next step:** GPX/TCX/FIT import into activities, or the meal log (owner-only, same template, erasures
+  through the ledger's extension point).
 
 The rest of this document is the pause handoff as written for the map lifecycle closeout. Its restart and
 verification instructions still apply; "no further product work" no longer does.

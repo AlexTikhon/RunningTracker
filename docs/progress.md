@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-06 (resumed with a new product direction; step 1, owner-only manual activities, and its integrity follow-up, ADR-0073, are the last two sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-06 (resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3311,4 +3311,86 @@ and its "current" case (new databases migrated from zero); the erasure checks pa
 **Not established.** Erasures committed but not yet exported when a node is lost still come back with an old backup
 (one export interval while healthy). That the journal directory is off-host is not verified (local directory here).
 `TRUNCATE` is not journaled. Ledger files are not signed. No full browser suite, Firefox or hosted CI run. The
+development database was not migrated.
+
+## Step 2: daily check-in metrics (2026-11-06)
+
+Base: `feat/activities` at `66f274e` (ADR-0073 committed). ADR-0074 records the decisions on the local date, the time
+zone and PUT as full replacement; ADR-0073 is marked as amended.
+
+**Found during inspection.** No time zone is stored for a person (no profile table or column). The run search already
+takes the browser's IANA zone per request. Decision (ADR-0074): the PUT body carries `timeZone`; "today" is the date of
+the injected clock's instant in that zone; the zone of the first write is stored and never rewritten.
+
+**Data model.** Migration `0028_daily_metrics.sql`: `daily_metrics` keyed by `(org_id, user_id, local_date)` (unique),
+surrogate `id` (`gen_random_uuid()`), `time_zone`, six nullable values with named CHECKs (weight `numeric(5,2)` 20-400,
+sleep 0-1440 min, sleep quality and mood 1-5, soreness 0-10, note 1-500 characters, at least one present), lower bound
+`2000-01-01`, membership FK `RESTRICT`. `created_at`/`updated_at` default to `clock_timestamp()`; a BEFORE UPDATE trigger
+moves `updated_at`. Owner-only RLS (SELECT, INSERT, UPDATE, DELETE, the activities predicate). The runtime role has
+SELECT and DELETE, column-level INSERT on the supplied columns and UPDATE on the six value columns only; maintenance has
+nothing. The erasure-ledger extension point: CHECK value `daily_metric`, trigger `daily_metrics_record_erasure`, an
+`ELSIF` branch in `app_private.reapply_erasure` (CREATE OR REPLACE), and `daily_metric` in `erasureEntityTypes`.
+Migration `0029_activity_created_at_database_clock.sql`: `activities.created_at` defaults to `clock_timestamp()` and the
+service no longer sends it. The two are separate so that the restore drill's "previous" backup (at `0028`) contains
+`daily_metrics`.
+
+**API.** `/api/orgs/:orgId/daily-metrics`: `PUT /{localDate}` (201 first write, 200 replace or unchanged; an exact retry
+updates nothing, not even `updatedAt`; `INSERT ... ON CONFLICT DO UPDATE ... WHERE IS DISTINCT FROM`), `GET ?from=&to=`
+(inclusive, at most 92 days), `GET /{localDate}` (404 `DAILY_METRICS_NOT_FOUND`), `DELETE /{localDate}` (204). Contracts
+and OpenAPI updated; `no-store` on every answer; Origin and CSRF on mutations.
+
+**Web.** A **Check-in** tab: the form defaults to today in the browser's zone (`max` today, `min` 2000-01-01), loads and
+shows what is stored for the chosen date, saves the whole day; the last 14 days are listed newest first with empty days
+shown as "No check-in" and an Add/Edit button per day. Framework-free controllers drop late answers and go silent when
+the session ends. No charts, no delete control.
+
+**Also in this change.** The cleanup lists (tenant fixture, browser organization cleanup, load seeder `TRUNCATE`) gained
+`daily_metrics` before `erasure_ledger` and `memberships`. A new test pins that neither application role holds TRUNCATE
+on `activities`, `daily_metrics` or `erasure_ledger`. The restore drill seeds two check-in days before the backup,
+deletes one through the service after it, and expects two `erased` outcomes (activity E, day G) on the first replay and
+two `absent` on the second; new checks `erased-daily-metric-existed-in-backup`, `erased-daily-metric-absent`,
+`surviving-daily-metric-untouched`.
+
+**Existing tests changed, and why.** (1) `activities-http`: the create test asserted `createdAt` equal to the injected
+clock; it now asserts the database clock (the requested change). (2) `activity-integrity` and
+`erasure-ledger-format.spec`: their "unknown entity type" examples used `daily_metric`, which is now known; they use
+`meal`. (3) `restore-drill.spec` and `backup-restore`: the scenario now erases two records, so the expected counts went
+from 1 to 2 and the check list gained three ids. (4) `openapi-routes.spec`: a path value for `localDate`. The 32
+activity access tests are unmodified and pass; activity RLS and idempotency code are unchanged.
+
+**Executed checks.** `npm run db:migrate:test` applied `0028` and `0029` on top of `0027`.
+
+| Command | Before (ADR-0073, `66f274e`) | After |
+|---|---|---|
+| `npm run verify` | 2,573: scripts 83, API 1,383, web 927, contracts 163, fixtures 14, simulator 3 | 2,628: scripts 83, API 1,389 (+6: 4 route-coverage operations, 1 drill evaluation, 1 ledger format), web 964 (+37), contracts 175 (+12), fixtures 14, simulator 3 |
+| `npm run test:integration` | 580 in 50 files, none skipped | 642 in 52 files, none skipped (+38 `daily-metrics-access`, +24 `daily-metrics-http`; the drill file still has 9 tests) |
+| `npx playwright test daily-checkin.spec.ts activity.spec.ts --project=chromium` | activity: 1 passed | 2 passed |
+| `npm run test:e2e` (Chromium + chromium-oidc) | not run since 115 tests (lists 130) | first run: 117 passed, 14 failed; after the harness fix below: 131 passed in 13.4 min (122 `chromium`, 9 `chromium-oidc`) |
+
+The integration run includes the restore drill's "previous" case (a backup at `0028` with check-in days, restored and
+migrated to `0029`) and its "current" case.
+
+**Browser suite failure and fix.** The first full run failed 14 late tests (`second-tab`, `session-revalidation`,
+`sign-out`, `smoke`), all at sign-in with `503 SESSION_STORE_UNAVAILABLE`: one API process serves the whole suite, its
+in-memory session store is capped at `SESSION_STORE_MAX_ENTRIES` (default 100), and the suite (now 131 tests, the full
+set never run together since 115) exceeded it. The harness (`tests/e2e/support/suite-config.ts`) now starts that API
+with `SESSION_STORE_MAX_ENTRIES=1000`; the product default is unchanged. The rerun passed 131/131.
+
+**Mutation checks** (each red, then restored and green):
+
+1. Owner condition (`user_id = current_user_id()`) removed from all four `daily_metrics` policies with `ALTER POLICY` on
+   the test database: 7 of 38 ACL tests failed (other people's days visible, inserts and updates for another member
+   allowed). The HTTP suite stayed green (24/24): the service states the owner in every statement, as for activities.
+   Policies, function body hash, owner and ACL were snapshotted before and compared equal after the restore; 38 passed.
+2. `daily_metric` `ELSIF` branch removed from `app_private.reapply_erasure`: (a) on the test database, 2 of 24 HTTP tests
+   failed with `unknown erasure entity type: daily_metric`; restored from the migration text (catalog equal to the
+   snapshot), 37 passed across the HTTP and integrity files. (b) In the migration file, so the drill builds its
+   databases without it: 3 of 9 restore-drill tests failed with the same error; the file was restored byte-identical
+   (SHA-256 compared) and no drill database was left behind.
+3. Future-date check (`assertNotAfterToday`) removed from the service: 3 of 24 HTTP tests failed (future date, Warsaw
+   after midnight vs UTC, one millisecond before Warsaw midnight); restored (file compared), 24 passed.
+
+**Not established.** No profile time zone exists; the zone is the client's word (at most one calendar day ahead of
+UTC). Two devices editing one day overwrite each other without a warning. The web screen keeps the "today" of the
+moment it opened. Firefox (`firefox-core` does not include the new spec), mobile and hosted CI were not run. The
 development database was not migrated.

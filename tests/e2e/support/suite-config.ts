@@ -63,6 +63,10 @@ export function localSessionApi(
       PORT: new URL(environment.apiOrigin).port,
       ...options.runSearchAi,
       SESSION_COOKIE_SECURE: 'false',
+      // One API process serves the whole suite and every test signs in at least once; sessions live in memory until
+      // they expire. The default cap (100) was reached by the 131-test suite (ADR-0074 run: 14 late tests got
+      // 503 SESSION_STORE_UNAVAILABLE), so the suite raises it. The product default is unchanged.
+      SESSION_STORE_MAX_ENTRIES: '1000',
     },
     reuseExistingServer: false,
     stderr: 'pipe',

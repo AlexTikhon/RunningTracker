@@ -2,6 +2,7 @@ import express, { type Express, type Router } from 'express';
 import type { Pool } from 'pg';
 
 import { createActivityRouter } from './activities/activity.routes.js';
+import { createDailyMetricsRouter } from './daily-metrics/daily-metrics.routes.js';
 import { createArchiveRouter } from './archive/archive.routes.js';
 import {
   ArchiveTileCache,
@@ -177,6 +178,15 @@ export function createApp({
   app.use(
     '/api/orgs/:orgId/activities',
     createActivityRouter({
+      clock,
+      config,
+      pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+    }),
+  );
+  app.use(
+    '/api/orgs/:orgId/daily-metrics',
+    createDailyMetricsRouter({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,

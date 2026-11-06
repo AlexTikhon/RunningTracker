@@ -9,6 +9,7 @@ import { Client, Pool } from 'pg';
 import { systemClock, type Clock } from '../clock.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { deleteActivity } from '../activities/activity-service.js';
+import { deleteDailyMetrics } from '../daily-metrics/daily-metrics-service.js';
 import { createFileDeletionJournalSink } from '../maintenance/deletion-journal-sink.js';
 import { runAccessJournalExportOnce } from '../maintenance/run-access-journal-export.js';
 import { runDeletionJournalExportOnce } from '../maintenance/run-deletion-journal-export.js';
@@ -80,6 +81,12 @@ const ids = {
   activities: {
     E: 'd1200000-0000-4000-8000-0000000000e1',
     F: 'd1200000-0000-4000-8000-0000000000e2',
+  },
+  // ADR-0074: check-in day G is deleted by its owner after the backup, H survives. Days are keyed by date; the dates
+  // are fixed (any past date works) so the scenario does not depend on the clock's zone.
+  dailyMetrics: {
+    G: '2026-01-10',
+    H: '2026-01-11',
   },
 };
 
@@ -380,17 +387,31 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
 
     async inspectActivities() {
       return withClient(target.ownerUrl, async (client) => {
-        const row = await client.query<{ digest: string | null; e: boolean; f: boolean; outbox: string }>(
+        const row = await client.query<{
+          day_digest: string | null;
+          digest: string | null;
+          e: boolean;
+          f: boolean;
+          g: boolean;
+          h: boolean;
+          outbox: string;
+        }>(
           `SELECT EXISTS (SELECT 1 FROM activities WHERE org_id = $1 AND id = $2) AS e,
                   EXISTS (SELECT 1 FROM activities WHERE org_id = $1 AND id = $3) AS f,
                   (SELECT md5(activity::text) FROM activities AS activity WHERE org_id = $1 AND id = $3) AS digest,
+                  EXISTS (SELECT 1 FROM daily_metrics WHERE org_id = $1 AND user_id = $4 AND local_date = $5::date) AS g,
+                  EXISTS (SELECT 1 FROM daily_metrics WHERE org_id = $1 AND user_id = $4 AND local_date = $6::date) AS h,
+                  (SELECT md5(metric::text) FROM daily_metrics AS metric
+                   WHERE org_id = $1 AND user_id = $4 AND local_date = $6::date) AS day_digest,
                   (SELECT count(*) FROM erasure_ledger)::text AS outbox`,
-          [ids.org, ids.activities.E, ids.activities.F],
+          [ids.org, ids.activities.E, ids.activities.F, ids.ownerUser, ids.dailyMetrics.G, ids.dailyMetrics.H],
         );
         const value = row.rows[0]!;
         return {
           outboxRows: Number(value.outbox),
           present: { E: value.e, F: value.f },
+          presentDays: { G: value.g, H: value.h },
+          survivorDayDigest: value.day_digest ?? 'missing',
           survivorDigest: value.digest ?? 'missing',
         } satisfies ActivityState;
       });
@@ -490,6 +511,10 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       // ADR-0073: the owner deletes activity E through the application's own service, as the runtime role.
       await withAuthenticatedTenantTransaction(runtimePool, session, ids.org, (client) =>
         deleteActivity(client, session, ids.org, ids.activities.E),
+      );
+      // ADR-0074: and deletes check-in day G the same way.
+      await withAuthenticatedTenantTransaction(runtimePool, session, ids.org, (client) =>
+        deleteDailyMetrics(client, session, ids.org, ids.dailyMetrics.G),
       );
 
       const journal = await withClient(source.ownerUrl, (client) =>
@@ -793,6 +818,13 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
            VALUES ($1, $2, $4, 'swim', $5, 1800, 1500, 4, 'drill fixture', $6),
                   ($1, $3, $4, 'strength', $5, 2700, NULL, 7, NULL, $6)`,
           [ids.org, ids.activities.E, ids.activities.F, ids.ownerUser, new Date(now - 3 * dayMs), new Date(now - 3 * dayMs + 60_000)],
+        );
+        // ADR-0074: two of the owner's check-in days, both in the backup; ids and timestamps are database defaults.
+        await client.query(
+          `INSERT INTO daily_metrics (org_id, user_id, local_date, time_zone, weight_kg, sleep_minutes, mood, note)
+           VALUES ($1, $2, $3, 'Europe/Warsaw', 71.80, 455, 4, 'drill fixture'),
+                  ($1, $2, $4, 'Europe/Warsaw', NULL, 400, 3, NULL)`,
+          [ids.org, ids.ownerUser, ids.dailyMetrics.G, ids.dailyMetrics.H],
         );
         // Run C also carries the shares of the access scenario (the grantee's was seeded with the run).
         await client.query(

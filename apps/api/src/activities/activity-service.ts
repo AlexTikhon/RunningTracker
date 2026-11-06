@@ -78,11 +78,12 @@ export const keyedActivitySql = `SELECT ${projection},
 
 // No conflict target: a clash on the id (another member's row, or a concurrent identical request) and a clash on the
 // form session's key (a concurrent save under another id) both insert nothing, and the reads that follow decide.
+// created_at is the column default, the database clock (migration 0029, ADR-0074): it identifies the record version in
+// the erasure ledger, so it must not depend on the application clock.
 export const insertActivitySql = `INSERT INTO activities (
-         org_id, id, user_id, type, started_at, duration_s, distance_m, rpe, notes, idempotency_key, source, created_at
+         org_id, id, user_id, type, started_at, duration_s, distance_m, rpe, notes, idempotency_key, source
        )
-       VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7::double precision, $8::smallint, $9::text, $10::uuid, 'manual',
-               $11::timestamptz)
+       VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7::double precision, $8::smallint, $9::text, $10::uuid, 'manual')
        ON CONFLICT DO NOTHING`;
 
 // $1 organization, $2 owner, $3/$4 keyset position or NULL, $5 fetch size. The order is total: start, then id.
@@ -193,7 +194,7 @@ export async function createActivity(
   // 3. Insert. Another member's row with this id is invisible here: the insert does nothing and the reads below find no
   // row of this person's, which is answered like a missing activity (ADR-0072 explains why that is not an oracle). A
   // concurrent save of the same form session under another id also inserts nothing; its row is found by key.
-  const inserted = await client.query(insertActivitySql, [...parameters, now.toISOString()]);
+  const inserted = await client.query(insertActivitySql, parameters);
 
   const stored = await readOne(client, ownedActivitySql, parameters);
   if (stored) {

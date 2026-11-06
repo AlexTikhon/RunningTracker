@@ -26,6 +26,11 @@ describe('erasure ledger format', () => {
     expect(parseErasureLedgerFile('f', text)).toEqual([entry, { ...entry, seq: '8' }]);
   });
 
+  it('knows activities and daily check-ins (ADR-0074), and nothing else', () => {
+    const daily = { ...entry, entityType: 'daily_metric' as const, seq: '9' };
+    expect(parseErasureLedgerFile('f', serializeErasureLedgerEntries([entry, daily]))).toEqual([entry, daily]);
+  });
+
   it('carries identifiers and timestamps only', () => {
     expect(Object.keys(JSON.parse(serializeErasureLedgerEntries([entry]).trim()) as object).sort()).toEqual([
       'entityType',
@@ -49,7 +54,7 @@ describe('erasure ledger format', () => {
     expect(() => parseErasureLedgerFile('f', `${good}{not json}\n`)).toThrow('line 2 is not valid JSON');
     expect(() => parseErasureLedgerFile('f', `${good}\n`)).toThrow('line 2');
     for (const bad of [
-      { ...entry, entityType: 'daily_metric' },
+      { ...entry, entityType: 'meal' },
       { ...entry, notes: 'content must never be here' },
       { ...entry, recordId: entry.recordId.toUpperCase() },
       { ...entry, erasedAt: '2026-11-06T12:00:00.123Z' },

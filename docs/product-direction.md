@@ -40,5 +40,10 @@ commitment to dates or to every item below.
 ## Current step
 
 Step 1 is complete when ADR-0072 is accepted: a generic `activities` table (manual entry only), owner-only RLS,
-idempotent create, keyset listing, hard delete and an Activity tab. The suggested next step is `daily_metrics`
-(weight, sleep, mood and soreness) with the same owner-only template.
+idempotent create, keyset listing, hard delete and an Activity tab.
+
+Step 2, the daily check-in, is [ADR-0074](adr/0074-daily-check-in-local-date-and-put-replace.md): `daily_metrics`
+(weight, sleep, sleep quality, mood, soreness, note), one record per person per local date, replaced as a whole by
+PUT, owner-only, with erasures in the ledger. It records two rules later slices should keep: a day is a local
+calendar date with the zone of its first write, and "today" is computed by the server's clock in the zone the client
+sends. Remaining items of the data foundation: GPX/TCX/FIT import and the meal log.
