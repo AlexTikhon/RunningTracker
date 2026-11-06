@@ -152,6 +152,20 @@ async function loadedController(geometry: CoachMapGeometry = withTrack) {
 }
 
 describe('coach map controller', () => {
+  it('contains attachment errors, removes the partial instance and stops late work', async () => {
+    const subject = controllerWith();
+    const map = fakeMap();
+    map.port.on.mockImplementation(() => { throw new Error('listener installation failed'); });
+    subject.controller.start();
+    subject.factory.pending[0]!.resolve(map.port);
+    await settle();
+    expect(subject.statuses.at(-1)).toBe('failed');
+    expect(map.port.remove).toHaveBeenCalledOnce();
+    expect(subject.factory.pending[0]!.signal.aborted).toBe(true);
+    subject.controller.update(withTrack);
+    expect(map.port.addSource).not.toHaveBeenCalled();
+  });
+
   it('adds the sources and layers once and draws the current geometry', async () => {
     const { map, statuses } = await loadedController();
 

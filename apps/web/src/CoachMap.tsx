@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 
 import type { CoachMapGeometry, CoachMapTrackStatus } from './coach-map-geometry.js';
 import { CoachMapController, type CoachMapStatus } from './coach-map-source.js';
-import { loadMapbox, MAPBOX_BASE_STYLE } from './mapbox-runtime.js';
+import { createMapboxMap } from './create-mapbox-map.js';
 
 export interface CoachMapProps {
   accessToken: string | null;
@@ -63,19 +63,9 @@ export function CoachMap({ accessToken, geometry, signal }: CoachMapProps) {
       return undefined;
     }
     const created = new CoachMapController({
-      createMap: async (lifetime) => {
-        const mapboxgl = await loadMapbox();
-        lifetime.throwIfAborted();
-        const map = new mapboxgl.Map({
-          accessToken,
-          center: [21.0122, 52.2297],
-          container: element,
-          style: MAPBOX_BASE_STYLE,
-          zoom: 10,
-        });
-        map.addControl(new mapboxgl.NavigationControl(), 'top-right');
-        return map;
-      },
+      createMap: (lifetime) => createMapboxMap({
+        accessToken, center: [21.0122, 52.2297], container: element, signal: lifetime, zoom: 10,
+      }),
       onStatus: setStatus,
       signal,
     });

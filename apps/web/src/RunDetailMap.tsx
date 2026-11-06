@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
-import { loadMapbox, MAPBOX_BASE_STYLE } from './mapbox-runtime.js';
+import { createMapboxMap } from './create-mapbox-map.js';
 import { MERCATOR_MAX_LATITUDE, RunDetailMapController, type ArchiveGeometry, type RunDetailMapStatus } from './run-detail-map.js';
 
 export function RunDetailMap({ accessToken, geometry, signal }: {
@@ -17,14 +17,7 @@ export function RunDetailMap({ accessToken, geometry, signal }: {
     const element = container.current;
     setStatus('loading');
     const next = new RunDetailMapController({
-      createMap: async (lifetime) => {
-        const runtime = await loadMapbox();
-        lifetime.throwIfAborted();
-        const map = new runtime.Map({ accessToken, center: [0, 0], container: element, style: MAPBOX_BASE_STYLE, zoom: 1 });
-        try { map.addControl(new runtime.NavigationControl(), 'top-right'); }
-        catch (error) { map.remove(); throw error; }
-        return map;
-      },
+      createMap: (lifetime) => createMapboxMap({ accessToken, center: [0, 0], container: element, signal: lifetime, zoom: 1 }),
       geometry, onStatus: setStatus, signal,
     });
     controller.current = next;

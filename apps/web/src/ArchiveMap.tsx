@@ -6,7 +6,8 @@ import {
   synchronizeArchiveMapSource,
   type ArchiveMapPort,
 } from './archive-map-source.js';
-import { loadMapbox, MAPBOX_BASE_STYLE, type MapboxMapInstance } from './mapbox-runtime.js';
+import { createMapboxMap } from './create-mapbox-map.js';
+import type { MapboxMapInstance } from './mapbox-runtime.js';
 
 export interface ArchiveMapProps {
   accessToken: string | null;
@@ -27,42 +28,43 @@ export function ArchiveMap({ accessToken, metadata, onTileError }: ArchiveMapPro
     if (accessToken === null || container.current === null) {
       return undefined;
     }
-    let disposed = false;
+    const lifetime = new AbortController();
     let createdMap: MapboxMapInstance | null = null;
     setMapError(null);
-    void loadMapbox().then((mapboxgl) => {
-      if (disposed || container.current === null) {
+    void createMapboxMap({
+      accessToken, center: [21.0122, 52.2297], container: container.current,
+      signal: lifetime.signal, zoom: 10,
+    }).then((instance) => {
+      if (lifetime.signal.aborted) {
+        instance.remove();
         return;
       }
-      createdMap = new mapboxgl.Map({
-        accessToken,
-        center: [21.0122, 52.2297],
-        container: container.current,
-        style: MAPBOX_BASE_STYLE,
-        zoom: 10,
-      });
+      createdMap = instance;
       map.current = createdMap;
-      createdMap.addControl(new mapboxgl.NavigationControl(), 'top-right');
       createdMap.on('load', () => {
-        if (!disposed && map.current === createdMap) {
+        if (!lifetime.signal.aborted && map.current === createdMap) {
           setReady(true);
         }
       });
       createdMap.on('error', (event) => {
+        if (lifetime.signal.aborted || map.current !== createdMap) return;
         const status = archiveTileErrorStatus(event);
         if (status !== null) {
           onTileErrorRef.current(status);
-        } else if (!disposed) {
+        } else {
           setMapError('The map provider or base style could not be loaded.');
         }
       });
     }).catch(() => {
-      if (!disposed) {
+      if (!lifetime.signal.aborted) {
+        if (map.current === createdMap) map.current = null;
+        try { createdMap?.remove(); } catch { /* No failed instance is retained. */ }
+        createdMap = null;
         setMapError('The map runtime could not be loaded by this browser.');
       }
     });
     return () => {
-      disposed = true;
+      lifetime.abort();
       setReady(false);
       previousMetadata.current = null;
       if (map.current === createdMap) {

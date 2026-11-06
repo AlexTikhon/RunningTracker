@@ -161,7 +161,7 @@ export class CoachMapController {
     } catch {
       creation = Promise.reject(new Error('map creation failed'));
     }
-    creation.then(
+    void creation.then(
       (map) => {
         if (this.#lifetime.signal.aborted) {
           map.remove();
@@ -169,12 +169,12 @@ export class CoachMapController {
         }
         this.#attach(map);
       },
-      () => {
-        if (!this.#lifetime.signal.aborted) {
-          this.#onStatus('failed');
-        }
-      },
-    );
+    ).catch(() => {
+      if (!this.#lifetime.signal.aborted) {
+        this.#onStatus('failed');
+        this.dispose();
+      }
+    });
   }
 
   public update(geometry: CoachMapGeometry): void {
