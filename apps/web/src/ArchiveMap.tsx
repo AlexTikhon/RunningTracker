@@ -94,7 +94,9 @@ export function ArchiveMap({ accessToken, metadata, onTileError }: ArchiveMapPro
   }
 
   return (
-    <div className="archive-map" ref={container}>
+    <div className="archive-map">
+      {/* Mapbox alone owns this subtree; React owns the sibling notices. */}
+      <div className="archive-map__canvas" ref={container} />
       {!ready && <span className="archive-map__loading">Loading map…</span>}
       {mapError !== null && <span className="archive-map__error" role="alert">{mapError}</span>}
     </div>

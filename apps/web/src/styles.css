@@ -195,6 +195,7 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .archive-filter input { border: 1px solid #465149; border-radius: 0.7rem; padding: 0.72rem 0.85rem; color: #f4f7f3; color-scheme: dark; background: #0e1410; }
 .archive-filter > span { grid-column: 1 / -1; color: #ffaca4; font-size: 0.78rem; }
 .archive-map { position: relative; min-height: 34rem; overflow: hidden; border: 1px solid #364139; border-radius: 1.4rem; background: #121813; }
+.archive-map__canvas { position: absolute; inset: 0; }
 .archive-map--unavailable { display: grid; align-content: center; justify-items: center; gap: 0.5rem; padding: 2rem; color: #dfe6e0; text-align: center; }
 .archive-map--unavailable span { max-width: 32rem; color: #7f8a82; line-height: 1.5; }
 .archive-map__loading { position: absolute; z-index: 1; top: 1rem; left: 1rem; padding: 0.55rem 0.75rem; border: 1px solid #465149; border-radius: 0.7rem; color: #dfe6e0; background: rgb(14 20 16 / 88%); font-size: 0.76rem; }
