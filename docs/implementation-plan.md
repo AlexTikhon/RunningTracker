@@ -46,6 +46,18 @@ remain deferred. Completion evidence is recorded in `docs/progress.md`.
 This four-commit closeout is complete and the project is paused again. The final
 checks and limits are in [the freeze report](reports/freeze-verification-2026-11-05.md).
 
+## Four-commit map lifecycle closeout (2026-11-06)
+
+The user reopened the project for exactly four additional local commits and a
+renewed freeze. ADR-0071 closes the previously recorded map-container defect:
+exclusive archive DOM host; shared allocation/control-setup cleanup and Coach
+attachment-error containment; installed-runtime lifecycle/failure browser
+regressions; final architecture review, verification and pause handoff. The
+browser protocol fixture answers style/session/telemetry locally and cannot
+certify provider behavior. No migration, dependency, GPS or new feature work is
+included. Evidence is in `docs/reports/freeze-verification-2026-11-06.md`;
+candidate fairness, whole-job/I/O bounds, durable sessions and D10 remain deferred.
+
 ## 1. Execution mode
 
 The unit of work is a single Pxx stage, explicitly named in the assignment. By default, the first assignment covers P00–P01. Later stages may be combined at the user's request; do not attempt to implement the entire SDD in a single change.

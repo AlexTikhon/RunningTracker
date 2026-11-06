@@ -1,10 +1,14 @@
 # Running Tracker: interview package
 
-Current freeze: 2026-11-05. The [latest verification](reports/freeze-verification-2026-11-05.md)
-and [architecture review](reports/architecture-review-2026-11-05.md) supersede older
+Current freeze: 2026-11-06. The [latest verification](reports/freeze-verification-2026-11-06.md)
+and [architecture review](reports/architecture-review-2026-11-06.md) supersede older
 snapshot counts below. ADR-0070 adds process-local maintenance failure backoff and
 retry/recovery visibility; it does not establish candidate fairness, filesystem
 cancellation, durable sessions or physical-phone GPS evidence.
+
+ADR-0071 separates React notices from Mapbox's DOM host and cleans up failed map
+allocation. Its local WebGL checks use synthetic style/auth/telemetry responses;
+they do not establish a real provider basemap or fix vendor network callbacks.
 
 What this is: notes to speak from in a technical interview about this project, with links to the code and the
 evidence. Everything here is a learning project verified on one Windows workstation. There are no production users,

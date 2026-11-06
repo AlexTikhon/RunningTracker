@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-05 (four-commit maintenance closeout and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-06 (four-commit map lifecycle closeout and renewed pause, the last section; handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3156,3 +3156,44 @@ blocked or stale results reset it. It cannot prove backlog progress or cancel
 hung I/O. Candidate fairness/quarantine, persisted attempts, whole-job/I/O bounds,
 durable sessions, physical-device D10 and target-environment evidence remain
 deferred. Exactly four local commits end this task; no push or deployment.
+
+## Four-commit map lifecycle closeout and freeze (2026-11-06)
+
+Clean base: `8c4f9e2` on `main`, equal to the local `origin/main` reference.
+The last commit had finalized the maintenance freeze; its report left a Mapbox
+container warning and unhandled library callbacks open. The new architectural
+review retained the modular monolith and selected that bounded map boundary.
+
+ADR-0071 gives ArchiveMap an exclusive empty host with React notices beside it.
+All three map views use a shared allocation factory: cancellation is checked
+before/after import; failed navigation-control setup removes the instance.
+Archive setup/late events and Coach attachment failures retain explicit cleanup.
+Installed-runtime Chromium checks cover refresh/reopening/sign-out, usable
+canvas dimensions, uncaught errors/container warnings and HTTP 503 style
+failure with statistics preserved. The existing geometry and capture/result
+ownership boundaries remain intact.
+
+Commits: `cf7704b` (archive DOM ownership), `d006133` (allocation/attachment
+cleanup), `ff03b31` (browser protocol/lifecycle regressions), and the fourth
+documentation commit containing this closeout. No migrations, role grants,
+dependencies, lockfile, GPS algorithms, private environment, push or deployment.
+
+Local validation: `npm run verify` passed 2,463 tests, lint, workspace typechecks
+and production builds; PostgreSQL/PostGIS integration passed 483 in 47 files,
+none skipped. Focused map tests passed 39 in 5 files after correcting one new
+test assertion. Chromium details/coach/finish-result passed 18 and the demo
+smoke passed 24, without retries. The three affected Firefox Coach scenarios
+passed with the fake runtime, without retries. The live test-role publication preflight
+confirmed zero candidates. Builds/integration settled before sequential browser
+execution. Final document checks, exact commands and evidence limits
+are in [the verification report](reports/freeze-verification-2026-11-06.md).
+
+**Paused.** The successful installed-runtime fixture now answers map-session and
+telemetry requests locally instead of aborting them. Dependency source maps
+identify a callback-after-removal hazard under failed network requests; this
+slice does not patch Mapbox or certify real provider behavior. Physical-phone
+D10, fair candidate progress/durable attempts, whole-job/I/O bounds, durable
+sessions and target-environment evidence remain deferred. See the
+[architecture review](reports/architecture-review-2026-11-06.md) and
+[restart handoff](pause-handoff.md). Exactly four additional local commits end
+this task; further product work stops at this freeze.

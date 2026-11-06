@@ -1,118 +1,107 @@
-# Pause handoff (updated 2026-11-05)
+# Pause handoff (updated 2026-11-06)
 
-The project is paused as a locally verified demo/portfolio application after the
-user-requested four-commit maintenance closeout. The accepted architecture remains
-React + Express + PostgreSQL/PostGIS. No further product work is required for this
-freeze. Start with the [current verification report](reports/freeze-verification-2026-11-05.md)
-and [architecture review](reports/architecture-review-2026-11-05.md).
+The project is paused as a locally verified demo/portfolio application after four
+new map lifecycle commits. The architecture remains React + Express +
+PostgreSQL/PostGIS. Start with the [current verification report](reports/freeze-verification-2026-11-06.md)
+and [architecture review](reports/architecture-review-2026-11-06.md). No further
+product work is required for this freeze.
 
 ## Latest closeout
 
-Starting point: `1c97264` (maintenance SQL budgets, ADR-0069), with a clean worktree.
-ADR-0070 extends that safeguard with independent, jittered failure backoff for each
-maintenance task. A failed cycle doubles its retry ceiling to five minutes (or the
-normal interval if longer); a fulfilled cycle resets normal polling. It never
-releases an unsettled worker. Failure streak and pending retry delay are exported
-as metrics, and recovery is logged once. The deployment runbook explains their
-meaning and operator response.
+Clean starting point: `8c4f9e2`, which documented the previous maintenance freeze.
+The new boundary is exactly four local commits after it:
 
-Delivery is exactly four local commits: retry scheduling; retry/recovery
-observability; real-role failure/recovery scenarios; final review, verification
-and this handoff. The final report records the hashes of the first three; the
-fourth contains that report. No push or deployment belongs to this closeout.
+1. `cf7704b`: exclusive empty archive map host, responsive canvas and ADR-0071.
+2. `d006133`: shared asynchronous map allocation/control-setup cleanup, aborted
+   import handling, ArchiveMap lifetime guards and Coach attachment containment.
+3. `ff03b31`: installed-runtime lifecycle/failure regressions, uncaught-error and
+   container-warning assertions, explicit local provider protocol fixtures.
+4. The documentation commit containing this handoff: architectural assessment,
+   regression evidence and renewed pause. Obtain its hash with `git log -1`.
 
-This does not supply per-run fairness/quarantine, persisted retry attempts, durable
-sessions or a complete job/filesystem deadline. A failing summary batch can still
-delay healthy candidates in that task. An idle/blocked fulfilled cycle is a
-scheduler success, not proof that a backlog advanced.
+Mapbox owns its canvas subtree; React owns sibling notices. Each map owner still
+removes its successfully initialized instance. The shared factory removes an
+instance if control setup fails and never allocates after an aborted import.
+The browser scenarios exercise archive/details, refresh, reopening, sign-out and
+HTTP 503 base-style failure, alongside the existing capture/result workflows.
 
-## Product state retained
+The installed Mapbox 3.31.0 source map identifies a separate dependency hazard:
+removal nulls event/session error callbacks that failed pending requests may
+still call. The old fixture aborted those requests. Successful-runtime tests now
+answer auth/telemetry locally and still fail on uncaught page errors; they do not
+patch the dependency or establish correctness under actual provider network
+failure. Investigate that boundary against a real provider before participant use.
 
-Finished-run review includes the revision-aware published archive track
-(ADR-0066), owner details from My runs (ADR-0067), and the explicit
-**Finish -> View result -> Back to Runner -> New run** flow (ADR-0068).
+## Product and operational state retained
 
-App retains capture/uploader/lifecycle/IndexedDB/writer ownership across result
-navigation. Pending or rejected device uploads and obsolete server revisions hide
-route/statistics until synchronization settles. Restored finished runs need fresh
-server confirmation. Publication may still be pending or stale; use Refresh run.
-There are no URL deep links or automatic result polling.
+- Capture, offline IndexedDB buffer, fenced writer ownership and exact lifecycle
+  retries remain owned by App across result navigation.
+- Finished-run review uses published archive tracks (ADR-0066), owner details
+  (ADR-0067) and explicit **Finish -> View result -> Back to Runner -> New run**
+  (ADR-0068). Pending/rejected device uploads or obsolete summary revisions hide
+  the route/statistics. Restored runs need fresh server confirmation; publication
+  can remain pending/stale. Refresh is explicit, without deep links or polling.
+- Maintenance SQL has independent statement/lock budgets (ADR-0069). Per-task
+  jittered failure backoff, metrics and recovery logs are retained (ADR-0070).
+  They do not provide per-candidate fairness, durable attempts or whole-job/I/O
+  cancellation. An idle successful cycle does not prove backlog progress.
+- AI search is optional/off by default. Sessions, OIDC login transactions and
+  retry state remain process-local and are lost on API restart.
 
 ## Returning to the project
 
-1. Read `git status --short --branch` and `git log --oneline -6`. The freeze adds
-   exactly four commits after `1c97264`; compare their actual manifests with the
-   report before relying on recorded evidence. A later commit requires its own
-   verification. Local remote-tracking refs may be stale.
-2. Start Docker Desktop. Node 24/npm 11 are required. Run `npm ci` only if needed
-   after checking the lockfile. Browser installation, when needed:
+1. Inspect `git status --short --branch` and `git log --oneline -6`. This closeout
+   is exactly four commits after `8c4f9e2`; later work needs new evidence. A local
+   `origin/main` comparison does not refresh the remote or establish hosted CI.
+2. Start Docker Desktop; use Node 24/npm 11. Run `npm ci` only if required by the
+   dependency/lockfile state. Browser installation when needed:
    `cd tests/e2e; npx playwright install chromium firefox; cd ../..`.
-3. Run `npm run demo:doctor`. It is read-only. Then `npm run demo:up` starts the
-   local API/web stack; Ctrl+C stops those processes and keeps PostgreSQL data.
-4. Open the URL in two **separate browser profiles/contexts** for runner and
-   coach. Follow [the demo rehearsal](runbooks/demo.md). Two tabs in one profile
-   share one person's session. Without a map token the statistics remain usable.
-5. Before editing, select one bounded task from the architecture review. The
-   original P00-P12 plan has no unfinished implementation stage; D10 remains
-   partial until physical-device evidence exists.
+3. Run `npm run demo:doctor`, then `npm run demo:up`. Ctrl+C stops that stack and
+   keeps PostgreSQL data. Authenticate again after restarting the API.
+4. Use separate browser profiles/contexts for runner and coach. Follow
+   [the rehearsal](runbooks/demo.md). Two tabs in one profile share a session.
+   The map token is absent on this workstation; statistics and tokenless demo
+   remain usable. Do not treat a synthetic local style as a provider basemap.
+5. Select one bounded task from the architecture review before making changes.
+   P00-P12 have no unfinished implementation stage; D10 remains partial until
+   the physical-device pilot has actual sanitized traces/evidence.
 
 ## Verification on return
 
-Run integration and browser commands sequentially: both mutate the dedicated test
-database. Do not rebuild contracts/fixtures or edit source while browser tests run;
-Vite HMR can reload the page and invalidate a scenario.
+Integration and browser commands share the dedicated test database and must run
+sequentially. Do not edit source or rebuild contracts/fixtures while browser
+servers are running: Vite HMR can invalidate a scenario. Supply documented
+`TEST_*` values from `.env.example` in process scope if absent. The suites reject
+non-test targets; verify live database/role identities before fixture writes.
+Never repoint them to development data.
 
-Sequential execution alone does not remove integration fixture backlogs. This
-closeout's first Chromium smoke timed out waiting for a new summary while older
-integration summaries consumed the default 60-second cycles. Before a browser
-publication scenario, use an isolated clean test target or confirm that
-`app_private.find_stale_run_summaries(1000)` returns no rows after maintenance
-drains the fixtures. A zero candidate count is a setup check, not a production
-progress guarantee. Do not change the development database to fix a test setup.
+Before publication-dependent browser scenarios, confirm an isolated clean test
+DB or zero candidates in `app_private.find_stale_run_summaries(1000)`. Sequential
+commands alone do not drain fixture backlogs. This closeout verified the live
+`running_tracker_test` / `running_tracker_maintenance` identity and zero remaining
+candidates before browser work; no publication was needed for setup.
 
 | Change | Checks |
 |---|---|
 | Documentation | Relative file links and `git diff --check` |
-| API/web behavior | Focused tests, `npm run verify`, affected browser specs |
-| SQL, maintenance, access or persistence | Also `npm run test:integration` under the validated test roles |
-| Before showing the demo | `npm run demo:doctor`, `npm run test:e2e:smoke`; Firefox smoke if used |
-| Full browser/transport profile | `test:e2e`, `test:e2e:firefox`, `deploy:verify`, `transport:verify`, `proxy:verify-error-log`, as applicable |
+| Map behavior | Focused map tests, `npm run verify`, affected Chromium details/coach/result specs and the applicable Firefox gate |
+| SQL, maintenance, authorization or persistence | Also `npm run test:integration` under validated test roles |
+| Before a demo | `npm run demo:doctor`, `npm run test:e2e:smoke`; Firefox smoke if used |
+| Full browser or transport profile | Full Chromium/OIDC and Firefox gates, deploy/transport/proxy checks as applicable; not implied by focused results |
 
-Use the documented `TEST_*` values from `.env.example` in the calling process when
-local values are absent. The suites reject non-test targets. Prove live database
-and role identities before fixture writes. Bootstrap/migrate the test database
-only when needed; this closeout did neither. Never repoint the suites at the demo
-or development database. The current report lists precisely which checks ran.
+## What persists and what remains deferred
 
-## What persists
+PostgreSQL uses the existing Compose volume. `db:down` and demo Ctrl+C keep it;
+`down -v` is not a restart step. `.env` and `.local/` contain private gitignored
+configuration, traces and local evidence. No secrets or local screenshots/logs
+are part of the commits. Test runners own and stop their servers; keep the
+existing database container and unrelated processes intact.
 
-- PostgreSQL uses the Compose volume `running_tracker_postgres` (Docker's name is
-  prefixed by the Compose project). `db:down` and demo Ctrl+C keep it; Compose
-  `down -v` removes development and test data and is not part of restart.
-- `.env` and `.local/` are private, gitignored machine state: configuration, TLS,
-  demo lock, raw GPS files and verification logs. They are not included in Git.
-- Opaque sessions and OIDC login transactions remain in memory. Restarting the
-  API loses them; reauthenticate. Retry state/metrics also reset on restart.
-
-## Evidence limits and deferred work
-
-All new evidence is local to one Windows workstation. Historical full-matrix
-results are in [the October pause report](reports/pause-verification.md); the
-[November 2 report](reports/maintenance-sql-budgets-2026-11-02.md) records the prior
-SQL-budget slice. Neither is a current hosted-CI or production claim.
-
-Still deferred: physical-phone capture/GPS accuracy and background behavior;
-current hosted CI; Safari/WebKit/mobile validation; actual provider OIDC and
-Mapbox basemap; production hosting and off-host backup/journal/restore evidence;
-durable sessions; candidate fairness and whole-job/I/O cancellation. AI search is
-optional/off by default, and no live-provider accuracy is established. The new
-journal failure test injects sink failures; it does not simulate physical storage
-failure or prove crash durability.
-
-The new Chromium detail assertions passed, but the installed Mapbox runtime test
-logged a container warning and two unhandled `this.errorCb is not a function`
-rejections. Its screenshot shows the route against a local style. Investigate
-this separately before claiming a clean map console or using a provider basemap.
-
-When resuming, prioritize the physical pilot and operational gaps in the review;
-keep deployment and new features as separately authorized work.
+All current evidence is local to one Windows workstation. The current report
+names exactly which checks ran; older reports remain historical snapshots.
+Still deferred: physical-phone capture/GPS accuracy/background behavior; current
+hosted CI; Safari/WebKit/mobile browser evidence; actual provider OIDC/basemap and
+Mapbox auth/telemetry failure behavior; production hosting and off-host
+backup/journal recovery; durable sessions; maintenance candidate fairness and
+whole-job/I/O cancellation. No migration, dependency update, push or deployment
+belongs to this closeout.
