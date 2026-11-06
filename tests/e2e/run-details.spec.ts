@@ -5,6 +5,7 @@ import { createFinishedRuns, setArchiveTrackFixture } from './support/database.j
 import { features, installFakeMapbox, isMapboxRequest, readProbe } from './support/fake-mapbox.js';
 import { expect, test } from './support/fixtures.js';
 import { expectSignedIn, expectSignedOut, organizationRegion } from './support/session.js';
+import { installLocalMapbox, mapRuntimeDiagnostics } from './support/real-mapbox.js';
 
 test.use({ locale: 'en-GB', timezoneId: 'Europe/Warsaw' });
 const geometry = { type: 'MultiLineString' as const, coordinates: [[[21.0, 52.0], [21.01, 52.01]], [[21.02, 52.01], [21.03, 52.0]]] };
@@ -149,19 +150,49 @@ test('run details: fake map draws exact disconnected geometry, refresh clears it
 });
 
 test('run details: installed Mapbox runtime renders the published route with a local style', { tag: '@real-map-runtime' }, async ({ context, environment, page, scenario }) => {
-  const localOrigins = new Set([environment.webOrigin, environment.mapWebOrigin, environment.apiOrigin]);
-  await context.route('**/*', async (route) => {
-    const url = new URL(route.request().url());
-    if (localOrigins.has(url.origin) || ['blob:', 'data:'].includes(url.protocol)) await route.fallback();
-    else if (url.hostname === 'api.mapbox.com' && url.pathname === '/styles/v1/mapbox/dark-v11') {
-      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ version: 8, sources: {}, layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#121813' } }] }) });
-    } else await route.abort('blockedbyclient');
-  });
+  const unexpected = await installLocalMapbox(context, environment);
+  const diagnostics = mapRuntimeDiagnostics(page);
   const [runId] = await createFinishedRuns(environment, scenario.orgId, [{ distanceM: 5000, startedAt: '2026-03-01T06:00:00Z', userId: scenario.runnerUserId }]);
   await setArchiveTrackFixture(environment, scenario.orgId, runId!, 'ready', geometry);
   await signIn(context, environment, scenario.runnerUserId); await openMarch(page, environment.mapWebOrigin);
+  const archiveCanvas = page.locator('.archive-map__canvas canvas.mapboxgl-canvas');
+  await expect(archiveCanvas).toBeVisible();
+  expect(await archiveCanvas.evaluate((canvas) => canvas.clientHeight)).toBeGreaterThan(300);
   await cards(page).first().getByRole('button', { name: /View details/ }).click();
   await expect(details(page).getByRole('button', { name: 'Fit route' })).toBeEnabled();
   await expect(details(page)).not.toContainText('could not be loaded');
   await details(page).screenshot({ path: '../../.local/run-details-real-map.png' });
+  await details(page).getByRole('button', { name: 'Refresh run' }).click();
+  await expect(details(page).getByRole('button', { name: 'Fit route' })).toBeEnabled();
+  await expect(page.locator('canvas.mapboxgl-canvas')).toHaveCount(1);
+  await details(page).getByRole('button', { name: 'Back to My runs' }).click();
+  await expect(archiveCanvas).toBeVisible();
+  await cards(page).first().getByRole('button', { name: /View details/ }).click();
+  await expect(details(page).getByRole('button', { name: 'Fit route' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+  await expectSignedOut(page);
+  await expect(page.locator('canvas.mapboxgl-canvas')).toHaveCount(0);
+  expect(unexpected).toEqual([]);
+  expect(diagnostics).toEqual({ errors: [], containerWarnings: [] });
+});
+
+test('run details: a failed base style keeps statistics usable and leaving clears the map', { tag: '@real-map-runtime' }, async ({ context, environment, page, scenario }) => {
+  const unexpected = await installLocalMapbox(context, environment);
+  const diagnostics = mapRuntimeDiagnostics(page);
+  await context.route('https://api.mapbox.com/styles/v1/mapbox/dark-v11?**', (route) =>
+    route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }));
+  const [runId] = await createFinishedRuns(environment, scenario.orgId, [{ distanceM: 5000, startedAt: '2026-03-01T06:00:00Z', userId: scenario.runnerUserId }]);
+  await setArchiveTrackFixture(environment, scenario.orgId, runId!, 'ready', geometry);
+  await signIn(context, environment, scenario.runnerUserId);
+  await openMarch(page, environment.mapWebOrigin);
+  await expect(page.getByRole('alert').filter({ hasText: 'base style' })).toBeVisible();
+  await cards(page).first().getByRole('button', { name: /View details/ }).click();
+  await expect(details(page)).toContainText('The route map could not be loaded.');
+  await expect(details(page)).toContainText('5.00 km');
+  await expect(details(page).getByRole('button', { name: 'Fit route' })).toBeDisabled();
+  await expect(page.locator('canvas.mapboxgl-canvas')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+  await expectSignedOut(page);
+  expect(unexpected).toEqual([]);
+  expect(diagnostics).toEqual({ errors: [], containerWarnings: [] });
 });

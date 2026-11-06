@@ -17,6 +17,7 @@ import { expect, test } from './support/fixtures.js';
 import { dropLiveStream, restoreLiveStream, trackLiveStreams } from './support/live-stream-fault.js';
 import { RunnerPage } from './support/runner-page.js';
 import { expectSignedOut } from './support/session.js';
+import { installLocalMapbox, mapRuntimeDiagnostics } from './support/real-mapbox.js';
 
 // The live stream polls every LIVE_SSE_POLL_INTERVAL_MS (2000 by default).
 const liveUpdateTimeoutMs = 10_000;
@@ -230,15 +231,6 @@ test('coach map: a lost stream clears the map, a fresh state redraws it, and sig
   }
 });
 
-// The real mapbox-gl runtime in this Chromium, with WebGL, but no provider: the base style request is answered in
-// the browser with an empty local style, and every other external request is aborted before it leaves.
-const emptyStyle = JSON.stringify({
-  layers: [{ id: 'background', paint: { 'background-color': '#121813' }, type: 'background' }],
-  name: 'e2e-empty',
-  sources: {},
-  version: 8,
-});
-
 // Tagged so the bounded Firefox gate can leave it out; the Chromium project still runs it.
 test('coach map smoke: the installed Mapbox runtime starts with a local empty style and draws without errors', {
   tag: '@real-map-runtime',
@@ -248,23 +240,14 @@ test('coach map smoke: the installed Mapbox runtime starts with a local empty st
   scenario,
 }) => {
   const contexts: BrowserContext[] = [];
-  const blocked: string[] = [];
-  const localOrigins = new Set([environment.mapWebOrigin, environment.webOrigin, environment.apiOrigin]);
+  let unexpected: string[] = [];
+  const diagnostics: ReturnType<typeof mapRuntimeDiagnostics>[] = [];
   try {
     const { coach, coachPage } = await shareRunWithCoach(browser, environment, scenario, contexts, {
       origin: environment.mapWebOrigin,
       prepare: async (context) => {
-        await context.route('**/*', async (route) => {
-          const url = new URL(route.request().url());
-          if (localOrigins.has(url.origin) || url.protocol === 'blob:' || url.protocol === 'data:') {
-            await route.fallback();
-          } else if (url.hostname === 'api.mapbox.com' && url.pathname === '/styles/v1/mapbox/dark-v11') {
-            await route.fulfill({ body: emptyStyle, contentType: 'application/json', status: 200 });
-          } else {
-            blocked.push(`${url.hostname}${url.pathname}`);
-            await route.abort('blockedbyclient');
-          }
-        });
+        unexpected = await installLocalMapbox(context, environment);
+        context.on('page', (page) => diagnostics.push(mapRuntimeDiagnostics(page)));
       },
     });
 
@@ -282,7 +265,11 @@ test('coach map smoke: the installed Mapbox runtime starts with a local empty st
     const screenshot = test.info().outputPath('coach-map.png');
     await coach.mapPanel().screenshot({ path: screenshot });
     await test.info().attach('coach-map.png', { contentType: 'image/png', path: screenshot });
-    test.info().annotations.push({ description: [...new Set(blocked)].join(', ') || 'none', type: 'blocked external requests' });
+    await coachPage.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expectSignedOut(coachPage);
+    await expect(coachPage.locator('canvas.mapboxgl-canvas')).toHaveCount(0);
+    expect(unexpected).toEqual([]);
+    expect(diagnostics).toEqual([{ errors: [], containerWarnings: [] }]);
   } finally {
     await closeAll(contexts);
   }
