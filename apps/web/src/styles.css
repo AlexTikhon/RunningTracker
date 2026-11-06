@@ -223,8 +223,9 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 @media (max-width: 520px) {
   main { width: min(100% - 1.2rem, 1120px); padding-top: 0.8rem; }
   .topbar { align-items: flex-start; flex-wrap: wrap; }
-  .view-switcher { order: 3; width: 100%; }
-  .view-switcher button { flex: 1; }
+  /* Five tabs do not fit 375 px in every font (Linux DejaVu Sans is wider): wrap rather than overflow. */
+  .view-switcher { order: 3; width: 100%; flex-wrap: wrap; }
+  .view-switcher button { flex: 1 1 auto; padding-inline: 0.55rem; }
   .service-health { flex-direction: column; gap: 0.35rem; }
   .control-card { padding: 1rem; }
   .notice, .session-bar { align-items: stretch; flex-direction: column; }

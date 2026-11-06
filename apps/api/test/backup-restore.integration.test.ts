@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from 'pg';
@@ -22,13 +22,26 @@ const drillTimeout = 180_000;
 
 const options = { commands: [] as string[], commit: 'integration-test', keep: false };
 
+// The drill makes its recovery journal copy read-only (0555 directory, 0444 files) on POSIX hosts, so a plain recursive
+// rm of the work directory fails with EACCES there. Give every directory its write bit back first.
+async function makeWritable(directory: string): Promise<void> {
+  await chmod(directory, 0o755).catch(() => undefined);
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (entry.isDirectory()) await makeWritable(join(directory, entry.name));
+  }
+}
+
 describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access reapplication against real PostgreSQL', () => {
   const cleanups: (() => Promise<void>)[] = [];
   const directories: string[] = [];
 
   afterEach(async () => {
     for (const cleanup of cleanups.splice(0)) await cleanup().catch(() => undefined);
-    for (const directory of directories.splice(0)) await rm(directory, { force: true, recursive: true });
+    for (const directory of directories.splice(0)) {
+      await makeWritable(directory);
+      await rm(directory, { force: true, recursive: true });
+    }
   });
 
   async function harness(sourceSchema: 'current' | 'previous' = 'previous') {
