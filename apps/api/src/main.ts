@@ -15,6 +15,7 @@ import {
   shutdownInfrastructure,
   type StoppableRunner,
 } from './lifecycle/shutdown.js';
+import { createWeeklyInsightService } from './insights/weekly-insight-factory.js';
 import { createLiveSseHub } from './live/live-sse.js';
 import {
   createFileDeletionJournalSink,
@@ -131,6 +132,8 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     pool,
     sessionManager,
   });
+  // Weekly insights run in this process, one generation at a time (ADR-0076); shutdown cancels the running one.
+  const weeklyInsights = createWeeklyInsightService({ clock, config, logger: defaultLogger, pool });
   const app = createApp({
     clock,
     config,
@@ -138,6 +141,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     metrics,
     pool,
     sessionManager,
+    weeklyInsights,
   });
   const server = createServer(app);
   const autoFinishRunner = new RunAutoFinishRunner({
@@ -240,6 +244,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
       accessJournalRunner?.stop();
       erasureLedgerRunner?.stop();
       liveSseHub.stop();
+      void weeklyInsights.stop();
       autoFinishRunner.stop();
       rawPurgeRunner.stop();
       retentionDeleteRunner.stop();

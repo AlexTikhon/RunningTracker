@@ -40,6 +40,10 @@ import { createOrganizationRouter } from './organizations/organization.routes.js
 import { createInterpretationService } from './runs/interpretation/interpretation-factory.js';
 import type { RunSearchInterpreter } from './runs/interpretation/interpretation-types.js';
 import { createRunRouter } from './runs/run.routes.js';
+import type { LlmProvider } from './insights/llm-provider.js';
+import { createWeeklyInsightService } from './insights/weekly-insight-factory.js';
+import type { WeeklyInsightService } from './insights/weekly-insight-service.js';
+import { createWeeklyInsightRouter } from './insights/weekly-insight.routes.js';
 import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 
 export interface AppDependencies {
@@ -56,7 +60,11 @@ export interface AppDependencies {
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   /** Replaces the configured interpreter in tests, so that no test can reach a provider. */
   testOnlyRunSearchInterpreter?: RunSearchInterpreter;
+  /** Replaces the configured weekly insight model in tests, so that no test can reach Ollama. */
+  testOnlyWeeklyInsightProvider?: LlmProvider;
   testOnlyRouter?: Router;
+  /** The weekly insight service; built from the configuration when omitted. The caller stops its queue at shutdown. */
+  weeklyInsights?: WeeklyInsightService;
 }
 
 export function createApp({
@@ -72,10 +80,12 @@ export function createApp({
   archiveTileScheduler,
   testOnlyFaultInjector,
   testOnlyRunSearchInterpreter,
+  testOnlyWeeklyInsightProvider,
   testOnlyRouter,
+  weeklyInsights,
 }: AppDependencies): Express {
   if (
-    (testOnlyFaultInjector || testOnlyRouter || testOnlyRunSearchInterpreter) &&
+    (testOnlyFaultInjector || testOnlyRouter || testOnlyRunSearchInterpreter || testOnlyWeeklyInsightProvider) &&
     config.APP_ENV !== 'test'
   ) {
     throw new Error('test-only app dependencies require APP_ENV=test');
@@ -108,6 +118,15 @@ export function createApp({
     logger,
     metrics: metrics.interpretation,
   });
+  const insights =
+    weeklyInsights ??
+    createWeeklyInsightService({
+      clock,
+      config,
+      logger,
+      pool: pool as Pick<Pool, 'connect'>,
+      ...(testOnlyWeeklyInsightProvider ? { provider: testOnlyWeeklyInsightProvider } : {}),
+    });
   const archiveTiles = archiveTileCache ?? new ArchiveTileCache({ clock });
   const archiveTileGenerations =
     archiveTileScheduler ?? new ArchiveTileGenerationScheduler();
@@ -193,6 +212,7 @@ export function createApp({
       sessionManager: sessions,
     }),
   );
+  app.use('/api/orgs/:orgId/insights', createWeeklyInsightRouter({ config, insights, sessionManager: sessions }));
   if (testOnlyRouter) {
     app.use('/api', testOnlyRouter);
   }

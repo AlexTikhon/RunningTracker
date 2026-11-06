@@ -59,6 +59,7 @@ export async function prepareTenantIsolationFixtures(
       );
     }
 
+    await client.query('DELETE FROM weekly_insights');
     await client.query('DELETE FROM activities');
     await client.query('DELETE FROM daily_metrics');
     await client.query('DELETE FROM erasure_ledger');

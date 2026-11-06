@@ -35,6 +35,7 @@ import {
   userLabels,
   type AccessSnapshot,
   type ActivityState,
+  type InsightLabel,
   type AccessState,
   type Check,
   type DatabaseState,
@@ -83,11 +84,21 @@ const ids = {
     F: 'd1200000-0000-4000-8000-0000000000e2',
   },
   // ADR-0074: check-in day G is deleted by its owner after the backup, H survives. Days are keyed by date; the dates
-  // are fixed (any past date works) so the scenario does not depend on the clock's zone.
+  // are fixed (any past date works) so the scenario does not depend on the clock's zone. ADR-0076: they are in 2020,
+  // far from every fixture run (which are dated relative to the clock), so that no run deletion replayed before the
+  // erasures can touch the weekly insight of their week.
   dailyMetrics: {
-    G: '2026-01-10',
-    H: '2026-01-11',
+    G: '2020-01-18',
+    H: '2020-01-19',
   },
+  // ADR-0076: activity E and F start on a fixed date too, in the week before G and H, for the same reason.
+  activityStartedAt: '2020-01-08T09:00:00.000Z',
+  // ADR-0076: the Mondays of the weekly insights (Europe/Warsaw): E's week, G's week, and a week without erased records.
+  insightWeeks: {
+    activityWeek: '2020-01-06',
+    checkInWeek: '2020-01-13',
+    survivorWeek: '2019-12-30',
+  } satisfies Record<InsightLabel, string>,
 };
 
 const labels = ['A', 'B', 'C', 'D'] as const;
@@ -394,6 +405,10 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
           f: boolean;
           g: boolean;
           h: boolean;
+          insight_activity: boolean;
+          insight_check_in: boolean;
+          insight_digest: string | null;
+          insight_survivor: boolean;
           outbox: string;
         }>(
           `SELECT EXISTS (SELECT 1 FROM activities WHERE org_id = $1 AND id = $2) AS e,
@@ -403,15 +418,36 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
                   EXISTS (SELECT 1 FROM daily_metrics WHERE org_id = $1 AND user_id = $4 AND local_date = $6::date) AS h,
                   (SELECT md5(metric::text) FROM daily_metrics AS metric
                    WHERE org_id = $1 AND user_id = $4 AND local_date = $6::date) AS day_digest,
-                  (SELECT count(*) FROM erasure_ledger)::text AS outbox`,
-          [ids.org, ids.activities.E, ids.activities.F, ids.ownerUser, ids.dailyMetrics.G, ids.dailyMetrics.H],
+                  (SELECT count(*) FROM erasure_ledger)::text AS outbox,
+                  EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $4 AND week_start = $7::date) AS insight_activity,
+                  EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $4 AND week_start = $8::date) AS insight_check_in,
+                  EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $4 AND week_start = $9::date) AS insight_survivor,
+                  (SELECT md5(insight::text) FROM weekly_insights AS insight
+                   WHERE org_id = $1 AND user_id = $4 AND week_start = $9::date) AS insight_digest`,
+          [
+            ids.org,
+            ids.activities.E,
+            ids.activities.F,
+            ids.ownerUser,
+            ids.dailyMetrics.G,
+            ids.dailyMetrics.H,
+            ids.insightWeeks.activityWeek,
+            ids.insightWeeks.checkInWeek,
+            ids.insightWeeks.survivorWeek,
+          ],
         );
         const value = row.rows[0]!;
         return {
           outboxRows: Number(value.outbox),
           present: { E: value.e, F: value.f },
           presentDays: { G: value.g, H: value.h },
+          presentInsights: {
+            activityWeek: value.insight_activity,
+            checkInWeek: value.insight_check_in,
+            survivorWeek: value.insight_survivor,
+          },
           survivorDayDigest: value.day_digest ?? 'missing',
+          survivorInsightDigest: value.insight_digest ?? 'missing',
           survivorDigest: value.digest ?? 'missing',
         } satisfies ActivityState;
       });
@@ -817,7 +853,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
           `INSERT INTO activities (org_id, id, user_id, type, started_at, duration_s, distance_m, rpe, notes, created_at)
            VALUES ($1, $2, $4, 'swim', $5, 1800, 1500, 4, 'drill fixture', $6),
                   ($1, $3, $4, 'strength', $5, 2700, NULL, 7, NULL, $6)`,
-          [ids.org, ids.activities.E, ids.activities.F, ids.ownerUser, new Date(now - 3 * dayMs), new Date(now - 3 * dayMs + 60_000)],
+          [ids.org, ids.activities.E, ids.activities.F, ids.ownerUser, ids.activityStartedAt, new Date(now - 3 * dayMs + 60_000)],
         );
         // ADR-0074: two of the owner's check-in days, both in the backup; ids and timestamps are database defaults.
         await client.query(
@@ -825,6 +861,18 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
            VALUES ($1, $2, $3, 'Europe/Warsaw', 71.80, 455, 4, 'drill fixture'),
                   ($1, $2, $4, 'Europe/Warsaw', NULL, 400, 3, NULL)`,
           [ids.org, ids.ownerUser, ids.dailyMetrics.G, ids.dailyMetrics.H],
+        );
+        // ADR-0076: three of the owner's weekly insights, all in the backup (the table exists in the older schema; the
+        // erasure triggers arrive with the catch-up migration). Ready ones, so a resurrected insight would carry text.
+        await client.query(
+          `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model,
+                                        prompt_version, status, output)
+           SELECT $1, $2, week.start, 'Europe/Warsaw', week.start::timestamp AT TIME ZONE 'Europe/Warsaw',
+                  (week.start + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('d', 64), 'fake', 'weekly-insight-v1', 'ready',
+                  jsonb_build_object('summary', 'Drill fixture.', 'observations', jsonb_build_array(), 'suggestion', 'Rest.',
+                                     'dataGaps', jsonb_build_array())
+           FROM unnest($3::date[]) AS week(start)`,
+          [ids.org, ids.ownerUser, Object.values(ids.insightWeeks)],
         );
         // Run C also carries the shares of the access scenario (the grantee's was seeded with the run).
         await client.query(

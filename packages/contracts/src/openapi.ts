@@ -48,6 +48,12 @@ import {
   trackPointSchema,
 } from './models.js';
 import { revisionSchema, seqSchema, timestampSchema, uuidSchema } from './primitives.js';
+import {
+  createWeeklyInsightRequestSchema,
+  weeklyInsightAcceptedSchema,
+  weeklyInsightOutputSchema,
+  weeklyInsightViewSchema,
+} from './weekly-insights.js';
 
 function jsonSchema(schema: ZodType): Record<string, unknown> {
   const generated: Record<string, unknown> = z.toJSONSchema(schema);
@@ -94,6 +100,7 @@ export const openApiDocument = {
     { name: 'Runs' },
     { name: 'Activities' },
     { name: 'Daily metrics' },
+    { name: 'Insights' },
     { name: 'Shares' },
     { name: 'Live reads' },
     { name: 'Archive' },
@@ -371,6 +378,28 @@ export const openApiDocument = {
         responses: { '204': noContentResponse, ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/insights/weekly': {
+      post: {
+        tags: ['Insights'],
+        summary: "Ask for the signed-in person's weekly insight",
+        description:
+          "Owner-only derived health data (ADR-0076). The server computes the week's numbers (check-in coverage, sleep, mood, soreness, weight, manual activities by type, GPS runs reported separately from manual runs) from the person's own records; free-text notes are never used. A local language model then writes text about those numbers only, and the server discards any answer that is not the schema, uses a number or metric key that is not in the computed data (failed_grounding), or contains medical content (failed_safety). The week runs Monday to Sunday in the time zone stored on the person's check-ins in that week, or in `timeZone` when there are none; a week starting after today in `timeZone` is refused (400 INVALID_REQUEST). Answers 202 at once; generation runs in the background, one at a time per server, and the result is read with GET. The same computed data, model and prompt version return the existing insight instead of generating again; a different input replaces the week's insight. Asking again resumes a `pending` insight whose generation was lost to a restart and retries a `generation_failed` one; a `failed_grounding` or `failed_safety` result is returned as it is until the data changes. Deleting an activity, a check-in or a GPS run, or changing a check-in, deletes the insights of the affected week in the same transaction. 503 WEEKLY_INSIGHTS_DISABLED when no model is configured, 503 WEEKLY_INSIGHTS_BUSY when the generation queue is full. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), ...csrfParameters],
+        requestBody: requestBody('CreateWeeklyInsightRequest'),
+        responses: {
+          '202': jsonResponse('Accepted, or the existing insight for the same input; read it with GET.', 'WeeklyInsightAccepted'),
+          ...defaultErrors,
+        },
+      },
+      get: {
+        tags: ['Insights'],
+        summary: "Read the signed-in person's insight for one week",
+        description:
+          "The week's insight with its status. `output` is present only when the status is `ready`; a failed status never carries model output. A week without an insight, and anyone else's, is 404 WEEKLY_INSIGHT_NOT_FOUND. Readable also when generation is disabled. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), parameterRef('WeekStart')],
+        responses: { '200': jsonResponse('The insight.', 'WeeklyInsightView'), ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/runs/{runId}/commands': {
       post: {
         tags: ['Runs'],
@@ -582,6 +611,13 @@ export const openApiDocument = {
         description: 'Last local date of the range, inclusive (YYYY-MM-DD). Not before `from`; at most 92 days from it.',
         schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
       },
+      WeekStart: {
+        name: 'weekStart',
+        in: 'query',
+        required: true,
+        description: 'The Monday the week starts on, as a local calendar date (YYYY-MM-DD), not before 2000-01-01.',
+        schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+      },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
       CsrfToken: { name: 'x-csrf-token', in: 'header', required: true, schema: { type: 'string' } },
@@ -698,6 +734,10 @@ export const openApiDocument = {
       PutDailyMetricsRequest: jsonSchema(putDailyMetricsRequestSchema),
       DailyMetricsView: jsonSchema(dailyMetricsViewSchema),
       DailyMetricsListResponse: jsonSchema(dailyMetricsListResponseSchema),
+      CreateWeeklyInsightRequest: jsonSchema(createWeeklyInsightRequestSchema),
+      WeeklyInsightAccepted: jsonSchema(weeklyInsightAcceptedSchema),
+      WeeklyInsightOutput: jsonSchema(weeklyInsightOutputSchema),
+      WeeklyInsightView: jsonSchema(weeklyInsightViewSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
       RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),
       RunSearchInterpretationResponse: jsonSchema(runSearchInterpretationResponseSchema),

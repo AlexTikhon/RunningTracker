@@ -108,15 +108,19 @@ const restoredActivities: ActivityState = {
   outboxRows: 0,
   present: { E: true, F: true },
   presentDays: { G: true, H: true },
+  presentInsights: { activityWeek: true, checkInWeek: true, survivorWeek: true },
   survivorDayDigest: 'digest-h',
   survivorDigest: 'digest-f',
+  survivorInsightDigest: 'digest-insight',
 };
 const activitiesAfterFirst: ActivityState = {
   outboxRows: 2,
   present: { E: false, F: true },
   presentDays: { G: false, H: true },
+  presentInsights: { activityWeek: false, checkInWeek: false, survivorWeek: true },
   survivorDayDigest: 'digest-h',
   survivorDigest: 'digest-f',
+  survivorInsightDigest: 'digest-insight',
 };
 const erasureOutcomes = (overrides: Partial<ReapplyErasureRun['outcomes']>): ReapplyErasureRun['outcomes'] => ({
   absent: 0,
@@ -152,10 +156,31 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
       'erased-daily-metric-absent',
       'surviving-activity-untouched',
       'surviving-daily-metric-untouched',
+      'derived-insights-existed-in-backup',
+      'derived-insights-erased',
+      'surviving-insight-untouched',
       'erasure-journaled-again',
       'erasure-second-pass-idempotent',
       'erasure-second-pass-changes-nothing',
     ]);
+  });
+
+  it('fails when the weekly insights were not in the backup, survive the replay, or the survivor changed (ADR-0076)', () => {
+    const missing = { ...restoredActivities, presentInsights: { activityWeek: true, checkInWeek: false, survivorWeek: true } };
+    expect(failed(evaluateErasures({ restored: missing }))).toContain('derived-insights-existed-in-backup');
+    for (const kept of [
+      { activityWeek: true, checkInWeek: false, survivorWeek: true },
+      { activityWeek: false, checkInWeek: true, survivorWeek: true },
+    ]) {
+      const resurrected = { ...activitiesAfterFirst, presentInsights: kept };
+      expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: structuredClone(resurrected) }))).toEqual(['derived-insights-erased']);
+    }
+    const gone = { ...activitiesAfterFirst, presentInsights: { activityWeek: false, checkInWeek: false, survivorWeek: false } };
+    expect(failed(evaluateErasures({ afterFirst: gone, afterSecond: structuredClone(gone) }))).toEqual(['surviving-insight-untouched']);
+    const changed = { ...activitiesAfterFirst, survivorInsightDigest: 'other' };
+    expect(failed(evaluateErasures({ afterFirst: changed, afterSecond: structuredClone(changed) }))).toEqual(['surviving-insight-untouched']);
+    const lateDelete = { ...activitiesAfterFirst, presentInsights: { activityWeek: false, checkInWeek: false, survivorWeek: false } };
+    expect(failed(evaluateErasures({ afterSecond: lateDelete }))).toEqual(['erasure-second-pass-changes-nothing']);
   });
 
   it('fails when the erased activity was not in the backup, because the drill would prove nothing', () => {

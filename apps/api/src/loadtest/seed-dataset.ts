@@ -15,6 +15,7 @@ import {
 export const loadDatabaseSuffix = '_load_test';
 
 const seededTables = [
+  'weekly_insights',
   'activities',
   'daily_metrics',
   'erasure_ledger',

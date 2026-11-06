@@ -18,6 +18,12 @@ import {
   withoutRunSearchAiFields,
 } from './run-search-ai-config.js';
 import { resolveSecretFiles } from './secret-files.js';
+import {
+  buildWeeklyInsightsConfig,
+  checkWeeklyInsightsEnvironment,
+  weeklyInsightsEnvironmentFields,
+  withoutWeeklyInsightsFields,
+} from './weekly-insights-config.js';
 
 const localLiveTrackCursorSigningKey =
   'cnVubmluZy10cmFja2VyLWxvY2FsLWN1cnNvci1rZXktdjE';
@@ -263,6 +269,7 @@ const environmentSchema = z
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
     ...oidcEnvironmentFields,
     ...runSearchAiEnvironmentFields,
+    ...weeklyInsightsEnvironmentFields,
   })
   .superRefine((environment, context) => {
     let runtime: ParsedDatabaseConnection | undefined;
@@ -390,16 +397,20 @@ const environmentSchema = z
     }
     checkOidcEnvironment(environment, environment, context);
     checkRunSearchAiEnvironment(environment, environment, context);
+    checkWeeklyInsightsEnvironment(environment, environment, context);
   })
-  // The raw OIDC_* and RUN_SEARCH_AI_* variables (including the secrets) are replaced by one structured value each.
+  // The raw OIDC_*, RUN_SEARCH_AI_* and WEEKLY_INSIGHTS_* variables (including the secrets) are replaced by one
+  // structured value each.
   .transform((environment) => {
-    const application = withoutRunSearchAiFields(withoutOidcFields(environment));
+    const application = withoutWeeklyInsightsFields(withoutRunSearchAiFields(withoutOidcFields(environment)));
     const oidc = buildOidcConfig(environment);
     const runSearchAi = buildRunSearchAiConfig(environment);
+    const weeklyInsights = buildWeeklyInsightsConfig(environment);
     return {
       ...application,
       ...(oidc ? { OIDC: oidc } : {}),
       ...(runSearchAi ? { RUN_SEARCH_AI: runSearchAi } : {}),
+      ...(weeklyInsights ? { WEEKLY_INSIGHTS: weeklyInsights } : {}),
     };
   });
 

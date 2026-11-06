@@ -4,3 +4,5 @@
 # Sanitized GPS fixtures and the generated D10 trace report are LF on every platform so their hashes are stable.
 apps/api/test/fixtures/gps-traces/*.trace.json text eol=lf
 docs/reports/d10-real-traces.md text eol=lf
+# Weekly insight prompt snapshots are compared byte for byte by toMatchFileSnapshot on every platform.
+apps/api/src/insights/__snapshots__/* text eol=lf

@@ -32,6 +32,9 @@
       "name": "Daily metrics"
     },
     {
+      "name": "Insights"
+    },
+    {
       "name": "Shares"
     },
     {
@@ -867,6 +870,81 @@
         }
       }
     },
+    "/api/orgs/{orgId}/insights/weekly": {
+      "post": {
+        "tags": [
+          "Insights"
+        ],
+        "summary": "Ask for the signed-in person's weekly insight",
+        "description": "Owner-only derived health data (ADR-0076). The server computes the week's numbers (check-in coverage, sleep, mood, soreness, weight, manual activities by type, GPS runs reported separately from manual runs) from the person's own records; free-text notes are never used. A local language model then writes text about those numbers only, and the server discards any answer that is not the schema, uses a number or metric key that is not in the computed data (failed_grounding), or contains medical content (failed_safety). The week runs Monday to Sunday in the time zone stored on the person's check-ins in that week, or in `timeZone` when there are none; a week starting after today in `timeZone` is refused (400 INVALID_REQUEST). Answers 202 at once; generation runs in the background, one at a time per server, and the result is read with GET. The same computed data, model and prompt version return the existing insight instead of generating again; a different input replaces the week's insight. Asking again resumes a `pending` insight whose generation was lost to a restart and retries a `generation_failed` one; a `failed_grounding` or `failed_safety` result is returned as it is until the data changes. Deleting an activity, a check-in or a GPS run, or changing a check-in, deletes the insights of the affected week in the same transaction. 503 WEEKLY_INSIGHTS_DISABLED when no model is configured, 503 WEEKLY_INSIGHTS_BUSY when the generation queue is full. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWeeklyInsightRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WeeklyInsightAccepted"
+                }
+              }
+            },
+            "description": "Accepted, or the existing insight for the same input; read it with GET."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Insights"
+        ],
+        "summary": "Read the signed-in person's insight for one week",
+        "description": "The week's insight with its status. `output` is present only when the status is `ready`; a failed status never carries model output. A week without an insight, and anyone else's, is 404 WEEKLY_INSIGHT_NOT_FOUND. Readable also when generation is disabled. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/WeekStart"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WeeklyInsightView"
+                }
+              }
+            },
+            "description": "The insight."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/runs/{runId}/commands": {
       "post": {
         "tags": [
@@ -1477,6 +1555,16 @@
         "in": "query",
         "required": true,
         "description": "Last local date of the range, inclusive (YYYY-MM-DD). Not before `from`; at most 92 days from it.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "WeekStart": {
+        "name": "weekStart",
+        "in": "query",
+        "required": true,
+        "description": "The Monday the week starts on, as a local calendar date (YYYY-MM-DD), not before 2000-01-01.",
         "schema": {
           "type": "string",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
@@ -3565,6 +3653,228 @@
         },
         "required": [
           "items"
+        ],
+        "additionalProperties": false
+      },
+      "CreateWeeklyInsightRequest": {
+        "type": "object",
+        "properties": {
+          "timeZone": {
+            "type": "string"
+          },
+          "weekStart": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "timeZone",
+          "weekStart"
+        ],
+        "additionalProperties": false
+      },
+      "WeeklyInsightAccepted": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "ready",
+              "generation_failed",
+              "failed_grounding",
+              "failed_safety"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "WeeklyInsightOutput": {
+        "type": "object",
+        "properties": {
+          "dataGaps": {
+            "maxItems": 6,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "observations": {
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "metricKeys": {
+                  "minItems": 1,
+                  "maxItems": 6,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z][A-Za-z0-9]*(?:\\.[A-Za-z][A-Za-z0-9]*)*$"
+                  }
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "metricKeys",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "suggestion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600
+          }
+        },
+        "required": [
+          "dataGaps",
+          "observations",
+          "suggestion",
+          "summary"
+        ],
+        "additionalProperties": false
+      },
+      "WeeklyInsightView": {
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "dataGaps": {
+                    "maxItems": 6,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "observations": {
+                    "maxItems": 4,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "metricKeys": {
+                          "minItems": 1,
+                          "maxItems": 6,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^[A-Za-z][A-Za-z0-9]*(?:\\.[A-Za-z][A-Za-z0-9]*)*$"
+                          }
+                        },
+                        "text": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        }
+                      },
+                      "required": [
+                        "metricKeys",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "suggestion": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 600
+                  }
+                },
+                "required": [
+                  "dataGaps",
+                  "observations",
+                  "suggestion",
+                  "summary"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "promptVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "ready",
+              "generation_failed",
+              "failed_grounding",
+              "failed_safety"
+            ]
+          },
+          "timeZone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "weekStart": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "createdAt",
+          "id",
+          "model",
+          "output",
+          "promptVersion",
+          "status",
+          "timeZone",
+          "weekStart"
         ],
         "additionalProperties": false
       },

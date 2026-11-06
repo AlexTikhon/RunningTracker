@@ -96,6 +96,13 @@ export type ActivityLabel = 'E' | 'F';
  */
 export type DailyMetricLabel = 'G' | 'H';
 
+/**
+ * The fixture weekly insights of the same scenario (ADR-0076), all in the backup: one for the week of activity E, one for
+ * the week of check-in day G, and one for a week without any erased record. The replay must delete the first two (the
+ * derived data of the erased records) and leave the third as it was.
+ */
+export type InsightLabel = 'activityWeek' | 'checkInWeek' | 'survivorWeek';
+
 /** The number of owner-only records the scenario deletes after the backup: activity E and day G. */
 export const ERASURES_AFTER_BACKUP = 2;
 
@@ -104,10 +111,13 @@ export interface ActivityState {
   outboxRows: number;
   present: Record<ActivityLabel, boolean>;
   presentDays: Record<DailyMetricLabel, boolean>;
+  presentInsights: Record<InsightLabel, boolean>;
   /** Digest over the surviving activity's row, so its content is compared, not just its presence. */
   survivorDigest: string;
   /** Digest over the surviving day's row. */
   survivorDayDigest: string;
+  /** Digest over the surviving insight's row. */
+  survivorInsightDigest: string;
 }
 
 export interface ReapplyErasureRun {
@@ -172,6 +182,21 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
     afterFirst.presentDays.H && afterFirst.survivorDayDigest === restored.survivorDayDigest,
   );
   add(
+    'derived-insights-existed-in-backup',
+    'The weekly insights of the weeks of E and G, and of a week without erased records, are all in the restored backup (ADR-0076)',
+    restored.presentInsights.activityWeek && restored.presentInsights.checkInWeek && restored.presentInsights.survivorWeek,
+  );
+  add(
+    'derived-insights-erased',
+    'After the replay, the weekly insights of the weeks that contain the erased activity and check-in day are gone',
+    !afterFirst.presentInsights.activityWeek && !afterFirst.presentInsights.checkInWeek,
+  );
+  add(
+    'surviving-insight-untouched',
+    'The weekly insight of a week without erased records is present and unchanged',
+    afterFirst.presentInsights.survivorWeek && afterFirst.survivorInsightDigest === restored.survivorInsightDigest,
+  );
+  add(
     'erasure-journaled-again',
     'The replayed erasure was journaled again on the recovered node, so it is exported from there too',
     afterFirst.outboxRows === restored.outboxRows + first.outcomes.erased,
@@ -183,7 +208,7 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
   );
   add(
     'erasure-second-pass-changes-nothing',
-    'The activities, the check-in days and the erasure outbox after the second replay are identical to those after the first',
+    'The activities, the check-in days, the weekly insights and the erasure outbox after the second replay are identical to those after the first',
     deepEqual(afterSecond, afterFirst),
   );
   return checks;

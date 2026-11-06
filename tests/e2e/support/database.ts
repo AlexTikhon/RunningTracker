@@ -72,6 +72,7 @@ async function deleteOrganizations(client: pg.Client, orgIds: readonly string[])
     return;
   }
   const ids = [orgIds];
+  await client.query('DELETE FROM weekly_insights WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM activities WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM daily_metrics WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM erasure_ledger WHERE org_id = ANY($1::uuid[])', ids);
