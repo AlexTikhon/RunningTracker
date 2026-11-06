@@ -156,10 +156,18 @@ export type DailyMetricsWriter = (
   signal: AbortSignal,
 ) => Promise<{ created: boolean; view: DailyMetricsView }>;
 
+// The server answers 204 whether or not the day still existed, so a repeat after an unknown outcome is always safe.
+export type DailyMetricsRemover = (target: DailyMetricsTarget, csrf: CsrfCredentials, signal: AbortSignal) => Promise<void>;
+
 export type CheckInSavePhase = 'failed' | 'idle' | 'pending' | 'saved';
+
+export type CheckInDeletionPhase = 'failed' | 'idle' | 'pending';
 
 export interface CheckInDaySnapshot {
   date: string;
+  deletion: CheckInDeletionPhase;
+  // "Check-in deleted." after a confirmed deletion, or why the last one failed.
+  deletionMessage: string | null;
   // The day as stored, or null when nothing is recorded (or not loaded yet).
   existing: DailyMetricsView | null;
   load: CheckInListStatus;
@@ -171,19 +179,32 @@ export interface CheckInDaySnapshot {
 }
 
 export function loadingCheckInDay(date: string): CheckInDaySnapshot {
-  return { date, existing: null, load: 'loading', loadMessage: null, save: 'idle', saveMessage: null, uncertain: false };
+  return {
+    date,
+    deletion: 'idle',
+    deletionMessage: null,
+    existing: null,
+    load: 'loading',
+    loadMessage: null,
+    save: 'idle',
+    saveMessage: null,
+    uncertain: false,
+  };
 }
 
 export interface CheckInDayControllerOptions {
   csrf: () => CsrfCredentials;
   date: string;
   onChange: (snapshot: CheckInDaySnapshot) => void;
+  // Called once per confirmed deletion, after the snapshot that shows the day empty.
+  onDeleted: (date: string) => void;
   // Called once each time a date's stored values arrive (null: nothing recorded), so the form can show them.
   onLoaded: (date: string, existing: DailyMetricsView | null) => void;
   // Called once per confirmed save, after the `saved` snapshot.
   onSaved: (view: DailyMetricsView, created: boolean) => void;
   orgId: string;
   read: DailyMetricsReader;
+  remove: DailyMetricsRemover;
   signal?: AbortSignal;
   // The zone the person is in now: the server uses it to refuse a date after today, and stores it on a first write.
   timeZone: string;
@@ -210,8 +231,28 @@ function unknownOutcomeText(error: unknown): string {
   return `The save was not confirmed: ${reason} Saving again is safe: the day is replaced, never duplicated.`;
 }
 
+function deletionFailureText(error: unknown): string {
+  if (error instanceof RunnerApiError) {
+    if (error.status === 401) return 'The check-in was not deleted: sign in again, then delete it.';
+    if (error.status === 403) return 'The check-in was not deleted: you no longer have access to this organization.';
+    if (error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status)) {
+      return `The check-in was not deleted: ${serverText(error)}`;
+    }
+  }
+  const reason =
+    error instanceof RunnerApiError
+      ? serverText(error)
+      : error instanceof DOMException && error.name === 'TimeoutError'
+        ? 'the server did not answer in time.'
+        : 'the connection failed.';
+  return `The deletion was not confirmed: ${reason} Deleting again is safe.`;
+}
+
+// One mutation at a time, and it belongs to the date it was sent for: while a save or a deletion is pending, the
+// other is refused and so is another date.
 export class CheckInDayController {
   readonly #options: CheckInDayControllerOptions;
+  #deleteRequest: AbortController | null = null;
   #disposed = false;
   #loadRequest: AbortController | null = null;
   #saveRequest: AbortController | null = null;
@@ -232,34 +273,52 @@ export class CheckInDayController {
     this.#loadDate(this.#snapshot.date);
   }
 
-  /** Shows another date. Refused (false) while a save is pending, so a save's answer always belongs to its date. */
+  /**
+   * Shows another date. Refused (false) while a save or a deletion is pending, so its answer always belongs to its date.
+   */
   public select(date: string): boolean {
-    if (this.#disposed || this.#saveRequest !== null) return false;
+    if (this.#disposed || this.#mutating()) return false;
     if (date === this.#snapshot.date && this.#snapshot.load !== 'error' && this.#snapshot.load !== 'access-denied') return true;
     this.#loadDate(date);
     return true;
   }
 
   public retry(): void {
-    if (this.#disposed || this.#saveRequest !== null) return;
+    if (this.#disposed || this.#mutating()) return;
     if (this.#snapshot.load === 'error' || this.#snapshot.load === 'access-denied') this.#loadDate(this.#snapshot.date);
   }
 
   public save(values: CheckInValues): void {
-    if (this.#disposed || this.#saveRequest !== null || this.#snapshot.load !== 'ready') return;
+    if (this.#disposed || this.#mutating() || this.#snapshot.load !== 'ready') return;
     const date = this.#snapshot.date;
     const controller = new AbortController();
     this.#saveRequest = controller;
-    this.#emit({ save: 'pending', saveMessage: null });
+    this.#emit({ deletion: 'idle', deletionMessage: null, save: 'pending', saveMessage: null });
     void this.#runSave(controller, date, { ...values, timeZone: this.#options.timeZone });
+  }
+
+  /** Deletes the shown day. Only a day with a stored record can be deleted; the caller asks for confirmation first. */
+  public deleteDay(): void {
+    if (this.#disposed || this.#mutating() || this.#snapshot.load !== 'ready' || this.#snapshot.existing === null) return;
+    const date = this.#snapshot.date;
+    const controller = new AbortController();
+    this.#deleteRequest = controller;
+    this.#emit({ deletion: 'pending', deletionMessage: null, save: 'idle', saveMessage: null });
+    void this.#runDelete(controller, date);
   }
 
   public dispose(): void {
     this.#disposed = true;
     this.#loadRequest?.abort();
     this.#saveRequest?.abort();
+    this.#deleteRequest?.abort();
     this.#loadRequest = null;
     this.#saveRequest = null;
+    this.#deleteRequest = null;
+  }
+
+  #mutating(): boolean {
+    return this.#saveRequest !== null || this.#deleteRequest !== null;
   }
 
   #emit(patch: Partial<CheckInDaySnapshot>): void {
@@ -333,5 +392,22 @@ export class CheckInDayController {
       uncertain: false,
     });
     this.#options.onSaved(result.view, result.created);
+  }
+
+  async #runDelete(controller: AbortController, date: string): Promise<void> {
+    const current = () => !this.#disposed && this.#deleteRequest === controller && !controller.signal.aborted;
+    try {
+      await this.#options.remove({ localDate: date, orgId: this.#options.orgId }, this.#options.csrf(), controller.signal);
+    } catch (error) {
+      if (!current() || isAbort(error)) return;
+      this.#deleteRequest = null;
+      // The stored values stay shown: after a refusal they are still there, after an unknown outcome they may be.
+      this.#emit({ deletion: 'failed', deletionMessage: deletionFailureText(error) });
+      return;
+    }
+    if (!current()) return;
+    this.#deleteRequest = null;
+    this.#emit({ deletion: 'idle', deletionMessage: 'Check-in deleted.', existing: null, uncertain: false });
+    this.#options.onDeleted(date);
   }
 }

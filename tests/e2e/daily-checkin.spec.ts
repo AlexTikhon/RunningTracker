@@ -4,8 +4,9 @@ import { expect, test } from './support/fixtures.js';
 import { expectOrganizationSelected, expectSignedIn, expectSignedOut } from './support/session.js';
 
 // The Check-in tab (ADR-0074): the demo runner records today's check-in, sees it in the 14-day history among empty
-// days, replaces it after a reload, and opens an earlier day. The demo people and their organization are created in the
-// _test database by the demoScenario fixture, whose cleanup removes the organization's check-ins with it.
+// days, replaces it after a reload, and opens an earlier day; and deletes a day after confirming (ADR-0075). The demo
+// people and their organization are created in the _test database by the demoScenario fixture, whose cleanup removes
+// the organization's check-ins with it.
 
 // A fixed browser zone and locale. The API runs on the real clock, so "today" is computed here the same way.
 const timeZone = 'Europe/Warsaw';
@@ -118,4 +119,68 @@ test('the demo runner checks in for today, sees it among empty days, replaces it
   await expect(form.getByLabel('Mood (optional)')).toHaveValue('');
   await expect(days.nth(1)).toHaveAttribute('aria-current', 'date');
   expect(mutations).toHaveLength(2);
+});
+
+test('the demo runner deletes a check-in day after confirming it, and it stays gone after a reload', async ({
+  demoScenario,
+  environment,
+  page,
+}) => {
+  const today = dateIn(timeZone, Date.now());
+  test.skip(dateIn(timeZone, Date.now() + 120_000) !== today, 'Too close to midnight in Warsaw for a stable "today"');
+
+  const mutations: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.includes('/daily-metrics') && request.method() !== 'GET') mutations.push(`${request.method()} ${url.pathname}`);
+  });
+  const dayPath = `/api/orgs/${demoScenario.orgId}/daily-metrics/${today}`;
+
+  await page.goto(environment.demoWebOrigin);
+  await expectSignedOut(page);
+  await page.getByRole('region', { name: 'Local demo sign-in' }).getByRole('button', { name: 'Demo runner' }).click();
+  await expectSignedIn(page, demoScenario.runnerUserId);
+  await expectOrganizationSelected(page, demoScenario.orgId);
+
+  await openCheckIn(page);
+  const form = page.getByRole('form', { name: 'Daily check-in' });
+  const history = page.getByRole('list', { name: 'Last 14 days' });
+  const days = history.locator(':scope > li');
+
+  // An empty day has nothing to delete.
+  await expect(form.getByText(/^Nothing recorded for .+ yet\.$/u)).toBeVisible();
+  await expect(form.getByRole('button', { name: /^Delete the check-in of / })).toHaveCount(0);
+
+  await form.getByLabel('Mood (optional)').selectOption('3');
+  await form.getByLabel('Note (optional)').fill('To be deleted');
+  await form.getByRole('button', { name: 'Save check-in' }).click();
+  await expect(form.getByText('Check-in saved.')).toBeVisible();
+  await expect(days.first()).toContainText('To be deleted');
+
+  // Asking first, and Cancel deletes nothing.
+  await form.getByRole('button', { name: /^Delete the check-in of / }).click();
+  const confirmation = form.getByRole('region', { name: /^Delete the check-in of .+\?$/u });
+  await expect(confirmation.getByText(/is removed permanently\. This cannot be undone\.$/u)).toBeVisible();
+  await confirmation.getByRole('button', { name: 'Cancel' }).click();
+  await expect(confirmation).toHaveCount(0);
+  expect(mutations).toEqual([`PUT ${dayPath}`]);
+
+  await form.getByRole('button', { name: /^Delete the check-in of / }).click();
+  await confirmation.getByRole('button', { name: 'Confirm delete' }).click();
+
+  await expect(form.getByText('Check-in deleted.')).toBeVisible();
+  await expect(form.getByText(/^Nothing recorded for .+ yet\.$/u)).toBeVisible();
+  await expect(form.getByLabel('Mood (optional)')).toHaveValue('');
+  await expect(form.getByLabel('Note (optional)')).toHaveValue('');
+  await expect(form.getByRole('button', { name: /^Delete the check-in of / })).toHaveCount(0);
+  await expect(history.getByText('No check-in')).toHaveCount(14);
+  await expect(page.getByRole('heading', { level: 1, name: 'Check-in' })).toBeFocused();
+  expect(mutations).toEqual([`PUT ${dayPath}`, `DELETE ${dayPath}`]);
+
+  // Deleted on the server, not only on the screen.
+  await page.reload();
+  await expectSignedIn(page, demoScenario.runnerUserId);
+  await openCheckIn(page);
+  await expect(form.getByText(/^Nothing recorded for .+ yet\.$/u)).toBeVisible();
+  await expect(history.getByText('No check-in')).toHaveCount(14);
 });

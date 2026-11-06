@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import { historyDays, localDateIn } from './daily-checkin.js';
-import { CheckInHistory, DailyCheckInScreen } from './DailyCheckInScreen.js';
+import { CheckInDeletion, CheckInHistory, DailyCheckInScreen, type CheckInDeletionProps } from './DailyCheckInScreen.js';
 import { defaultTimeZone } from './run-search.js';
 
 const orgId = '11111111-1111-4111-8111-111111111111';
@@ -67,6 +67,52 @@ describe('DailyCheckInScreen', () => {
     expect(markup).toContain('Last 14 days');
     expect(markup).toContain('Loading your recent check-ins…');
     expect(markup).not.toContain(orgId);
+  });
+
+  it('offers no deletion before the day is loaded', () => {
+    expect(markup).not.toContain('Delete check-in');
+  });
+});
+
+describe('CheckInDeletion', () => {
+  const props: CheckInDeletionProps = {
+    confirming: false,
+    dateLabel: 'Thu, 5 Nov 2026',
+    disabled: false,
+    failure: null,
+    onCancel: () => undefined,
+    onConfirm: () => undefined,
+    onStart: () => undefined,
+    phase: 'idle',
+  };
+  const render = (overrides: Partial<CheckInDeletionProps>) => renderToStaticMarkup(<CheckInDeletion {...props} {...overrides} />);
+
+  it('starts as one button naming the day, which asks first and deletes nothing by itself', () => {
+    const markup = render({});
+    expect(markup).toContain('aria-label="Delete the check-in of Thu, 5 Nov 2026"');
+    expect(markup).toContain('>Delete check-in</button>');
+    expect(markup).not.toContain('Confirm delete');
+    expect(render({ disabled: true })).toMatch(/disabled=""[^>]*>Delete check-in<\/button>/u);
+  });
+
+  it('asks for confirmation, says the deletion is permanent, and can be cancelled', () => {
+    const markup = render({ confirming: true });
+    expect(markup).toContain('aria-label="Delete the check-in of Thu, 5 Nov 2026?"');
+    expect(markup).toContain('<h2>Delete this check-in?</h2>');
+    expect(markup).toContain('Everything recorded for Thu, 5 Nov 2026 is removed permanently. This cannot be undone.');
+    expect(markup).toContain('>Confirm delete</button>');
+    expect(markup).toContain('>Cancel</button>');
+    expect(markup).not.toContain('role="alert"');
+  });
+
+  it('locks both buttons while deleting, and shows why the last attempt failed', () => {
+    const pending = render({ confirming: true, phase: 'pending' });
+    expect(pending).toMatch(/disabled=""[^>]*>Deleting…<\/button>/u);
+    expect(pending).toMatch(/disabled=""[^>]*>Cancel<\/button>/u);
+    const failed = render({ confirming: true, failure: 'The deletion was not confirmed: the connection failed. Deleting again is safe.', phase: 'failed' });
+    expect(failed).toContain('role="alert"');
+    expect(failed).toContain('Deleting again is safe.');
+    expect(failed).toContain('>Confirm delete</button>');
   });
 });
 

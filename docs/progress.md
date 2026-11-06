@@ -3394,3 +3394,97 @@ with `SESSION_STORE_MAX_ENTRIES=1000`; the product default is unchanged. The rer
 UTC). Two devices editing one day overwrite each other without a warning. The web screen keeps the "today" of the
 moment it opened. Firefox (`firefox-core` does not include the new spec), mobile and hosted CI were not run. The
 development database was not migrated.
+
+## CI restructure, session store at capacity, and deleting a check-in day (2026-11-06)
+
+Base: `feat/activities` at `52b0fc3` (ADR-0074 committed). Not committed. ADR-0075 records the three decisions; ADR-0074
+is marked as amended (its "no delete control" is lifted).
+
+**Found during inspection.** (1) `.github/workflows/ci.yml` already existed: one `verify` job that also ran the
+integration suite, and a `browser` matrix (`chromium`, `firefox-core`). The request is a restructure, not a new file.
+(2) The previous workflow's service set `POSTGRES_DB=running_tracker_test`, and the `postgis/postgis` entrypoint installs
+postgis, postgis_topology, fuzzystrmatch and postgis_tiger_geocoder into `POSTGRES_DB`. So the CI test database had
+four extensions that the compose-created local one does not have. Checked on the local container: `running_tracker`
+has five extensions, `running_tracker_test` has `plpgsql,postgis`. (3) Demo sign-in (`POST /api/session`,
+`LOCAL_AUTH_ENABLED=true`) cannot run in a deployed environment: the config refuses it with `APP_ENV=production`
+(`environment.spec.ts`), and the only deployment profile is pinned to `APP_ENV: production` and
+`LOCAL_AUTH_ENABLED: "false"` (`production-profile.test.mjs`). The transport profile that enables it is
+`APP_ENV=development` on `https://localhost:8443`.
+
+**Session store at capacity (ADR-0075, decision 1).** The rule given was to switch to evicting expired and then the
+oldest sessions if demo sign-in is enabled in any deployed environment. It is not, so the store keeps its behaviour:
+expired records are evicted first, and if the store is still full of live sessions the new one is refused
+(`503 SESSION_STORE_UNAVAILABLE`, or `sign_in_error=unavailable` after OIDC). No live session is ever evicted. In
+production the only session source is OIDC sign-in, and oldest-eviction would let one member sign everyone else out by
+signing in 100 times. The revisit trigger is recorded. There is no product code change: new tests only.
+`session-store.spec.ts` (7) covers expired-first eviction, the `expiresAt <= issuedAt` boundary, refusal without
+evicting live sessions, same-digest replacement, revocation freeing a slot, and recovery as sessions expire.
+`oidc-http.spec.ts` (+1) covers the OIDC callback with a full store: `unavailable`, no cookie, the existing session
+still resolves, and a sign-in fits once that session expires.
+
+**CI workflow (ADR-0075, decision 2).** `verify` (npm ci, `npm run verify`, npm cache, no database) is the gate. After it
+passes, these run in parallel: `integration`, three `e2e (chromium n/3)` shards, and `e2e (firefox-core)` (kept from the
+old workflow so no check is removed; not requested). `e2e-report` runs only when a shard failed. It merges the shards'
+blob reports into one HTML report and uploads `playwright-report-chromium`. Each database job uses the compose image and
+digest, the compose `POSTGRES_DB` and superuser, and creates the test database with the compose init script through
+`docker exec ... psql`. `integration` asserts PostgreSQL 17 and `plpgsql,postgis`, and now runs the restore drill instead
+of skipping it: the drill URLs point at the service, pg_dump and pg_restore run inside it, and the key comes from
+`backup:keygen` in the job. No secret is read, `permissions: contents: read`, and superseded pull-request runs are
+cancelled. The Playwright reporter adds `blob` only when `CI` is set. `scripts/ci-workflow.test.mjs` (7 tests, in
+`npm test`) pins the shape: no secrets context, the `needs` graph, image/database/superuser parity with compose, the init
+script before bootstrap and migrations, the TCP health check, the extension assertion, the drill configuration with
+contracts built before keygen, sharding and the report merge, and the README badge. The badge is under the README title.
+
+**Two workflow bugs found by replaying the jobs locally, both fixed and pinned.** The jobs were replayed in a clean
+copy (`git archive HEAD` plus the changed files: no `.env`, no `.local/`, no `dist/`) against a fresh container started
+exactly like the service (port 5499).
+1. `backup:keygen` failed with `ERR_MODULE_NOT_FOUND .../contracts/dist/index.js`: it loads API modules that import the
+   built contracts package, and on a fresh runner only `test:integration`'s pre-hook builds it, after the key is needed.
+   An explicit contracts build now precedes it.
+2. The first `psql` failed with `the database system is shutting down`. The socket `pg_isready` health check passed
+   against the image's temporary initdb server, which listens on the socket only, just before it stopped for the real
+   start. The services now check `pg_isready -h 127.0.0.1`. On GitHub the `npm ci` step would usually have hidden this.
+
+**Shard count: 3.** One full local run with a JSON reporter: 132 tests, 13.8 min, 810 s of test time across 31 files,
+the longest file 80 s (`finish-result`). Playwright's own assignment (`--list --shard`) gives a longest shard of about
+409 s for two shards, 291 s for three and 243 s for four. Each CI shard adds about 3 to 4 minutes of setup, so three is
+the smallest count expected under ~10 minutes. Measured with `CI=1`: shards 1, 2 and 3 passed 47, 43 and 42 tests in
+331, 261 and 304 s wall, servers included. `npx playwright merge-reports --reporter html` merged the three blobs into one
+report. It does not load `playwright.config.ts`: it succeeded with the config's database guard deliberately failing.
+
+**Check-in delete control (ADR-0075, decision 3).** The control is on the day shown in the form, and only for a loaded
+day with a record. **Delete check-in** opens an inline confirmation (permanent, cannot be undone) with **Confirm delete**
+and **Cancel**, the same pattern as activities. `CheckInDayController.deleteDay()` shares one rule with `save()`: one
+mutation at a time, and while either is pending, the other and a change of date are refused. Failure wording: 401/403
+and other definitive 4xx say "not deleted"; anything else says "Deleting again is safe", because the API answers 204 in
+every case. The stored values stay shown after a failure. On success: empty form, "Check-in deleted.", history
+reloaded, focus on the heading. New `deleteDailyMetrics` client call. No API, contract or migration change.
+
+**Executed checks.**
+
+| Command | Before (ADR-0074, `52b0fc3`) | After |
+|---|---|---|
+| `npm run verify` | 2,628: scripts 83, API 1,389, web 964, contracts 175, fixtures 14, simulator 3 | 2,653: scripts 90 (+7 `ci-workflow`), API 1,397 (+7 `session-store`, +1 OIDC), web 974 (+5 controller, +4 screen, +1 client), contracts 175, fixtures 14, simulator 3 |
+| `npm run verify` in the clean copy (no `.env`) | not run | lint and typecheck passed; 2,653 tests with one failure, `privacy.spec` (`git check-ignore`), because the copy was not a git repository; after `git init` that file passed 16/16, and `npm test` 2,653 passed; `npm run build` passed |
+| Integration job replayed (clean copy, fresh CI-shaped container) | 642 in 52 files locally; the last hosted run skipped the 9 drill tests | 642 passed in 52 files, none skipped (drill included), 166 s |
+| `npm run test:e2e` (Chromium + chromium-oidc), full | 131 passed in 13.4 min | 132 passed in 13.8 min (+1 delete-flow test) |
+| `npm run e2e -- --shard=n/3` with `CI=1` | not run | 47 + 43 + 42 passed; 331 / 261 / 304 s |
+| e2e shard 2/3 replayed (clean copy, only contracts and fixtures built, fresh container) | not run | 43 passed in 244 s; blob written |
+| actionlint 1.7.7 (Docker) on `ci.yml` | not run | 0 errors |
+
+**Mutation checks** (each red, then restored; the file's SHA-256 prefix was compared equal after restoring):
+1. Expiry boundary `<=` changed to `<` in `InMemorySessionStore.set`: 4 failed (2 `session-store`, the OIDC capacity
+   test, and the existing `session.spec` capacity test).
+2. Throwing at capacity replaced by evicting the oldest entry: 6 failed (4 `session-store`, the OIDC capacity test,
+   `session.spec`).
+3. In `ci.yml`, each separately: the `e2e-firefox` service digest changed (failed: compose parity), the contracts build
+   removed from before keygen (failed: drill configuration), and `APP_ENV: ${{ secrets.APP_ENV }}` (failed: no
+   secrets). One test failed each time, the intended one. (The secrets check had also failed on its first run, against a
+   draft comment of the workflow that named the secrets context; the comment was reworded.)
+
+**Not established.** The workflow has not run on GitHub: the hosted runner, `actions/cache` for the browser, the artifact
+upload/download, the `e2e-report` job (its merge was run locally, its trigger was not), and `e2e (firefox-core)` on
+Ubuntu are unverified. Hosted shard durations are estimates from this Windows workstation. The local `npm run db:up`
+compose health check still uses the socket form; it was not changed or tested for the initdb race. The development
+database was not migrated (no migration in this change). Firefox, mobile and real devices were not run for the delete
+control.

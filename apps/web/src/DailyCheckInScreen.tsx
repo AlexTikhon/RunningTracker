@@ -7,6 +7,7 @@ import {
   loadingCheckInDay,
   loadingCheckInHistory,
   type CheckInDaySnapshot,
+  type CheckInDeletionPhase,
   type CheckInHistorySnapshot,
 } from './daily-checkin-controller.js';
 import {
@@ -21,7 +22,7 @@ import {
   type CheckInDraft,
 } from './daily-checkin.js';
 import { defaultTimeZone } from './run-search.js';
-import { listDailyMetrics, putDailyMetrics, readDailyMetrics, type CsrfCredentials } from './runner-api.js';
+import { deleteDailyMetrics, listDailyMetrics, putDailyMetrics, readDailyMetrics, type CsrfCredentials } from './runner-api.js';
 
 export interface DailyCheckInScreenProps {
   csrf: CsrfCredentials;
@@ -98,6 +99,46 @@ export function CheckInHistory({ disabled, onEdit, onRetry, selectedDate, snapsh
   );
 }
 
+export interface CheckInDeletionProps {
+  confirming: boolean;
+  // The day in words, as the form's status line shows it.
+  dateLabel: string;
+  disabled: boolean;
+  // Why the last attempt failed; shown only while confirming.
+  failure: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onStart: () => void;
+  phase: CheckInDeletionPhase;
+}
+
+/** Deleting the day shown in the form, behind an explicit confirmation. Rendered only for a day with a record. */
+export function CheckInDeletion({ confirming, dateLabel, disabled, failure, onCancel, onConfirm, onStart, phase }: CheckInDeletionProps) {
+  const pending = phase === 'pending';
+  if (!confirming) {
+    return (
+      <div className="checkin-form__delete">
+        <button aria-label={`Delete the check-in of ${dateLabel}`} disabled={disabled} onClick={onStart} type="button">
+          Delete check-in
+        </button>
+      </div>
+    );
+  }
+  return (
+    <section aria-label={`Delete the check-in of ${dateLabel}?`} className="run-delete checkin-form__delete">
+      <h2>Delete this check-in?</h2>
+      <p className="run-delete__warning">Everything recorded for {dateLabel} is removed permanently. This cannot be undone.</p>
+      {failure !== null && <p className="run-delete__failure" role="alert">{failure}</p>}
+      <div className="run-delete__actions">
+        <button className="finish-action" disabled={pending} onClick={onConfirm} type="button">
+          {pending ? 'Deleting…' : 'Confirm delete'}
+        </button>
+        <button disabled={pending} onClick={onCancel} type="button">Cancel</button>
+      </div>
+    </section>
+  );
+}
+
 // Daily check-in of the signed-in person (ADR-0074). The parent keys it by session, person and organization, so a
 // change of any of them starts from a clean form and history with no request carried over. Owner-only: nothing here
 // is visible to a coach or another member.
@@ -111,18 +152,32 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
   const [showErrors, setShowErrors] = useState(false);
   const [day, setDay] = useState<CheckInDaySnapshot>(() => loadingCheckInDay(today));
   const [history, setHistory] = useState<CheckInHistorySnapshot>(loadingCheckInHistory);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const dayController = useRef<CheckInDayController | null>(null);
   const historyController = useRef<CheckInHistoryController | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
 
   const validation = validateCheckInDraft(draft);
   const dateProblem = checkInDateProblem(dateInput, today);
   const pending = day.save === 'pending';
+  const deleting = day.deletion === 'pending';
+  // A save or a deletion is in flight: the date, the values and the other action wait for it.
+  const busy = pending || deleting;
   const loading = day.load !== 'ready';
 
   const afterLoaded = useRef<(date: string, existing: Parameters<typeof draftFromView>[0] | null) => void>(() => undefined);
   afterLoaded.current = (_date, existing) => {
     setShowErrors(false);
     setDraft(existing === null ? emptyCheckInDraft : draftFromView(existing));
+  };
+
+  const afterDeleted = useRef<() => void>(() => undefined);
+  afterDeleted.current = () => {
+    setConfirmingDelete(false);
+    setShowErrors(false);
+    setDraft(emptyCheckInDraft);
+    historyController.current?.refresh();
+    heading.current?.focus();
   };
 
   useEffect(() => {
@@ -140,10 +195,12 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
       csrf: () => csrfRef.current,
       date: today,
       onChange: setDay,
+      onDeleted: () => afterDeleted.current(),
       onLoaded: (date, existing) => afterLoaded.current(date, existing),
       onSaved: () => historyController.current?.refresh(),
       orgId,
       read: readDailyMetrics,
+      remove: deleteDailyMetrics,
       signal,
       timeZone,
       write: putDailyMetrics,
@@ -158,6 +215,7 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
 
   const chooseDate = (value: string) => {
     setDateInput(value);
+    setConfirmingDelete(false);
     if (checkInDateProblem(value, today) === null) dayController.current?.select(value);
   };
 
@@ -165,18 +223,20 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
     event.preventDefault();
     setShowErrors(true);
     if (dateProblem !== null || loading || !validation.ok) return;
+    setConfirmingDelete(false);
     dayController.current?.save(validation.values);
   };
 
   const update = (patch: Partial<CheckInDraft>) => setDraft((current) => ({ ...current, ...patch }));
   const problems = [...(dateProblem === null ? [] : [dateProblem]), ...(validation.ok ? [] : validation.errors)];
-  const fieldsDisabled = loading || pending;
+  const fieldsDisabled = loading || busy;
+  const actionMessage = day.saveMessage ?? (day.deletion === 'failed' ? null : day.deletionMessage);
 
   return (
     <section aria-labelledby="checkin-title" className="activity-shell">
       <div className="search-panel__heading">
         <p className="eyebrow">Daily check-in</p>
-        <h1 id="checkin-title" tabIndex={-1}>Check-in</h1>
+        <h1 id="checkin-title" ref={heading} tabIndex={-1}>Check-in</h1>
         <p>
           Record your weight, sleep, mood and soreness for a day. Every value is optional; fill in what you know. Only you
           can see your check-ins: coaches and other members cannot, even for runs you share with them.
@@ -187,7 +247,7 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
         <label>
           Date
           <input
-            disabled={pending}
+            disabled={busy}
             max={today}
             min={DAILY_METRICS_LOCAL_DATE_MIN}
             onChange={(event) => chooseDate(event.target.value)}
@@ -256,18 +316,30 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
           </ul>
         )}
         <div className="activity-form__actions">
-          <button className="primary-action" disabled={pending || loading} type="submit">
+          <button className="primary-action" disabled={busy || loading} type="submit">
             {pending ? 'Saving…' : 'Save check-in'}
           </button>
           <p className={day.save === 'failed' ? 'activity-form__failure' : 'activity-form__status'} role="status">
-            {day.saveMessage ?? ''}
+            {actionMessage ?? ''}
           </p>
         </div>
+        {day.load === 'ready' && day.existing !== null && (
+          <CheckInDeletion
+            confirming={confirmingDelete}
+            dateLabel={formatCheckInDate(day.date)}
+            disabled={busy}
+            failure={day.deletion === 'failed' ? day.deletionMessage : null}
+            onCancel={() => setConfirmingDelete(false)}
+            onConfirm={() => dayController.current?.deleteDay()}
+            onStart={() => setConfirmingDelete(true)}
+            phase={day.deletion}
+          />
+        )}
         <p className="search-results__note checkin-form__zone">Today is {formatCheckInDate(today)} in {timeZone}.</p>
       </form>
 
       <CheckInHistory
-        disabled={pending}
+        disabled={busy}
         onEdit={chooseDate}
         onRetry={() => historyController.current?.retry()}
         selectedDate={day.date}

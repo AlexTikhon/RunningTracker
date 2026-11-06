@@ -52,6 +52,7 @@ function createHarness(
     maxEntries?: number;
     resolve?: (identity: string) => Promise<string | undefined>;
     secureCookies?: boolean;
+    sessionMaxEntries?: number;
   } = {},
 ): Harness {
   const config = validateEnvironment({
@@ -66,6 +67,7 @@ function createHarness(
     OIDC_REDIRECT_URI: 'https://tracker.example/api/auth/callback',
     SESSION_COOKIE_SECURE: String(options.secureCookies ?? true),
     ...(options.maxEntries === undefined ? {} : { OIDC_STORE_MAX_ENTRIES: String(options.maxEntries) }),
+    ...(options.sessionMaxEntries === undefined ? {} : { SESSION_STORE_MAX_ENTRIES: String(options.sessionMaxEntries) }),
   });
   const clock = new FixedClock();
   const sessions = new SessionManager({
@@ -289,6 +291,31 @@ describe('OIDC login routes', () => {
       .set('Cookie', `running_tracker_login=${loginCookie}`)
       .expect(302);
     expect(callback.headers.location).toBe('/runner?sign_in_error=unavailable');
+  });
+
+  it('fails a callback as unavailable when the session store is full of live sessions, and signs nobody out (ADR-0075)', async () => {
+    const harness = createHarness({ sessionMaxEntries: 1 });
+    const signedIn = harness.sessions.create(userId);
+    const loginCookie = await startLogin(harness);
+
+    const callback = await request(harness.app)
+      .get('/api/auth/callback?code=abc&state=state-1')
+      .set('Cookie', `running_tracker_login=${loginCookie}`)
+      .expect(302);
+
+    expect(callback.headers.location).toBe('/runner?sign_in_error=unavailable');
+    expect(setCookieLines(callback).some((line) => line.startsWith('running_tracker_session='))).toBe(false);
+    expect(harness.sessions.resolve(signedIn.sessionToken)?.userId).toBe(userId);
+
+    // Once the existing session has expired, the next sign-in takes its slot.
+    harness.clock.now = signedIn.record.expiresAt.getTime();
+    const retryCookie = await startLogin(harness);
+    const retry = await request(harness.app)
+      .get('/api/auth/callback?code=abc&state=state-2')
+      .set('Cookie', `running_tracker_login=${retryCookie}`)
+      .expect(200);
+    expect(setCookieLines(retry).some((line) => line.startsWith('running_tracker_session='))).toBe(true);
+    expect(harness.sessions.resolve(signedIn.sessionToken)).toBeUndefined();
   });
 
   it('is bounded: a full pending-login store answers 503 instead of growing', async () => {

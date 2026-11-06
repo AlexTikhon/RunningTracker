@@ -7,6 +7,8 @@
   RLS semantics and idempotency behaviour of activities (ADR-0072, ADR-0073) are unchanged.
 - Scope: migrations 0028 and 0029, `packages/contracts`, `apps/api` (daily metrics service and routes, activity
   creation, restore drill), `apps/web` (Check-in tab), tests, docs. No new dependency and no new infrastructure.
+- Amended by: [ADR-0075](0075-session-store-capacity-ci-shape-checkin-delete.md), which adds a delete control for a
+  check-in day to the web screen (the API is unchanged).
 
 ## Context
 
@@ -114,6 +116,6 @@ TRUNCATE fires no row trigger and would erase health data without a ledger entry
   holds trivially: nothing ever rewrites `local_date` or `time_zone`.
 - The web screen fixes "today" when it opens; across midnight it keeps the previous day as the latest selectable date
   until it is opened again (the server still refuses a date after its own "today").
-- No delete control in the web screen (the API has one), no charts, no trends, no unit other than kilograms.
+- No delete control in the web screen (the API has one; ADR-0075 adds the control), no charts, no trends, no unit other than kilograms.
 - The activities runtime role can still state `created_at` in direct SQL (see Decision 3).
 - Erasures committed but not yet exported when the node is lost still come back with an old backup (ADR-0073).

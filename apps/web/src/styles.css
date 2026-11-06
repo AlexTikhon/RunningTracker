@@ -372,6 +372,8 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .activity-saved__details dd { margin: 0.1rem 0 0; font-weight: 800; overflow-wrap: anywhere; }
 .checkin-form__sleep { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .checkin-form__state, .checkin-form__zone { grid-column: 1 / -1; margin: 0; color: #b8c2bb; font-size: 0.84rem; line-height: 1.45; }
+.checkin-form__delete { grid-column: 1 / -1; justify-self: start; }
+.checkin-form__delete h2 { margin: 0; font-size: 1rem; }
 .checkin-history { display: grid; gap: 0.5rem; margin: 0; padding: 0; list-style: none; }
 .checkin-day { display: grid; grid-template-columns: minmax(8.5rem, auto) 1fr auto; align-items: center; gap: 0.4rem 1rem; padding: 0.7rem 1rem; border: 1px solid #2e3831; border-radius: 0.8rem; background: #151c17; }
 .checkin-day[aria-current="date"] { border-color: #6a8d3b; }

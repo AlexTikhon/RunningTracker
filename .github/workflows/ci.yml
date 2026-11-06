@@ -7,20 +7,53 @@ on:
   # Lets a branch without an open pull request run the workflow on a GitHub-hosted runner.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# A newer push to the same pull request cancels the run it supersedes; runs on main always finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# No secrets anywhere in this file. Every credential below is a fixed, test-only value for a throwaway database that
+# exists only inside the job's service container (the same values as .env.example). scripts/ci-workflow.test.mjs
+# checks that the secrets context is never read and that each PostGIS service matches infra/compose/docker-compose.yml.
+
 jobs:
+  # Job 1, the gate: lint, typecheck, unit tests and build. Jobs 2 and 3 start only after it passes.
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          cache: npm
+          node-version-file: .nvmrc
+      - run: npm ci
+      - run: npm run verify
+
+  # Job 2: the integration suite against real PostgreSQL/PostGIS, set up the way docker-compose sets up the local one.
+  integration:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
+        # Same image and digest as infra/compose/docker-compose.yml (PostgreSQL 17, PostGIS 3.5).
         image: postgis/postgis:17-3.5@sha256:8dfee83d8bd4c2873dc4a233c13ba2799a44f2edb16a0552d58715917fac32ba
+        # Same database and superuser as docker-compose: the image's entrypoint puts its PostGIS extension set into
+        # running_tracker, and the test database is created by the compose init script below, with postgis only.
+        # The health check uses TCP: during initdb the image runs a temporary server on the Unix socket only, which a
+        # socket check would report as healthy just before it shuts down for the real start.
         env:
-          POSTGRES_DB: running_tracker_test
+          POSTGRES_DB: running_tracker
           POSTGRES_PASSWORD: running_tracker_local
           POSTGRES_USER: running_tracker
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U running_tracker -d running_tracker_test"
+          --health-cmd "pg_isready -h 127.0.0.1 -U running_tracker -d running_tracker"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
@@ -34,54 +67,66 @@ jobs:
       DB_CONNECTION_TIMEOUT_MS: 2000
       DB_QUERY_TIMEOUT_MS: 1000
       SHUTDOWN_TIMEOUT_MS: 5000
+      # The restore drill (backup-restore.integration.test.ts) builds throwaway *_restore_drill_* databases on this
+      # server and runs pg_dump/pg_restore inside the service container, so the PostgreSQL 17 client matches the server.
+      RESTORE_DRILL_ADMIN_URL: postgresql://running_tracker:running_tracker_local@127.0.0.1:5432/postgres
+      RESTORE_DRILL_OWNER_URL: postgresql://running_tracker_owner:owner_local_only@127.0.0.1:5432/running_tracker_restore_drill
+      RESTORE_DRILL_RUNTIME_URL: postgresql://running_tracker_runtime:runtime_local_only@127.0.0.1:5432/running_tracker_restore_drill
+      RESTORE_DRILL_MAINTENANCE_URL: postgresql://running_tracker_maintenance:maintenance_local_only@127.0.0.1:5432/running_tracker_restore_drill
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           cache: npm
-          node-version: 24.11.1
+          node-version-file: .nvmrc
       - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      - name: Create the test database with the docker-compose init script
+        run: docker exec -i "${{ job.services.postgres.id }}" psql -X -v ON_ERROR_STOP=1 -U running_tracker -d running_tracker < db/test-support/20-create-test-database.sql
+      - name: Check the server version and test-database extensions match docker-compose
+        run: |
+          set -euo pipefail
+          query() { docker exec "${{ job.services.postgres.id }}" psql -XAt -v ON_ERROR_STOP=1 -U running_tracker -d running_tracker_test -c "$1"; }
+          major="$(query "SELECT current_setting('server_version_num')::int / 10000")"
+          extensions="$(query "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension")"
+          echo "PostgreSQL major ${major}; running_tracker_test extensions: ${extensions}"
+          test "${major}" = 17
+          test "${extensions}" = plpgsql,postgis
       - run: npm run db:bootstrap:test
       - run: npm run db:migrate:test
-      - run: npm run test:integration
+      # backup:keygen below loads API modules that import the built contracts package (dist/ is not committed);
+      # test:integration would build it too, but only after the key is needed.
+      - run: npm run build --workspace=@running-tracker/contracts
+      - name: Integration tests
+        env:
+          BACKUP_ENCRYPTION_KEY_FILE: ${{ runner.temp }}/restore-drill.key
+          BACKUP_PG_DOCKER_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          # A key generated for this run only, for the drill's encrypted backups; it never leaves the runner.
+          npm run backup:keygen -- --out "$BACKUP_ENCRYPTION_KEY_FILE"
+          npm run test:integration
 
-  # Real-browser suite (tests/e2e). A separate job with its own database service: it must never share
-  # running_tracker_test with the integration tests above, and the slow browser run must not delay verify.
-  # Each matrix entry is its own runner with its own database service, installs only its browser, and runs a script
-  # that selects only that browser's projects.
-  browser:
-    name: browser (${{ matrix.project }})
+  # Job 3: the Chromium browser suite (the chromium and chromium-oidc projects), split into shards that each run on
+  # their own runner with their own database service, so no shard shares running_tracker_test with another job.
+  e2e:
+    name: e2e (chromium ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: verify
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.timeout-minutes }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # The whole suite: the chromium and chromium-oidc projects, with the real Mapbox runtime smoke.
-          - browser: chromium
-            project: chromium
-            script: test:e2e
-            timeout-minutes: 20
-          # The bounded Firefox gate: 18 core tests (firefox-core in tests/e2e/playwright.config.ts).
-          - browser: firefox
-            project: firefox-core
-            script: test:e2e:firefox
-            timeout-minutes: 15
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgis/postgis:17-3.5@sha256:8dfee83d8bd4c2873dc4a233c13ba2799a44f2edb16a0552d58715917fac32ba
         env:
-          POSTGRES_DB: running_tracker_test
+          POSTGRES_DB: running_tracker
           POSTGRES_PASSWORD: running_tracker_local
           POSTGRES_USER: running_tracker
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U running_tracker -d running_tracker_test"
+          --health-cmd "pg_isready -h 127.0.0.1 -U running_tracker -d running_tracker"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
@@ -97,20 +142,119 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           cache: npm
-          node-version: 24.11.1
+          node-version-file: .nvmrc
       - run: npm ci
-      # The API and the web app import the built contracts and fixtures packages; dist/ is not committed.
-      - run: npm run build
+      - name: Create the test database with the docker-compose init script
+        run: docker exec -i "${{ job.services.postgres.id }}" psql -X -v ON_ERROR_STOP=1 -U running_tracker -d running_tracker < db/test-support/20-create-test-database.sql
+      # The API and the Vite server import the built contracts and fixtures packages; dist/ is not committed.
+      - run: npm run build --workspace=@running-tracker/contracts
+      - run: npm run build --workspace=@running-tracker/fixtures
       - run: npm run db:bootstrap:test
       - run: npm run db:migrate:test
-      # The browser build pinned by the installed @playwright/test, with its system libraries.
-      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - id: playwright-version
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
         working-directory: tests/e2e
-      - run: npm run ${{ matrix.script }}
+      - id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}-chromium
+      # The browser build pinned by the installed @playwright/test; its system libraries are installed on every run.
+      - if: steps.browser-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+        working-directory: tests/e2e
+      - if: steps.browser-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+        working-directory: tests/e2e
+      - run: npm run e2e -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        working-directory: tests/e2e
+      # Every shard keeps its blob report briefly; e2e-report merges them only when a shard failed.
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: blob-report-chromium-${{ matrix.shard }}
+          path: tests/e2e/blob-report
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # On failure only: one HTML report (traces and screenshots of the failed tests included) from all shards.
+  e2e-report:
+    needs: e2e
+    if: ${{ !cancelled() && needs.e2e.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          cache: npm
+          node-version-file: .nvmrc
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-chromium-*
+          path: tests/e2e/all-blob-reports
+          merge-multiple: true
+      - run: npx playwright merge-reports --reporter html ./all-blob-reports
+        working-directory: tests/e2e
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-chromium
+          path: tests/e2e/playwright-report
+          retention-days: 14
+
+  # Kept from the previous workflow: the bounded Firefox gate (18 core tests, firefox-core in
+  # tests/e2e/playwright.config.ts). Like job 3 it waits for verify and runs in parallel with jobs 2 and 3.
+  e2e-firefox:
+    name: e2e (firefox-core)
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgis/postgis:17-3.5@sha256:8dfee83d8bd4c2873dc4a233c13ba2799a44f2edb16a0552d58715917fac32ba
+        env:
+          POSTGRES_DB: running_tracker
+          POSTGRES_PASSWORD: running_tracker_local
+          POSTGRES_USER: running_tracker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U running_tracker -d running_tracker"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql://running_tracker_runtime:runtime_local_only@127.0.0.1:5432/running_tracker_main_must_not_be_used
+      TEST_BOOTSTRAP_DATABASE_URL: postgresql://running_tracker:running_tracker_local@127.0.0.1:5432/running_tracker_test
+      TEST_DATABASE_URL: postgresql://running_tracker_runtime:runtime_local_only@127.0.0.1:5432/running_tracker_test
+      TEST_MAINTENANCE_DATABASE_URL: postgresql://running_tracker_maintenance:maintenance_local_only@127.0.0.1:5432/running_tracker_test
+      TEST_MIGRATION_DATABASE_URL: postgresql://running_tracker_owner:owner_local_only@127.0.0.1:5432/running_tracker_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          cache: npm
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Create the test database with the docker-compose init script
+        run: docker exec -i "${{ job.services.postgres.id }}" psql -X -v ON_ERROR_STOP=1 -U running_tracker -d running_tracker < db/test-support/20-create-test-database.sql
+      - run: npm run build --workspace=@running-tracker/contracts
+      - run: npm run build --workspace=@running-tracker/fixtures
+      - run: npm run db:bootstrap:test
+      - run: npm run db:migrate:test
+      - run: npx playwright install --with-deps firefox
+        working-directory: tests/e2e
+      - run: npm run e2e:firefox
+        working-directory: tests/e2e
+      - if: failure()
+        run: npx playwright merge-reports --reporter html ./blob-report
+        working-directory: tests/e2e
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-test-results-${{ matrix.project }}
-          path: tests/e2e/test-results
+          name: playwright-report-firefox-core
+          path: tests/e2e/playwright-report
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14

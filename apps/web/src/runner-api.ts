@@ -464,6 +464,17 @@ export async function readDailyMetrics(target: DailyMetricsTarget, signal: Abort
   return view;
 }
 
+// 204 in every case: deleted now, already deleted or never written are answered alike, so a retry is always safe.
+export async function deleteDailyMetrics(target: DailyMetricsTarget, csrf: CsrfCredentials, signal: AbortSignal): Promise<void> {
+  const response = await requestJson(dailyMetricsPath(target.orgId, target.localDate), {
+    credentials: 'same-origin',
+    headers: { [csrf.headerName]: csrf.token },
+    method: 'DELETE',
+    signal,
+  });
+  requireSuccess(response);
+}
+
 export async function listDailyMetrics(
   input: { from: string; orgId: string; to: string },
   signal: AbortSignal,

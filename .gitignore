@@ -13,6 +13,8 @@ coverage/
 test-results/
 smoke-results/
 playwright-report/
+blob-report/
+all-blob-reports/
 
 # Raw GPS exports carry location and time and are private (see docs/runbooks/gps-traces.md).
 # Only sanitized *.trace.json fixtures are committed; raw files belong in .local/gps-traces/raw/.

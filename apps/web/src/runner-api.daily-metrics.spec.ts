@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { listDailyMetrics, putDailyMetrics, readDailyMetrics } from './runner-api.js';
+import { deleteDailyMetrics, listDailyMetrics, putDailyMetrics, readDailyMetrics } from './runner-api.js';
 
 const csrf = { headerName: 'x-csrf-token' as const, token: 'a'.repeat(43) };
 const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -70,6 +70,23 @@ describe('daily metrics API calls', () => {
     await expect(readDailyMetrics({ localDate: '2026-11-06', orgId }, new AbortController().signal)).rejects.toMatchObject({
       code: 'ROUTE_NOT_FOUND',
       status: 404,
+    });
+  });
+
+  it('deletes a day with a DELETE to its date carrying only the CSRF header, and throws a refusal', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(deleteDailyMetrics({ localDate: '2026-11-06', orgId }, csrf, new AbortController().signal)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/daily-metrics/2026-11-06`, {
+      credentials: 'same-origin',
+      headers: { 'x-csrf-token': csrf.token },
+      method: 'DELETE',
+      signal: expect.any(AbortSignal) as AbortSignal,
+    });
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json(refusal('CSRF_DENIED'), 403)));
+    await expect(deleteDailyMetrics({ localDate: '2026-11-06', orgId }, csrf, new AbortController().signal)).rejects.toMatchObject({
+      code: 'CSRF_DENIED',
+      status: 403,
     });
   });
 

@@ -8,6 +8,7 @@ import {
   type CheckInHistorySnapshot,
   type DailyMetricsLoader,
   type DailyMetricsReader,
+  type DailyMetricsRemover,
   type DailyMetricsWriter,
 } from './daily-checkin-controller.js';
 import type { CheckInValues } from './daily-checkin.js';
@@ -120,23 +121,31 @@ describe('CheckInHistoryController', () => {
 });
 
 describe('CheckInDayController', () => {
-  function harness(read: DailyMetricsReader, write: DailyMetricsWriter = vi.fn<DailyMetricsWriter>(), signal?: AbortSignal) {
+  function harness(
+    read: DailyMetricsReader,
+    write: DailyMetricsWriter = vi.fn<DailyMetricsWriter>(),
+    signal?: AbortSignal,
+    remove: DailyMetricsRemover = vi.fn<DailyMetricsRemover>(),
+  ) {
     const snapshots: CheckInDaySnapshot[] = [];
+    const deleted: string[] = [];
     const loaded: Array<[string, DailyMetricsView | null]> = [];
     const saved: Array<[DailyMetricsView, boolean]> = [];
     const controller = new CheckInDayController({
       csrf: () => csrf,
       date: '2026-11-06',
       onChange: (snapshot) => snapshots.push(snapshot),
+      onDeleted: (date) => deleted.push(date),
       onLoaded: (date, existing) => loaded.push([date, existing]),
       onSaved: (stored, created) => saved.push([stored, created]),
       orgId,
       read,
+      remove,
       timeZone: 'Europe/Warsaw',
       write,
       ...(signal ? { signal } : {}),
     });
-    return { controller, last: () => snapshots.at(-1)!, loaded, saved, snapshots };
+    return { controller, deleted, last: () => snapshots.at(-1)!, loaded, saved, snapshots };
   }
 
   it('loads the stored values of today and hands them to the form', async () => {
@@ -242,6 +251,129 @@ describe('CheckInDayController', () => {
     controller.retry();
     await flush();
     expect(last()).toMatchObject({ load: 'ready' });
+  });
+
+  it('deletes the shown day once it is loaded, then shows it empty and tells the screen', async () => {
+    const remove = vi.fn<DailyMetricsRemover>().mockResolvedValue(undefined);
+    const write = vi.fn<DailyMetricsWriter>().mockResolvedValue({ created: true, view: view('2026-11-06') });
+    const { controller, deleted, last } = harness(vi.fn<DailyMetricsReader>().mockResolvedValue(view('2026-11-06')), write, undefined, remove);
+    controller.start();
+    controller.deleteDay();
+    expect(remove).not.toHaveBeenCalled();
+    await flush();
+
+    controller.deleteDay();
+    expect(last()).toMatchObject({ deletion: 'pending', deletionMessage: null });
+    await flush();
+    expect(remove).toHaveBeenCalledWith({ localDate: '2026-11-06', orgId }, csrf, expect.any(AbortSignal));
+    expect(last()).toMatchObject({ deletion: 'idle', deletionMessage: 'Check-in deleted.', existing: null, load: 'ready' });
+    expect(deleted).toEqual(['2026-11-06']);
+
+    // Nothing is stored any more, so there is nothing to delete; a new save clears the deletion notice.
+    controller.deleteDay();
+    expect(remove).toHaveBeenCalledTimes(1);
+    controller.save(values);
+    expect(last()).toMatchObject({ deletion: 'idle', deletionMessage: null, save: 'pending' });
+  });
+
+  it('offers no deletion for a day without a record', async () => {
+    const remove = vi.fn<DailyMetricsRemover>();
+    const { controller } = harness(vi.fn<DailyMetricsReader>().mockResolvedValue(null), undefined, undefined, remove);
+    controller.start();
+    await flush();
+    controller.deleteDay();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('runs one mutation at a time: no save, other date or second deletion while deleting, and no deletion while saving', async () => {
+    const pendingDelete = deferred<undefined>();
+    const pendingSave = deferred<{ created: boolean; view: DailyMetricsView }>();
+    const remove = vi.fn<DailyMetricsRemover>().mockReturnValue(pendingDelete.promise);
+    const write = vi.fn<DailyMetricsWriter>().mockReturnValue(pendingSave.promise);
+    const read = vi.fn<DailyMetricsReader>().mockResolvedValue(view('2026-11-06'));
+    const { controller, last } = harness(read, write, undefined, remove);
+    controller.start();
+    await flush();
+
+    controller.deleteDay();
+    controller.deleteDay();
+    controller.save(values);
+    expect(controller.select('2026-11-01')).toBe(false);
+    controller.retry();
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(write).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(1);
+    pendingDelete.resolve(undefined);
+    await flush();
+    expect(last()).toMatchObject({ date: '2026-11-06', existing: null });
+
+    controller.save(values);
+    controller.deleteDay();
+    expect(remove).toHaveBeenCalledTimes(1);
+    pendingSave.resolve({ created: true, view: view('2026-11-06') });
+    await flush();
+    controller.deleteDay();
+    expect(remove).toHaveBeenCalledTimes(2);
+  });
+
+  it('says a refused deletion did not happen, an unknown outcome is safe to repeat, and keeps the stored values shown', async () => {
+    const stored = view('2026-11-06', { weightKg: 70 });
+    const remove = vi.fn<DailyMetricsRemover>()
+      .mockRejectedValueOnce(apiError(403, 'CSRF_DENIED'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(apiError(503, 'SERVICE_UNAVAILABLE', 'Busy'))
+      .mockRejectedValueOnce(apiError(401, 'AUTH_REQUIRED'))
+      .mockResolvedValueOnce(undefined);
+    const { controller, deleted, last } = harness(vi.fn<DailyMetricsReader>().mockResolvedValue(stored), undefined, undefined, remove);
+    controller.start();
+    await flush();
+
+    controller.deleteDay();
+    await flush();
+    expect(last()).toMatchObject({
+      deletion: 'failed',
+      deletionMessage: 'The check-in was not deleted: you no longer have access to this organization.',
+      existing: stored,
+    });
+    controller.deleteDay();
+    await flush();
+    expect(last()).toMatchObject({
+      deletion: 'failed',
+      deletionMessage: 'The deletion was not confirmed: the connection failed. Deleting again is safe.',
+      existing: stored,
+    });
+    controller.deleteDay();
+    await flush();
+    expect(last().deletionMessage).toBe('The deletion was not confirmed: Busy. Reference 22222222-2222-4222-8222-222222222222. Deleting again is safe.');
+    controller.deleteDay();
+    await flush();
+    expect(last().deletionMessage).toBe('The check-in was not deleted: sign in again, then delete it.');
+    expect(deleted).toEqual([]);
+
+    controller.deleteDay();
+    await flush();
+    expect(last()).toMatchObject({ deletion: 'idle', deletionMessage: 'Check-in deleted.', existing: null });
+    expect(deleted).toEqual(['2026-11-06']);
+  });
+
+  it('goes silent when its session ends during a deletion', async () => {
+    const pendingDelete = deferred<undefined>();
+    const session = new AbortController();
+    const { controller, deleted, snapshots } = harness(
+      vi.fn<DailyMetricsReader>().mockResolvedValue(view('2026-11-06')),
+      undefined,
+      session.signal,
+      vi.fn<DailyMetricsRemover>().mockReturnValue(pendingDelete.promise),
+    );
+    controller.start();
+    await flush();
+    controller.deleteDay();
+    const before = snapshots.length;
+    session.abort();
+    pendingDelete.resolve(undefined);
+    await flush();
+    expect(snapshots).toHaveLength(before);
+    expect(deleted).toEqual([]);
   });
 
   it('goes silent when its session ends, also for a pending save', async () => {

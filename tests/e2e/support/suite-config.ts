@@ -19,7 +19,9 @@ export function suiteSettings(environment: E2eEnvironment) {
     expect: { timeout: 15_000 },
     fullyParallel: false,
     globalTeardown: './global-teardown.ts',
-    reporter: 'list',
+    // In CI each shard also writes a blob report (blob-report/); the workflow merges the shards' blobs into one HTML
+    // report and uploads it when the browser suite failed. Locally only the list.
+    reporter: process.env.CI ? [['list'], ['blob']] : 'list',
     retries: 0,
     testDir: '.',
     timeout: 60_000,
