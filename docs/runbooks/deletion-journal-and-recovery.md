@@ -111,16 +111,27 @@ Nothing may connect as the runtime or maintenance role in the meantime.
    must report only `already_applied`). It only removes access and never reconstructs a
    grant. Procedure, outcomes and limits: `docs/runbooks/backup-and-restore.md` step 8
    and ADR-0045. Do not open access until it is done and verified.
-8. **Open the database and start the application** with `DELETION_JOURNAL_DIR` pointing
+8. **Replay erasures of owner-only health records** (activities, ADR-0073) from the same
+   journal copy with `npm run restore:reapply-erasures -- --journal-dir <copy>`, owner
+   login, exactly as in step 5. It reads every `erasure-ledger-*.ndjson` file first and
+   stops on a malformed one. Outcomes: `erased` (the erased record was back in the
+   restored data and is deleted again), `absent` (nothing to do), `skipped_different_record`
+   (a record that reused the id after the erasure; left alone). Run it twice; the second
+   run must report no `erased`. Do not open access until it is done.
+9. **Open the database and start the application** with `DELETION_JOURNAL_DIR` pointing
    at the same storage (opening is an explicit `GRANT CONNECT`, see the backup runbook,
-   step 10). Deletions and restrictions reapplied above were journaled again on the new
-   database and will be exported as new files, so history stays continuous.
+   step 10). Deletions, restrictions and erasures reapplied above were journaled again on
+   the new database and will be exported as new files, so history stays continuous.
 
 ## Failure modes and honest limits
 
 - Deletions committed but not yet exported when the node is lost are gone; the run
   can reappear after a restore. Its owner must delete it again. The window is one
-  export interval while healthy and unbounded while the exporter is failing.
+  export interval while healthy and unbounded while the exporter is failing. The same
+  holds for activity erasures in the erasure ledger (ADR-0073).
+- If the erasure ledger cannot be written, an activity DELETE fails (HTTP 500) and the
+  activity stays; nothing is erased without its record. Fix the database, then the owner
+  retries.
 - Files are not signed. Whoever can write to the directory can add an entry, which
   on restore deletes a run that existed before the entry's instant. Control write
   access to the storage.

@@ -1,5 +1,7 @@
-import type { ActivityListResponse, ActivityView, CreateActivityRequest } from '@running-tracker/contracts';
+import type { ActivityListResponse, ActivityView } from '@running-tracker/contracts';
 import { describe, expect, it, vi } from 'vitest';
+
+import type { ActivityDetails } from './activity-form.js';
 
 import {
   ActivityDeletionController,
@@ -28,7 +30,8 @@ const activity = (n: number): ActivityView => ({
   type: 'run',
 });
 const page = (items: ActivityView[], nextCursor: string | null = null): ActivityListResponse => ({ items, nextCursor });
-const request: Required<CreateActivityRequest> = {
+const formKey = (n: number) => `bf000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const request: ActivityDetails = {
   distanceM: 5_000,
   durationS: 1_800,
   notes: null,
@@ -36,8 +39,8 @@ const request: Required<CreateActivityRequest> = {
   startedAt: '2026-10-05T06:00:00.000Z',
   type: 'run',
 };
-const apiError = (status: number, code: string, message = 'Refused') =>
-  new RunnerApiError(message, status, code, '22222222-2222-4222-8222-222222222222');
+const apiError = (status: number, code: string, message = 'Refused', details: Record<string, unknown> | null = null) =>
+  new RunnerApiError(message, status, code, '22222222-2222-4222-8222-222222222222', null, details);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -203,18 +206,23 @@ describe('ActivitySubmissionController', () => {
   function harness(create: ActivityCreator, signal?: AbortSignal) {
     const snapshots: ActivitySubmissionSnapshot[] = [];
     const saved = vi.fn<(activity: ActivityView, created: boolean) => void>();
+    const alreadySaved = vi.fn<(activityId: string | null) => void>();
     let next = 100;
+    let nextKey = 1;
     let token = csrf;
     const controller = new ActivitySubmissionController({
       create,
       csrf: () => token,
       newId: () => id(next++),
+      newKey: () => formKey(nextKey++),
+      onAlreadySaved: alreadySaved,
       onChange: (s) => snapshots.push(s),
       onSaved: saved,
       orgId,
       ...(signal ? { signal } : {}),
     });
     return {
+      alreadySaved,
       controller,
       last: () => snapshots.at(-1)!,
       saved,
@@ -233,11 +241,92 @@ describe('ActivitySubmissionController', () => {
     expect(controller.submit(request)).toBe(true);
     expect(last()).toMatchObject({ phase: 'pending', uncertain: false });
     await flush();
-    expect(create).toHaveBeenCalledWith({ activityId: id(100), orgId }, request, fresh, expect.any(AbortSignal));
+    expect(create).toHaveBeenCalledWith(
+      { activityId: id(100), orgId },
+      { ...request, idempotencyKey: formKey(1) },
+      fresh,
+      expect.any(AbortSignal),
+    );
     expect(last()).toMatchObject({ message: 'Activity saved.', phase: 'saved', uncertain: false });
     expect(saved).toHaveBeenCalledWith(activity(100), true);
+    // A confirmed save ends the form session: the next activity gets a new id and a new key.
     controller.submit(request);
     expect(create.mock.calls[1]?.[0]).toEqual({ activityId: id(101), orgId });
+    expect(create.mock.calls[1]?.[1].idempotencyKey).toBe(formKey(2));
+  });
+
+  it('keeps one idempotency key for the whole form session, across edits after an unknown outcome', async () => {
+    const create = vi
+      .fn<ActivityCreator>()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ activity: activity(101), created: true });
+    const { controller } = harness(create);
+    controller.submit(request);
+    await flush();
+    controller.submit({ ...request, notes: 'edited' });
+    await flush();
+    controller.submit({ ...request, notes: 'edited again' });
+    await flush();
+    expect(create.mock.calls.map(([target, sent]) => [target.activityId, sent.idempotencyKey])).toEqual([
+      [id(100), formKey(1)],
+      [id(101), formKey(1)],
+      [id(102), formKey(1)],
+    ]);
+  });
+
+  it('tells the person their earlier save went through when the key already saved other details (409), and names it', async () => {
+    const create = vi
+      .fn<ActivityCreator>()
+      .mockRejectedValueOnce(new DOMException('Request deadline exceeded', 'TimeoutError'))
+      .mockRejectedValueOnce(
+        apiError(409, 'ACTIVITY_ALREADY_SAVED', 'An activity was already saved from this form with different details', {
+          activityId: id(100),
+        }),
+      );
+    const { alreadySaved, controller, last, saved } = harness(create);
+    controller.submit(request);
+    await flush();
+    controller.submit({ ...request, rpe: 9 });
+    await flush();
+
+    expect(last()).toEqual({
+      message: 'Your earlier save went through, so these changed details were not saved.',
+      phase: 'already-saved',
+      savedActivityId: id(100),
+      uncertain: false,
+    });
+    expect(alreadySaved).toHaveBeenCalledWith(id(100));
+    expect(saved).not.toHaveBeenCalled();
+    // Nothing more is sent from this form session: it already produced its activity.
+    expect(controller.submit({ ...request, rpe: 9 })).toBe(false);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('still reports the earlier save when the 409 does not name the activity', async () => {
+    const create = vi.fn<ActivityCreator>().mockRejectedValueOnce(apiError(409, 'ACTIVITY_ALREADY_SAVED', 'Already saved', { activityId: 'nope' }));
+    const { alreadySaved, controller, last } = harness(create);
+    controller.submit(request);
+    await flush();
+    expect(last()).toMatchObject({ phase: 'already-saved', savedActivityId: null });
+    expect(alreadySaved).toHaveBeenCalledWith(null);
+  });
+
+  it('starts a new form session on request: idle, a new key, and nothing retained', async () => {
+    const create = vi
+      .fn<ActivityCreator>()
+      .mockRejectedValueOnce(apiError(409, 'ACTIVITY_ALREADY_SAVED', 'Already saved', { activityId: id(100) }))
+      .mockResolvedValueOnce({ activity: activity(101), created: true });
+    const { controller, last } = harness(create);
+    controller.submit(request);
+    await flush();
+    controller.startNew();
+    expect(last()).toEqual({ message: null, phase: 'idle', savedActivityId: null, uncertain: false });
+    expect(controller.wouldReuse(request)).toBe(false);
+    expect(controller.submit(request)).toBe(true);
+    await flush();
+    expect(create.mock.calls[1]?.[1].idempotencyKey).toBe(formKey(2));
+    expect(last()).toMatchObject({ phase: 'saved' });
   });
 
   it('keeps the id after an unknown outcome, so saving the same details again cannot duplicate them', async () => {
@@ -277,6 +366,8 @@ describe('ActivitySubmissionController', () => {
     controller.submit(changed);
     await flush();
     expect(create.mock.calls.map(([target]) => target.activityId)).toEqual([id(100), id(101)]);
+    // The key stays: if the first attempt did go through, the server refuses to save a second activity.
+    expect(create.mock.calls.map(([, sent]) => sent.idempotencyKey)).toEqual([formKey(1), formKey(1)]);
   });
 
   it('forgets the id after a definitive refusal, and says what the server refused', async () => {

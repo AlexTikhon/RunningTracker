@@ -5,6 +5,7 @@ import process from 'node:process';
 
 import { accessJournalFileNamePattern } from './access-journal-format.js';
 import { deletionJournalFileNamePattern } from './deletion-journal-format.js';
+import { erasureLedgerFileNamePattern } from './erasure-ledger-format.js';
 
 /**
  * Where exported journal files go (the deletion journal and the access-restriction
@@ -59,7 +60,11 @@ export function createFileDeletionJournalSink(directory: string): DeletionJourna
       }
     },
     async write(fileName, contents) {
-      if (!deletionJournalFileNamePattern.test(fileName) && !accessJournalFileNamePattern.test(fileName)) {
+      if (
+        !deletionJournalFileNamePattern.test(fileName) &&
+        !accessJournalFileNamePattern.test(fileName) &&
+        !erasureLedgerFileNamePattern.test(fileName)
+      ) {
         throw new Error('Invalid journal file name');
       }
       const finalPath = join(directory, fileName);
@@ -97,7 +102,12 @@ export function listAccessJournalFiles(directory: string): Promise<string[]> {
   return listJournalFiles(directory, accessJournalFileNamePattern);
 }
 
-/** Reads one file of either journal; callers pass names returned by the list functions. */
+/** Erasure ledger files (ADR-0073) in name order, which is export order. */
+export function listErasureLedgerFiles(directory: string): Promise<string[]> {
+  return listJournalFiles(directory, erasureLedgerFileNamePattern);
+}
+
+/** Reads one file of any journal; callers pass names returned by the list functions. */
 export async function readDeletionJournalFile(
   directory: string,
   fileName: string,

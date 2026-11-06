@@ -300,7 +300,7 @@ export const openApiDocument = {
         tags: ['Activities'],
         summary: 'Create an idempotent client-identified manual activity',
         description:
-          'The id is a client-generated UUID. 201 when created; 200 with the stored activity when the same id is sent again with an equal payload (omitted and null optional fields are equal); 409 ACTIVITY_CONFLICT when the id already holds a different payload. An id that belongs to another member answers 404 ACTIVITY_NOT_FOUND, the same as runs. `startedAt` must not be before 2000-01-01T00:00:00Z or more than 24 hours after server time. Unknown fields are refused; the source is always `manual`.',
+          'The id is a client-generated UUID, and `idempotencyKey` is a client-generated UUID per form session, unique per owner in the organization (ADR-0073). 201 when created; 200 with the stored activity when the same id is sent again with an equal payload and key (omitted and null optional fields are equal); 409 ACTIVITY_CONFLICT when the id already holds a different payload or key. When the key already created an activity under another id: 200 with that activity if the details are equal (its `activityId` is then not the one in the path), otherwise 409 ACTIVITY_ALREADY_SAVED with `details.activityId` naming the saved activity; the details sent are not saved. An id that belongs to another member answers 404 ACTIVITY_NOT_FOUND, the same as runs. `startedAt` must not be before 2000-01-01T00:00:00Z or more than 24 hours after server time. Unknown fields are refused; the source is always `manual`.',
         parameters: [parameterRef('OrgId'), parameterRef('ActivityId'), ...csrfParameters],
         requestBody: requestBody('CreateActivityRequest'),
         responses: {
@@ -320,7 +320,7 @@ export const openApiDocument = {
         tags: ['Activities'],
         summary: "Delete one of the signed-in person's activities",
         description:
-          'A permanent hard delete without a tombstone. 204 in every case: deleted now, already deleted, never existed, or another member\'s (which is left untouched). A restored backup can bring a deleted activity back (ADR-0072).',
+          'A permanent hard delete without a tombstone. 204 in every case: deleted now, already deleted, never existed, or another member\'s (which is left untouched). The erasure is recorded in the erasure ledger in the same statement and exported off the database host, so a restored backup is cleaned by `restore:reapply-erasures` (ADR-0073). If the ledger cannot be written the deletion is not performed and the request fails (5xx); retrying is safe.',
         parameters: [parameterRef('OrgId'), parameterRef('ActivityId'), ...csrfParameters],
         responses: { '204': noContentResponse, ...defaultErrors },
       },

@@ -6,15 +6,21 @@ The pause below has ended. The project is resumed as a broader activity, health 
 coach on a local Ollama model; the roadmap and the principles every later slice must follow are in
 [product-direction.md](product-direction.md). Work proceeds one small vertical slice at a time.
 
-- **Step 1 (done, uncommitted at hand-off):** owner-only manual activities, [ADR-0072](adr/0072-owner-only-manual-activities.md):
+- **Step 1 (done, committed locally as `d0224c2` on branch `feat/activities`):** owner-only manual activities, [ADR-0072](adr/0072-owner-only-manual-activities.md):
   migration `0025_activities.sql`, strict contracts and OpenAPI, `/api/orgs/:orgId/activities`, an **Activity** tab, and
   tests at every layer. Runs, ingestion, the GPS algorithm, SSE, tiles, retention and AI search are unchanged. Evidence
   is in the [progress entry](progress.md) "Resumed: owner-only manual activities (step 1)".
-- **Migration state:** `0025` was applied to the `running_tracker_test` database only. The development database is
-  not migrated by that work; `npm run demo:up` (or `npm run db:migrate`) applies it on the next start.
-- **Known limitation introduced:** activity deletion is a hard delete without tombstone or journal, so a restored
-  backup can resurrect deleted activities. Revisit before real participants record health data.
-- **Suggested step 2:** `daily_metrics` (weight, sleep, mood, soreness), owner-only, with the same template.
+- **Integrity follow-up (done, uncommitted at hand-off):** [ADR-0073](adr/0073-erasure-ledger-and-idempotent-activity-creation.md):
+  migration `0026_erasure_ledger.sql` records every activity deletion in an outbox exported beside the run deletion
+  journal, and `npm run restore:reapply-erasures` replays it after a restore (the restore drill covers it); migration
+  `0027_activity_idempotency_keys.sql` and a per-form-session key stop duplicates after an unknown save outcome.
+  Evidence: the progress entry "Integrity follow-up: erasure ledger and idempotent activity creation".
+- **Migration state:** `0025`-`0027` were applied to the `running_tracker_test` database only. The development
+  database is not migrated by that work; `npm run demo:up` (or `npm run db:migrate`) applies them on the next start.
+- **Remaining limitation:** an activity erasure committed but not yet exported when the node is lost (one export
+  interval while healthy) can still come back with an old backup, as for run deletions (ADR-0037).
+- **Suggested step 2:** `daily_metrics` (weight, sleep, mood, soreness), owner-only, with the same template; its
+  erasures use the ledger's extension point (ADR-0073).
 
 The rest of this document is the pause handoff as written for the map lifecycle closeout. Its restart and
 verification instructions still apply; "no further product work" no longer does.

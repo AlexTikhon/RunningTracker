@@ -1,6 +1,12 @@
-import type { ActivityListResponse, ActivityView, CreateActivityRequest } from '@running-tracker/contracts';
+import {
+  ACTIVITY_ALREADY_SAVED,
+  activityAlreadySavedDetailsSchema,
+  type ActivityListResponse,
+  type ActivityView,
+  type CreateActivityRequest,
+} from '@running-tracker/contracts';
 
-import { sameActivityRequest } from './activity-form.js';
+import { sameActivityRequest, type ActivityDetails } from './activity-form.js';
 import { RunnerApiError, type ActivityTarget, type CsrfCredentials } from './runner-api.js';
 
 // Framework-free controllers for the Activity tab (ADR-0072). Each belongs to one organization and one session: a
@@ -213,8 +219,12 @@ export class ActivityListController {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Saving one activity. The client id is bound to one payload: after an unknown outcome the same details are sent again
-// under the same id (idempotent on the server); changed details get a new id.
+// Saving one activity. Two layers make it idempotent:
+//   - the client id is bound to one payload: after an unknown outcome the same details are sent again under the same
+//     id (idempotent on the server); changed details get a new id;
+//   - one idempotency key per form session (ADR-0073), kept across edits until a confirmed save or an explicit new
+//     form: if an earlier attempt of this session did go through, the server returns that activity (same details) or
+//     409 ACTIVITY_ALREADY_SAVED (changed details), and never stores a second activity.
 
 export type ActivityCreator = (
   target: ActivityTarget,
@@ -223,22 +233,33 @@ export type ActivityCreator = (
   signal: AbortSignal,
 ) => Promise<{ activity: ActivityView; created: boolean }>;
 
-export type ActivitySubmissionPhase = 'failed' | 'idle' | 'pending' | 'saved';
+export type ActivitySubmissionPhase = 'already-saved' | 'failed' | 'idle' | 'pending' | 'saved';
 
 export interface ActivitySubmissionSnapshot {
   message: string | null;
   phase: ActivitySubmissionPhase;
+  // With `already-saved`: the activity this form session saved earlier, when the server named it.
+  savedActivityId: string | null;
   // An earlier attempt's outcome is unknown: it may already be saved.
   uncertain: boolean;
 }
 
-export const idleSubmission: ActivitySubmissionSnapshot = { message: null, phase: 'idle', uncertain: false };
+export const idleSubmission: ActivitySubmissionSnapshot = {
+  message: null,
+  phase: 'idle',
+  savedActivityId: null,
+  uncertain: false,
+};
 
 export interface ActivitySubmissionControllerOptions {
   create: ActivityCreator;
   // Read when the request is sent, so a refreshed token needs no new controller.
   csrf: () => CsrfCredentials;
   newId: () => string;
+  // A fresh idempotency key for a new form session.
+  newKey: () => string;
+  // Called once when the server says this form session already saved an activity with other details.
+  onAlreadySaved: (activityId: string | null) => void;
   onChange: (snapshot: ActivitySubmissionSnapshot) => void;
   // Called once per confirmed save, after the `saved` snapshot.
   onSaved: (activity: ActivityView, created: boolean) => void;
@@ -248,7 +269,7 @@ export interface ActivitySubmissionControllerOptions {
 
 interface Attempt {
   activityId: string;
-  request: Required<CreateActivityRequest>;
+  details: ActivityDetails;
 }
 
 function definitiveSaveRefusal(error: unknown): string | null {
@@ -275,13 +296,23 @@ function unknownOutcomeText(error: unknown): string {
   return `The save was not confirmed: ${reason} The activity may already be saved. Saving the same details again is safe and will not create a duplicate.`;
 }
 
+function alreadySavedId(error: unknown): { activityId: string | null } | null {
+  if (!(error instanceof RunnerApiError) || error.status !== 409 || error.code !== ACTIVITY_ALREADY_SAVED) return null;
+  const details = activityAlreadySavedDetailsSchema.safeParse(error.details);
+  return { activityId: details.success ? details.data.activityId : null };
+}
+
 export class ActivitySubmissionController {
   readonly #create: ActivityCreator;
   readonly #csrf: () => CsrfCredentials;
   readonly #newId: () => string;
+  readonly #newKey: () => string;
+  readonly #onAlreadySaved: (activityId: string | null) => void;
   readonly #onChange: (snapshot: ActivitySubmissionSnapshot) => void;
   readonly #onSaved: (activity: ActivityView, created: boolean) => void;
   readonly #orgId: string;
+  // The form session's idempotency key.
+  #formKey: string;
   // The attempt whose outcome is unknown, kept for an exact retry.
   #retained: Attempt | null = null;
   #disposed = false;
@@ -292,9 +323,12 @@ export class ActivitySubmissionController {
     this.#create = options.create;
     this.#csrf = options.csrf;
     this.#newId = options.newId;
+    this.#newKey = options.newKey;
+    this.#onAlreadySaved = options.onAlreadySaved;
     this.#onChange = options.onChange;
     this.#onSaved = options.onSaved;
     this.#orgId = options.orgId;
+    this.#formKey = options.newKey();
     followSession(options.signal, () => this.dispose());
   }
 
@@ -302,42 +336,66 @@ export class ActivitySubmissionController {
     return this.#snapshot;
   }
 
-  /** Whether saving these details now would repeat the uncertain earlier attempt rather than create a new activity. */
-  public wouldReuse(request: Required<CreateActivityRequest>): boolean {
-    return this.#retained !== null && sameActivityRequest(this.#retained.request, request);
+  /** Whether saving these details now would repeat the uncertain earlier attempt rather than send new details. */
+  public wouldReuse(details: ActivityDetails): boolean {
+    return this.#retained !== null && sameActivityRequest(this.#retained.details, details);
   }
 
-  /** Sends the request unless one is already on its way. Returns whether it was sent. */
-  public submit(request: Required<CreateActivityRequest>): boolean {
-    if (this.#disposed || this.#request !== null) return false;
-    const attempt: Attempt = this.wouldReuse(request)
-      ? this.#retained!
-      : { activityId: this.#newId(), request };
+  /**
+   * Sends the details unless a request is on its way or this form session already saved its activity. Returns whether
+   * it was sent.
+   */
+  public submit(details: ActivityDetails): boolean {
+    if (this.#disposed || this.#request !== null || this.#snapshot.phase === 'already-saved') return false;
+    const attempt: Attempt = this.wouldReuse(details) ? this.#retained! : { activityId: this.#newId(), details };
     this.#retained = attempt;
     const controller = new AbortController();
     this.#request = controller;
-    this.#emit({ message: null, phase: 'pending', uncertain: false });
-    void this.#create({ activityId: attempt.activityId, orgId: this.#orgId }, attempt.request, this.#csrf(), controller.signal).then(
+    this.#emit({ message: null, phase: 'pending', savedActivityId: null, uncertain: false });
+    const request = { ...attempt.details, idempotencyKey: this.#formKey };
+    void this.#create({ activityId: attempt.activityId, orgId: this.#orgId }, request, this.#csrf(), controller.signal).then(
       ({ activity, created }) => {
         if (!this.#current(controller)) return;
         this.#request = null;
         this.#retained = null;
-        this.#emit({ message: 'Activity saved.', phase: 'saved', uncertain: false });
+        // The form session produced its activity; the next one starts with a new key.
+        this.#formKey = this.#newKey();
+        this.#emit({ message: 'Activity saved.', phase: 'saved', savedActivityId: null, uncertain: false });
         this.#onSaved(activity, created);
       },
       (error: unknown) => {
         if (!this.#current(controller)) return;
         this.#request = null;
+        const saved = alreadySavedId(error);
+        if (saved !== null) {
+          this.#retained = null;
+          this.#emit({
+            message: 'Your earlier save went through, so these changed details were not saved.',
+            phase: 'already-saved',
+            savedActivityId: saved.activityId,
+            uncertain: false,
+          });
+          this.#onAlreadySaved(saved.activityId);
+          return;
+        }
         const refusal = definitiveSaveRefusal(error);
         if (refusal !== null) {
           this.#retained = null;
-          this.#emit({ message: refusal, phase: 'failed', uncertain: false });
+          this.#emit({ message: refusal, phase: 'failed', savedActivityId: null, uncertain: false });
         } else {
-          this.#emit({ message: unknownOutcomeText(error), phase: 'failed', uncertain: true });
+          this.#emit({ message: unknownOutcomeText(error), phase: 'failed', savedActivityId: null, uncertain: true });
         }
       },
     );
     return true;
+  }
+
+  /** Starts a new form session: a new key, nothing retained, idle. Ignored while a request is on its way. */
+  public startNew(): void {
+    if (this.#disposed || this.#request !== null) return;
+    this.#retained = null;
+    this.#formKey = this.#newKey();
+    this.#emit(idleSubmission);
   }
 
   // Aborting does not undo a PUT the server already received; it only stops this controller from reporting it.

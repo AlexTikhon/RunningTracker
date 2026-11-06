@@ -44,10 +44,13 @@ export const activityNotesSchema = z
   .refine((value) => !value.includes('\u0000'), 'Notes must not contain NUL characters')
   .refine((value) => !/\p{Cs}/u.test(value), 'Notes must be well-formed Unicode text');
 
-// Omitted and null are the same value for the optional fields.
+// Omitted and null are the same value for the optional fields. `idempotencyKey` (ADR-0073) is one client-generated UUID
+// per form session: a second save from the same session never creates a second activity. It is not part of the
+// activity's details and is not returned.
 export const createActivityRequestSchema = z.strictObject({
   distanceM: activityDistanceSchema.nullable().optional(),
   durationS: activityDurationSchema,
+  idempotencyKey: uuidSchema,
   notes: activityNotesSchema.nullable().optional(),
   rpe: activityRpeSchema.nullable().optional(),
   startedAt: activityStartedAtSchema,
@@ -67,6 +70,11 @@ export const activityViewSchema = z.strictObject({
 });
 
 export const activityPathSchema = z.strictObject({ activityId: uuidSchema, orgId: uuidSchema });
+
+// `details` of a 409 ACTIVITY_ALREADY_SAVED: the activity that the same idempotency key already created, so the client
+// can tell the person their earlier save went through and open it.
+export const ACTIVITY_ALREADY_SAVED = 'ACTIVITY_ALREADY_SAVED';
+export const activityAlreadySavedDetailsSchema = z.strictObject({ activityId: uuidSchema });
 
 export const activityListQuerySchema = z.strictObject({
   cursor: cursorSchema.optional(),
@@ -101,3 +109,4 @@ export type ActivityPath = z.infer<typeof activityPathSchema>;
 export type ActivityListQuery = z.infer<typeof activityListQuerySchema>;
 export type ActivityListResponse = z.infer<typeof activityListResponseSchema>;
 export type ActivityCursor = z.infer<typeof activityCursorSchema>;
+export type ActivityAlreadySavedDetails = z.infer<typeof activityAlreadySavedDetailsSchema>;

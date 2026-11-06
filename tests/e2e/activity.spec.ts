@@ -58,12 +58,16 @@ test('the demo runner adds an activity, sees it in the list after a reload, and 
     await expect(cards.first()).toContainText(text);
   }
 
-  // Exactly one PUT, to a client-generated id, carrying no owner, organization or source.
+  // Exactly one PUT, to a client-generated id, carrying the form session's idempotency key (ADR-0073) and no owner,
+  // organization or source.
   expect(mutations).toHaveLength(1);
   const [put] = mutations;
   expect(put?.method).toBe('PUT');
   expect(put?.path).toMatch(new RegExp(`^/api/orgs/${demoScenario.orgId}/activities/[0-9a-f-]{36}$`, 'u'));
-  expect(JSON.parse(put?.body ?? '{}')).toEqual({
+  const { idempotencyKey, ...sent } = JSON.parse(put?.body ?? '{}') as Record<string, unknown>;
+  expect(idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  expect(put?.path.endsWith(String(idempotencyKey))).toBe(false);
+  expect(sent).toEqual({
     distanceM: 32_500,
     durationS: 4_500,
     notes: 'Hilly loop',

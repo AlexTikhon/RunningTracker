@@ -249,7 +249,7 @@ describe('drill configuration', () => {
 });
 
 describe('recovery gating', () => {
-  it('lists the recovery sequence in the SDD order: deletions, then access restrictions, then readiness, permission recovery last', () => {
+  it('lists the recovery sequence in the SDD order: deletions, access restrictions, erasures, then readiness, permission recovery last', () => {
     expect(recoverySteps).toEqual([
       'application_offline',
       'database_created',
@@ -262,6 +262,8 @@ describe('recovery gating', () => {
       'deletion_outcomes_verified',
       'access_restrictions_reapplied',
       'access_outcomes_verified',
+      'erasures_reapplied',
+      'erasure_outcomes_verified',
       'readiness_verified',
       'current_permissions_restored',
     ]);

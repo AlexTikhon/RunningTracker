@@ -32,6 +32,8 @@ commitment to dates or to every item below.
 - **Health data is owner-only by default.** Activities, check-ins and meals are visible only to the person who
   recorded them. A coach sees none of it, even with run sharing grants, unless a later, explicit, per-category grant
   exists. Such a grant is a separate decision with its own ADR; run sharing never implies it.
+- **A deletion of health data stays deleted.** Every owner-only entity records its erasures in the erasure ledger,
+  which leaves the database host and is replayed after a restore (ADR-0073). A new entity uses its extension point.
 - **Each slice is a vertical slice:** migration with row-level security, strict contracts, API, web screen, tests at
   every layer and documentation, without changing existing behaviour that it does not own.
 

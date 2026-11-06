@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ACTIVITY_ALREADY_SAVED,
   ACTIVITY_DISTANCE_MAX_M,
   ACTIVITY_DURATION_MAX_S,
   ACTIVITY_NOTES_MAX_LENGTH,
   ACTIVITY_PAGE_MAX,
   ACTIVITY_TYPES,
+  activityAlreadySavedDetailsSchema,
   activityCursorSchema,
   activityListQuerySchema,
   activityListResponseSchema,
@@ -17,7 +19,8 @@ import {
 
 const activityId = 'ad32e5d8-dd0d-4652-b26a-026033120c33';
 const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const minimal = { durationS: 1_800, startedAt: '2026-10-05T06:00:00.000Z', type: 'ride' };
+const idempotencyKey = 'be000000-0000-4000-8000-000000000001';
+const minimal = { durationS: 1_800, idempotencyKey, startedAt: '2026-10-05T06:00:00.000Z', type: 'ride' };
 const view = {
   activityId,
   createdAt: '2026-10-05T08:00:00.000Z',
@@ -60,10 +63,17 @@ describe('activity creation request', () => {
     }
   });
 
-  it('requires type, startedAt and durationS', () => {
-    expect(accepts({ durationS: 60, startedAt: minimal.startedAt })).toBe(false);
-    expect(accepts({ durationS: 60, type: 'run' })).toBe(false);
-    expect(accepts({ startedAt: minimal.startedAt, type: 'run' })).toBe(false);
+  it('requires type, startedAt, durationS and an idempotency key', () => {
+    expect(accepts({ durationS: 60, idempotencyKey, startedAt: minimal.startedAt })).toBe(false);
+    expect(accepts({ durationS: 60, idempotencyKey, type: 'run' })).toBe(false);
+    expect(accepts({ idempotencyKey, startedAt: minimal.startedAt, type: 'run' })).toBe(false);
+    expect(accepts({ durationS: 60, startedAt: minimal.startedAt, type: 'run' })).toBe(false);
+  });
+
+  it('requires the idempotency key to be a UUID', () => {
+    for (const key of ['', 'form-1', null, 7, '00000000-0000-0000-0000-00000000000g']) {
+      expect(accepts({ ...minimal, idempotencyKey: key })).toBe(false);
+    }
   });
 
   it('bounds the duration to whole seconds from 1 to 48 hours', () => {
@@ -87,7 +97,8 @@ describe('activity creation request', () => {
   });
 
   it('refuses a distance that JSON parsing turned into Infinity', () => {
-    expect(accepts(JSON.parse('{"type":"run","startedAt":"2026-10-05T06:00:00.000Z","durationS":60,"distanceM":1e400}'))).toBe(false);
+    const parsed = JSON.parse('{"type":"run","startedAt":"2026-10-05T06:00:00.000Z","durationS":60,"distanceM":1e400}') as object;
+    expect(accepts({ ...parsed, idempotencyKey })).toBe(false);
   });
 
   it('bounds RPE to whole numbers from 1 to 10', () => {
@@ -153,6 +164,12 @@ describe('activity paths, list query, response and cursor', () => {
     const items = Array.from({ length: 51 }, () => view);
     expect(activityListResponseSchema.safeParse({ items: items.slice(0, 50), nextCursor: null }).success).toBe(true);
     expect(activityListResponseSchema.safeParse({ items, nextCursor: null }).success).toBe(false);
+  });
+
+  it('describes the already-saved conflict as the id of the activity the key created', () => {
+    expect(ACTIVITY_ALREADY_SAVED).toBe('ACTIVITY_ALREADY_SAVED');
+    expect(activityAlreadySavedDetailsSchema.parse({ activityId })).toEqual({ activityId });
+    expect(activityAlreadySavedDetailsSchema.safeParse({ activityId, notes: 'x' }).success).toBe(false);
   });
 
   it('documents the cursor content: version 1, a digest context, a position', () => {

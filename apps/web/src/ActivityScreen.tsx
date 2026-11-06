@@ -18,11 +18,13 @@ import {
   validateActivityDraft,
   type ActivityDraft,
 } from './activity-form.js';
+import { ActivityAlreadySaved, type SavedActivityView } from './ActivityAlreadySaved.js';
 import { defaultTimeZone, formatDistance, formatDuration, formatStartedAt } from './run-search.js';
 import {
   createActivity,
   deleteActivity,
   listActivities,
+  readActivity,
   type CsrfCredentials,
 } from './runner-api.js';
 
@@ -61,15 +63,68 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
 
   const validation = validateActivityDraft(draft, Date.now());
   const pending = submission.phase === 'pending';
+  const alreadySaved = submission.phase === 'already-saved';
   const repeatsUncertain = validation.ok && submitter.current?.wouldReuse(validation.request) === true;
+  const [savedView, setSavedView] = useState<SavedActivityView>({ status: 'closed' });
+  const opener = useRef<AbortController | null>(null);
+
+  const freshDraft = (current: ActivityDraft): ActivityDraft => ({
+    ...defaultActivityDraft(new Date()),
+    type: current.type,
+    unit: current.unit,
+  });
 
   const afterSaved = useRef<() => void>(() => undefined);
   afterSaved.current = () => {
     lister.current?.refresh();
     setNotice(null);
     setShowErrors(false);
-    setDraft((current) => ({ ...defaultActivityDraft(new Date()), type: current.type, unit: current.unit }));
+    setDraft(freshDraft);
   };
+
+  // The earlier save of this form went through (ADR-0073): the list must show it.
+  const afterAlreadySaved = useRef<() => void>(() => undefined);
+  afterAlreadySaved.current = () => {
+    lister.current?.refresh();
+    setSavedView({ status: 'closed' });
+  };
+
+  const openSaved = () => {
+    const activityId = submission.savedActivityId;
+    if (activityId === null || signal.aborted) return;
+    opener.current?.abort();
+    const request = new AbortController();
+    opener.current = request;
+    setSavedView({ status: 'loading' });
+    readActivity({ activityId, orgId }, request.signal).then(
+      (activity) => {
+        if (opener.current === request && !signal.aborted) setSavedView({ activity, status: 'ready' });
+      },
+      () => {
+        if (opener.current === request && !signal.aborted) {
+          setSavedView({ message: 'The saved activity could not be opened. It is in your list of activities below.', status: 'error' });
+        }
+      },
+    );
+  };
+
+  const startNew = () => {
+    opener.current?.abort();
+    opener.current = null;
+    submitter.current?.startNew();
+    setSavedView({ status: 'closed' });
+    setShowErrors(false);
+    setDraft(freshDraft);
+  };
+
+  useEffect(() => {
+    const stop = () => opener.current?.abort();
+    signal.addEventListener('abort', stop, { once: true });
+    return () => {
+      signal.removeEventListener('abort', stop);
+      stop();
+    };
+  }, [signal]);
 
   useEffect(() => {
     const next = new ActivityListController({ load: listActivities, onChange: setList, orgId, signal });
@@ -86,6 +141,8 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
       create: createActivity,
       csrf: () => csrfRef.current,
       newId: () => crypto.randomUUID(),
+      newKey: () => crypto.randomUUID(),
+      onAlreadySaved: () => afterAlreadySaved.current(),
       onChange: setSubmission,
       onSaved: () => afterSaved.current(),
       orgId,
@@ -213,16 +270,26 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
         )}
         {submission.uncertain && validation.ok && !repeatsUncertain && (
           <p className="activity-form__warning">
-            Your previous save may already have gone through. These details differ from it, so saving creates a separate
-            activity: check your list first.
+            Your previous save may already have gone through. Saving these changed details is still safe: if it did, no
+            second activity is created and you are told so.
           </p>
         )}
+        {alreadySaved && (
+          <ActivityAlreadySaved
+            onOpen={openSaved}
+            onStartNew={startNew}
+            savedActivityId={submission.savedActivityId}
+            timeZone={timeZone}
+            unit={draft.unit}
+            view={savedView}
+          />
+        )}
         <div className="activity-form__actions">
-          <button className="primary-action" disabled={pending} type="submit">
+          <button className="primary-action" disabled={pending || alreadySaved} type="submit">
             {pending ? 'Saving…' : 'Save activity'}
           </button>
           <p className={submission.phase === 'failed' ? 'activity-form__failure' : 'activity-form__status'} role="status">
-            {submission.message ?? ''}
+            {alreadySaved ? '' : submission.message ?? ''}
           </p>
         </div>
       </form>

@@ -119,6 +119,24 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         applied: 0,
         skipped_unknown_organization: 0,
       });
+      // ADR-0073: activity E was created before the backup and deleted after it. The restored backup brought it back,
+      // the ledger replay removed it again, and a second replay changed nothing.
+      expect(report.erasures.exportedEntries).toBe(1);
+      expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 1, skipped_different_record: 0 });
+      expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 1, erased: 0, skipped_different_record: 0 });
+      const erasureCheckIds = [
+        'erased-activity-existed-in-backup',
+        'erasure-first-pass-outcomes',
+        'erased-activity-absent',
+        'surviving-activity-untouched',
+        'erasure-journaled-again',
+        'erasure-second-pass-idempotent',
+        'erasure-second-pass-changes-nothing',
+        'erasure-ledger-denied-to-application',
+      ];
+      expect(
+        erasureCheckIds.map((id) => [id, report.checks.find((check) => check.id === id)?.passed]),
+      ).toEqual(erasureCheckIds.map((id) => [id, true]));
       // Stale access really was in the backup, and recovery removed it again as the runtime role sees it.
       expect(report.access.effectiveAccess).toEqual({
         recovered: { grantee: false, granteeTwo: false, keeper: true, leaver: false, owner: true },

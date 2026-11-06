@@ -181,6 +181,9 @@ runtime or maintenance role in the meantime.
    were restricted after the backup: the membership is inactive, the share is gone or narrowed, and a
    `SET LOCAL ROLE running_tracker_runtime` query with `app.user_id` and `app.org_id` set to them no
    longer returns the run (the drill does exactly this).
+   Then **replay erasures** of owner-only health records (ADR-0073) from the same journal copy:
+   `RESTORE_DATABASE_URL=<owner URL of the fresh database> npm run restore:reapply-erasures -- --journal-dir /path/to/journal-copy`.
+   Run it twice; the second run must report no `erased` (outcomes in `docs/runbooks/deletion-journal-and-recovery.md`, step 8).
 10. **Open the database deliberately.** The drill and the bootstrap leave the application logins without
     `CONNECT` on the restored database. Only after steps 4 to 9 succeeded and the application version is
     the one the migrations belong to:

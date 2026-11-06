@@ -17,6 +17,7 @@
     "restore:drill": "node --import tsx src/backup/restore-drill-main.ts",
     "restore:reapply-deletions": "node --import tsx src/restore/reapply-deletions-main.ts",
     "restore:reapply-access": "node --import tsx src/restore/reapply-access-main.ts",
+    "restore:reapply-erasures": "node --import tsx src/restore/reapply-erasures-main.ts",
     "load:explain": "node --import tsx src/loadtest/explain-run-main.ts",
     "load:report": "node --import tsx src/loadtest/load-report-main.ts",
     "load:run": "node --import tsx src/loadtest/load-run-main.ts",

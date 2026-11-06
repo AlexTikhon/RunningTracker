@@ -1,6 +1,8 @@
 # ADR-0072: Owner-only manual activities
 
-- Status: accepted; implemented and verified locally
+- Status: accepted; implemented and verified locally. Amended by [ADR-0073](0073-erasure-ledger-and-idempotent-activity-creation.md):
+  deletions are recorded in an erasure ledger and replayed after a restore (section 4's limitation is closed for the
+  recovery path), and creation takes a per-form-session idempotency key.
 - Date: 2026-11-06
 - Amends: nothing. Runs, run points, summaries, ingestion, the GPS algorithm and its version, SSE, tiles, retention
   and AI search are unchanged.

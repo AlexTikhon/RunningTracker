@@ -8,14 +8,22 @@ import { Client, Pool } from 'pg';
 
 import { systemClock, type Clock } from '../clock.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
+import { deleteActivity } from '../activities/activity-service.js';
 import { createFileDeletionJournalSink } from '../maintenance/deletion-journal-sink.js';
 import { runAccessJournalExportOnce } from '../maintenance/run-access-journal-export.js';
 import { runDeletionJournalExportOnce } from '../maintenance/run-deletion-journal-export.js';
+import { runErasureLedgerExportOnce } from '../maintenance/run-erasure-ledger-export.js';
 import { runRetentionDeleteOnce } from '../maintenance/run-retention-delete.js';
 import { runReapplyAccessCli } from '../restore/reapply-access-cli.js';
 import { loadAccessJournal, reapplyAccessOutcomes, type ReapplyAccessOutcome } from '../restore/reapply-access.js';
 import { runReapplyCli } from '../restore/reapply-deletions-cli.js';
 import { loadDeletionJournal, reapplyOutcomes, type ReapplyOutcome } from '../restore/reapply-deletions.js';
+import { runReapplyErasuresCli } from '../restore/reapply-erasures-cli.js';
+import {
+  loadErasureLedger,
+  reapplyErasureOutcomes,
+  type ReapplyErasureOutcome,
+} from '../restore/reapply-erasures.js';
 import { deleteRun, revokeRunShare, upsertRunShare } from '../runs/run-service.js';
 import { createBackup, readSourceFacts } from './backup-create.js';
 import { createBackupDecryptor, verifyBackupFile } from './backup-envelope.js';
@@ -25,6 +33,7 @@ import {
   countedTables,
   userLabels,
   type AccessSnapshot,
+  type ActivityState,
   type AccessState,
   type Check,
   type DatabaseState,
@@ -32,6 +41,7 @@ import {
   type JournalFacts,
   type MigrationRun,
   type ReapplyAccessRun,
+  type ReapplyErasureRun,
   type ReapplyRun,
   type UserLabel,
   type RoleFacts,
@@ -66,6 +76,11 @@ const ids = {
     C: 'd1200000-0000-4000-8000-0000000000c3',
     D: 'd1200000-0000-4000-8000-0000000000c4',
   } satisfies Record<RunLabel, string>,
+  // ADR-0073: E is deleted by its owner after the backup, F survives.
+  activities: {
+    E: 'd1200000-0000-4000-8000-0000000000e1',
+    F: 'd1200000-0000-4000-8000-0000000000e2',
+  },
 };
 
 const labels = ['A', 'B', 'C', 'D'] as const;
@@ -363,6 +378,24 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       await dropDatabase(target.database);
     },
 
+    async inspectActivities() {
+      return withClient(target.ownerUrl, async (client) => {
+        const row = await client.query<{ digest: string | null; e: boolean; f: boolean; outbox: string }>(
+          `SELECT EXISTS (SELECT 1 FROM activities WHERE org_id = $1 AND id = $2) AS e,
+                  EXISTS (SELECT 1 FROM activities WHERE org_id = $1 AND id = $3) AS f,
+                  (SELECT md5(activity::text) FROM activities AS activity WHERE org_id = $1 AND id = $3) AS digest,
+                  (SELECT count(*) FROM erasure_ledger)::text AS outbox`,
+          [ids.org, ids.activities.E, ids.activities.F],
+        );
+        const value = row.rows[0]!;
+        return {
+          outboxRows: Number(value.outbox),
+          present: { E: value.e, F: value.f },
+          survivorDigest: value.digest ?? 'missing',
+        } satisfies ActivityState;
+      });
+    },
+
     async copyJournalReadOnly() {
       await rm(recoveryJournalDirectory, { force: true, recursive: true });
       await cp(journalDirectory, recoveryJournalDirectory, { recursive: true });
@@ -386,10 +419,12 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       }
       const journal = await loadDeletionJournal(recoveryJournalDirectory);
       const accessJournal = await loadAccessJournal(recoveryJournalDirectory);
+      const erasureLedger = await loadErasureLedger(recoveryJournalDirectory);
       const manifest = await manifestOf(recoveryJournalDirectory);
       return {
         accessEntries: accessJournal.entries.length,
         entries: journal.entries.length,
+        erasureEntries: erasureLedger.entries.length,
         files: manifest.files,
         manifestDigest: manifest.digest,
         readOnlyEnforced,
@@ -452,9 +487,19 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       if (retention.status !== 'deleted' || retention.runId !== ids.runs.B) {
         throw new Error('Annual retention did not delete the expected run');
       }
+      // ADR-0073: the owner deletes activity E through the application's own service, as the runtime role.
+      await withAuthenticatedTenantTransaction(runtimePool, session, ids.org, (client) =>
+        deleteActivity(client, session, ids.org, ids.activities.E),
+      );
 
       const journal = await withClient(source.ownerUrl, (client) =>
-        client.query<{ deleted_at: Date }>('SELECT deleted_at FROM run_deletion_journal ORDER BY journal_seq'),
+        client.query<{ deleted_at: Date }>(
+          `SELECT deleted_at FROM (
+             SELECT deleted_at, 1 AS source, journal_seq AS seq FROM run_deletion_journal
+             UNION ALL
+             SELECT erased_at, 2, ledger_seq FROM erasure_ledger
+           ) AS deletion ORDER BY source, seq`,
+        ),
       );
       return { deletedAt: journal.rows.map((row) => row.deleted_at.toISOString()) };
     },
@@ -484,12 +529,25 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       if (accessBatches === 0) {
         throw new Error('The access journal exporter exported nothing');
       }
+      let erasureBatches = 0;
+      for (;;) {
+        const result = await runErasureLedgerExportOnce(maintenancePool, sink, clock);
+        if (result.status === 'idle') break;
+        erasureBatches += 1;
+      }
+      if (erasureBatches === 0) {
+        throw new Error('The erasure ledger exporter exported nothing');
+      }
       const pending = await withClient(source.ownerUrl, (client) =>
-        client.query<{ access: string; deletion: string }>(
+        client.query<{ access: string; deletion: string; erasure: string }>(
           `SELECT (SELECT count(*) FROM run_deletion_journal)::text AS deletion,
-                  (SELECT count(*) FROM access_restriction_journal)::text AS access`,
+                  (SELECT count(*) FROM access_restriction_journal)::text AS access,
+                  (SELECT count(*) FROM erasure_ledger)::text AS erasure`,
         ),
       );
+      if (pending.rows[0]!.erasure !== '0') {
+        throw new Error('The erasure ledger outbox still holds rows after export');
+      }
       if (pending.rows[0]!.deletion !== '0') {
         throw new Error('The deletion journal outbox still holds rows after export');
       }
@@ -498,11 +556,13 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       }
       const journal = await loadDeletionJournal(journalDirectory);
       const accessJournal = await loadAccessJournal(journalDirectory);
+      const erasureLedger = await loadErasureLedger(journalDirectory);
       const manifest = await manifestOf(journalDirectory);
       exportedDigest = manifest.digest;
       return {
         accessEntries: accessJournal.entries.length,
         entries: journal.entries.length,
+        erasureEntries: erasureLedger.entries.length,
         files: manifest.files,
         manifestDigest: manifest.digest,
       } satisfies JournalFacts;
@@ -633,6 +693,26 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       return { entries: value('journal entries'), files: value('journal files'), outcomes } satisfies ReapplyRun;
     },
 
+    async reapplyErasures() {
+      onCommand(`restore:reapply-erasures --journal-dir <recovery copy>  (RESTORE_DATABASE_URL = owner of ${target.database})`);
+      const lines: string[] = [];
+      await runReapplyErasuresCli({
+        argv: ['--journal-dir', recoveryJournalDirectory],
+        env: { RESTORE_DATABASE_URL: target.ownerUrl },
+        log: (line) => lines.push(line),
+      });
+      const value = (name: string): number => {
+        const line = lines.find((entry) => entry.startsWith(`${name}: `));
+        if (!line) throw new Error('The erasure replay report is incomplete');
+        return Number(line.slice(name.length + 2));
+      };
+      const outcomes = Object.fromEntries(reapplyErasureOutcomes.map((name) => [name, value(name)])) as Record<
+        ReapplyErasureOutcome,
+        number
+      >;
+      return { entries: value('ledger entries'), files: value('ledger files'), outcomes } satisfies ReapplyErasureRun;
+    },
+
     async reapplyAccess() {
       onCommand(`restore:reapply-access --journal-dir <recovery copy>  (RESTORE_DATABASE_URL = owner of ${target.database})`);
       const lines: string[] = [];
@@ -707,6 +787,13 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
         await seedRun(client, 'A', timing(2), true);
         await seedRun(client, 'B', timing(400), true);
         await seedRun(client, 'C', timing(1), true);
+        // ADR-0073: two of the owner's manual activities, both in the backup.
+        await client.query(
+          `INSERT INTO activities (org_id, id, user_id, type, started_at, duration_s, distance_m, rpe, notes, created_at)
+           VALUES ($1, $2, $4, 'swim', $5, 1800, 1500, 4, 'drill fixture', $6),
+                  ($1, $3, $4, 'strength', $5, 2700, NULL, 7, NULL, $6)`,
+          [ids.org, ids.activities.E, ids.activities.F, ids.ownerUser, new Date(now - 3 * dayMs), new Date(now - 3 * dayMs + 60_000)],
+        );
         // Run C also carries the shares of the access scenario (the grantee's was seeded with the run).
         await client.query(
           `INSERT INTO run_shares (org_id, run_id, grantee_user_id, can_read_live, can_read_history)
@@ -822,6 +909,15 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
         );
         add('journal-denied-to-application', 'The runtime and maintenance roles have no access to the deletion journal table or the reapplication function', privileges.rows[0]!.journal === false && privileges.rows[0]!.reapply === false);
         add('access-journal-denied-to-application', 'The runtime and maintenance roles have no access to the access-restriction journal table or its reapplication function', privileges.rows[0]!.access_journal === false && privileges.rows[0]!.access_reapply === false);
+        const erasure = await client.query<{ ledger: boolean; replay: boolean }>(
+          `SELECT bool_or(has_table_privilege(role, 'public.erasure_ledger', 'SELECT')
+                          OR has_table_privilege(role, 'public.erasure_ledger', 'INSERT')
+                          OR has_table_privilege(role, 'public.erasure_ledger', 'DELETE')) AS ledger,
+                  bool_or(has_function_privilege(role,
+                    'app_private.reapply_erasure(text, uuid, uuid, uuid, timestamptz)', 'EXECUTE')) AS replay
+           FROM unnest(ARRAY['running_tracker_runtime', 'running_tracker_maintenance']) AS role`,
+        );
+        add('erasure-ledger-denied-to-application', 'The runtime and maintenance roles have no access to the erasure ledger table or its replay function', erasure.rows[0]!.ledger === false && erasure.rows[0]!.replay === false);
         add('application-cannot-connect', 'The runtime and maintenance roles cannot connect to the restored database: the drill leaves it closed, and opening it is an explicit operator step', privileges.rows[0]!.connect === false);
         const sessions = await client.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM pg_stat_activity

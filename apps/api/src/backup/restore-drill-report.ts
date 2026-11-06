@@ -1,5 +1,6 @@
 import { reapplyAccessOutcomes } from '../restore/reapply-access.js';
 import { reapplyOutcomes } from '../restore/reapply-deletions.js';
+import { reapplyErasureOutcomes } from '../restore/reapply-erasures.js';
 import { userLabels, type DrillReport } from './restore-drill.js';
 
 export function formatDuration(ms: number): string {
@@ -30,6 +31,10 @@ function outcomeRows(run: NonNullable<DrillReport['journal']['firstPass']>): str
 
 function accessOutcomeRows(run: NonNullable<DrillReport['access']['firstPass']>): string {
   return reapplyAccessOutcomes.map((name) => `${name}: ${run.outcomes[name]}`).join(', ');
+}
+
+function erasureOutcomeRows(run: NonNullable<DrillReport['erasures']['firstPass']>): string {
+  return reapplyErasureOutcomes.map((name) => `${name}: ${run.outcomes[name]}`).join(', ');
 }
 
 const yesNo = (value: boolean): string => (value ? 'yes' : 'no');
@@ -181,6 +186,20 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '',
   );
 
+  out.push('## Erasure replay (owner-only health data)', '');
+  out.push(
+    table([
+      ['erasure ledger entries', report.erasures.exportedEntries === null ? 'not reached' : String(report.erasures.exportedEntries)],
+      ['first pass outcomes', report.erasures.firstPass ? erasureOutcomeRows(report.erasures.firstPass) : 'not reached'],
+      ['second pass outcomes (idempotency)', report.erasures.secondPass ? erasureOutcomeRows(report.erasures.secondPass) : 'not reached'],
+    ]),
+    '',
+  );
+  out.push(
+    'Fixture activities are labelled E and F; no identifier is printed. Both are in the backup. After the backup the owner deleted E through the application\'s delete path, which recorded it in the erasure ledger (ADR-0073); the ledger was exported with the deletion journal. F is untouched.',
+    '',
+  );
+
   out.push('## Roles and security', '');
   if (report.roles.length === 0) {
     out.push('Not reached.', '');
@@ -216,6 +235,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
       '- After `restore:reapply-deletions` from a read-only copy of the journal, A and B had no run, point, summary or share rows, every deleted run had a tombstone of at least one year, and the archive revision advanced exactly once per deleted run. D received its tombstone. The surviving run C was unchanged.',
       '- A second reapplication was idempotent: only marker_present outcomes, and an identical database state.',
       '- Access that was revoked after the backup (a share revoked, a share narrowed, a member deactivated) was still present in the restored backup, and was removed again by `restore:reapply-access` from the exported journal: the recovered permissions equal those of the lost source, and the people concerned can no longer read the surviving run as the runtime role under row-level security. Nobody gained access, the second pass changed nothing, and the changes were journaled again on the recovered node.',
+      '- Activity E, deleted by its owner after the backup, was back in the restored backup and was removed again by `restore:reapply-erasures` from the exported erasure ledger; activity F was unchanged, the replayed erasure was journaled again, and a second replay reported only absent outcomes and changed nothing.',
       '- The three application roles are not superuser and have no BYPASSRLS, CREATEDB or CREATEROLE.',
       '- Failure paths fail closed: wrong key, corrupted or truncated backup, malformed journal, migration checksum mismatch, and an out-of-order recovery step are covered by automated tests.',
       '',
@@ -233,6 +253,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '- Credentials and sessions. Sessions are held in process memory and are gone after a restart, and no identity provider exists yet (P12.1), so no credential was restored or exercised.',
     '- Production sign-in (P12.1): no identity provider is selected, so no end-to-end login was exercised.',
     '- Deletions that were committed but not yet exported when a node is lost (journal recovery point, ADR-0037), and a mount that accepts writes but is not durable.',
+    '- Activity erasures that were committed but not yet exported when a node is lost (the same recovery point, ADR-0073): such an activity comes back with an old backup.',
     '- Daily scheduling and 7-day retention running unattended on a host: the commands exist and are tested; nothing here ran on a schedule.',
     '',
   );

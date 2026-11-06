@@ -43,6 +43,9 @@ interface Authentication {
 }
 
 const activityId = (n: number) => `ad000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+// One form session per activity id unless a test says otherwise (ADR-0073): retries of one id share one key.
+const keyFor = (id: string) => `be${id.slice(2)}`;
+const formKey = (n: number) => `bf000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const body = {
   distanceM: 20_000,
   durationS: 3_600,
@@ -135,13 +138,17 @@ describe('ADR-0072 activities HTTP API', () => {
   const path = (orgId: string, id?: string) => `/api/orgs/${orgId}/activities${id === undefined ? '' : `/${id}`}`;
 
   function put(auth: Authentication, id: string, payload: unknown, orgId: string = ids.orgA) {
+    const withKey =
+      payload !== null && typeof payload === 'object' && !('idempotencyKey' in payload)
+        ? { ...payload, idempotencyKey: keyFor(id) }
+        : payload;
     return request(app)
       .put(path(orgId, id))
       .set('Cookie', auth.cookie)
       .set('Origin', allowedOrigin)
       .set(csrfHeaderName, auth.csrfToken)
       .type('application/json')
-      .send(payload as object);
+      .send(withKey as object);
   }
 
   function putRaw(auth: Authentication, id: string, raw: string) {
@@ -256,6 +263,81 @@ describe('ADR-0072 activities HTTP API', () => {
     });
   });
 
+  describe('idempotency key per form session (ADR-0073)', () => {
+    async function count(where = 'TRUE', values: unknown[] = []): Promise<number> {
+      const result = await ownerPool.query<{ n: string }>(`SELECT count(*)::text AS n FROM activities WHERE ${where}`, values);
+      return Number(result.rows[0]!.n);
+    }
+
+    it('creates with a new key and stores the key with the activity, not in the answer', async () => {
+      const created = await put(owner, activityId(200), { ...body, idempotencyKey: formKey(1) }).expect(201);
+      expect(created.body).not.toHaveProperty('idempotencyKey');
+      const stored = await ownerPool.query<{ idempotency_key: string }>('SELECT idempotency_key FROM activities WHERE id = $1', [activityId(200)]);
+      expect(stored.rows).toEqual([{ idempotency_key: formKey(1) }]);
+    });
+
+    it('answers a retry with the same key and payload with the existing activity, under the same or a new id', async () => {
+      const created = await put(owner, activityId(201), { ...body, idempotencyKey: formKey(2) }).expect(201);
+      const sameId = await put(owner, activityId(201), { ...body, idempotencyKey: formKey(2) }).expect(200);
+      expect(sameId.body).toEqual(created.body);
+      // The client lost the id it used (or chose a new one) but the form session is the same: no second activity.
+      const newId = await put(owner, activityId(202), { ...body, idempotencyKey: formKey(2) }).expect(200);
+      expect(newId.body).toEqual(created.body);
+      expect(await count()).toBe(1);
+      expect(errorCode(await read(owner, activityId(202)).expect(404))).toBe('ACTIVITY_NOT_FOUND');
+    });
+
+    it('answers the same key with different details with 409 ACTIVITY_ALREADY_SAVED naming the saved activity, and saves nothing', async () => {
+      await put(owner, activityId(203), { ...body, idempotencyKey: formKey(3) }).expect(201);
+      for (const change of [{ notes: 'Edited after the unknown outcome' }, { durationS: 3_700 }, { type: 'run' }]) {
+        const response = await put(owner, activityId(204), { ...body, ...change, idempotencyKey: formKey(3) }).expect(409);
+        const error = apiErrorResponseSchema.parse(response.body).error;
+        expect(error.code).toBe('ACTIVITY_ALREADY_SAVED');
+        expect(error.details).toEqual({ activityId: activityId(203) });
+        expect(error.message).toMatch(/already saved/iu);
+      }
+      expect(await count()).toBe(1);
+      expect((await read(owner, activityId(203)).expect(200)).body).toMatchObject({ notes: body.notes });
+    });
+
+    it('keeps id-bound conflicts as before: the same id with another key is ACTIVITY_CONFLICT', async () => {
+      await put(owner, activityId(205), { ...body, idempotencyKey: formKey(5) }).expect(201);
+      expect(errorCode(await put(owner, activityId(205), { ...body, idempotencyKey: formKey(6) }).expect(409))).toBe('ACTIVITY_CONFLICT');
+      expect(await count()).toBe(1);
+    });
+
+    it('isolates keys per owner and per organization', async () => {
+      // Another member of org A, and the owner of an activity in org B, may use the very same key.
+      await put(owner, activityId(206), { ...body, idempotencyKey: formKey(7) }).expect(201);
+      await put(coach, activityId(207), { ...body, idempotencyKey: formKey(7) }).expect(201);
+      await put(grantee, activityId(208), { ...body, idempotencyKey: formKey(7) }).expect(201);
+      // The grantee is also a member of org B: the same person's key is independent per organization.
+      await put(grantee, activityId(209), { ...body, idempotencyKey: formKey(7) }, ids.orgB).expect(201);
+      expect(await count('idempotency_key = $1', [formKey(7)])).toBe(4);
+      // Nobody learns about another owner's activity through a key collision.
+      const coachRetry = await put(coach, activityId(210), { ...body, notes: 'different', idempotencyKey: formKey(7) }).expect(409);
+      expect(apiErrorResponseSchema.parse(coachRetry.body).error.details).toEqual({ activityId: activityId(207) });
+    });
+
+    it('frees a key when its activity is deleted', async () => {
+      await put(owner, activityId(211), { ...body, idempotencyKey: formKey(8) }).expect(201);
+      await remove(owner, activityId(211)).expect(204);
+      await put(owner, activityId(212), { ...body, notes: 'saved again', idempotencyKey: formKey(8) }).expect(201);
+    });
+
+    it('settles concurrent saves of one form session under different ids to a single activity', async () => {
+      const responses = await Promise.all(
+        Array.from({ length: 6 }, (_, index) =>
+          put(owner, activityId(220 + index), { ...body, idempotencyKey: formKey(9) }),
+        ),
+      );
+      expect(responses.map((response) => response.status).sort()).toEqual([200, 200, 200, 200, 200, 201]);
+      expect(await count('idempotency_key = $1', [formKey(9)])).toBe(1);
+      const ids200 = new Set(responses.map((response) => (response.body as { activityId: string }).activityId));
+      expect(ids200.size).toBe(1);
+    });
+  });
+
   describe('validation', () => {
     it.each([
       ['an unknown type', { ...body, type: 'yoga' }],
@@ -288,10 +370,18 @@ describe('ADR-0072 activities HTTP API', () => {
       await put(owner, activityId(21), { ...body, startedAt: '2026-10-07T00:00:00.000Z' }).expect(201);
     });
 
+    it('refuses a missing or malformed idempotency key', async () => {
+      // `body` carries no key: sent raw, nothing adds one.
+      expect(errorCode(await putRaw(owner, activityId(24), JSON.stringify(body)).expect(400))).toBe('INVALID_REQUEST');
+      expect(errorCode(await put(owner, activityId(24), { ...body, idempotencyKey: 'form-1' }).expect(400))).toBe('INVALID_REQUEST');
+      expect(await storedRows()).toEqual([]);
+    });
+
     it('refuses a distance that JSON turns into Infinity, and a literal NaN that is not JSON at all', async () => {
-      const infinite = await putRaw(owner, activityId(22), '{"type":"run","startedAt":"2026-10-05T06:00:00.000Z","durationS":60,"distanceM":1e400}').expect(400);
+      const key = keyFor(activityId(22));
+      const infinite = await putRaw(owner, activityId(22), `{"type":"run","startedAt":"2026-10-05T06:00:00.000Z","durationS":60,"idempotencyKey":"${key}","distanceM":1e400}`).expect(400);
       expect(errorCode(infinite)).toBe('INVALID_REQUEST');
-      const nan = await putRaw(owner, activityId(22), '{"type":"run","startedAt":"2026-10-05T06:00:00.000Z","durationS":60,"distanceM":NaN}').expect(400);
+      const nan = await putRaw(owner, activityId(22), `{"type":"run","startedAt":"2026-10-05T06:00:00.000Z","durationS":60,"idempotencyKey":"${key}","distanceM":NaN}`).expect(400);
       expect(errorCode(nan)).toBe('INVALID_REQUEST');
       expect(await storedRows()).toEqual([]);
     });

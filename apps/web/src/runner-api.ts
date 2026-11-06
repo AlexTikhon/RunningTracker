@@ -85,6 +85,8 @@ export class RunnerApiError extends Error {
     public readonly code: string,
     public readonly requestId: string | null,
     public readonly retryAfterMs: number | null = null,
+    // The error envelope's `details`, unvalidated: a caller that relies on a field parses it with its own schema.
+    public readonly details: Readonly<Record<string, unknown>> | null = null,
   ) {
     super(message);
     this.name = 'RunnerApiError';
@@ -117,6 +119,7 @@ function requireSuccess({ response, payload }: { response: Response; payload: un
       parsed.data.error.code,
       parsed.data.error.requestId,
       retryAfterMs(response),
+      parsed.data.error.details ?? null,
     );
   }
 
@@ -349,7 +352,9 @@ function activityPath(orgId: string, activityId?: string): string {
 }
 
 // Idempotent create: the client chose the id, so sending the same id and payload again after an unknown outcome is
-// safe (200 with the stored activity). 409 ACTIVITY_CONFLICT means the id already holds a different payload.
+// safe (200 with the stored activity). 409 ACTIVITY_CONFLICT means the id already holds a different payload. The form
+// session's idempotency key (ADR-0073) makes a save under a new id safe too: 200 with the activity that key already
+// created (whose id is then not the one sent), or 409 ACTIVITY_ALREADY_SAVED when the details differ.
 export async function createActivity(
   target: ActivityTarget,
   request: CreateActivityRequest,
@@ -364,8 +369,21 @@ export async function createActivity(
     signal,
   });
   const activity = activityViewSchema.parse(requireSuccess(response));
+  const created = response.response.status === 201;
+  // A new activity must be the one asked for; a replay may be the one this form session saved earlier under another id.
+  if (created && activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
+  return { activity, created };
+}
+
+export async function readActivity(target: ActivityTarget, signal: AbortSignal): Promise<ActivityView> {
+  const response = await requestJson(activityPath(target.orgId, target.activityId), {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  const activity = activityViewSchema.parse(requireSuccess(response));
   if (activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
-  return { activity, created: response.response.status === 201 };
+  return activity;
 }
 
 export async function listActivities(

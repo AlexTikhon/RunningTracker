@@ -41,9 +41,14 @@ function passedReport(): DrillReport {
       postgres: '17.5',
       runnerMode: 'docker-exec',
     },
+    erasures: {
+      exportedEntries: 1,
+      firstPass: { entries: 1, files: 1, outcomes: { absent: 0, erased: 1, skipped_different_record: 0 } },
+      secondPass: { entries: 1, files: 1, outcomes: { absent: 1, erased: 0, skipped_different_record: 0 } },
+    },
     generatedAt: '2026-10-01T10:05:00.000Z',
     journal: {
-      exported: { accessEntries: 5, entries: 3, files: 2, manifestDigest: 'abc' },
+      exported: { accessEntries: 5, entries: 3, erasureEntries: 1, files: 3, manifestDigest: 'abc' },
       firstPass: { entries: 3, files: 1, outcomes: { deleted: 2, expired: 0, marker_present: 0, marker_restored: 1, skipped_newer_run: 0, skipped_unknown_membership: 0, skipped_unknown_organization: 0 } },
       recoveryCopyReadOnlyEnforced: true,
       secondPass: { entries: 3, files: 1, outcomes: { deleted: 0, expired: 0, marker_present: 3, marker_restored: 0, skipped_newer_run: 0, skipped_unknown_membership: 0, skipped_unknown_organization: 0 } },
@@ -63,6 +68,8 @@ function passedReport(): DrillReport {
         'deletion_outcomes_verified',
         'access_restrictions_reapplied',
         'access_outcomes_verified',
+        'erasures_reapplied',
+        'erasure_outcomes_verified',
         'readiness_verified',
         'current_permissions_restored',
       ],
@@ -193,6 +200,15 @@ describe('drill report', () => {
     }
     expect(text).toMatch(/\| grantee \| no \| yes \| no \|/u);
     expect(text).toMatch(/\| keeper \| yes \| yes \| yes \|/u);
+  });
+
+  it('reports the erasure replay with both passes and its unexported-window limit', () => {
+    const text = renderDrillReportMarkdown(passedReport());
+    expect(text).toContain('Erasure replay (owner-only health data)');
+    expect(text).toContain('absent: 0, erased: 1, skipped_different_record: 0');
+    expect(text).toContain('absent: 1, erased: 0, skipped_different_record: 0');
+    expect(text).toContain('restore:reapply-erasures');
+    expect(text.slice(text.indexOf('NOT VERIFIED'))).toMatch(/erasures that were committed but not yet exported/iu);
   });
 
   it('states what the access recovery deliberately does not do', () => {

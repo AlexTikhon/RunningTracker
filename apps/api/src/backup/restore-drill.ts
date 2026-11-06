@@ -1,6 +1,7 @@
 import type { Clock } from '../clock.js';
 import type { ReapplyAccessOutcome } from '../restore/reapply-access.js';
 import type { ReapplyOutcome } from '../restore/reapply-deletions.js';
+import type { ReapplyErasureOutcome } from '../restore/reapply-erasures.js';
 import { createRecoveryTracker, recoverySteps, type RecoveryStep } from './restore-safety.js';
 
 export const rpoTargetMs = 24 * 60 * 60 * 1000;
@@ -81,6 +82,82 @@ export interface ReapplyAccessRun {
   entries: number;
   files: number;
   outcomes: Record<ReapplyAccessOutcome, number>;
+}
+
+/**
+ * The fixture activities of the erasure scenario (ADR-0073): E is in the backup and its owner deletes it after the
+ * backup; F is in the backup and untouched.
+ */
+export type ActivityLabel = 'E' | 'F';
+
+export interface ActivityState {
+  /** Rows waiting in the restored database's own erasure-ledger outbox. */
+  outboxRows: number;
+  present: Record<ActivityLabel, boolean>;
+  /** Digest over the surviving activity's row, so its content is compared, not just its presence. */
+  survivorDigest: string;
+}
+
+export interface ReapplyErasureRun {
+  entries: number;
+  files: number;
+  outcomes: Record<ReapplyErasureOutcome, number>;
+}
+
+export interface ErasureEvaluationInput {
+  afterFirst: ActivityState;
+  afterSecond: ActivityState;
+  first: ReapplyErasureRun;
+  restored: ActivityState;
+  second: ReapplyErasureRun;
+}
+
+/** Pure comparison of the activities in the restored database before and after each erasure replay pass. */
+export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] {
+  const { afterFirst, afterSecond, first, restored, second } = input;
+  const checks: Check[] = [];
+  const add = (id: string, description: string, passed: boolean): void => {
+    checks.push({ description, id, passed });
+  };
+  const othersZero = (run: ReapplyErasureRun, keep: ReapplyErasureOutcome) =>
+    Object.entries(run.outcomes).every(([name, count]) => name === keep || count === 0);
+
+  add(
+    'erased-activity-existed-in-backup',
+    'Activity E, deleted after the backup, and the surviving activity F are both in the restored backup: the backup really contains health data deleted later',
+    restored.present.E && restored.present.F,
+  );
+  add(
+    'erasure-first-pass-outcomes',
+    'The first erasure replay erased exactly the one activity deleted after the backup and reported no other outcome',
+    first.entries === 1 && first.outcomes.erased === 1 && othersZero(first, 'erased'),
+  );
+  add(
+    'erased-activity-absent',
+    'After the replay, activity E is gone from the restored database',
+    !afterFirst.present.E,
+  );
+  add(
+    'surviving-activity-untouched',
+    'The surviving activity F is present and unchanged',
+    afterFirst.present.F && afterFirst.survivorDigest === restored.survivorDigest,
+  );
+  add(
+    'erasure-journaled-again',
+    'The replayed erasure was journaled again on the recovered node, so it is exported from there too',
+    afterFirst.outboxRows === restored.outboxRows + first.outcomes.erased,
+  );
+  add(
+    'erasure-second-pass-idempotent',
+    'The second erasure replay changed nothing: every entry reported absent',
+    second.entries === first.entries && second.outcomes.absent === second.entries && othersZero(second, 'absent'),
+  );
+  add(
+    'erasure-second-pass-changes-nothing',
+    'The activities and the erasure outbox after the second replay are identical to those after the first',
+    deepEqual(afterSecond, afterFirst),
+  );
+  return checks;
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {
@@ -353,6 +430,8 @@ export interface JournalFacts {
   /** Entries of the access-restriction journal files (the deletion journal's are `entries`). */
   accessEntries: number;
   entries: number;
+  /** Entries of the erasure ledger files (ADR-0073). */
+  erasureEntries: number;
   files: number;
   manifestDigest: string;
 }
@@ -382,12 +461,16 @@ export interface DrillOperations {
   deleteAfterBackup(): Promise<{ deletedAt: string[] }>;
   exportJournal(): Promise<JournalFacts>;
   inspectAccess(side: 'source' | 'target'): Promise<AccessSnapshot>;
+  /** The fixture activities and the erasure outbox of the restored database. */
+  inspectActivities(): Promise<ActivityState>;
   inspectSource(): Promise<{ databaseBytes: number; state: DatabaseState }>;
   inspectTarget(): Promise<DatabaseState>;
   migrate(): Promise<MigrationRun>;
   prepare(): Promise<EnvironmentFacts>;
   reapplyAccess(): Promise<ReapplyAccessRun>;
   reapplyDeletions(): Promise<ReapplyRun>;
+  /** Replays the exported erasure ledger with restore:reapply-erasures (ADR-0073). */
+  reapplyErasures(): Promise<ReapplyErasureRun>;
   restoreBackup(): Promise<void>;
   /** Revokes, narrows and deactivates access after the backup, through the application's own paths. */
   restrictAccessAfterBackup(): Promise<void>;
@@ -420,6 +503,7 @@ export interface DrillReport {
     totalRecoveryMs: number;
   };
   environment: EnvironmentFacts | null;
+  erasures: { exportedEntries: number | null; firstPass: ReapplyErasureRun | null; secondPass: ReapplyErasureRun | null };
   failure?: { message: string; step: string };
   generatedAt: string;
   journal: { exported: JournalFacts | null; firstPass: ReapplyRun | null; recoveryCopyReadOnlyEnforced: boolean | null; secondPass: ReapplyRun | null };
@@ -467,7 +551,8 @@ function scrubMessage(error: unknown): string {
 
 /**
  * Runs the drill in the SDD order: backup, deletions and access restrictions after it, journal export, simulated loss, restore
- * into a fresh isolated database, migrations, deletion reapplication, verification. Any failure stops the
+ * into a fresh isolated database, migrations, deletion reapplication, access reapplication, erasure replay (ADR-0073),
+ * verification. Any failure stops the
  * drill, keeps every database for diagnosis, and returns a failed report with exit code 1. The last SDD
  * step (current permissions restored, P12.4) completes only after the access restrictions were reapplied
  * and verified against the permissions of the lost source. Even then the drill never reopens the
@@ -498,6 +583,8 @@ export async function runRestoreDrill(input: {
   let secondPass: ReapplyRun | null = null;
   let firstAccessPass: ReapplyAccessRun | null = null;
   let secondAccessPass: ReapplyAccessRun | null = null;
+  let firstErasurePass: ReapplyErasureRun | null = null;
+  let secondErasurePass: ReapplyErasureRun | null = null;
   let effectiveAccess: DrillReport['access']['effectiveAccess'] = null;
   let roles: RoleFacts[] = [];
   let checks: Check[] = [];
@@ -568,7 +655,8 @@ export async function runRestoreDrill(input: {
     if (
       copy.manifestDigest !== exported.manifestDigest ||
       copy.entries !== exported.entries ||
-      copy.accessEntries !== exported.accessEntries
+      copy.accessEntries !== exported.accessEntries ||
+      copy.erasureEntries !== exported.erasureEntries
     ) {
       throw new Error('The recovery copy of the journal differs from the exported journal');
     }
@@ -635,6 +723,8 @@ export async function runRestoreDrill(input: {
     const restored = await operations.inspectTarget();
     step = 'inspect-restored-access';
     const restoredAccess = await operations.inspectAccess('target');
+    step = 'inspect-restored-activities';
+    const restoredActivities = await operations.inspectActivities();
 
     step = 'reapply-deletions';
     const reapplyStart = mark();
@@ -701,6 +791,32 @@ export async function runRestoreDrill(input: {
       throw new Error(`Access recovery verification failed: ${accessFailed.map((check) => check.id).join(', ')}`);
     }
     tracker.complete('access_outcomes_verified');
+
+    // Erasures of owner-only health records (ADR-0073), from the same read-only journal copy.
+    step = 'reapply-erasures';
+    firstErasurePass = await operations.reapplyErasures();
+    tracker.complete('erasures_reapplied');
+    step = 'inspect-activities-after-first-replay';
+    const activitiesAfterFirst = await operations.inspectActivities();
+    step = 'reapply-erasures-second-pass';
+    secondErasurePass = await operations.reapplyErasures();
+    step = 'inspect-activities-after-second-replay';
+    const activitiesAfterSecond = await operations.inspectActivities();
+
+    step = 'verify-erasure-outcomes';
+    const erasureChecks = evaluateErasureRecovery({
+      afterFirst: activitiesAfterFirst,
+      afterSecond: activitiesAfterSecond,
+      first: firstErasurePass,
+      restored: restoredActivities,
+      second: secondErasurePass,
+    });
+    checks = [...checks, ...erasureChecks];
+    const erasureFailed = erasureChecks.filter((check) => !check.passed);
+    if (erasureFailed.length > 0) {
+      throw new Error(`Erasure recovery verification failed: ${erasureFailed.map((check) => check.id).join(', ')}`);
+    }
+    tracker.complete('erasure_outcomes_verified');
 
     step = 'verify-readiness';
     const readiness = await operations.verifyReadiness();
@@ -780,6 +896,11 @@ export async function runRestoreDrill(input: {
       totalRecoveryMs,
     },
     environment,
+    erasures: {
+      exportedEntries: exported?.erasureEntries ?? null,
+      firstPass: firstErasurePass,
+      secondPass: secondErasurePass,
+    },
     ...(failure ? { failure } : {}),
     generatedAt: clock.utcNow().toISOString(),
     journal: {

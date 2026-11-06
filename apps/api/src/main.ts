@@ -24,6 +24,7 @@ import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
 import { runAccessJournalExportOnce } from './maintenance/run-access-journal-export.js';
 import { runDeletionJournalExportOnce } from './maintenance/run-deletion-journal-export.js';
+import { runErasureLedgerExportOnce } from './maintenance/run-erasure-ledger-export.js';
 import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runRetentionDeleteOnce } from './maintenance/run-retention-delete.js';
 import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
@@ -219,6 +220,17 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
           runOnce: () => runAccessJournalExportOnce(maintenancePool, sink, clock),
           taskName: 'Run access journal export',
         });
+  // The erasure ledger of owner-only health data (ADR-0073) uses the same directory, sink and interval.
+  const erasureLedgerRunner =
+    sink === undefined
+      ? undefined
+      : new PeriodicRunner({
+          clock,
+          intervalMs: config.RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS,
+          metrics: metrics.maintenance,
+          runOnce: () => runErasureLedgerExportOnce(maintenancePool, sink, clock),
+          taskName: 'Erasure ledger export',
+        });
   let metricsListener: MetricsListener | undefined;
   const runner: StoppableRunner = {
     stop: () => {
@@ -226,6 +238,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
       processMetrics.stop();
       deletionJournalRunner?.stop();
       accessJournalRunner?.stop();
+      erasureLedgerRunner?.stop();
       liveSseHub.stop();
       autoFinishRunner.stop();
       rawPurgeRunner.stop();
@@ -256,6 +269,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   tombstoneReclaimRunner.start();
   deletionJournalRunner?.start();
   accessJournalRunner?.start();
+  erasureLedgerRunner?.start();
   summaryRunner.start();
   registerShutdown({
     clock,

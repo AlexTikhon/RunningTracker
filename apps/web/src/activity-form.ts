@@ -28,8 +28,11 @@ export interface ActivityDraft {
   unit: DistanceUnit;
 }
 
+// What the person entered. The form session's idempotency key is added by the submission controller (ADR-0073).
+export type ActivityDetails = Omit<Required<CreateActivityRequest>, 'idempotencyKey'>;
+
 export type ActivityDraftValidation =
-  | { ok: true; request: Required<CreateActivityRequest> }
+  | { ok: true; request: ActivityDetails }
   | { errors: string[]; ok: false };
 
 export const activityTypeLabels: Record<ActivityType, string> = {
@@ -176,7 +179,7 @@ export function validateActivityDraft(draft: ActivityDraft, nowMs: number): Acti
   if (errors.length > 0 || started === null || durationS === null) {
     return { errors, ok: false };
   }
-  const request = {
+  const request: ActivityDetails = {
     distanceM,
     durationS,
     notes,
@@ -184,8 +187,9 @@ export function validateActivityDraft(draft: ActivityDraft, nowMs: number): Acti
     startedAt: started.toISOString(),
     type: draft.type,
   };
-  // The contract is the last word: a draft that passes here must pass the server's schema too.
-  const checked = createActivityRequestSchema.safeParse(request);
+  // The contract is the last word: a draft that passes here must pass the server's schema too (checked with a
+  // placeholder key, since the key belongs to the form session, not to the draft).
+  const checked = createActivityRequestSchema.safeParse({ ...request, idempotencyKey: '00000000-0000-4000-8000-000000000000' });
   if (!checked.success) {
     return { errors: ['The activity could not be prepared. Check the fields and try again.'], ok: false };
   }
@@ -193,10 +197,7 @@ export function validateActivityDraft(draft: ActivityDraft, nowMs: number): Acti
 }
 
 /** Whether two prepared requests are the same payload, so a retry may reuse the earlier attempt's activity id. */
-export function sameActivityRequest(
-  left: Required<CreateActivityRequest>,
-  right: Required<CreateActivityRequest>,
-): boolean {
+export function sameActivityRequest(left: ActivityDetails, right: ActivityDetails): boolean {
   return (
     left.type === right.type &&
     left.startedAt === right.startedAt &&

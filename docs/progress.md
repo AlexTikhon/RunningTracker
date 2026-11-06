@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-06 (resumed with a new product direction; step 1, owner-only manual activities, is the last section; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-06 (resumed with a new product direction; step 1, owner-only manual activities, and its integrity follow-up, ADR-0073, are the last two sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3253,3 +3253,62 @@ Firefox, WebKit or mobile run of the Activity tab; no hosted CI. The development
 measurement. Restored backups can resurrect deleted activities; there is no per-person activity cap, no edit, no
 import and no link to runs (`type = run` overlaps with `runs`; a unified read model is planned for analytics). The
 suggested step 2 is `daily_metrics` with the same owner-only template.
+
+## Integrity follow-up: erasure ledger and idempotent activity creation (2026-11-06)
+
+Base: step 1 committed locally as `d0224c2` on branch `feat/activities` (created from `main` at `087a048`, because the
+user asked for a local commit and work is not committed to the default branch directly). Before more health data, the
+user asked to close the two data-integrity risks of the step 1 report. ADR-0073 records the decisions; ADR-0072 is
+marked as amended.
+
+**Part A: a deletion survives a restore.** Options compared in the ADR: a separate small database, a separate schema
+with its own backup, and append-only files outside the database host. Chosen: the existing off-host journal path
+(ADR-0037), generalised. Migration `0026_erasure_ledger.sql` adds `erasure_ledger` (entity type, organization, record
+id, owner, record creation instant, erasure instant; no content), an `AFTER DELETE` trigger on `activities` that writes
+it in the deleting statement, maintenance claim/acknowledge functions and an owner-only replay function. A failed ledger
+write fails the DELETE: the activity stays and the API answers 500, never 204 without a record. A maintenance runner
+exports the ledger to `DELETION_JOURNAL_DIR` as `erasure-ledger-*.ndjson`; `npm run restore:reapply-erasures` replays it
+idempotently (`erased`, `absent`, `skipped_different_record`). The restore drill seeds two activities before the backup,
+deletes one through the API service after it, exports, restores, migrates, replays twice and checks the outcome; two
+recovery steps were added before readiness. Extension point for `daily_metrics`: one CHECK value, one trigger, one
+`ELSIF` branch, one format enum value.
+
+**Part B: no duplicate after an unknown outcome.** Migration `0027_activity_idempotency_keys.sql` adds a nullable
+`idempotency_key` with `UNIQUE (org_id, user_id, idempotency_key)`; the contract requires `idempotencyKey`. Same key and
+details: 200 with the existing activity (also under a new id); same key, other details: `409 ACTIVITY_ALREADY_SAVED`
+with `details.activityId`. The web controller keeps one key per form session across edits; on that 409 the form says the
+earlier save went through and offers **Open saved activity** and **Start a new activity**. The insert has no conflict
+target, so a racing save waits on the constraint and then finds the winner by key.
+
+**Not changed.** RLS of `activities` (the 32 access tests pass with their file unmodified), DELETE's 204, runs and
+their tables, dependencies, `.env`/`.local`, the development database. The cleanup lists (tenant fixture, browser
+organization cleanup, load seeder `TRUNCATE`) gained `erasure_ledger` next to `activities`. No commit of this work.
+
+**Executed checks.** `npm run db:migrate:test` applied `0026` and `0027` on top of `0025`. The step 1 numbers below are
+the final measurements of step 1, made on the tree that was then committed unchanged.
+
+| Command | Before (step 1, `d0224c2`) | After |
+|---|---|---|
+| `npm run verify` | 2,536: scripts 83, API 1,360, web 915, contracts 161, fixtures 14, simulator 3 | 2,573: scripts 83, API 1,383 (+23), web 927 (+12), contracts 163 (+2), fixtures 14, simulator 3 |
+| `npm run test:integration` | 559 in 49 files, none skipped | 580 in 50 files, none skipped (+13 ledger/key integrity, +8 HTTP key cases; the restore drill file still has 9 tests, now with erasure assertions) |
+| `npx playwright test activity.spec.ts --project=chromium` | 1 passed | 1 passed (body now carries a UUID `idempotencyKey`) |
+
+The integration run includes the restore drill's "previous" case (a backup at `0026` restored and migrated to `0027`)
+and its "current" case (new databases migrated from zero); the erasure checks passed in both.
+
+**Mutation checks** (each red, then restored and green):
+
+1. Ledger replay removed (the replay loop processed no entry): 4 of 9 restore-drill tests failed with
+   `erasure-first-pass-outcomes, erased-activity-absent, erasure-second-pass-idempotent`; 9 passed after the restore.
+   The failed drills' databases were dropped by the test cleanup (none left, checked).
+2. Unique constraint dropped with `ALTER TABLE` on the test database: the SQL-level duplicate test and the
+   constraint-definition test failed. The HTTP "concurrent saves" test did **not** fail: its supertest requests did not
+   actually interleave. A deterministic race test was added while the constraint was still dropped (two transactions,
+   the second saving the same key under another id while the first is uncommitted); it failed (`created: true`, a second
+   activity). The constraint was re-added with the migration's definition (`pg_get_constraintdef` equal), and the three
+   activity integration files passed, 97 tests.
+
+**Not established.** Erasures committed but not yet exported when a node is lost still come back with an old backup
+(one export interval while healthy). That the journal directory is off-host is not verified (local directory here).
+`TRUNCATE` is not journaled. Ledger files are not signed. No full browser suite, Firefox or hosted CI run. The
+development database was not migrated.
