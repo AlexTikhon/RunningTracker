@@ -3488,3 +3488,34 @@ Ubuntu are unverified. Hosted shard durations are estimates from this Windows wo
 compose health check still uses the socket form; it was not changed or tested for the initdb race. The development
 database was not migrated (no migration in this change). Firefox, mobile and real devices were not run for the delete
 control.
+
+## Deterministic weekly review (ADR-0077) (2026-11-07)
+
+Stacked on `feat/weekly-insights-prompt-experiment` (49fbf09; `main` was still at 3ee6bf2), branch
+`feat/weekly-review-deterministic`. `GET /api/orgs/:orgId/weekly-review` computes one week's coverage, facts,
+code-written statements, data gaps and provenance from the person's own sources in one read-only snapshot, with no
+model call and nothing stored; the Check-in tab shows it first, and the AI insight is an optional section below it. No
+migration, no dependency, no prompt or validation change.
+
+**The regression.** Four days with values, sleep duration on three: "Check-ins with values on 4 of 7 days of the
+week." and "Sleep duration was recorded on 3 of 4 days with check-in values." (unit, HTTP and Chromium). The frozen
+`val_weight_up_manual_runs` case (read-only) gives the same sentence.
+
+**Executed checks.**
+
+| Command | Before (49fbf09) | After |
+|---|---|---|
+| `npm run verify` | 2,793: scripts 90, API 1,512, web 991, contracts 183, fixtures 14, simulator 3 | 2,836: scripts 90, API 1,535 (+22 `weekly-review.spec`, +1 route coverage), web 1,006 (+8 review controller, +7 review panel), contracts 188 (+5), fixtures 14, simulator 3 |
+| `npm run test:integration` | 693 in 57 files | 702 in 58 files (+9 `weekly-review-http`), 149 s |
+| Affected Chromium specs (`weekly-review`, `weekly-insights`, `daily-checkin`, `activity`, `oidc/sign-in`) | n/a | 15 of 16 on the first run after `verify`; the failure was `daily-checkin` test 1, "This day could not be loaded" on the first request after the rebuild (not an assertion of this change); `daily-checkin` + `weekly-review` then 9/9 with `--repeat-each=3` |
+| Full `npm run test:e2e` | 135 | 136 passed in 13.3 min (127 `chromium`, 9 `chromium-oidc`), the `daily-checkin` test above included |
+
+The suite lists 136 tests (127 `chromium`, 9 `chromium-oidc`).
+
+**Mutation checks** (each red, then restored): the sleep sentence using the day count with values instead of the days
+with sleep: 5 unit tests failed. The review controller's late-response guard reduced to "not disposed": 2 controller
+tests failed. The Check-in screen passing a constant refresh key to the review: the Chromium scenario failed at the
+post-save expectation.
+
+**Not established.** Hosted CI is reported with the change. The browser scenario ran only in Chromium on Windows; the
+narrow-screen check forces Verdana to approximate Linux fonts. No real model was run (none needed).

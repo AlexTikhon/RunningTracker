@@ -1,6 +1,9 @@
 # Weekly insights: local model, states and evaluation (ADR-0076)
 
-Weekly insights are off by default. Everything else in the application works without them and without Ollama.
+Weekly insights are off by default. Everything else in the application works without them and without Ollama. The
+**Weekly review** on the Check-in tab ([ADR-0077](../adr/0077-deterministic-weekly-review.md),
+`GET /api/orgs/:orgId/weekly-review`) is computed by the app on every read, never calls a model and never depends on
+this setting; the AI insight is an optional section below it.
 
 ## Enable with a local model
 

@@ -47,3 +47,10 @@ Step 2, the daily check-in, is [ADR-0074](adr/0074-daily-check-in-local-date-and
 PUT, owner-only, with erasures in the ledger. It records two rules later slices should keep: a day is a local
 calendar date with the zone of its first write, and "today" is computed by the server's clock in the zone the client
 sends. Remaining items of the data foundation: GPX/TCX/FIT import and the meal log.
+
+Weekly insights (AI layer, [ADR-0076](adr/0076-weekly-insights.md)) exist but stay off by default: no installed local
+model met the target. The first deterministic analytics item is the **weekly review**
+([ADR-0077](adr/0077-deterministic-weekly-review.md)): one week's coverage, values, GPS distance gaps and limitations,
+described in sentences written by code from the same aggregate, computed on every read, never stored, and independent of
+any model. It is the primary weekly view; AI text is an optional, separately labelled section. Multi-week trends,
+baselines and a unified manual/GPS read model remain to be decided.

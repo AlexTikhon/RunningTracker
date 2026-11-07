@@ -269,6 +269,10 @@ is unverified count-like prose ("every check-in day"); the next decision is eith
 text (preferred: it carries what the accepted answers found useful, without a model) or a separately decided rule for
 quantified coverage phrases, measured on a fresh validation set.
 
+Follow-up (2026-11-07): the deterministic option was taken in [ADR-0077](0077-deterministic-weekly-review.md), a weekly
+review computed and worded by code, shown as the primary weekly view; the AI insight became an optional section below it.
+Nothing above (results, prompts, validation set) was changed.
+
 ## Consequences
 
 - Insights can only be shown for data that still exists and was read under the gate; derived rows may be deleted more
