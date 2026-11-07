@@ -8,7 +8,7 @@ import {
 
 import { checkGrounding, type GroundingViolation } from './grounding.js';
 import { buildFacts, dataGapsOf } from './insight-facts.js';
-import { buildWeeklyInsightPrompt, weeklyInsightOutputJsonSchema } from './insight-prompt.js';
+import { buildWeeklyInsightPrompt, weeklyInsightOutputJsonSchema, type WeeklyInsightPromptVersion } from './insight-prompt.js';
 import { LlmProviderError, type LlmFailureReason, type LlmProvider } from './llm-provider.js';
 import { approvedSuggestionFor, checkSafety, type SafetyViolation } from './safety.js';
 import type { WeeklyAggregate } from './weekly-aggregate.js';
@@ -52,6 +52,8 @@ export interface GenerationSettings {
   maxOutputTokens: number;
   /** Monotonic milliseconds. */
   now: () => number;
+  /** Evaluation only: another kept prompt version. Production leaves it unset (WEEKLY_INSIGHT_PROMPT_VERSION). */
+  promptVersion?: WeeklyInsightPromptVersion;
   signal?: AbortSignal;
 }
 
@@ -134,7 +136,7 @@ export async function generateWeeklyInsight(
   settings: GenerationSettings,
 ): Promise<GenerationOutcome> {
   const facts = buildFacts(aggregate);
-  const prompt = buildWeeklyInsightPrompt(aggregate, facts);
+  const prompt = buildWeeklyInsightPrompt(aggregate, facts, settings.promptVersion);
   const schema = weeklyInsightOutputJsonSchema(facts);
   const { budget } = settings;
   const started = settings.now();

@@ -1,16 +1,23 @@
 import { weeklyInsightModelOutputSchema } from '@running-tracker/contracts';
 import { describe, expect, it } from 'vitest';
 
+import { checkGrounding } from './grounding.js';
 import { buildFacts } from './insight-facts.js';
+import { validateModelOutput } from './insight-generator.js';
 import {
   buildWeeklyInsightPrompt,
   weeklyInsightOutputJsonSchema,
+  WEEKLY_INSIGHT_EXAMPLE_AGGREGATE,
+  WEEKLY_INSIGHT_EXAMPLE_ANSWER,
   WEEKLY_INSIGHT_PROMPT_VERSION,
   WEEKLY_INSIGHT_SUGGESTION_NULL,
   WEEKLY_INSIGHT_SYSTEM_PROMPT,
+  WEEKLY_INSIGHT_SYSTEM_PROMPTS,
+  type WeeklyInsightPromptVersion,
 } from './insight-prompt.js';
 import { OllamaProvider } from './ollama-provider.js';
-import { aggregateWeek, resolveWeekWindow } from './weekly-aggregate.js';
+import { checkSafety } from './safety.js';
+import { aggregateWeek, canonicalJson, resolveWeekWindow } from './weekly-aggregate.js';
 
 // A fixed week: three check-ins, a manual run that overlaps a GPS run, a strength session.
 const window = resolveWeekWindow({
@@ -86,6 +93,56 @@ describe('weekly insight prompt (ADR-0076)', () => {
     expect(user).toContain('manual_and_gps_runs_may_overlap');
     expect(user).not.toMatch(/note|latitude|longitude|geom/iu);
     expect(user).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/u);
+  });
+
+  describe('kept versions and the candidates of the prompt experiment', () => {
+    const versions = Object.keys(WEEKLY_INSIGHT_SYSTEM_PROMPTS) as WeeklyInsightPromptVersion[];
+
+    it('keeps every measured version, differing only in the system message', () => {
+      expect(versions).toEqual(['weekly-insight-v2', 'weekly-insight-v3', 'weekly-insight-v4']);
+      expect(new Set(versions.map((version) => WEEKLY_INSIGHT_SYSTEM_PROMPTS[version])).size).toBe(versions.length);
+      const users = versions.map((version) => buildWeeklyInsightPrompt(aggregate, facts, version).user);
+      expect(new Set(users).size).toBe(1);
+      expect(buildWeeklyInsightPrompt(aggregate, facts).system).toBe(WEEKLY_INSIGHT_SYSTEM_PROMPTS[WEEKLY_INSIGHT_PROMPT_VERSION]);
+      expect(WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v4'].startsWith(`${WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v3']}\n`)).toBe(true);
+      for (const version of versions) expect(WEEKLY_INSIGHT_SYSTEM_PROMPTS[version]).not.toMatch(/\d{4}-\d{2}-\d{2}/u);
+    });
+
+    it('pins the exact text of the candidate system messages', async () => {
+      await expect(`=== weekly-insight-v3 ===\n${WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v3']}\n=== weekly-insight-v4 ===\n${WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v4']}\n`).toMatchFileSnapshot(
+        './__snapshots__/weekly-insight-candidate-prompts.txt',
+      );
+    });
+
+    it('has a worked example that passes the production schema, claim grounding, prose rules and safety screen', () => {
+      const parsed = weeklyInsightModelOutputSchema.parse(WEEKLY_INSIGHT_EXAMPLE_ANSWER);
+      expect(validateModelOutput(parsed, WEEKLY_INSIGHT_EXAMPLE_AGGREGATE)).toMatchObject({ status: 'ready' });
+      expect(checkSafety(parsed, WEEKLY_INSIGHT_EXAMPLE_AGGREGATE)).toEqual([]);
+      // Its facts are the production catalogue of a week in neither evaluation set, with the fields the model sees.
+      expect(WEEKLY_INSIGHT_EXAMPLE_AGGREGATE.week.start).toBe('2026-09-14');
+      const exampleFacts = buildFacts(WEEKLY_INSIGHT_EXAMPLE_AGGREGATE);
+      expect(WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v4']).toContain(
+        `Facts: ${canonicalJson(exampleFacts.map(({ day, direction, id, label, unit, value }) => ({ day, direction, id, label, unit, value })))}`,
+      );
+      expect(WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v4']).toContain(`Answer: ${JSON.stringify(WEEKLY_INSIGHT_EXAMPLE_ANSWER)}`);
+    });
+
+    it('gives only "right" example sentences that the unchanged prose rules and safety screen accept', () => {
+      const right = [...WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v3'].matchAll(/Right: "([^"]+)"/gu)].map((match) => match[1]!);
+      const wrong = [...WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v3'].matchAll(/Wrong: "([^"]+)"/gu)].map((match) => match[1]!);
+      expect(right).toHaveLength(5);
+      expect(wrong).toHaveLength(5);
+      const withChange = buildFacts(WEEKLY_INSIGHT_EXAMPLE_AGGREGATE);
+      for (const sentence of right) {
+        const output = { observations: [], suggestion: null, summary: sentence };
+        expect(checkGrounding(output, withChange)).toEqual([]);
+        expect(checkSafety(output, WEEKLY_INSIGHT_EXAMPLE_AGGREGATE)).toEqual([]);
+      }
+      // ...and every "wrong" one is refused by them, so the examples teach the rule that is enforced.
+      for (const sentence of wrong) {
+        expect(checkGrounding({ observations: [], suggestion: null, summary: sentence }, withChange).length).toBeGreaterThan(0);
+      }
+    });
   });
 
   it('tells the model to write no suggestion in an extreme week', () => {

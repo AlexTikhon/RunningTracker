@@ -4,7 +4,7 @@ import process from 'node:process';
 import { weeklyInsightModelOutputSchema } from '@running-tracker/contracts';
 
 import { validateModelOutput } from '../insights/insight-generator.js';
-import { evaluationCases, type CaseResult } from './weekly-insight-evaluation.js';
+import { evaluationCases, validationCases, type CaseResult } from './weekly-insight-evaluation.js';
 
 // Re-checks the model answers stored in an evaluation report against the CURRENT grounding and safety rules, without
 // asking any model again (ADR-0076). Used when a rule changes after a measured run, so that the effect of the change on
@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   const path = process.argv[2];
   if (!path) throw new Error('Pass the path of an evaluation report (.json)');
   const report = JSON.parse(await readFile(path, 'utf8')) as { perModel: Record<string, CaseResult[]> };
-  const cases = new Map(evaluationCases().map((entry) => [entry.id, entry.aggregate]));
+  const cases = new Map([...evaluationCases(), ...validationCases()].map((entry) => [entry.id, entry.aggregate]));
   for (const [model, results] of Object.entries(report.perModel)) {
     const statuses: Record<string, number> = {};
     const changes: string[] = [];

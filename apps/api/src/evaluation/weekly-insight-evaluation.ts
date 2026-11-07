@@ -3,7 +3,15 @@ import type { WeeklyInsightModelOutput } from '@running-tracker/contracts';
 import { checkGrounding, type GroundingKind } from '../insights/grounding.js';
 import { generateWeeklyInsight, type GenerationBudget, type GenerationOutcome } from '../insights/insight-generator.js';
 import { buildFacts } from '../insights/insight-facts.js';
-import type { LlmCallOptions, LlmJsonSchema, LlmProvider, LlmStructuredInput, LlmStructuredResult } from '../insights/llm-provider.js';
+import type { WeeklyInsightPromptVersion } from '../insights/insight-prompt.js';
+import {
+  LlmProviderError,
+  type LlmCallOptions,
+  type LlmJsonSchema,
+  type LlmProvider,
+  type LlmStructuredInput,
+  type LlmStructuredResult,
+} from '../insights/llm-provider.js';
 import { checkSafety } from '../insights/safety.js';
 import {
   aggregateWeek,
@@ -233,21 +241,56 @@ export function validationCases(): EvaluationCase[] {
   ];
 }
 
-/** Wraps a provider to record every attempt's latency and raw answer. */
+/**
+ * A hard limit on actual provider calls across a whole evaluation run (the prompt experiment's call budget). A call
+ * that would exceed it is never sent: the provider is told "no" as a non-retryable failure and the case is marked as
+ * cut short by the experiment budget, so it is reported separately, never as a model result.
+ */
+export class CallBudget {
+  public used = 0;
+  public refused = 0;
+  public constructor(public readonly limit: number) {}
+  public get remaining(): number {
+    return Math.max(0, this.limit - this.used);
+  }
+}
+
+export interface RecordedAttempt {
+  durationMs: number;
+  /** The provider's failure reason (timeout, unavailable, incomplete, ...), absent when the call answered. */
+  failure?: string;
+  ok: boolean;
+  startedAt: string;
+  value?: unknown;
+}
+
+/** Wraps a provider to record every attempt's latency, outcome and raw answer, and to enforce the call budget. */
 export class RecordingProvider implements LlmProvider {
-  public readonly attempts: { durationMs: number; ok: boolean; value?: unknown }[] = [];
-  public constructor(private readonly inner: LlmProvider) {}
+  public readonly attempts: RecordedAttempt[] = [];
+  public refusedByBudget = false;
+  public constructor(
+    private readonly inner: LlmProvider,
+    private readonly budget?: CallBudget,
+  ) {}
   public get model(): string {
     return this.inner.model;
   }
   public async generateStructured(input: LlmStructuredInput, schema: LlmJsonSchema, options: LlmCallOptions): Promise<LlmStructuredResult> {
+    if (this.budget && this.budget.remaining === 0) {
+      this.budget.refused += 1;
+      this.refusedByBudget = true;
+      throw new LlmProviderError('provider_error', false);
+    }
+    if (this.budget) this.budget.used += 1;
+    const startedAt = new Date().toISOString();
     const started = performance.now();
     try {
       const result = await this.inner.generateStructured(input, schema, options);
-      this.attempts.push({ durationMs: performance.now() - started, ok: true, value: result.value });
+      this.attempts.push({ durationMs: performance.now() - started, ok: true, startedAt, value: result.value });
       return result;
     } catch (error) {
-      this.attempts.push({ durationMs: performance.now() - started, ok: false });
+      const failure = error instanceof LlmProviderError ? error.reason : 'provider_error';
+      this.attempts.push({ durationMs: performance.now() - started, failure, ok: false, startedAt });
       throw error;
     }
   }
@@ -255,6 +298,10 @@ export class RecordingProvider implements LlmProvider {
 
 export interface CaseResult {
   attempts: number;
+  /** Every provider call of this case, with its outcome (raw answers are in modelOutput, not repeated here). */
+  calls?: Omit<RecordedAttempt, 'value'>[];
+  /** The experiment's call budget refused a call of this case: not a model result. */
+  cutByCallBudget?: boolean;
   /** Seconds, the whole generation (all attempts). */
   durationMs: number;
   /** Grounding violations by kind, of the last schema-valid answer. */
@@ -282,12 +329,14 @@ export async function evaluateCase(
   provider: LlmProvider,
   budget: GenerationBudget,
   cold: boolean,
+  options: { callBudget?: CallBudget; promptVersion?: WeeklyInsightPromptVersion } = {},
 ): Promise<CaseResult> {
-  const recording = new RecordingProvider(provider);
+  const recording = new RecordingProvider(provider, options.callBudget);
   const outcome = await generateWeeklyInsight(evaluationCase.aggregate, recording, {
     budget,
     maxOutputTokens: 800,
     now: () => performance.now(),
+    ...(options.promptVersion ? { promptVersion: options.promptVersion } : {}),
   });
   const modelOutput: WeeklyInsightModelOutput | null =
     outcome.status === 'failed_grounding' || outcome.status === 'failed_safety'
@@ -305,7 +354,9 @@ export async function evaluateCase(
   }
   return {
     attempts: outcome.stats.attempts,
+    calls: recording.attempts.map(({ durationMs, failure, ok, startedAt }) => ({ durationMs, ok, startedAt, ...(failure ? { failure } : {}) })),
     cold,
+    cutByCallBudget: recording.refusedByBudget,
     durationMs: outcome.stats.durationMs,
     grounding,
     id: evaluationCase.id,
@@ -329,6 +380,12 @@ export function percentile(values: readonly number[], fraction: number): number 
 
 export interface ModelSummary {
   cases: number;
+  /** Cases cut short by the experiment's call budget: counted as not ready, left out of the latency samples. */
+  casesCutByCallBudget: number;
+  /** Cases with at least one violation of each grounding kind. */
+  groundingCasesByKind: Partial<Record<GroundingKind, number>>;
+  /** Provider calls that ended in a timeout. */
+  timeouts: number;
   coldMs: number | null;
   globalGroundingFailures: number;
   model: string;
@@ -350,11 +407,20 @@ export interface ModelSummary {
 export function summarize(model: string, results: readonly CaseResult[]): ModelSummary {
   const has = (result: CaseResult, kinds: ReadonlySet<GroundingKind>) =>
     Object.entries(result.grounding).some(([kind, count]) => kinds.has(kind as GroundingKind) && (count ?? 0) > 0);
-  const warm = results.filter((result) => !result.cold).map((result) => result.durationMs);
+  const warm = results.filter((result) => !result.cold && result.cutByCallBudget !== true).map((result) => result.durationMs);
   const statuses: Record<string, number> = {};
   for (const result of results) statuses[result.status] = (statuses[result.status] ?? 0) + 1;
+  const groundingCasesByKind: Partial<Record<GroundingKind, number>> = {};
+  for (const result of results) {
+    for (const [kind, count] of Object.entries(result.grounding)) {
+      if ((count ?? 0) > 0) groundingCasesByKind[kind as GroundingKind] = (groundingCasesByKind[kind as GroundingKind] ?? 0) + 1;
+    }
+  }
   return {
     cases: results.length,
+    casesCutByCallBudget: results.filter((result) => result.cutByCallBudget === true).length,
+    groundingCasesByKind,
+    timeouts: results.reduce((sum, result) => sum + (result.calls ?? []).filter((call) => call.failure === 'timeout').length, 0),
     coldMs: results.find((result) => result.cold)?.durationMs ?? null,
     globalGroundingFailures: results.filter((result) => has(result, globalKinds)).length,
     model,
