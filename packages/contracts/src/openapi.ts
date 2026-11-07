@@ -54,6 +54,7 @@ import {
   weeklyInsightOutputSchema,
   weeklyInsightViewSchema,
 } from './weekly-insights.js';
+import { weeklyReviewSchema } from './weekly-review.js';
 
 function jsonSchema(schema: ZodType): Record<string, unknown> {
   const generated: Record<string, unknown> = z.toJSONSchema(schema);
@@ -378,6 +379,16 @@ export const openApiDocument = {
         responses: { '204': noContentResponse, ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/weekly-review': {
+      get: {
+        tags: ['Insights'],
+        summary: "Compute the signed-in person's weekly review",
+        description:
+          "Owner-only derived health data, computed by the app on every read and never stored. No language model is called and nothing is queued: the review works whether AI generation (WEEKLY_INSIGHTS_PROVIDER) is on or off and whether or not an AI insight exists for the week. Every source of the week (the person's own check-ins, manual activities and finished GPS runs; never anyone else's runs, even when run sharing makes them readable) is read in one statement of one REPEATABLE READ, READ ONLY transaction, so a source deleted before the read began is absent. The week runs Monday to Sunday in the time zone stored on the person's check-ins in that week (the most frequent one), or in `timeZone` when there are none; a week starting after today in `timeZone` is refused (400 INVALID_REQUEST). The response carries the week and its effective zone; per-metric coverage with explicit denominators (days in the week, days with numeric check-in values, days with each metric; a note-only check-in is not a day with values, and a sleep-quality rating never counts as a recorded sleep duration); the facts (a value that was not recorded has no fact, never a zero; a GPS distance only from summaries current for the run's data, with the runs it covers); code-written descriptive statements with stable codes; data gaps and source limitations; and provenance (`source: computed_by_app`, `persisted: false`, the review and aggregation policy versions and the computation time), which distinguishes it from a stored AI insight (that has a model, a prompt version, an id and a creation time). Manual runs and GPS runs are never added together. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), parameterRef('WeekStart'), parameterRef('ReviewTimeZone')],
+        responses: { '200': jsonResponse('The weekly review.', 'WeeklyReview'), ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/insights/weekly': {
       post: {
         tags: ['Insights'],
@@ -618,6 +629,14 @@ export const openApiDocument = {
         description: 'The Monday the week starts on, as a local calendar date (YYYY-MM-DD), not before 2000-01-01.',
         schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
       },
+      ReviewTimeZone: {
+        name: 'timeZone',
+        in: 'query',
+        required: true,
+        description:
+          "IANA time zone name, for example Europe/Warsaw. Decides the week's days only when the person has no check-in in that week; otherwise the zone stored on their check-ins does.",
+        schema: { type: 'string', minLength: 1, maxLength: 64 },
+      },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
       CsrfToken: { name: 'x-csrf-token', in: 'header', required: true, schema: { type: 'string' } },
@@ -738,6 +757,7 @@ export const openApiDocument = {
       WeeklyInsightAccepted: jsonSchema(weeklyInsightAcceptedSchema),
       WeeklyInsightOutput: jsonSchema(weeklyInsightOutputSchema),
       WeeklyInsightView: jsonSchema(weeklyInsightViewSchema),
+      WeeklyReview: jsonSchema(weeklyReviewSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
       RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),
       RunSearchInterpretationResponse: jsonSchema(runSearchInterpretationResponseSchema),

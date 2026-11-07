@@ -44,6 +44,8 @@ import type { LlmProvider } from './insights/llm-provider.js';
 import { createWeeklyInsightService } from './insights/weekly-insight-factory.js';
 import type { WeeklyInsightService } from './insights/weekly-insight-service.js';
 import { createWeeklyInsightRouter } from './insights/weekly-insight.routes.js';
+import { WeeklyReviewService } from './insights/weekly-review-service.js';
+import { createWeeklyReviewRouter } from './insights/weekly-review.routes.js';
 import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 
 export interface AppDependencies {
@@ -213,6 +215,14 @@ export function createApp({
     }),
   );
   app.use('/api/orgs/:orgId/insights', createWeeklyInsightRouter({ config, insights, sessionManager: sessions }));
+  // The deterministic weekly review: independent of the insight service and of any model provider.
+  app.use(
+    '/api/orgs/:orgId/weekly-review',
+    createWeeklyReviewRouter({
+      review: new WeeklyReviewService({ clock, pool: pool as Pick<Pool, 'connect'> }),
+      sessionManager: sessions,
+    }),
+  );
   if (testOnlyRouter) {
     app.use('/api', testOnlyRouter);
   }

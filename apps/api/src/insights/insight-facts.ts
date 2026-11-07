@@ -175,7 +175,8 @@ export function dataGapsOf(aggregate: WeeklyAggregate): WeeklyInsightDataGap[] {
   } else if (checkIns.daysMissing > 0) {
     gaps.push({
       code: 'missing_check_in_days',
-      text: `No check-in on ${checkIns.daysMissing} of ${checkIns.daysInWeek} days; averages use the days that have one.`,
+      // "values": a day whose check-in holds only a note is one of the missing days.
+      text: `No check-in values on ${checkIns.daysMissing} of ${checkIns.daysInWeek} days; averages use the days that have them.`,
     });
   }
   if (flags.has('no_activities')) gaps.push({ code: 'no_activities', text: 'No manual activities or GPS runs this week.' });

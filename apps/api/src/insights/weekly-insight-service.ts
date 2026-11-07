@@ -38,6 +38,7 @@ import {
   type CheckInRecord,
   type GpsRunRecord,
   type ManualActivityRecord,
+  type WeekWindow,
   type WeeklyAggregate,
 } from './weekly-aggregate.js';
 
@@ -191,7 +192,7 @@ function transportTimestamp(value: string): string {
   return `${matched[1]}${matched[2]!.replace(/0+$/u, '').padEnd(3, '0')}Z`;
 }
 
-function canonicalTimeZone(timeZone: string): string {
+export function canonicalTimeZone(timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone;
 }
 
@@ -208,14 +209,27 @@ async function lockSources(client: PoolClient, mode: 'exclusive' | 'shared'): Pr
   return revision;
 }
 
-/** Reads the person's records of one week (one statement) and computes its aggregate. Exported for tests. */
+export interface ComputedWeek {
+  aggregate: WeeklyAggregate;
+  rangeEnd: string;
+  rangeStart: string;
+  /** The records the aggregate was computed from (a superset of the week), for the weekly review's extra counts. */
+  sources: { activities: ManualActivityRecord[]; checkIns: CheckInRecord[]; gpsRuns: GpsRunRecord[] };
+  timeZone: string;
+  window: WeekWindow;
+}
+
+/**
+ * Reads the person's records of one week (one statement) and computes its aggregate. Shared by insight requests, insight
+ * reads and the weekly review (weekly-review-service.ts). Exported for tests.
+ */
 export async function computeWeek(
   client: PoolClient,
   owner: Owner,
   weekStart: string,
   requestTimeZone: string,
   nowMs: number,
-): Promise<{ aggregate: WeeklyAggregate; rangeEnd: string; rangeStart: string; timeZone: string }> {
+): Promise<ComputedWeek> {
   const sources = (await client.query<SourceRow>(weekSourcesSql, [owner.orgId, owner.userId, weekStart])).rows[0];
   if (!sources) throw new Error('The weekly insight source query returned no row');
   const checkIns: CheckInRecord[] = sources.check_ins;
@@ -227,7 +241,9 @@ export async function computeWeek(
     aggregate,
     rangeEnd: new Date(window.rangeEndMs).toISOString(),
     rangeStart: new Date(window.rangeStartMs).toISOString(),
+    sources: { activities, checkIns, gpsRuns },
     timeZone: window.timeZone,
+    window,
   };
 }
 

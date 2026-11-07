@@ -86,7 +86,7 @@ describe('weekly insight facts (ADR-0076)', () => {
     expect(dataGapsOf(week({})).map((gap) => gap.code)).toEqual(['no_check_ins', 'no_activities']);
     expect(dataGapsOf(week({ checkIns: [{ mood: 3 }] }))[0]).toEqual({
       code: 'missing_check_in_days',
-      text: 'No check-in on 6 of 7 days; averages use the days that have one.',
+      text: 'No check-in values on 6 of 7 days; averages use the days that have them.',
     });
     const mixed = week({ checkIns: [{ mood: 3 }, { mood: 4 }, { mood: 4 }], zones: ['Europe/Warsaw', 'America/New_York', 'Europe/Warsaw'] });
     expect(dataGapsOf(mixed).find((gap) => gap.code === 'multiple_time_zones')?.text).toBe(
