@@ -122,6 +122,117 @@ export function evaluationCases(): EvaluationCase[] {
   ];
 }
 
+// The separate validation set (prompt experiment, 2026-11-07). Ten more synthetic weeks, written and frozen (pinned by
+// hash in weekly-insight-evaluation.spec.ts) BEFORE any candidate prompt was written, in another week (Monday
+// 2026-10-19) and with other values than the development set above. Prompts are tuned on the development set only; a
+// candidate is evaluated on these once, and no prompt is changed because of their results. The same person wrote both
+// sets, so this is a held-out check against overfitting to particular weeks, not evidence of generalisation.
+const VALIDATION_WEEK = '2026-10-19';
+
+function validationDay(offset: number, values: Partial<CheckInRecord>, timeZone = 'Europe/Warsaw'): CheckInRecord {
+  return { ...day(0, values, timeZone), localDate: `2026-10-${19 + offset}` };
+}
+
+function buildValidation(input: { activities?: ManualActivityRecord[]; checkIns?: CheckInRecord[]; gpsRuns?: GpsRunRecord[] }): WeeklyAggregate {
+  const checkIns = input.checkIns ?? [];
+  const window = resolveWeekWindow({ checkIns, requestTimeZone: 'Europe/Warsaw', weekStart: VALIDATION_WEEK });
+  return aggregateWeek({ activities: input.activities ?? [], checkIns, gpsRuns: input.gpsRuns ?? [], todayLocalDate: '2026-11-20', window });
+}
+
+/** The ten validation weeks. Frozen: changing them invalidates the experiment's held-out result. */
+export function validationCases(): EvaluationCase[] {
+  const stable = [0, 1, 2, 3, 4, 5, 6].map((offset) =>
+    validationDay(offset, { mood: 4 - (offset % 2), sleepMinutes: 455 - (offset % 3) * 15, sleepQuality: 4, soreness: 1 + (offset % 2), weightKg: offset === 0 || offset === 6 ? 80.4 : 80.4 + (offset % 2) * 0.2 }),
+  );
+  return [
+    {
+      // No sleep and no weight logged at all: mood and soreness only, and one strength session.
+      aggregate: buildValidation({
+        activities: [manual('strength', '2026-10-21T16:30:00Z', 50)],
+        checkIns: [0, 1, 3, 4, 6].map((offset) => validationDay(offset, { mood: 3 + (offset % 3 === 0 ? 1 : 0), soreness: 3 + (offset % 2) })),
+      }),
+      id: 'val_mood_soreness_only',
+    },
+    {
+      // A single check-in with every value, one of them an extremely short night; no activities.
+      aggregate: buildValidation({ checkIns: [validationDay(3, { mood: 2, sleepMinutes: 200, sleepQuality: 1, soreness: 3, weightKg: 66.2 })] }),
+      id: 'val_single_day_short_night',
+    },
+    {
+      // Complete check-ins, weight back to where it started, three GPS runs with current distances.
+      aggregate: buildValidation({
+        checkIns: stable,
+        gpsRuns: [run('2026-10-20T05:30:00Z', 41, 7_350), run('2026-10-22T05:30:00Z', 28, 5_010), run('2026-10-25T07:00:00Z', 96, 16_200)],
+      }),
+      id: 'val_complete_stable_weight',
+    },
+    {
+      // Weight goes up (not a large change); manual runs and a walk, no GPS runs.
+      aggregate: buildValidation({
+        activities: [manual('run', '2026-10-19T17:00:00Z', 35, 6_000), manual('run', '2026-10-23T17:00:00Z', 50, 8_500), manual('walk', '2026-10-24T10:00:00Z', 75, 5_200)],
+        checkIns: [validationDay(0, { sleepMinutes: 400, weightKg: 77.1 }), validationDay(2, { sleepMinutes: 380, weightKg: 77.4 }), validationDay(4, { mood: 3, weightKg: 77.6 }), validationDay(5, { mood: 4, sleepMinutes: 430, weightKg: 77.9 })],
+      }),
+      id: 'val_weight_up_manual_runs',
+    },
+    {
+      // One extremely long night among ordinary ones; sparse check-ins with sleep quality.
+      aggregate: buildValidation({
+        checkIns: [validationDay(1, { mood: 3, sleepMinutes: 450, sleepQuality: 3 }), validationDay(5, { mood: 2, sleepMinutes: 760, sleepQuality: 2 }), validationDay(6, { mood: 3, sleepMinutes: 480, sleepQuality: 4 })],
+        activities: [manual('walk', '2026-10-25T12:00:00Z', 30)],
+      }),
+      id: 'val_extreme_long_sleep',
+    },
+    {
+      // Extreme soreness in an active week: a hike, a ride, a GPS run.
+      aggregate: buildValidation({
+        activities: [manual('hike', '2026-10-19T08:00:00Z', 180, 14_000), manual('ride', '2026-10-21T15:00:00Z', 60, 22_500)],
+        checkIns: [validationDay(1, { mood: 3, sleepMinutes: 420, soreness: 6 }), validationDay(2, { mood: 3, sleepMinutes: 405, soreness: 8 }), validationDay(3, { mood: 4, sleepMinutes: 445, soreness: 5 }), validationDay(5, { mood: 4, sleepMinutes: 470, soreness: 3 })],
+        gpsRuns: [run('2026-10-24T08:00:00Z', 33, 5_900)],
+      }),
+      id: 'val_extreme_soreness_active',
+    },
+    {
+      // Check-ins in two time zones and two GPS runs.
+      aggregate: buildValidation({
+        checkIns: [
+          validationDay(0, { mood: 4, sleepMinutes: 430, sleepQuality: 4 }, 'Europe/Warsaw'),
+          validationDay(1, { mood: 3, sleepMinutes: 350, sleepQuality: 2 }, 'Asia/Tokyo'),
+          validationDay(2, { mood: 3, sleepMinutes: 365, sleepQuality: 3 }, 'Asia/Tokyo'),
+          validationDay(4, { mood: 4, sleepMinutes: 440, sleepQuality: 4 }, 'Europe/Warsaw'),
+          validationDay(6, { mood: 5, sleepMinutes: 500, sleepQuality: 5 }, 'Europe/Warsaw'),
+        ],
+        gpsRuns: [run('2026-10-19T17:00:00Z', 30, 5_400), run('2026-10-24T09:00:00Z', 62, 11_100)],
+      }),
+      id: 'val_mixed_zones_gps',
+    },
+    {
+      // Two manual runs that duplicate two GPS runs, with soreness entries.
+      aggregate: buildValidation({
+        activities: [manual('run', '2026-10-20T06:00:00Z', 40, 7_000), manual('run', '2026-10-23T06:00:00Z', 45, 8_000)],
+        checkIns: [validationDay(1, { soreness: 4, sleepMinutes: 410 }), validationDay(3, { soreness: 5, mood: 3 }), validationDay(4, { soreness: 2, mood: 4, sleepMinutes: 470 })],
+        gpsRuns: [run('2026-10-20T06:01:00Z', 39, 7_080), run('2026-10-23T06:00:30Z', 46, 8_150)],
+      }),
+      id: 'val_overlap_two_runs',
+    },
+    {
+      // GPS runs whose distance is not available at all (no current summary for either run).
+      aggregate: buildValidation({
+        checkIns: [validationDay(0, { sleepMinutes: 440, mood: 4 }), validationDay(2, { sleepMinutes: 455, mood: 4 }), validationDay(4, { sleepMinutes: 425, mood: 3 }), validationDay(6, { sleepMinutes: 470, mood: 4 })],
+        gpsRuns: [run('2026-10-21T06:00:00Z', 44, null), run('2026-10-25T08:00:00Z', 70, null)],
+      }),
+      id: 'val_gps_distance_unavailable',
+    },
+    {
+      // No check-ins at all, but activities: a swim, a walk, a GPS run with a distance and one without.
+      aggregate: buildValidation({
+        activities: [manual('swim', '2026-10-20T18:00:00Z', 45, 2_000), manual('walk', '2026-10-22T12:00:00Z', 40)],
+        gpsRuns: [run('2026-10-23T06:00:00Z', 36, 6_400), run('2026-10-25T07:30:00Z', 52, null)],
+      }),
+      id: 'val_activities_no_check_ins',
+    },
+  ];
+}
+
 /** Wraps a provider to record every attempt's latency and raw answer. */
 export class RecordingProvider implements LlmProvider {
   public readonly attempts: { durationMs: number; ok: boolean; value?: unknown }[] = [];
