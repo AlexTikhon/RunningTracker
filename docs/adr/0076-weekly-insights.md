@@ -139,7 +139,8 @@ listing every new phrase.
   `current` (same input hash), `stale` (changed: shown, marked out of date, regenerable), `outdated_policy` (validated
   under another prompt or policy version: output withheld). A week whose insight was deleted with a source is a normal
   404, shown as "no insight".
-- **Policy version** `weekly-insight-policy-2` is part of the cache key and stored per row; Stop 1 rows were migrated as
+- **Policy version** `weekly-insight-policy-2` (and the prompt version, `weekly-insight-v4` since the prompt experiment
+  addendum below) is part of the cache key and stored per row; Stop 1 rows were migrated as
   `weekly-insight-policy-1` (never trusted, output withheld, regenerated on request) and their `pending` became
   `interrupted`.
 - **States**: `queued`, `running` (each with a job token and a lease), `ready`, `generation_failed`,
@@ -236,6 +237,37 @@ model produces usable insights at this prompt (0/10 and 1/10 ready) and, on this
 any ready answer, no claim mismatch) with `WEEKLY_INSIGHTS_TIMEOUT_MS=180000` and `WEEKLY_INSIGHTS_TOTAL_BUDGET_MS=400000`.
 The next step is a prompt revision aimed at number-free prose (for example an example answer in the system message),
 measured with the same command; it is not part of this change, and no other model was downloaded to evaluate.
+
+### Addendum (2026-11-07, afternoon): bounded prompt experiment
+
+Same report, section "Prompt experiment". Two candidate system messages, everything else unchanged (policy version,
+facts, claims, prose rules, safety screen, contract, budgets): A `weekly-insight-v3` (the prose/claims split stated
+plainly, wrong/right pairs from the failures above, a glossary of the code-computed flags) and B `weekly-insight-v4` (A
+plus one worked example whose facts come from `buildFacts` and whose answer passes every production check). Ten new
+synthetic weeks were frozen as a validation set before either candidate was written. 40 provider calls in total, all
+recorded, no retries or timeouts.
+
+| prompt | set | qwen3:4b ready | qwen3:8b ready |
+| --- | --- | --- | --- |
+| v2 (baseline, stored answers re-checked) | development | 0/10 | 1/10 |
+| v3 (A) | development | 1/10 | not run |
+| v4 (B, selected) | development | 5/10 | not run |
+| v4 (B) | validation (frozen) | 1/10 | **8/10** |
+
+qwen3:8b with v4 on the validation set: schema 10/10, no claim, unit, direction, day or safety failures, two answers
+with a number in prose; cold 117.8 s, warm median 77.7 s, p95 109.4 s (n = 9), CPU only. A human reading of the eight
+accepted answers against a rubric written beforehand found no harmful instruction, diagnosis or cause, and **one
+material contradiction**: "Sleep was logged on every check-in day" for 3 nights out of 4 check-in days, a sentence
+copied from the worked example. The exploratory target (8/10 ready and no material contradiction) is therefore not met.
+
+Decision: `WEEKLY_INSIGHTS_PROVIDER=off` stays the default and no installed model is recommended for people's data.
+`weekly-insight-v4` becomes the production prompt version as the strongest measured candidate with the same contract and
+checks (v2 rows become `outdated_policy`, withheld and regenerable); the policy version is unchanged because no
+validation or fact semantics changed. For opt-in experiments: qwen3:8b with `WEEKLY_INSIGHTS_TIMEOUT_MS=180000` and
+`WEEKLY_INSIGHTS_TOTAL_BUDGET_MS=400000`; qwen3:4b is not usable (1/10 on the validation set). The unsatisfied constraint
+is unverified count-like prose ("every check-in day"); the next decision is either a deterministic, app-written coverage
+text (preferred: it carries what the accepted answers found useful, without a model) or a separately decided rule for
+quantified coverage phrases, measured on a fresh validation set.
 
 ## Consequences
 

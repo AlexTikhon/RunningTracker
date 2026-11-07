@@ -1,0 +1,4 @@
+qwen3:4b: {"failed_grounding":10}
+
+qwen3:8b: {"failed_grounding":9,"ready":1}
+  empty: ready -> failed_grounding number_in_prose:zero

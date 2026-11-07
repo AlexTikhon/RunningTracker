@@ -1,0 +1,1067 @@
+{
+  "budget": {
+    "attemptTimeoutMs": 240000,
+    "maxAttempts": 3,
+    "totalBudgetMs": 600000
+  },
+  "callBudget": {
+    "limit": 11,
+    "refused": 0,
+    "used": 10
+  },
+  "caseSet": "development",
+  "cases": 10,
+  "promptVersion": "weekly-insight-v3",
+  "caseIds": [
+    "complete",
+    "sparse",
+    "empty",
+    "extreme_soreness",
+    "extreme_short_sleep",
+    "weight_change",
+    "mixed_time_zones",
+    "overlapping_runs",
+    "stale_gps_summary",
+    "cross_training"
+  ],
+  "generatedAt": "2026-11-07T16:37:06.239Z",
+  "generation": {
+    "numCtx": 4096,
+    "temperature": 0,
+    "think": false,
+    "maxOutputTokens": 800
+  },
+  "hardware": {
+    "arch": "x64",
+    "cpu": "AMD Ryzen AI 7 350 w/ Radeon 860M              ",
+    "logicalCpus": 16,
+    "os": "Windows_NT 10.0.26300",
+    "totalMemoryBytes": 16418983936
+  },
+  "modelDigests": {
+    "qwen3:4b": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7"
+  },
+  "notRun": {},
+  "ollamaVersion": "0.40.14",
+  "perModel": {
+    "qwen3:4b": [
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 65833.6556,
+            "ok": true,
+            "startedAt": "2026-11-07T16:29:03.450Z"
+          }
+        ],
+        "cold": true,
+        "cutByCallBudget": false,
+        "durationMs": 65851,
+        "grounding": {
+          "number_in_prose": 10,
+          "day_in_prose": 2
+        },
+        "id": "complete",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "Monday",
+                  "direction": "none",
+                  "factId": "sleep.shortest",
+                  "unit": "minutes",
+                  "value": 420
+                },
+                {
+                  "day": "Sunday",
+                  "direction": "none",
+                  "factId": "sleep.longest",
+                  "unit": "minutes",
+                  "value": 480
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 7
+                }
+              ],
+              "text": "Sleep was logged on all seven nights, with a shortest night of 420 minutes and a longest of 480 minutes."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.average",
+                  "unit": "score_1_5",
+                  "value": 3.4
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.days_reported",
+                  "unit": "days",
+                  "value": 7
+                }
+              ],
+              "text": "Mood was logged every day with an average score of 3.4."
+            },
+            {
+              "claims": [
+                {
+                  "day": "Wednesday",
+                  "direction": "none",
+                  "factId": "soreness.highest",
+                  "unit": "score_0_10",
+                  "value": 4
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "soreness.days_reported",
+                  "unit": "days",
+                  "value": 7
+                }
+              ],
+              "text": "Soreness was logged every day but peaked at a 4 on Wednesday."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "up",
+                  "factId": "weight.change",
+                  "unit": "kg",
+                  "value": 0.3
+                }
+              ],
+              "text": "Weight went up slightly from the first to the last weigh-in."
+            }
+          ],
+          "suggestion": "Try adding a short walk after dinner to help with sleep quality.",
+          "summary": "Your week had consistent check-ins across all days, with sleep logged every night. Average sleep was around 7.5 hours, and mood stayed steady at a 3.4 score. Soreness was low but peaked slightly on Wednesday."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 36171.0116,
+            "ok": true,
+            "startedAt": "2026-11-07T16:30:09.308Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 36172,
+        "grounding": {
+          "number_in_prose": 7
+        },
+        "id": "sparse",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 2
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 5
+                }
+              ],
+              "text": "Check-ins were recorded on only two days, missing five days."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 2
+                },
+                {
+                  "day": "Friday",
+                  "direction": "none",
+                  "factId": "sleep.shortest",
+                  "unit": "minutes",
+                  "value": 410
+                },
+                {
+                  "day": "Tuesday",
+                  "direction": "none",
+                  "factId": "sleep.longest",
+                  "unit": "minutes",
+                  "value": 465
+                }
+              ],
+              "text": "Sleep was logged on two days with a shortest night of 410 minutes and a longest night of 465 minutes."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.days_reported",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "soreness.days_reported",
+                  "unit": "days",
+                  "value": 1
+                }
+              ],
+              "text": "Mood and soreness were each logged only once this week."
+            }
+          ],
+          "suggestion": "Try checking in at least once each day to help track your health.",
+          "summary": "This week had few check-ins and no physical activities logged. Sleep was tracked on two days with average sleep around seven hours. Mood and soreness were only recorded once each."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 20492.189699999988,
+            "ok": true,
+            "startedAt": "2026-11-07T16:30:45.480Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 20496,
+        "grounding": {},
+        "id": "empty",
+        "modelOutput": {
+          "summary": "This week had no check-ins and no activities recorded. The week was incomplete with all days missing check-ins and no runs or manual activities logged.",
+          "observations": [
+            {
+              "text": "No check-ins were recorded this week.",
+              "claims": [
+                {
+                  "factId": "check_ins.days_with_data",
+                  "value": 0,
+                  "unit": "days",
+                  "direction": "none",
+                  "day": "none"
+                },
+                {
+                  "factId": "check_ins.days_missing",
+                  "value": 7,
+                  "unit": "days",
+                  "direction": "none",
+                  "day": "none"
+                },
+                {
+                  "factId": "check_ins.coverage",
+                  "value": 0,
+                  "unit": "percent",
+                  "direction": "none",
+                  "day": "none"
+                }
+              ]
+            },
+            {
+              "text": "No activities or runs were logged this week.",
+              "claims": [
+                {
+                  "factId": "manual.activities",
+                  "value": 0,
+                  "unit": "count",
+                  "direction": "none",
+                  "day": "none"
+                },
+                {
+                  "factId": "gps.runs",
+                  "value": 0,
+                  "unit": "count",
+                  "direction": "none",
+                  "day": "none"
+                }
+              ]
+            }
+          ],
+          "suggestion": "Check in at least once this week to start logging your week."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "ready",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 32741.49040000001,
+            "ok": true,
+            "startedAt": "2026-11-07T16:31:05.976Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 32744,
+        "grounding": {
+          "number_in_prose": 5
+        },
+        "id": "extreme_soreness",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 4
+                }
+              ],
+              "text": "Check-ins were logged on three days but missed on four days."
+            },
+            {
+              "claims": [
+                {
+                  "day": "Tuesday",
+                  "direction": "none",
+                  "factId": "soreness.highest",
+                  "unit": "score_0_10",
+                  "value": 9
+                }
+              ],
+              "text": "Soreness reached a high score of 9 on one day."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.average_hours",
+                  "unit": "hours",
+                  "value": 6.9
+                }
+              ],
+              "text": "Sleep was logged on three nights with an average of about 7 hours."
+            }
+          ],
+          "suggestion": "null",
+          "summary": "This week had some check-ins and sleep tracking, but few check-ins were recorded. Soreness was high on at least one day, and sleep patterns varied."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": true,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 37286.5355,
+            "ok": true,
+            "startedAt": "2026-11-07T16:31:38.721Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 37287,
+        "grounding": {
+          "number_in_prose": 6
+        },
+        "id": "extreme_short_sleep",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 4
+                }
+              ],
+              "text": "Check-ins were recorded on three days but missed on four days."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "Monday",
+                  "direction": "none",
+                  "factId": "sleep.shortest",
+                  "unit": "minutes",
+                  "value": 210
+                },
+                {
+                  "day": "Thursday",
+                  "direction": "none",
+                  "factId": "sleep.longest",
+                  "unit": "minutes",
+                  "value": 390
+                }
+              ],
+              "text": "Sleep was logged on three nights with a shortest night of 210 minutes and a longest night of 390 minutes."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.days_reported",
+                  "unit": "days",
+                  "value": 3
+                }
+              ],
+              "text": "Mood was logged on three days but not every day."
+            }
+          ],
+          "suggestion": "null",
+          "summary": "This week had some check-ins and sleep logged, but few activities were recorded. The sleep patterns showed both short and long nights. Mood was logged on a few days but not consistently."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": true,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 48054.27979999999,
+            "ok": true,
+            "startedAt": "2026-11-07T16:32:16.008Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 48055,
+        "grounding": {
+          "number_in_prose": 4
+        },
+        "id": "weight_change",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 4
+                }
+              ],
+              "text": "Check-ins were recorded on only three days, missing four days."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "manual.activities",
+                  "unit": "count",
+                  "value": 0
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "gps.runs",
+                  "unit": "count",
+                  "value": 0
+                }
+              ],
+              "text": "No physical activities or runs were logged."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.average_hours",
+                  "unit": "hours",
+                  "value": 7.5
+                }
+              ],
+              "text": "Sleep was logged on one night with an average of seven and a half hours."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "down",
+                  "factId": "weight.change",
+                  "unit": "kg",
+                  "value": 2.3
+                }
+              ],
+              "text": "Weight went down from the first to the last weigh-in."
+            }
+          ],
+          "suggestion": "Try checking in on more days to improve tracking.",
+          "summary": "This week had few check-ins and no physical activity logged. Sleep was recorded on one night, but the average sleep duration was short. Weight dropped significantly from the first to the last weigh-in."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 51602.187600000005,
+            "ok": true,
+            "startedAt": "2026-11-07T16:33:04.064Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 51603,
+        "grounding": {
+          "number_in_prose": 16
+        },
+        "id": "mixed_time_zones",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 4
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 3
+                }
+              ],
+              "text": "Check-ins were recorded on four days but missed on three days."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 4
+                },
+                {
+                  "day": "Wednesday",
+                  "direction": "none",
+                  "factId": "sleep.shortest",
+                  "unit": "minutes",
+                  "value": 380
+                },
+                {
+                  "day": "Saturday",
+                  "direction": "none",
+                  "factId": "sleep.longest",
+                  "unit": "minutes",
+                  "value": 470
+                }
+              ],
+              "text": "Sleep was logged on four nights, with a shortest night of 380 minutes and a longest night of 470 minutes."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.days_reported",
+                  "unit": "days",
+                  "value": 4
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.average",
+                  "unit": "score_1_5",
+                  "value": 4
+                }
+              ],
+              "text": "Mood was logged on four days with an average score of four."
+            }
+          ],
+          "suggestion": "Try checking in on a day you feel most awake to help track your patterns.",
+          "summary": "This week had check-ins on four days and missed three days, with a 57% check-in coverage. Sleep was logged on four nights, averaging about seven hours with a shortest night of 380 minutes and a longest night of 470 minutes. Mood was logged on four days with an average score of four."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 66183.65490000002,
+            "ok": true,
+            "startedAt": "2026-11-07T16:33:55.668Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 66184,
+        "grounding": {
+          "number_in_prose": 5
+        },
+        "id": "overlapping_runs",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 6
+                }
+              ],
+              "text": "Check-ins were recorded on only one day, with six days missing."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.average_hours",
+                  "unit": "hours",
+                  "value": 7.5
+                }
+              ],
+              "text": "Sleep was logged for only one night, with an average of seven and a half hours."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.days_reported",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "Tuesday",
+                  "direction": "none",
+                  "factId": "soreness.highest",
+                  "unit": "score_0_10",
+                  "value": 3
+                }
+              ],
+              "text": "Mood and soreness were both recorded on one day, with the highest soreness level being three."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "manual.run.distance",
+                  "unit": "km",
+                  "value": 5
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "gps.distance",
+                  "unit": "km",
+                  "value": 5.08
+                }
+              ],
+              "text": "Manual and GPS runs both show a distance of five kilometers but may be the same activity."
+            }
+          ],
+          "suggestion": "Try checking in on more days to improve your data coverage.",
+          "summary": "Your week had limited check-ins and only one night of sleep logged. Mood and soreness were both recorded on a single day, with no significant changes noted. Manual and GPS runs both show similar distances but may overlap."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 47903.109600000025,
+            "ok": true,
+            "startedAt": "2026-11-07T16:35:01.853Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 47904,
+        "grounding": {
+          "number_in_prose": 3
+        },
+        "id": "stale_gps_summary",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 6
+                }
+              ],
+              "text": "Check-ins were recorded on only one day, with six days missing."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.average_hours",
+                  "unit": "hours",
+                  "value": 7
+                }
+              ],
+              "text": "Sleep was logged for one night, with an average of seven hours."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.days_reported",
+                  "unit": "days",
+                  "value": 1
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "manual.activities",
+                  "unit": "count",
+                  "value": 0
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "gps.runs",
+                  "unit": "count",
+                  "value": 2
+                }
+              ],
+              "text": "Mood was recorded once, but no activities or runs were logged."
+            }
+          ],
+          "suggestion": "Try checking in on two days this week to improve your data coverage.",
+          "summary": "Your week had limited check-ins and only one night of sleep logged. Mood was recorded once, but no activities or runs were logged manually or via GPS."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      },
+      {
+        "attempts": 1,
+        "calls": [
+          {
+            "durationMs": 76437.5036,
+            "ok": true,
+            "startedAt": "2026-11-07T16:35:49.758Z"
+          }
+        ],
+        "cold": false,
+        "cutByCallBudget": false,
+        "durationMs": 76438,
+        "grounding": {
+          "number_in_prose": 7
+        },
+        "id": "cross_training",
+        "modelOutput": {
+          "observations": [
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_with_data",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "check_ins.days_missing",
+                  "unit": "days",
+                  "value": 4
+                }
+              ],
+              "text": "Check-ins were recorded on three days, but missed on four days."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "sleep.nights_reported",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "Thursday",
+                  "direction": "none",
+                  "factId": "sleep.shortest",
+                  "unit": "minutes",
+                  "value": 455
+                },
+                {
+                  "day": "Sunday",
+                  "direction": "none",
+                  "factId": "sleep.longest",
+                  "unit": "minutes",
+                  "value": 500
+                }
+              ],
+              "text": "Sleep was logged on three days, with a shortest night of 455 minutes and a longest night of 500 minutes."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "mood.days_reported",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "soreness.days_reported",
+                  "unit": "days",
+                  "value": 3
+                },
+                {
+                  "day": "Thursday",
+                  "direction": "none",
+                  "factId": "soreness.highest",
+                  "unit": "score_0_10",
+                  "value": 2
+                }
+              ],
+              "text": "Mood and soreness were logged on three days each, with soreness staying low."
+            },
+            {
+              "claims": [
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "manual.activities",
+                  "unit": "count",
+                  "value": 2
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "manual.duration",
+                  "unit": "minutes",
+                  "value": 130
+                },
+                {
+                  "day": "none",
+                  "direction": "none",
+                  "factId": "gps.runs",
+                  "unit": "count",
+                  "value": 0
+                }
+              ],
+              "text": "Manual activities and swims were logged, but no GPS runs were recorded."
+            }
+          ],
+          "suggestion": "Try checking in on more days to keep your week consistent.",
+          "summary": "Your week had some check-ins but not enough to be consistent. Sleep was logged on three days, with a shortest night and a longest night. Mood and soreness were tracked on a few days, but not all."
+        },
+        "reason": null,
+        "safetyRules": [],
+        "schemaFailures": 0,
+        "schemaValid": true,
+        "status": "failed_grounding",
+        "suggestionDropped": false,
+        "transportFailures": 0
+      }
+    ]
+  },
+  "policyVersion": "weekly-insight-policy-2",
+  "residency": {
+    "qwen3:4b": {
+      "models": [
+        {
+          "name": "qwen3:4b",
+          "model": "qwen3:4b",
+          "size": 3186108660,
+          "digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+          "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "qwen3",
+            "families": [
+              "qwen3"
+            ],
+            "parameter_size": "4.0B",
+            "quantization_level": "Q4_K_M"
+          },
+          "expires_at": "2026-11-07T17:35:09.2701114+01:00",
+          "size_vram": 0,
+          "context_length": 4096,
+          "runner": "llamacpp"
+        }
+      ]
+    }
+  },
+  "summaries": [
+    {
+      "cases": 10,
+      "casesCutByCallBudget": 0,
+      "groundingCasesByKind": {
+        "number_in_prose": 9,
+        "day_in_prose": 1
+      },
+      "timeouts": 0,
+      "coldMs": 65851,
+      "globalGroundingFailures": 9,
+      "model": "qwen3:4b",
+      "ready": 1,
+      "safetyFailures": 0,
+      "schemaPassRate": 1,
+      "scopedGroundingFailures": 0,
+      "statuses": {
+        "failed_grounding": 9,
+        "ready": 1
+      },
+      "totalAttempts": 10,
+      "totalSchemaFailures": 0,
+      "totalTransportFailures": 0,
+      "unitDirectionFailures": 0,
+      "warmMedianMs": 47904,
+      "warmP95Ms": 76438,
+      "warmSamples": 9
+    }
+  ]
+}

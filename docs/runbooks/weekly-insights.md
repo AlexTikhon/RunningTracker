@@ -17,6 +17,17 @@ Weekly insights are off by default. Everything else in the application works wit
    service, `WEEKLY_INSIGHTS_OLLAMA_BASE_URL=http://127.0.0.1:11435`. Choose the timeout and total budget from the
    evaluation below; a CPU-only machine needs minutes, not seconds.
 
+**Recommendation (measured 2026-11-07, prompt `weekly-insight-v4`):** leave it off for people's data. No installed model
+met the product target ([report](../reports/weekly-insights-model-evaluation-2026-11-07.md)): qwen3:8b produced 8/10
+ready answers on the validation weeks, but one accepted answer stated something false ("Sleep was logged on every
+check-in day" for 3 of 4 days); qwen3:4b produced 1/10. For an opt-in experiment on this workstation use
+`WEEKLY_INSIGHTS_MODEL=qwen3:8b`, `WEEKLY_INSIGHTS_TIMEOUT_MS=180000` and `WEEKLY_INSIGHTS_TOTAL_BUDGET_MS=400000`
+(cold 118 s, warm median 78 s, warm p95 109 s, CPU only). The prose is labelled AI-generated and is not verified beyond
+its numbers, days and change verbs; the cited facts next to it are the code's.
+
+Changing the prompt version (it is `weekly-insight-v4` since 2026-11-07) withholds insights generated with the previous
+version (`outdated_policy`); the person can regenerate them.
+
 ## Network boundary
 
 The API refuses public hosts and cloud model names, and it never sends notes, coordinates, identifiers or the person's
@@ -41,9 +52,22 @@ that host as part of the trust boundary of health data.
 
 ```sh
 npm run eval:weekly-insights -- --models qwen3:4b,qwen3:8b
+npm run eval:weekly-insights -- --models qwen3:8b --prompt weekly-insight-v4 --cases validation --max-calls 10
 ```
 
 It runs ten synthetic weeks per model through the production generator and checks. It reports the schema pass rate,
-global (prose) and scoped (claim) grounding failures, unit/direction failures, safety failures, attempt counts, and
-cold and warm latency (median and p95; small sample). Reports go to `apps/api/.local/eval-reports/`. A model that is not
-installed is reported as unavailable, never as passed.
+global (prose) and scoped (claim) grounding failures and failures by kind, unit/direction failures, safety failures,
+attempt counts, timeouts, and cold and warm latency (median and p95; small sample). Reports go to
+`apps/api/.local/eval-reports/` (`--out` to change). A model that is not installed is reported as unavailable, never as
+passed.
+
+- `--prompt` picks a kept prompt version (`weekly-insight-v2`, `v3`, `v4`; default: the production one).
+- `--cases development` (default) is the set prompts are tuned on; `--cases validation` is the frozen held-out set.
+  Do not tune a prompt on validation results, and do not edit the validation weeks (their hash is pinned by test). It
+  has been used once (2026-11-07); a further prompt experiment needs a fresh validation set.
+- `--max-calls` is a hard limit on actual provider calls, retries included: a call beyond it is never sent, the case
+  is reported as cut short, and cases that cannot start are reported as not run.
+- To re-check stored answers after a rule change, without any model call:
+  `node --import tsx src/evaluation/weekly-insight-revalidate-main.ts <report.json>` (from `apps/api`).
+- Token use per request is in the Ollama server log (`%LOCALAPPDATA%\Ollama\server.log`, "task.n_tokens" and
+  "stop processing: n_tokens"); the window is 4,096 tokens.
