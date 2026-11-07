@@ -1,4 +1,4 @@
-import { weeklyInsightModelOutputSchema } from '@running-tracker/contracts';
+import { ACTIVITY_TYPES, weeklyInsightModelOutputSchema } from '@running-tracker/contracts';
 import { describe, expect, it } from 'vitest';
 
 import { checkGrounding } from './grounding.js';
@@ -43,7 +43,7 @@ const facts = buildFacts(aggregate);
 
 describe('weekly insight prompt (ADR-0076)', () => {
   it('is versioned', () => {
-    expect(WEEKLY_INSIGHT_PROMPT_VERSION).toBe('weekly-insight-v2');
+    expect(WEEKLY_INSIGHT_PROMPT_VERSION).toBe('weekly-insight-v4');
   });
 
   it('keeps the system message independent of the person and the week', () => {
@@ -125,6 +125,37 @@ describe('weekly insight prompt (ADR-0076)', () => {
         `Facts: ${canonicalJson(exampleFacts.map(({ day, direction, id, label, unit, value }) => ({ day, direction, id, label, unit, value })))}`,
       );
       expect(WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v4']).toContain(`Answer: ${JSON.stringify(WEEKLY_INSIGHT_EXAMPLE_ANSWER)}`);
+    });
+
+    it('keeps the production prompt of the busiest possible week inside the model window with room for a full answer', () => {
+      // num_ctx is 4,096 tokens and an answer may use up to 800. Measured in the Ollama server log during the experiment
+      // (qwen3): the v4 system message is ~1,630 tokens (6,416 characters) and the largest measured v4 prompt, 9,610
+      // characters, was 2,483 tokens: about 3.7 to 3.9 characters per token. A week with every metric, every activity
+      // type and every flag (44 facts) is ~11,800 characters, so ~3,100 tokens + 800 < 4,096. A character bound is a proxy
+      // for tokens, not a guarantee; the provider still refuses an answer whose window was full ('incomplete').
+      const days = [0, 1, 2, 3, 4, 5, 6].map((offset) => ({
+        localDate: `2026-11-0${2 + offset}`,
+        mood: 3,
+        sleepMinutes: 200 + offset * 100,
+        sleepQuality: 3,
+        soreness: 9,
+        timeZone: offset % 2 === 0 ? 'Asia/Tokyo' : 'Europe/Warsaw',
+        weightKg: 70 + offset,
+      }));
+      const busiest = aggregateWeek({
+        activities: ACTIVITY_TYPES.map((type, index) => ({ distanceM: 12_345, durationS: 3_600 + index, startedAtMs: Date.parse('2026-11-03T06:00:00Z') + index * 3_600_000, type })),
+        checkIns: days,
+        gpsRuns: [
+          { distanceM: 10_123, finishedAtMs: Date.parse('2026-11-04T07:00:00Z'), startedAtMs: Date.parse('2026-11-04T06:00:00Z') },
+          { distanceM: null, finishedAtMs: Date.parse('2026-11-05T07:00:00Z'), startedAtMs: Date.parse('2026-11-05T06:00:00Z') },
+        ],
+        todayLocalDate: '2026-11-05',
+        window: resolveWeekWindow({ checkIns: days, requestTimeZone: 'Europe/Warsaw', weekStart: '2026-11-02' }),
+      });
+      const busiestFacts = buildFacts(busiest);
+      expect(busiestFacts).toHaveLength(44);
+      const prompt = buildWeeklyInsightPrompt(busiest, busiestFacts);
+      expect(prompt.system.length + prompt.user.length).toBeLessThanOrEqual(12_000);
     });
 
     it('gives only "right" example sentences that the unchanged prose rules and safety screen accept', () => {

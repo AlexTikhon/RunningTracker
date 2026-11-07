@@ -478,7 +478,7 @@ export async function seedInterruptedInsight(environment: E2eEnvironment, orgId:
        VALUES ($1, $2, $3::date, 'Europe/Warsaw', $3::date::timestamp AT TIME ZONE 'Europe/Warsaw',
                ($3::date + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('e', 64),
                coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
-               'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'running', gen_random_uuid(),
+               'fake', 'weekly-insight-v4', 'weekly-insight-policy-2', 'running', gen_random_uuid(),
                clock_timestamp() - interval '1 minute')`,
       [orgId, userId, weekStart],
     ),

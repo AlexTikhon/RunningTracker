@@ -323,7 +323,7 @@ describe('ADR-0076 weekly insight source protocol against PostgreSQL (migration 
         `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision,
                                       model, prompt_version, policy_version, job_token, lease_expires_at)
          VALUES ($1, $2, $3::date, 'UTC', $3::date::timestamp AT TIME ZONE 'UTC', ($3::date + 7)::timestamp AT TIME ZONE 'UTC',
-                 repeat('a', 64), $4::bigint, 'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', gen_random_uuid(),
+                 repeat('a', 64), $4::bigint, 'fake', 'weekly-insight-v4', 'weekly-insight-policy-2', gen_random_uuid(),
                  clock_timestamp() + interval '1 minute')`,
         [ids.orgA, ids.userOrgA, WEEK, sourceRevision],
       );
@@ -393,7 +393,7 @@ describe('ADR-0076 weekly insight source protocol against PostgreSQL (migration 
          VALUES ($1, $2, $3::date, 'UTC', $3::date::timestamp AT TIME ZONE 'UTC', ($3::date + 7)::timestamp AT TIME ZONE 'UTC',
                  repeat('b', 64),
                  coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
-                 'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'interrupted', NULL)`,
+                 'fake', 'weekly-insight-v4', 'weekly-insight-policy-2', 'interrupted', NULL)`,
         [ids.orgA, userId, weekStart],
       );
     }

@@ -46,9 +46,10 @@ describe('weekly insight model evaluation (ADR-0076)', () => {
       },
     };
     const budget = { attemptTimeoutMs: 5_000, maxAttempts: 3, totalBudgetMs: 10_000 };
-    await evaluateCase(cases[1]!, spy, budget, false, { promptVersion: 'weekly-insight-v4' });
+    await evaluateCase(cases[1]!, spy, budget, false, { promptVersion: 'weekly-insight-v2' });
     await evaluateCase(cases[1]!, spy, budget, false);
-    expect(systems).toEqual([WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v4'], WEEKLY_INSIGHT_SYSTEM_PROMPTS[WEEKLY_INSIGHT_PROMPT_VERSION]]);
+    expect(WEEKLY_INSIGHT_PROMPT_VERSION).not.toBe('weekly-insight-v2');
+    expect(systems).toEqual([WEEKLY_INSIGHT_SYSTEM_PROMPTS['weekly-insight-v2'], WEEKLY_INSIGHT_SYSTEM_PROMPTS[WEEKLY_INSIGHT_PROMPT_VERSION]]);
   });
 
   it('never sends a call beyond the call limit, and reports the cut case apart from model results', async () => {
@@ -76,7 +77,7 @@ describe('weekly insight model evaluation (ADR-0076)', () => {
   it('keeps the validation set frozen, separate from the development set, and covering its situations', () => {
     const validation = validationCases();
     // Pinned before any candidate prompt was written. A change here invalidates the held-out result of the prompt
-    // experiment (docs/reports/weekly-insights-prompt-experiment-2026-11-07.md): do not update this hash to tune.
+    // experiment (docs/reports/weekly-insights-model-evaluation-2026-11-07.md): do not update this hash to tune.
     const digest = createHash('sha256')
       .update(canonicalJson(validation.map((entry) => ({ aggregate: entry.aggregate, id: entry.id }))))
       .digest('hex');

@@ -59,7 +59,7 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
       `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision,
                                     model, prompt_version, policy_version, status, output)
        VALUES ($1, $2, $3::date, 'UTC', $3::date::timestamp AT TIME ZONE 'UTC', ($3::date + 7)::timestamp AT TIME ZONE 'UTC',
-               $4, $7::bigint, 'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', $5, CASE WHEN $5 = 'ready' THEN $6::jsonb END)`,
+               $4, $7::bigint, 'fake', 'weekly-insight-v4', 'weekly-insight-policy-2', $5, CASE WHEN $5 = 'ready' THEN $6::jsonb END)`,
       [orgId, userId, weekStart, hash('a'), status, readyOutput, await revisionOf(orgId, userId)],
     );
   }
@@ -109,7 +109,7 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
         `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision,
                                       model, prompt_version, policy_version, job_token, lease_expires_at)
          VALUES ($1, $2, $3::date, 'UTC', $3::date::timestamp AT TIME ZONE 'UTC', ($3::date + 7)::timestamp AT TIME ZONE 'UTC',
-                 $4, $5::bigint, 'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', gen_random_uuid(),
+                 $4, $5::bigint, 'fake', 'weekly-insight-v4', 'weekly-insight-policy-2', gen_random_uuid(),
                  clock_timestamp() + interval '1 minute')`,
         [row.orgId, row.userId, weeks.other, hash('b'), revision],
       ),

@@ -21,10 +21,13 @@ import { aggregateWeek, canonicalJson, hasExtremeValues, resolveWeekWindow, type
 // What the model receives: the week's first and last date, its flags, and the fact catalogue (id, label, value, unit,
 // direction, day). Never notes, coordinates, run or activity identifiers, or the person's identity.
 //
-// Several versions are kept so that a measured run can be reproduced (docs/reports/weekly-insights-prompt-experiment-
-// 2026-11-07.md): every version sends the same user message and output schema and differs only in its system message.
-// Production generates with WEEKLY_INSIGHT_PROMPT_VERSION; the others are reachable only through the evaluation runner.
-export const WEEKLY_INSIGHT_PROMPT_VERSION = 'weekly-insight-v2';
+// Several versions are kept so that a measured run can be reproduced (the prompt experiment in docs/reports/weekly-
+// insights-model-evaluation-2026-11-07.md): every version sends the same user message and output schema and differs
+// only in its system message. Production generates with WEEKLY_INSIGHT_PROMPT_VERSION; the others are reachable only
+// through the evaluation runner. v4 is the strongest measured candidate (qwen3:8b 8/10 ready on the frozen validation
+// set, against 1/10 for v2 on the development set); it did not meet the exploratory target, and generation stays off by
+// default.
+export const WEEKLY_INSIGHT_PROMPT_VERSION = 'weekly-insight-v4';
 
 /**
  * The system message of weekly-insight-v2 (ADR-0076, the measured baseline). It does not depend on the person or the

@@ -37,7 +37,7 @@ describe('ADR-0076 weekly insight erasure (migration 0031)', () => {
                                     model, prompt_version, policy_version, status)
        VALUES ($1, $2, $3::date, $4, $3::date::timestamp AT TIME ZONE $4, ($3::date + 7)::timestamp AT TIME ZONE $4,
                repeat('a', 64), coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
-               'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'interrupted')`,
+               'fake', 'weekly-insight-v4', 'weekly-insight-policy-2', 'interrupted')`,
       [ids.orgA, userId, weekStart, timeZone],
     );
   }
