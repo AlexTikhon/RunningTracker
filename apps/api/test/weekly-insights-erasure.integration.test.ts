@@ -33,9 +33,11 @@ describe('ADR-0076 weekly insight erasure (migration 0031)', () => {
 
   async function seedInsight(userId: string, weekStart: string, timeZone: string): Promise<void> {
     await ownerPool.query(
-      `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model, prompt_version)
+      `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision,
+                                    model, prompt_version, policy_version, status)
        VALUES ($1, $2, $3::date, $4, $3::date::timestamp AT TIME ZONE $4, ($3::date + 7)::timestamp AT TIME ZONE $4,
-               repeat('a', 64), 'fake', 'weekly-insight-v1')`,
+               repeat('a', 64), coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
+               'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'interrupted')`,
       [ids.orgA, userId, weekStart, timeZone],
     );
   }
@@ -164,12 +166,20 @@ describe('ADR-0076 weekly insight erasure (migration 0031)', () => {
     expect(await insights()).toEqual(without('owner@2026-10-05'));
   });
 
-  it('the run deletion journal replay deletes the insight of a journaled run\'s week', async () => {
-    const outcome = await ownerPool.query<{ outcome: string }>(
-      'SELECT app_private.reapply_journaled_deletion($1, $2, $3, $4, $5) AS outcome',
-      [ids.orgA, ids.runFinishedBoth, ids.userOrgA, '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'],
-    );
-    expect(outcome.rows[0]?.outcome).toBe('deleted');
-    expect(await insights()).toEqual(without('owner@2026-09-14'));
+  it('the run deletion journal replay deletes the insight of a journaled run\'s week, and (migration 0032) every other insight of its owner', async () => {
+    const replay = () =>
+      ownerPool.query<{ outcome: string }>('SELECT app_private.reapply_journaled_deletion($1, $2, $3, $4, $5) AS outcome', [
+        ids.orgA,
+        ids.runFinishedBoth,
+        ids.userOrgA,
+        '2026-10-01T00:00:00Z',
+        '2026-10-02T00:00:00Z',
+      ]);
+    expect((await replay()).rows[0]?.outcome).toBe('deleted');
+    // A journal entry does not say which week the run was in, so the replay invalidates all of the owner's insights in
+    // the organization, for every outcome: another person's insight stays, and a second replay changes nothing.
+    expect(await insights()).toEqual(['other@2026-10-05']);
+    expect((await replay()).rows[0]?.outcome).toBe('marker_present');
+    expect(await insights()).toEqual(['other@2026-10-05']);
   });
 });

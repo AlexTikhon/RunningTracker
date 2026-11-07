@@ -34,6 +34,7 @@ describe('weekly insights configuration (ADR-0076)', () => {
     const environment = validateEnvironment({ ...base, WEEKLY_INSIGHTS_MODEL: 'qwen2.5:3b', WEEKLY_INSIGHTS_PROVIDER: 'ollama' });
     expect(environment.WEEKLY_INSIGHTS).toEqual({
       baseUrl: 'http://127.0.0.1:11434',
+      maxAttempts: 3,
       maxOutputTokens: 800,
       maxPerPerson: 2,
       maxQueue: 16,
@@ -41,6 +42,7 @@ describe('weekly insights configuration (ADR-0076)', () => {
       model: 'qwen2.5:3b',
       provider: 'ollama',
       timeoutMs: 60_000,
+      totalBudgetMs: 150_000,
     });
   });
 
@@ -87,11 +89,24 @@ describe('weekly insights configuration (ADR-0076)', () => {
 
   it('allows the fake provider outside production only', () => {
     expect(validateEnvironment({ ...base, WEEKLY_INSIGHTS_PROVIDER: 'fake' }).WEEKLY_INSIGHTS).toMatchObject({
+      fakeDelayMs: 0,
+      fakeFailingWeeks: [],
       fakeMode: 'grounded',
       provider: 'fake',
     });
-    expect(validateEnvironment({ ...base, WEEKLY_INSIGHTS_FAKE_MODE: 'hallucinated_number', WEEKLY_INSIGHTS_PROVIDER: 'fake' }).WEEKLY_INSIGHTS)
-      .toMatchObject({ fakeMode: 'hallucinated_number' });
+    expect(validateEnvironment({ ...base, WEEKLY_INSIGHTS_FAKE_MODE: 'wrong_unit', WEEKLY_INSIGHTS_PROVIDER: 'fake' }).WEEKLY_INSIGHTS)
+      .toMatchObject({ fakeMode: 'wrong_unit' });
+    expect(
+      validateEnvironment({
+        ...base,
+        WEEKLY_INSIGHTS_FAKE_DELAY_MS: '1500',
+        WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS: '2026-11-02, 2026-11-09',
+        WEEKLY_INSIGHTS_PROVIDER: 'fake',
+      }).WEEKLY_INSIGHTS,
+    ).toMatchObject({ fakeDelayMs: 1500, fakeFailingWeeks: ['2026-11-02', '2026-11-09'] });
+    expect(invalid({ ...base, WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS: 'next week', WEEKLY_INSIGHTS_PROVIDER: 'fake' })).toThrow(
+      /WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS/u,
+    );
     expect(invalid({ ...production, WEEKLY_INSIGHTS_PROVIDER: 'fake' })).toThrow(/must be off or ollama in production/u);
   });
 
@@ -99,5 +114,12 @@ describe('weekly insights configuration (ADR-0076)', () => {
     expect(invalid({ ...base, WEEKLY_INSIGHTS_PROVIDER: 'fake', WEEKLY_INSIGHTS_TIMEOUT_MS: '999' })).toThrow(/WEEKLY_INSIGHTS_TIMEOUT_MS/u);
     expect(invalid({ ...base, WEEKLY_INSIGHTS_PROVIDER: 'fake', WEEKLY_INSIGHTS_MAX_QUEUE: '257' })).toThrow(/WEEKLY_INSIGHTS_MAX_QUEUE/u);
     expect(invalid({ ...base, WEEKLY_INSIGHTS_PROVIDER: 'openai' })).toThrow(/WEEKLY_INSIGHTS_PROVIDER/u);
+    expect(invalid({ ...base, WEEKLY_INSIGHTS_MAX_ATTEMPTS: '6', WEEKLY_INSIGHTS_PROVIDER: 'fake' })).toThrow(/WEEKLY_INSIGHTS_MAX_ATTEMPTS/u);
+  });
+
+  it('requires the total generation budget to cover at least one full attempt', () => {
+    expect(
+      invalid({ ...base, WEEKLY_INSIGHTS_PROVIDER: 'fake', WEEKLY_INSIGHTS_TIMEOUT_MS: '60000', WEEKLY_INSIGHTS_TOTAL_BUDGET_MS: '30000' }),
+    ).toThrow(/WEEKLY_INSIGHTS_TOTAL_BUDGET_MS must be at least WEEKLY_INSIGHTS_TIMEOUT_MS/u);
   });
 });

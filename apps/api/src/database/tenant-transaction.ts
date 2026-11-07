@@ -11,6 +11,12 @@ export interface TenantContext {
    * so it is safe to omit and is used only by callers that read a handful of live rows.
    */
   visibilityScope?: 'live';
+  /**
+   * `'read-only snapshot'`: BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY, so every statement of the transaction reads
+   * one snapshot (ADR-0076 insight reads). Default: the server default, READ COMMITTED, which the weekly insight source
+   * protocol relies on for writes.
+   */
+  snapshot?: 'read-only snapshot';
 }
 
 export class TenantTransactionCommitError extends Error {
@@ -75,6 +81,7 @@ export async function withTenantTransaction<Result>(
       orgId: validatedUuid('orgId', context.orgId),
       userId: validatedUuid('userId', context.userId),
       visibilityScope: validatedVisibilityScope(context.visibilityScope),
+      snapshot: context.snapshot === 'read-only snapshot' ? context.snapshot : undefined,
     },
     callback,
   );
@@ -92,14 +99,19 @@ export async function withUserTransaction<Result>(
 ): Promise<Result> {
   return runScopedTransaction(
     pool,
-    { orgId: undefined, userId: validatedUuid('userId', context.userId), visibilityScope: undefined },
+    { orgId: undefined, snapshot: undefined, userId: validatedUuid('userId', context.userId), visibilityScope: undefined },
     callback,
   );
 }
 
 async function runScopedTransaction<Result>(
   pool: Pick<Pool, 'connect'>,
-  { orgId, userId, visibilityScope }: { orgId: string | undefined; userId: string; visibilityScope: 'live' | undefined },
+  {
+    orgId,
+    snapshot,
+    userId,
+    visibilityScope,
+  }: { orgId: string | undefined; snapshot: 'read-only snapshot' | undefined; userId: string; visibilityScope: 'live' | undefined },
   callback: (client: PoolClient) => Promise<Result>,
 ): Promise<Result> {
   const client = await pool.connect();
@@ -107,7 +119,7 @@ async function runScopedTransaction<Result>(
   let destroyReason: Error | undefined;
 
   try {
-    await client.query('BEGIN');
+    await client.query(snapshot ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN');
     phase = 'begun';
     await (orgId === undefined
       ? client.query("SELECT set_config('app.user_id', $1, true)", [userId])

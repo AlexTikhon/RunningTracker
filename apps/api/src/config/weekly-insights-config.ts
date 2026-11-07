@@ -14,7 +14,10 @@ const integer = (minimum: number, maximum: number) => z.coerce.number().int().mi
 export const DEFAULT_OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
 
 export const weeklyInsightsEnvironmentFields = {
+  WEEKLY_INSIGHTS_FAKE_DELAY_MS: integer(0, 60_000).default(0),
+  WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS: z.string().max(1_000).default(''),
   WEEKLY_INSIGHTS_FAKE_MODE: z.enum(fakeProviderModes).default('grounded'),
+  WEEKLY_INSIGHTS_MAX_ATTEMPTS: integer(1, 5).default(3),
   WEEKLY_INSIGHTS_MAX_OUTPUT_TOKENS: integer(64, 4_000).default(800),
   WEEKLY_INSIGHTS_MAX_PER_PERSON: integer(1, 16).default(2),
   WEEKLY_INSIGHTS_MAX_QUEUE: integer(0, 256).default(16),
@@ -23,19 +26,26 @@ export const weeklyInsightsEnvironmentFields = {
   WEEKLY_INSIGHTS_OLLAMA_BASE_URL: z.string().max(256).default(DEFAULT_OLLAMA_BASE_URL),
   WEEKLY_INSIGHTS_PROVIDER: z.enum(['off', 'ollama', 'fake']).default('off'),
   WEEKLY_INSIGHTS_TIMEOUT_MS: integer(1_000, 300_000).default(60_000),
+  WEEKLY_INSIGHTS_TOTAL_BUDGET_MS: integer(1_000, 900_000).default(150_000),
 };
 
 type WeeklyInsightsFieldValues = z.output<z.ZodObject<typeof weeklyInsightsEnvironmentFields>>;
 
 interface WeeklyInsightsLimits {
+  /** Provider calls per generation, transport retries and the one schema regeneration included. */
+  readonly maxAttempts: number;
   readonly maxOutputTokens: number;
   readonly maxPerPerson: number;
   readonly maxQueue: number;
-  /** Deadline of one model request; the provider may retry once with a fresh deadline. */
+  /** Deadline of one model request (never longer than what is left of the total budget). */
   readonly timeoutMs: number;
+  /** Total time of one generation, every attempt included. */
+  readonly totalBudgetMs: number;
 }
 
 export interface FakeWeeklyInsightsConfig extends WeeklyInsightsLimits {
+  readonly fakeDelayMs: number;
+  readonly fakeFailingWeeks: readonly string[];
   readonly fakeMode: FakeProviderMode;
   readonly provider: 'fake';
 }
@@ -93,6 +103,12 @@ export function checkWeeklyInsightsEnvironment(
     context.addIssue({ code: 'custom', message, path: [path] });
   };
   if (values.WEEKLY_INSIGHTS_PROVIDER === 'off') return;
+  if (values.WEEKLY_INSIGHTS_TOTAL_BUDGET_MS < values.WEEKLY_INSIGHTS_TIMEOUT_MS) {
+    fail('WEEKLY_INSIGHTS_TOTAL_BUDGET_MS', 'WEEKLY_INSIGHTS_TOTAL_BUDGET_MS must be at least WEEKLY_INSIGHTS_TIMEOUT_MS');
+  }
+  if (failingWeeksOf(values.WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS) === undefined) {
+    fail('WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS', 'WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS must be a comma-separated list of YYYY-MM-DD dates');
+  }
   if (values.WEEKLY_INSIGHTS_PROVIDER === 'fake') {
     if (environment.APP_ENV === 'production') {
       fail('WEEKLY_INSIGHTS_PROVIDER', 'WEEKLY_INSIGHTS_PROVIDER must be off or ollama in production');
@@ -116,19 +132,33 @@ export function checkWeeklyInsightsEnvironment(
   }
 }
 
+/** The fake provider's failing weeks (test only), or undefined when the list is malformed. */
+export function failingWeeksOf(value: string): string[] | undefined {
+  const weeks = value.split(',').map((entry) => entry.trim()).filter((entry) => entry !== '');
+  return weeks.every((entry) => /^\d{4}-\d{2}-\d{2}$/u.test(entry)) ? weeks : undefined;
+}
+
 /** The validated settings, or undefined when generation is off. */
 export function buildWeeklyInsightsConfig(values: WeeklyInsightsFieldValues): WeeklyInsightsConfig | undefined {
   const limits: WeeklyInsightsLimits = {
+    maxAttempts: values.WEEKLY_INSIGHTS_MAX_ATTEMPTS,
     maxOutputTokens: values.WEEKLY_INSIGHTS_MAX_OUTPUT_TOKENS,
     maxPerPerson: values.WEEKLY_INSIGHTS_MAX_PER_PERSON,
     maxQueue: values.WEEKLY_INSIGHTS_MAX_QUEUE,
     timeoutMs: values.WEEKLY_INSIGHTS_TIMEOUT_MS,
+    totalBudgetMs: values.WEEKLY_INSIGHTS_TOTAL_BUDGET_MS,
   };
   switch (values.WEEKLY_INSIGHTS_PROVIDER) {
     case 'off':
       return undefined;
     case 'fake':
-      return { ...limits, fakeMode: values.WEEKLY_INSIGHTS_FAKE_MODE, provider: 'fake' };
+      return {
+        ...limits,
+        fakeDelayMs: values.WEEKLY_INSIGHTS_FAKE_DELAY_MS,
+        fakeFailingWeeks: failingWeeksOf(values.WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS) ?? [],
+        fakeMode: values.WEEKLY_INSIGHTS_FAKE_MODE,
+        provider: 'fake',
+      };
     case 'ollama': {
       const model = values.WEEKLY_INSIGHTS_MODEL?.trim() ?? '';
       if (model === '') throw new Error('WEEKLY_INSIGHTS_MODEL must be set when WEEKLY_INSIGHTS_PROVIDER is ollama');

@@ -62,6 +62,19 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
       'Nothing was reported as recovered, the restored application was not started, and both drill databases were kept for diagnosis (drop them with `npm run restore:drill -- --cleanup`).',
       '',
     );
+    const diagnostics = report.failure?.diagnostics;
+    if (diagnostics) {
+      out.push(`PostgreSQL at the failure${report.failure?.timedOut ? ' (the step timed out)' : ''}:`, '');
+      if (diagnostics.sessions.length === 0) out.push('- no session on a drill database');
+      for (const session of diagnostics.sessions) {
+        const wait = session.waitEventType ? `${session.waitEventType}/${session.waitEvent ?? '?'}` : 'not waiting';
+        out.push(
+          `- ${session.application || session.backendType || 'session'} (${session.role || 'no role'}): ${session.state || 'no state'}, ${wait}, blocked by ${session.blockedBy}, state for ${session.stateAgeSeconds ?? '?'} s`,
+        );
+      }
+      for (const lock of diagnostics.ungrantedLocks) out.push(`- ungranted ${lock.lockType} ${lock.mode} locks: ${lock.count}`);
+      out.push('');
+    }
   } else {
     out.push('## DRILL RESULT', '');
     out.push(`- measured local drill RTO: ${formatDuration(report.rto.measuredMs)}`);

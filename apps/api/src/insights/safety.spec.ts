@@ -1,86 +1,91 @@
-import type { WeeklyInsightOutput } from '@running-tracker/contracts';
+import type { WeeklyInsightModelOutput } from '@running-tracker/contracts';
 import { describe, expect, it } from 'vitest';
 
-import { checkSafety } from './safety.js';
+import { assembleOutput } from './insight-generator.js';
+import { buildFacts } from './insight-facts.js';
+import { APPROVED_SUGGESTIONS, approvedSuggestionFor, checkSafety, normalizeForSafety, screenText } from './safety.js';
+import { aggregateWeek, resolveWeekWindow, type CheckInRecord, type WeeklyFlag } from './weekly-aggregate.js';
 
-const calm = { flags: [] };
-const sore = { flags: ['extreme_soreness' as const] };
-const shortSleep = { flags: ['extreme_short_sleep' as const] };
-const longSleep = { flags: ['extreme_long_sleep' as const] };
+const ordinary = { flags: [] as WeeklyFlag[] };
+const sore = { flags: ['extreme_soreness'] as WeeklyFlag[] };
+const output = (patch: Partial<WeeklyInsightModelOutput>): WeeklyInsightModelOutput => ({
+  observations: [],
+  suggestion: 'Keep a regular bedtime.',
+  summary: 'A calm week.',
+  ...patch,
+});
+const rules = (text: string, extreme = false) => screenText(text, extreme).map((match) => match.rule);
 
-const output = (overrides: Partial<WeeklyInsightOutput> = {}): WeeklyInsightOutput => ({
-  dataGaps: ['No weight on most days.'],
-  observations: [{ metricKeys: ['sleep.avgMinutes'], text: 'Sleep was steady across the week.' }],
-  suggestion: 'Keep a regular bedtime and check in each evening.',
-  summary: 'A balanced week with regular check-ins and two runs.',
-  ...overrides,
+describe('weekly insight safety: code-selected suggestion in extreme weeks', () => {
+  it('selects an approved suggestion for each extreme flag and none for an ordinary week', () => {
+    expect(approvedSuggestionFor(ordinary)).toBeUndefined();
+    expect(approvedSuggestionFor(sore)).toEqual({
+      id: 'rest_and_recovery',
+      text: `${APPROVED_SUGGESTIONS.rest_and_recovery} ${APPROVED_SUGGESTIONS.check_in_with_professional}`,
+    });
+    expect(approvedSuggestionFor({ flags: ['extreme_short_sleep'] })?.id).toBe('rest_and_sleep_routine');
+    expect(approvedSuggestionFor({ flags: ['extreme_long_sleep'] })?.id).toBe('rest_and_sleep_routine');
+    expect(approvedSuggestionFor({ flags: ['extreme_long_sleep', 'extreme_soreness'] })?.id).toBe('rest_and_recovery');
+  });
+
+  it('never shows the model\'s suggestion in an extreme week, whatever it says (the two Stop 1 failures included)', () => {
+    const records: CheckInRecord[] = [
+      { localDate: '2026-11-02', mood: 3, sleepMinutes: 400, sleepQuality: null, soreness: 9, timeZone: 'UTC', weightKg: null },
+    ];
+    const window = resolveWeekWindow({ checkIns: records, requestTimeZone: 'UTC', weekStart: '2026-11-02' });
+    const aggregate = aggregateWeek({ activities: [], checkIns: records, gpsRuns: [], todayLocalDate: '2026-11-20', window });
+    for (const suggestion of ['Rest and ignore severe pain.', 'Rest and do not tell a professional about worsening pain.']) {
+      const assembled = assembleOutput(output({ suggestion }), aggregate, buildFacts(aggregate));
+      expect(assembled.suggestion).toEqual({ id: 'rest_and_recovery', source: 'approved', text: approvedSuggestionFor(sore)!.text });
+      expect(JSON.stringify(assembled)).not.toContain(suggestion);
+      // It is not screened either: it is never shown.
+      expect(checkSafety(output({ suggestion }), sore)).toEqual([]);
+    }
+  });
+
+  it('the approved suggestions pass the screen themselves', () => {
+    for (const text of Object.values(APPROVED_SUGGESTIONS)) {
+      expect(screenText(text, true)).toEqual([]);
+    }
+  });
 });
 
-const rulesOf = (value: WeeklyInsightOutput, aggregate: { flags: readonly string[] } = calm) =>
-  checkSafety(value, aggregate as { flags: never[] }).map((violation) => `${violation.field}:${violation.rule}`);
-
-describe('safety check (ADR-0076)', () => {
-  it('passes plain descriptive text and a non-medical habit', () => {
-    expect(rulesOf(output())).toEqual([]);
-    expect(rulesOf(output({ summary: 'You lowered the risk of injury by keeping runs short.' }))).toEqual([]);
-    expect(rulesOf(output({ summary: 'Your weight went down a little and mood stayed stable.' }))).toEqual([]);
-  });
-
-  it('refuses diagnoses and named conditions in any field', () => {
-    expect(rulesOf(output({ summary: 'This pattern suggests insomnia.' }))).toEqual(['summary:condition-sleep']);
-    expect(rulesOf(output({ observations: [{ metricKeys: ['mood.average'], text: 'Low mood may mean depression.' }] }))).toEqual([
-      'observations:condition-mental',
+describe('weekly insight safety: heuristic prose screen', () => {
+  it('refuses the two Stop 1 sentences wherever they appear in shown prose', () => {
+    expect(rules('Rest and ignore severe pain.', true)).toEqual(['dismiss-symptom']);
+    expect(rules('Rest and do not tell a professional about worsening pain.', true)).toEqual(['avoid-help']);
+    expect(checkSafety(output({ summary: 'Rest and ignore severe pain.' }), sore)).toEqual([
+      { field: 'summary', kind: 'dismiss_symptom', rule: 'dismiss-symptom' },
     ]);
-    expect(rulesOf(output({ dataGaps: ['We cannot diagnose anything from 2 days.'] }))).toEqual(['dataGaps:diagnose']);
-    expect(rulesOf(output({ summary: 'You may have an injury in your knee.' }))).toEqual(['summary:condition-injury']);
-    expect(rulesOf(output({ summary: 'High soreness can be a sign of overtraining.' }))).toEqual(['summary:condition-musculoskeletal']);
-    expect(rulesOf(output({ summary: 'Your weight puts you in the obese range.' }))).toEqual(['summary:condition-metabolic']);
-  });
-
-  it('refuses medication, supplements and doses', () => {
-    expect(rulesOf(output({ suggestion: 'Take ibuprofen after long runs.' }))).toEqual(['suggestion:medication-named']);
-    expect(rulesOf(output({ suggestion: 'Try melatonin before bed.' }))).toEqual(['suggestion:medication-named']);
-    expect(rulesOf(output({ suggestion: 'Consider a vitamin supplement.' }))).toEqual(['suggestion:medication-generic']);
-    expect(rulesOf(output({ suggestion: 'A 200 mg dose helps.' }))).toEqual([
-      'suggestion:medication-generic',
-      'suggestion:medication-amount',
+    expect(checkSafety(output({ suggestion: 'Rest and ignore severe pain.' }), ordinary)).toEqual([
+      { field: 'suggestion', kind: 'dismiss_symptom', rule: 'dismiss-symptom' },
     ]);
   });
 
-  it('refuses treatment, cold therapy, diet and escalation instructions', () => {
-    expect(rulesOf(output({ suggestion: 'Ice the sore muscles twice a day.' }))).toEqual(['suggestion:cold-compression']);
-    expect(rulesOf(output({ suggestion: 'Start a calorie deficit to lose weight.' }))).toEqual(['suggestion:diet']);
-    expect(rulesOf(output({ suggestion: 'Book physiotherapy for your calf.' }))).toEqual(['suggestion:treatment']);
-    expect(rulesOf(output({ suggestion: 'Go to the emergency room if it hurts.' }))).toEqual(['suggestion:escalation']);
+  it('screens summary and observations in every week, and the suggestion only in ordinary weeks', () => {
+    const unsafe = output({
+      observations: [{ claims: [{ day: 'none', direction: 'none', factId: 'mood.average', unit: 'score_1_5', value: 3 }], text: 'Take melatonin.' }],
+      summary: 'Signs of insomnia.',
+    });
+    expect(checkSafety(unsafe, ordinary).map((violation) => [violation.field, violation.rule])).toEqual([
+      ['summary', 'condition-sleep'],
+      ['observations', 'medication-named'],
+    ]);
   });
 
-  it('normalises case, compatibility forms and typographic punctuation before matching', () => {
-    expect(rulesOf(output({ suggestion: 'TAKE IBUPROFEN.' }))).toEqual(['suggestion:medication-named']);
-    expect(rulesOf(output({ suggestion: 'Ｍｅｌａｔｏｎｉｎ helps.' }))).toEqual(['suggestion:medication-named']);
+  it('refuses training escalation in prose only in extreme weeks', () => {
+    expect(rules('Keep the intensity high this week.', true)).toEqual(['extreme-forbids-training']);
+    expect(rules('Keep the intensity high this week.', false)).toEqual([]);
   });
 
-  it('limits the suggestion of an extreme week to rest or a professional in generic terms', () => {
-    for (const aggregate of [sore, shortSleep, longSleep]) {
-      expect(rulesOf(output({ suggestion: 'Take a rest day and let your body recover.' }), aggregate)).toEqual([]);
-      expect(rulesOf(output({ suggestion: 'If it continues, talk to a healthcare professional.' }), aggregate)).toEqual([]);
-      expect(rulesOf(output({ suggestion: 'Keep a regular bedtime and check in each evening.' }), aggregate)).toEqual([
-        'suggestion:extreme-requires-rest-or-professional',
-      ]);
-      expect(rulesOf(output({ suggestion: 'Rest, then add an extra interval session.' }), aggregate)).toEqual([
-        'suggestion:extreme-forbids-training',
-      ]);
-      expect(rulesOf(output({ suggestion: 'Recover with a gentle walk each day.' }), aggregate)).toEqual([
-        'suggestion:extreme-forbids-training',
-      ]);
-      expect(rulesOf(output({ suggestion: 'Sleep well, then go for a short run.' }), aggregate)).toEqual([
-        'suggestion:extreme-forbids-training',
-      ]);
-    }
-    // The same training suggestion is fine in an ordinary week.
-    expect(rulesOf(output({ suggestion: 'Add an extra interval session.' }), calm)).toEqual([]);
+  it('keeps harmless rest, sleep and recovery wording, double negatives included', () => {
+    expect(rules('Rest well and protect your sleep.', true)).toEqual([]);
+    expect(rules("Don't hesitate to talk to a healthcare professional if something feels off.", true)).toEqual([]);
+    expect(rules('There is no need to rush; keep the week relaxed.', true)).toEqual([]);
   });
 
-  it('applies the medical rules on top of the extreme-week rule', () => {
-    expect(rulesOf(output({ suggestion: 'Rest and take painkillers.' }), sore)).toEqual(['suggestion:medication-generic']);
+  it('normalises typography before matching', () => {
+    expect(normalizeForSafety('Don’t  TELL a professional')).toBe("don't tell a professional");
+    expect(rules('Don’t tell a professional about the pain.', true)).toEqual(['avoid-help']);
   });
 });

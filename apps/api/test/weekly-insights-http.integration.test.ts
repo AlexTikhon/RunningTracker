@@ -15,9 +15,10 @@ import { InMemorySessionStore } from '../src/auth/session-store.js';
 import type { Clock } from '../src/clock.js';
 import { loadIntegrationTestConfiguration, validateEnvironment, type Environment } from '../src/config/environment.js';
 import { createDatabasePool } from '../src/database/database.js';
-import { FAKE_PROVIDER_MODEL, FakeProvider, aggregateFromPrompt } from '../src/insights/fake-provider.js';
+import { FAKE_PROVIDER_MODEL, FakeProvider, factsFromPrompt } from '../src/insights/fake-provider.js';
 import { WEEKLY_INSIGHT_PROMPT_VERSION } from '../src/insights/insight-prompt.js';
 import type { LlmProvider } from '../src/insights/llm-provider.js';
+import { WEEKLY_INSIGHT_POLICY_VERSION } from '../src/insights/weekly-aggregate.js';
 import { WeeklyInsightService, type WeeklyInsightSettings } from '../src/insights/weekly-insight-service.js';
 import { createLogger } from '../src/observability/logger.js';
 import {
@@ -68,7 +69,14 @@ describe('ADR-0076 weekly insights HTTP API', () => {
   let outsider: Authentication;
   const services: WeeklyInsightService[] = [];
 
-  const settings: WeeklyInsightSettings = { maxOutputTokens: 800, maxPerPerson: 2, maxQueue: 16, timeoutMs: 5_000 };
+  const settings: WeeklyInsightSettings = {
+    attemptTimeoutMs: 5_000,
+    maxAttempts: 3,
+    maxOutputTokens: 800,
+    maxPerPerson: 2,
+    maxQueue: 16,
+    totalBudgetMs: 15_000,
+  };
 
   function build(withProvider: LlmProvider | undefined, override: Partial<WeeklyInsightSettings> = {}) {
     const built = new WeeklyInsightService({ clock, logger: silent, pool: runtimePool, provider: withProvider, settings: { ...settings, ...override } });
@@ -171,19 +179,32 @@ describe('ADR-0076 weekly insights HTTP API', () => {
     await checkIn(ids.userOrgA, '2026-11-04', '3,420,3');
     const accepted = await ask().expect(202);
     expect(accepted.headers['cache-control']).toBe('no-store');
-    expect(weeklyInsightAcceptedSchema.parse(accepted.body).status).toBe('pending');
+    expect(weeklyInsightAcceptedSchema.parse(accepted.body).status).toBe('queued');
     await service.whenIdle();
     const read = await get(owner, WEEK).expect(200);
     expect(read.headers['cache-control']).toBe('no-store');
     const view = weeklyInsightViewSchema.parse(read.body);
     expect(view).toMatchObject({
+      attempts: 1,
+      failureReason: null,
+      freshness: 'current',
       model: FAKE_PROVIDER_MODEL,
+      policyVersion: WEEKLY_INSIGHT_POLICY_VERSION,
       promptVersion: WEEKLY_INSIGHT_PROMPT_VERSION,
+      retryable: false,
       status: 'ready',
       timeZone: 'Europe/Warsaw',
       weekStart: WEEK,
     });
-    expect(view.output?.summary).toBe('You checked in on 2 of 7 days. Your average sleep was 435 minutes. You logged 0 manual activities and 0 GPS runs.');
+    expect(view.output?.summary).toBe('A calm look at your week, based on what you logged.');
+    // Every number shown is rendered by code from the facts the model cited.
+    expect(view.output?.observations.flatMap((observation) => observation.facts.map((fact) => fact.text))).toEqual([
+      'Days with a check-in: 2 of 7',
+      'Average sleep: 435 min',
+      'Shortest sleep: 420 min (Wednesday)',
+      'Longest sleep: 450 min (Monday)',
+    ]);
+    expect(view.output?.dataGaps.map((gap) => gap.code)).toEqual(['missing_check_in_days', 'no_activities']);
   });
 
   it('returns the existing insight for the same input without calling the model again', async () => {
@@ -206,29 +227,40 @@ describe('ADR-0076 weekly insights HTTP API', () => {
     expect(await storedCount()).toBe(1);
   });
 
-  it('stores generation_failed after two schema failures, and retries it on the next request', async () => {
+  it('stores generation_failed after two schema failures, and retries it on the next request (attempts counted)', async () => {
     provider.mode = 'invalid_schema';
     const failed = await generate();
-    expect(failed).toMatchObject({ output: null, status: 'generation_failed' });
+    expect(failed).toMatchObject({ attempts: 1, failureReason: 'schema_invalid', output: null, retryable: true, status: 'generation_failed' });
     expect(provider.calls).toHaveLength(2);
     provider.mode = 'grounded';
     const retried = weeklyInsightAcceptedSchema.parse((await ask().expect(202)).body);
-    expect(retried).toEqual({ id: failed.id, status: 'pending' });
+    expect(retried).toEqual({ id: failed.id, status: 'queued' });
     await service.whenIdle();
-    expect(weeklyInsightViewSchema.parse((await get(owner, WEEK).expect(200)).body)).toMatchObject({ id: failed.id, status: 'ready' });
+    expect(weeklyInsightViewSchema.parse((await get(owner, WEEK).expect(200)).body)).toMatchObject({ attempts: 2, id: failed.id, status: 'ready' });
   });
 
-  it('stores generation_failed for a provider failure without regenerating', async () => {
+  it('stores generation_failed for a provider timeout after the whole attempt budget, and stops at the retry limit', async () => {
     provider.mode = 'timeout';
-    expect(await generate()).toMatchObject({ output: null, status: 'generation_failed' });
-    expect(provider.calls).toHaveLength(1);
+    expect(await generate()).toMatchObject({ failureReason: 'timeout', output: null, status: 'generation_failed' });
+    expect(provider.calls).toHaveLength(3);
+    await ask().expect(202);
+    await service.whenIdle();
+    await ask().expect(202);
+    await service.whenIdle();
+    expect(weeklyInsightViewSchema.parse((await get(owner, WEEK).expect(200)).body)).toMatchObject({
+      attempts: 3,
+      retryable: false,
+      status: 'generation_failed',
+    });
+    expect(errorCode(await ask().expect(409))).toBe('WEEKLY_INSIGHT_RETRY_LIMIT');
+    expect(provider.calls).toHaveLength(9);
   });
 
-  it('discards a hallucinated number as failed_grounding and does not retry it for the same input', async () => {
+  it('discards a number in prose as failed_grounding and does not retry it for the same input', async () => {
     await checkIn(ids.userOrgA, '2026-11-03', '4,450,2');
-    provider.mode = 'hallucinated_number';
+    provider.mode = 'number_in_prose';
     const failed = await generate();
-    expect(failed).toMatchObject({ output: null, status: 'failed_grounding' });
+    expect(failed).toMatchObject({ failureReason: 'number_in_prose', output: null, retryable: false, status: 'failed_grounding' });
     provider.mode = 'grounded';
     expect(weeklyInsightAcceptedSchema.parse((await ask().expect(202)).body)).toEqual({ id: failed.id, status: 'failed_grounding' });
     await service.whenIdle();
@@ -237,17 +269,19 @@ describe('ADR-0076 weekly insights HTTP API', () => {
     expect(stored.rows).toEqual([{ output: null }]);
   });
 
-  it('discards an unknown metric key as failed_grounding', async () => {
-    provider.mode = 'unknown_metric_key';
-    expect(await generate()).toMatchObject({ output: null, status: 'failed_grounding' });
+  it('discards a claim of an unknown fact as failed_grounding', async () => {
+    provider.mode = 'unknown_fact';
+    expect(await generate()).toMatchObject({ failureReason: 'unknown_fact', output: null, status: 'failed_grounding' });
   });
 
-  it('discards medical content as failed_safety, and a training suggestion in an extreme week', async () => {
+  it('discards medical content as failed_safety; in an extreme week the suggestion is the approved one', async () => {
     provider.mode = 'unsafe_medication';
-    expect(await generate()).toMatchObject({ output: null, status: 'failed_safety' });
+    expect(await generate()).toMatchObject({ failureReason: 'medication', output: null, status: 'failed_safety' });
     await checkIn(ids.userOrgA, '2026-11-10', '2,300,9');
-    provider.mode = 'unsafe_extreme';
-    expect(await generate(owner, '2026-11-09')).toMatchObject({ output: null, status: 'failed_safety' });
+    provider.mode = 'extreme_model_suggestion';
+    const extreme = await generate(owner, '2026-11-09');
+    expect(extreme).toMatchObject({ status: 'ready' });
+    expect(extreme.output?.suggestion).toMatchObject({ id: 'rest_and_recovery', source: 'approved' });
   });
 
   it('isolates insights: another member, a coach, a grantee and another organization see none of the owner\'s', async () => {
@@ -265,9 +299,9 @@ describe('ADR-0076 weekly insights HTTP API', () => {
     // userOrgA owns three finished runs on 2026-09-20; userDual holds history grants on some of them.
     await generate(owner, '2026-09-14');
     await generate(grantee, '2026-09-14');
-    const [ownerCall, granteeCall] = provider.calls.map((call) => aggregateFromPrompt(call.user));
-    expect(ownerCall!.gpsRuns.count).toBe(3);
-    expect(granteeCall!.gpsRuns.count).toBe(0);
+    const [ownerCall, granteeCall] = provider.calls.map((call) => factsFromPrompt(call.user).find((fact) => fact.id === 'gps.runs')?.value);
+    expect(ownerCall).toBe(3);
+    expect(granteeCall).toBe(0);
   });
 
   it('never sends check-in notes or activity notes to the model', async () => {
@@ -310,25 +344,69 @@ describe('ADR-0076 weekly insights HTTP API', () => {
     expect(errorCode(await get(owner, WEEK, { target: holding.app }).expect(404))).toBe('WEEKLY_INSIGHT_NOT_FOUND');
   });
 
-  it('resumes a pending insight whose generation was lost to a restart', async () => {
+  it('marks the job interrupted at shutdown; asking again retries it', async () => {
     const stuck = build(new FakeProvider({ beforeAnswer: () => new Promise<void>(() => undefined) }));
     const accepted = weeklyInsightAcceptedSchema.parse(
       (await post(owner, { timeZone: 'Europe/Warsaw', weekStart: WEEK }, { target: stuck.app }).expect(202)).body,
     );
-    await stuck.service.stop(); // as at shutdown: the running generation is cancelled, nothing is written
-    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({ id: accepted.id, status: 'pending' });
-    expect(weeklyInsightAcceptedSchema.parse((await ask().expect(202)).body)).toEqual({ id: accepted.id, status: 'pending' });
+    await expect.poll(async () => weeklyInsightViewSchema.parse((await get(owner, WEEK).expect(200)).body).status).toBe('running');
+    await stuck.service.stop(); // as at shutdown: the running generation is cancelled and the row says so
+    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({
+      failureReason: 'shutdown',
+      id: accepted.id,
+      retryable: true,
+      status: 'interrupted',
+    });
+    expect(weeklyInsightAcceptedSchema.parse((await ask().expect(202)).body)).toEqual({ id: accepted.id, status: 'queued' });
     await service.whenIdle();
-    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({ id: accepted.id, status: 'ready' });
+    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({ attempts: 2, id: accepted.id, status: 'ready' });
   });
 
-  it('answers 503 when the queue is full and keeps the row pending for a later request', async () => {
+  it('reports a job whose process died (expired lease) as interrupted, and retries it on request', async () => {
+    await generate();
+    await ownerPool.query(
+      "UPDATE weekly_insights SET status = 'running', output = NULL, job_token = gen_random_uuid(), lease_expires_at = clock_timestamp() - interval '1 second'",
+    );
+    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({ failureReason: 'lease_expired', output: null, status: 'interrupted' });
+    expect(weeklyInsightAcceptedSchema.parse((await ask().expect(202)).body).status).toBe('queued');
+    await service.whenIdle();
+    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({ attempts: 2, status: 'ready' });
+  });
+
+  it('answers 503 when the queue is full and stores nothing for the refused week', async () => {
     const busy = build(new FakeProvider({ beforeAnswer: () => new Promise<void>(() => undefined) }), { maxPerPerson: 1, maxQueue: 0 });
     await post(owner, { timeZone: 'Europe/Warsaw', weekStart: WEEK }, { target: busy.app }).expect(202);
     const refused = await post(owner, { timeZone: 'Europe/Warsaw', weekStart: '2026-11-09' }, { target: busy.app }).expect(503);
     expect(errorCode(refused)).toBe('WEEKLY_INSIGHTS_BUSY');
-    expect((await get(owner, '2026-11-09').expect(200)).body).toMatchObject({ status: 'pending' });
+    expect(errorCode(await get(owner, '2026-11-09').expect(404))).toBe('WEEKLY_INSIGHT_NOT_FOUND');
+    // A ready insight is still served while the queue is full: no queue place is needed for it.
     await busy.service.stop();
+  });
+
+  it('reports a stale insight when a source was added, and a policy-outdated one without its output', async () => {
+    await checkIn(ids.userOrgA, '2026-11-03', '4,450,2');
+    await generate();
+    await checkIn(ids.userOrgA, '2026-11-04', '3,420,3');
+    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({ freshness: 'stale', retryable: true, status: 'ready' });
+    await ownerPool.query("UPDATE weekly_insights SET policy_version = 'weekly-insight-policy-1'");
+    const outdated = weeklyInsightViewSchema.parse((await get(owner, WEEK).expect(200)).body);
+    expect(outdated).toMatchObject({ freshness: 'outdated_policy', output: null, status: 'ready' });
+  });
+
+  it('marks the row interrupted when the result cannot be stored, after bounded retries', async () => {
+    const failing = new WeeklyInsightService({
+      clock,
+      hooks: { publish: () => Promise.reject(new Error('database unavailable')) },
+      logger: silent,
+      pool: runtimePool,
+      provider: new FakeProvider(),
+      settings,
+    });
+    services.push(failing);
+    const failingApp = createApp({ clock, config, logger: silent, pool: runtimePool, sessionManager: sessions, weeklyInsights: failing });
+    await post(owner, { timeZone: 'Europe/Warsaw', weekStart: WEEK }, { target: failingApp }).expect(202);
+    await failing.whenIdle();
+    expect((await get(owner, WEEK).expect(200)).body).toMatchObject({ failureReason: 'persistence_failed', status: 'interrupted' });
   });
 
   it('answers 503 WEEKLY_INSIGHTS_DISABLED without a model, but still serves stored insights', async () => {
@@ -357,7 +435,7 @@ describe('ADR-0076 weekly insights HTTP API', () => {
     // The current week (in progress) is allowed.
     await ask(owner, '2026-11-16').expect(202);
     await service.whenIdle();
-    expect(provider.calls.map((call) => aggregateFromPrompt(call.user).week.inProgress)).toEqual([true]);
+    expect(provider.calls.map((call) => call.user.includes('week_in_progress'))).toEqual([true]);
     expect(await storedCount()).toBe(1);
   });
 });

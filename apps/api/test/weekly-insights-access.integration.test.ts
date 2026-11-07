@@ -45,13 +45,22 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
   });
 
   // The object owner bypasses row-level security, so these rows exist whatever the policies say.
-  async function seedInsight(orgId: string, userId: string, weekStart: string, status = 'pending'): Promise<void> {
+  // The current gate revision of a person (migration 0032): an insert must carry it.
+  const revisionOf = async (orgId: string, userId: string) =>
+    (
+      await ownerPool.query<{ revision: string }>(
+        'SELECT coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0)::text AS revision',
+        [orgId, userId],
+      )
+    ).rows[0]!.revision;
+
+  async function seedInsight(orgId: string, userId: string, weekStart: string, status = 'interrupted'): Promise<void> {
     await ownerPool.query(
-      `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model,
-                                    prompt_version, status, output)
+      `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision,
+                                    model, prompt_version, policy_version, status, output)
        VALUES ($1, $2, $3::date, 'UTC', $3::date::timestamp AT TIME ZONE 'UTC', ($3::date + 7)::timestamp AT TIME ZONE 'UTC',
-               $4, 'fake', 'weekly-insight-v1', $5, CASE WHEN $5 = 'ready' THEN $6::jsonb END)`,
-      [orgId, userId, weekStart, hash('a'), status, readyOutput],
+               $4, $7::bigint, 'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', $5, CASE WHEN $5 = 'ready' THEN $6::jsonb END)`,
+      [orgId, userId, weekStart, hash('a'), status, readyOutput, await revisionOf(orgId, userId)],
     );
   }
 
@@ -93,15 +102,19 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
       )
     ).rows.map(label);
 
-  const insertAs = (orgId: string, userId: string, row: { orgId: string; userId: string }) =>
-    asRuntime(orgId, userId, (client) =>
+  const insertAs = async (orgId: string, userId: string, row: { orgId: string; userId: string }) => {
+    const revision = await revisionOf(row.orgId, row.userId);
+    return asRuntime(orgId, userId, (client) =>
       client.query(
-        `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model, prompt_version)
+        `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision,
+                                      model, prompt_version, policy_version, job_token, lease_expires_at)
          VALUES ($1, $2, $3::date, 'UTC', $3::date::timestamp AT TIME ZONE 'UTC', ($3::date + 7)::timestamp AT TIME ZONE 'UTC',
-                 $4, 'fake', 'weekly-insight-v1')`,
-        [row.orgId, row.userId, weeks.other, hash('b')],
+                 $4, $5::bigint, 'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', gen_random_uuid(),
+                 clock_timestamp() + interval '1 minute')`,
+        [row.orgId, row.userId, weeks.other, hash('b'), revision],
       ),
     );
+  };
 
   it('shows each person only their own insights in the current organization', async () => {
     await expect(readWeeks(ids.orgA, ids.userOrgA)).resolves.toEqual([ownerA(weeks.first), ownerA(weeks.second)]);
@@ -151,7 +164,7 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
       [ids.userOrgA, weeks.other],
     );
     // Status and output always start as the defaults: the runtime cannot insert them.
-    expect(inserted.rows).toEqual([{ output: null, status: 'pending' }]);
+    expect(inserted.rows).toEqual([{ output: null, status: 'queued' }]);
   });
 
   it('refuses inserting an insight for someone else, into another organization, or without an active membership', async () => {
@@ -188,15 +201,23 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
       'SELECT status FROM weekly_insights WHERE user_id = $1 ORDER BY week_start',
       [ids.userOrgA],
     );
-    expect(statuses.rows).toEqual([{ status: 'ready' }, { status: 'pending' }]);
+    expect(statuses.rows).toEqual([{ status: 'ready' }, { status: 'interrupted' }]);
   });
 
   it('lets the runtime role write only the columns the service supplies, and update only status and output', async () => {
     const denied = /permission denied/u;
     const attempt = (sql: string, parameters: unknown[] = []) =>
       asRuntime(ids.orgA, ids.userOrgA, (client) => client.query(sql, parameters));
-    for (const column of ['id', 'status', 'output', 'created_at']) {
-      const value = column === 'id' ? 'gen_random_uuid()' : column === 'created_at' ? 'now()' : column === 'status' ? `'ready'` : `'{}'::jsonb`;
+    const values: Record<string, string> = {
+      attempts: '2',
+      created_at: 'now()',
+      failure_reason: `'timeout'`,
+      id: 'gen_random_uuid()',
+      output: `'{}'::jsonb`,
+      status: `'ready'`,
+      updated_at: 'now()',
+    };
+    for (const [column, value] of Object.entries(values)) {
       await expect(
         attempt(
           `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model, prompt_version, ${column})
@@ -213,6 +234,9 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
       `user_id = '${ids.userStranger}'`,
       `range_start = now()`,
       `created_at = now()`,
+      `source_revision = 0`,
+      `policy_version = 'x'`,
+      `updated_at = now()`,
     ]) {
       await expect(attempt(`UPDATE weekly_insights SET ${assignment}`)).rejects.toThrow(denied);
     }
@@ -223,20 +247,26 @@ describe('ADR-0076 weekly_insights ACL (migration 0030)', () => {
     await expect(maintenancePool.query('DELETE FROM weekly_insights')).rejects.toThrow(/permission denied/u);
   });
 
-  it('enforces the row shape: Monday weeks, output exactly when ready, a SHA-256 input hash', async () => {
-    const insert = (weekStart: string, status: string, output: string | null, inputHash = hash('e')) =>
+  it('enforces the row shape: Monday weeks, output exactly when ready, a job exactly when active, a SHA-256 input hash', async () => {
+    const revision = await revisionOf(ids.orgA, ids.userDual);
+    const insert = (weekStart: string, status: string, output: string | null, inputHash = hash('e'), extra = '') =>
       ownerPool.query(
-        `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model, prompt_version, status, output)
+        `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision, model,
+                                      prompt_version, policy_version, status, output, failure_reason, job_token, lease_expires_at)
          VALUES ($1, $2, $3::date, 'UTC', $3::date::timestamp AT TIME ZONE 'UTC', ($3::date + 7)::timestamp AT TIME ZONE 'UTC',
-                 $4, 'fake', 'v1', $5, $6::jsonb)`,
-        [ids.orgA, ids.userDual, weekStart, inputHash, status, output],
+                 $4, $7::bigint, 'fake', 'v2', 'p2', $5, $6::jsonb, ${extra === 'reason' ? `'Not A Code'` : 'NULL'},
+                 ${extra === 'job' ? 'gen_random_uuid()' : 'NULL'}, ${extra === 'job' ? `clock_timestamp() + interval '1 minute'` : 'NULL'})`,
+        [ids.orgA, ids.userDual, weekStart, inputHash, status, output, revision],
       );
-    await expect(insert('2026-10-06', 'pending', null)).rejects.toThrow(/weekly_insights_week_start_monday/u);
+    await expect(insert('2026-10-06', 'interrupted', null)).rejects.toThrow(/weekly_insights_week_start_monday/u);
     await expect(insert(weeks.other, 'ready', null)).rejects.toThrow(/weekly_insights_output_only_when_ready/u);
     await expect(insert(weeks.other, 'failed_safety', readyOutput)).rejects.toThrow(/weekly_insights_output_only_when_ready/u);
-    await expect(insert(weeks.other, 'pending', null, 'XYZ')).rejects.toThrow(/weekly_insights_input_hash_shape/u);
-    await expect(insert(weeks.other, 'queued', null)).rejects.toThrow(/weekly_insights_status_known/u);
-    await insert(weeks.other, 'pending', null);
-    await expect(insert(weeks.other, 'pending', null, hash('f'))).rejects.toThrow(/weekly_insights_one_per_week/u);
+    await expect(insert(weeks.other, 'interrupted', null, 'XYZ')).rejects.toThrow(/weekly_insights_input_hash_shape/u);
+    await expect(insert(weeks.other, 'pending', null)).rejects.toThrow(/weekly_insights_status_known/u);
+    await expect(insert(weeks.other, 'queued', null)).rejects.toThrow(/weekly_insights_job_only_when_active/u);
+    await expect(insert(weeks.other, 'ready', readyOutput, hash('e'), 'job')).rejects.toThrow(/weekly_insights_job_only_when_active/u);
+    await expect(insert(weeks.other, 'interrupted', null, hash('e'), 'reason')).rejects.toThrow(/weekly_insights_failure_reason_shape/u);
+    await insert(weeks.other, 'queued', null, hash('e'), 'job');
+    await expect(insert(weeks.other, 'interrupted', null, hash('f'))).rejects.toThrow(/weekly_insights_one_per_week/u);
   });
 });

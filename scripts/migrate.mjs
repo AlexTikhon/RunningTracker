@@ -36,15 +36,47 @@ if (useTestDatabase) {
 
 const migrationsDirectory = join(process.cwd(), 'db', 'migrations');
 
+// Bounded waits (milliseconds; 0 disables a bound). The connection and the migration lock are the two places a run
+// can wait on something else: a stuck server or another migration run. Neither may wait forever. Migration statements
+// themselves are unbounded by default (MIGRATION_STATEMENT_TIMEOUT_MS), since a large data migration may legitimately
+// run long.
+function bound(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer of milliseconds`);
+  return value;
+}
+const connectTimeoutMs = bound('MIGRATION_CONNECT_TIMEOUT_MS', 10_000);
+const lockTimeoutMs = bound('MIGRATION_LOCK_TIMEOUT_MS', 60_000);
+const statementTimeoutMs = bound('MIGRATION_STATEMENT_TIMEOUT_MS', 0);
+
 const client = new Client({
   application_name: 'running-tracker-migrations',
   connectionString: databaseUrl,
+  connectionTimeoutMillis: connectTimeoutMs,
 });
 
 await client.connect();
+let locked = false;
 
 try {
-  await client.query("SELECT pg_advisory_lock(hashtext('running-tracker:migrations'))");
+  // lock_timeout bounds the advisory lock wait too; it is reset before any migration runs.
+  await client.query(`SET lock_timeout = ${lockTimeoutMs}`);
+  try {
+    await client.query("SELECT pg_advisory_lock(hashtext('running-tracker:migrations'))");
+  } catch (error) {
+    if (error?.code === '55P03') {
+      throw new Error(
+        `Another migration run holds the migration lock; not acquired within ${lockTimeoutMs} ms (MIGRATION_LOCK_TIMEOUT_MS)`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+  locked = true;
+  await client.query('SET lock_timeout = 0');
+  await client.query(`SET statement_timeout = ${statementTimeoutMs}`);
   const migrationFiles = (await readdir(migrationsDirectory))
     .filter((file) => file.endsWith('.sql'))
     .sort();
@@ -89,6 +121,10 @@ try {
     }
   }
 } finally {
-  await client.query("SELECT pg_advisory_unlock(hashtext('running-tracker:migrations'))");
-  await client.end();
+  try {
+    if (locked) await client.query("SELECT pg_advisory_unlock(hashtext('running-tracker:migrations'))");
+  } finally {
+    // The session ends either way, and ending it releases a session advisory lock that the unlock could not.
+    await Promise.race([client.end(), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+  }
 }

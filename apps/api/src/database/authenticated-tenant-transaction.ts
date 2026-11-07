@@ -12,7 +12,7 @@ export async function withAuthenticatedTenantTransaction<Result>(
   session: Pick<StoredSession, 'userId'>,
   orgId: string,
   callback: (client: PoolClient) => Promise<Result>,
-  options: Pick<TenantContext, 'visibilityScope'> = {},
+  options: Pick<TenantContext, 'snapshot' | 'visibilityScope'> = {},
 ): Promise<Result> {
   if (!canonicalUuidPattern.test(orgId)) {
     throw new ApiError(400, 'INVALID_REQUEST', 'orgId must be a canonical UUID');

@@ -39,6 +39,7 @@ import {
   type AccessState,
   type Check,
   type DatabaseState,
+  type DrillDiagnostics,
   type DrillOperations,
   type JournalFacts,
   type MigrationRun,
@@ -116,13 +117,48 @@ function quoteIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+/**
+ * Bounds of every connection the drill opens (ADR-0076, drill reliability). No drill statement may wait forever on a
+ * lock or a server: connecting, a lock wait, a statement and an idle transaction are all limited, and the client gives
+ * up on a query the server never answers. DROP DATABASE ... WITH (FORCE) obeys the lock bound too.
+ */
+export const DRILL_CONNECTION_LIMITS = {
+  connectionTimeoutMillis: 10_000,
+  idle_in_transaction_session_timeout: 120_000,
+  lock_timeout: 30_000,
+  query_timeout: 150_000,
+  statement_timeout: 120_000,
+} as const;
+/** A drill script (bootstrap, migrations) that runs longer than this is killed. */
+export const DRILL_SCRIPT_TIMEOUT_MS = 180_000;
+/** Closing the drill's pools may take this long before it is reported as a failure. */
+export const DRILL_POOL_CLOSE_TIMEOUT_MS = 10_000;
+
 async function withClient<T>(url: string, work: (client: Client) => Promise<T>): Promise<T> {
-  const client = new Client({ application_name: 'running-tracker-restore-drill', connectionString: url });
+  const client = new Client({ application_name: 'running-tracker-restore-drill', connectionString: url, ...DRILL_CONNECTION_LIMITS });
   await client.connect();
   try {
     return await work(client);
   } finally {
-    await client.end();
+    await Promise.race([client.end(), new Promise((resolveEnd) => setTimeout(resolveEnd, 5_000).unref())]);
+  }
+}
+
+/** Ends a pool within a deadline, or fails naming what was still checked out. */
+async function endPool(pool: Pool, name: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<'expired'>((resolveExpired) => {
+    timer = setTimeout(() => resolveExpired('expired'), DRILL_POOL_CLOSE_TIMEOUT_MS);
+  });
+  try {
+    const outcome = await Promise.race([pool.end().then(() => 'ended' as const), expired]);
+    if (outcome === 'expired') {
+      throw new Error(
+        `The drill's ${name} pool did not close within ${DRILL_POOL_CLOSE_TIMEOUT_MS} ms (${pool.totalCount} clients, ${pool.idleCount} idle, ${pool.waitingCount} waiting)`,
+      );
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -209,13 +245,20 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
     try {
       const { stdout } = await execFileAsync(process.execPath, [join(repositoryRoot, 'scripts', script)], {
         cwd,
-        env,
+        env: { ...env, MIGRATION_CONNECT_TIMEOUT_MS: '10000', MIGRATION_LOCK_TIMEOUT_MS: '30000' },
+        killSignal: 'SIGKILL',
         maxBuffer: 10 * 1024 * 1024,
+        timeout: DRILL_SCRIPT_TIMEOUT_MS,
       });
       return stdout;
     } catch (error) {
-      const failure = error as { stderr?: string; stdout?: string };
+      const failure = error as { killed?: boolean; signal?: string | null; stderr?: string; stdout?: string };
       const detail = scrubSecrets(`${failure.stderr ?? ''}${failure.stdout ?? ''}`, secrets).trim();
+      if (failure.killed && failure.signal) {
+        throw new Error(`scripts/${script} did not finish within ${DRILL_SCRIPT_TIMEOUT_MS} ms and was killed${detail ? `: ${detail}` : ''}`, {
+          cause: error,
+        });
+      }
       throw new Error(`scripts/${script} failed${detail ? `: ${detail}` : ''}`, { cause: error });
     }
   }
@@ -303,7 +346,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
   async function closeSourcePools(): Promise<void> {
     const pools = sourcePools;
     sourcePools = [];
-    await Promise.all(pools.map((pool) => pool.end()));
+    await Promise.all(pools.map((pool, index) => endPool(pool, `source pool ${index + 1}`)));
   }
 
   async function terminateSessions(name: string): Promise<void> {
@@ -396,6 +439,39 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       await dropDatabase(target.database);
     },
 
+    async diagnose() {
+      // What every session on a drill database is doing and waiting for, and the locks that are not granted. No query
+      // text (it can carry values), no addresses: names, states, wait events, ages and lock modes only.
+      return withClient(databases.adminMaintenanceUrl, async (client) => {
+        const sessions = await client.query<DrillDiagnostics['sessions'][number]>(
+          `SELECT activity.datname AS database,
+                  coalesce(activity.application_name, '') AS application,
+                  coalesce(activity.usename, '') AS role,
+                  coalesce(activity.state, '') AS state,
+                  activity.wait_event_type AS "waitEventType",
+                  activity.wait_event AS "waitEvent",
+                  activity.backend_type AS "backendType",
+                  round(extract(epoch FROM clock_timestamp() - activity.xact_start))::int AS "transactionAgeSeconds",
+                  round(extract(epoch FROM clock_timestamp() - activity.state_change))::int AS "stateAgeSeconds",
+                  cardinality(pg_blocking_pids(activity.pid)) AS "blockedBy"
+           FROM pg_stat_activity AS activity
+           WHERE activity.datname LIKE $1 AND activity.pid <> pg_backend_pid()
+           ORDER BY activity.datname, activity.backend_start`,
+          [`${drillDatabasePrefix}%`],
+        );
+        const locks = await client.query<DrillDiagnostics['ungrantedLocks'][number]>(
+          `SELECT lock.locktype AS "lockType", lock.mode, count(*)::int AS count
+           FROM pg_locks AS lock
+           JOIN pg_database AS db ON db.oid = lock.database
+           WHERE NOT lock.granted AND db.datname LIKE $1
+           GROUP BY lock.locktype, lock.mode
+           ORDER BY lock.locktype, lock.mode`,
+          [`${drillDatabasePrefix}%`],
+        );
+        return { sessions: sessions.rows, ungrantedLocks: locks.rows } satisfies DrillDiagnostics;
+      });
+    },
+
     async inspectActivities() {
       return withClient(target.ownerUrl, async (client) => {
         const row = await client.query<{
@@ -421,9 +497,9 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
                   (SELECT count(*) FROM erasure_ledger)::text AS outbox,
                   EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $4 AND week_start = $7::date) AS insight_activity,
                   EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $4 AND week_start = $8::date) AS insight_check_in,
-                  EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $4 AND week_start = $9::date) AS insight_survivor,
+                  EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $10 AND week_start = $9::date) AS insight_survivor,
                   (SELECT md5(insight::text) FROM weekly_insights AS insight
-                   WHERE org_id = $1 AND user_id = $4 AND week_start = $9::date) AS insight_digest`,
+                   WHERE org_id = $1 AND user_id = $10 AND week_start = $9::date) AS insight_digest`,
           [
             ids.org,
             ids.activities.E,
@@ -434,6 +510,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
             ids.insightWeeks.activityWeek,
             ids.insightWeeks.checkInWeek,
             ids.insightWeeks.survivorWeek,
+            ids.keeperUser,
           ],
         );
         const value = row.rows[0]!;
@@ -512,8 +589,10 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
     },
 
     async deleteAfterBackup() {
-      const runtimePool = new Pool({ application_name: 'running-tracker-restore-drill-runtime', connectionString: source.runtimeUrl, max: 2 });
-      const maintenancePool = new Pool({ application_name: 'running-tracker-restore-drill-maintenance', connectionString: source.maintenanceUrl, max: 2 });
+      const poolLimits = { ...DRILL_CONNECTION_LIMITS, idleTimeoutMillis: 1_000, max: 2 };
+      const runtimePool = new Pool({ application_name: 'running-tracker-restore-drill-runtime', connectionString: source.runtimeUrl, ...poolLimits });
+      const maintenancePool = new Pool({ application_name: 'running-tracker-restore-drill-maintenance', connectionString: source.maintenanceUrl, ...poolLimits });
+      for (const pool of [runtimePool, maintenancePool]) pool.on('error', () => undefined);
       sourcePools.push(runtimePool, maintenancePool);
       sourceMaintenancePool = maintenancePool;
       sourceRuntimePool = runtimePool;
@@ -862,18 +941,36 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
                   ($1, $2, $4, 'Europe/Warsaw', NULL, 400, 3, NULL)`,
           [ids.org, ids.ownerUser, ids.dailyMetrics.G, ids.dailyMetrics.H],
         );
-        // ADR-0076: three of the owner's weekly insights, all in the backup (the table exists in the older schema; the
-        // erasure triggers arrive with the catch-up migration). Ready ones, so a resurrected insight would carry text.
-        await client.query(
-          `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model,
-                                        prompt_version, status, output)
-           SELECT $1, $2, week.start, 'Europe/Warsaw', week.start::timestamp AT TIME ZONE 'Europe/Warsaw',
-                  (week.start + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('d', 64), 'fake', 'weekly-insight-v1', 'ready',
-                  jsonb_build_object('summary', 'Drill fixture.', 'observations', jsonb_build_array(), 'suggestion', 'Rest.',
-                                     'dataGaps', jsonb_build_array())
-           FROM unnest($3::date[]) AS week(start)`,
-          [ids.org, ids.ownerUser, Object.values(ids.insightWeeks)],
-        );
+        // ADR-0076: weekly insights in the backup, ready ones so that a resurrected insight would carry text: the
+        // owner's for the weeks of E and G, and the keeper's for a week without erased records (a replay invalidates
+        // the owner's insights conservatively, migration 0032, but never another person's). At the older schema
+        // (0031) the table has its first shape; at the current one an insert must carry the current source revision.
+        const insightRows = [
+          { userId: ids.ownerUser, week: ids.insightWeeks.activityWeek },
+          { userId: ids.ownerUser, week: ids.insightWeeks.checkInWeek },
+          { userId: ids.keeperUser, week: ids.insightWeeks.survivorWeek },
+        ];
+        for (const row of insightRows) {
+          await client.query(
+            (options.sourceSchema ?? 'previous') === 'current'
+              ? `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash,
+                                            source_revision, model, prompt_version, policy_version, status, output)
+                 SELECT $1, $2, $3::date, 'Europe/Warsaw', $3::date::timestamp AT TIME ZONE 'Europe/Warsaw',
+                        ($3::date + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('d', 64),
+                        coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
+                        'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'ready',
+                        jsonb_build_object('summary', 'Drill fixture.', 'observations', jsonb_build_array(),
+                          'suggestion', jsonb_build_object('id', 'rest_and_recovery', 'source', 'approved', 'text', 'Rest.'),
+                          'dataGaps', jsonb_build_array())`
+              : `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model,
+                                            prompt_version, status, output)
+                 SELECT $1, $2, $3::date, 'Europe/Warsaw', $3::date::timestamp AT TIME ZONE 'Europe/Warsaw',
+                        ($3::date + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('d', 64), 'fake', 'weekly-insight-v1', 'ready',
+                        jsonb_build_object('summary', 'Drill fixture.', 'observations', jsonb_build_array(), 'suggestion', 'Rest.',
+                                           'dataGaps', jsonb_build_array())`,
+            [ids.org, row.userId, row.week],
+          );
+        }
         // Run C also carries the shares of the access scenario (the grantee's was seeded with the run).
         await client.query(
           `INSERT INTO run_shares (org_id, run_id, grantee_user_id, can_read_live, can_read_history)

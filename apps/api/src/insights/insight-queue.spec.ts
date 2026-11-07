@@ -1,107 +1,155 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { SerialJobQueue } from './insight-queue.js';
+import { SerialJobQueue, type QueuedJob, type Reservation } from './insight-queue.js';
 
-function deferred() {
+function held() {
   let release!: () => void;
-  const promise = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return { promise, release };
+  const done = new Promise<void>((resolve) => (release = resolve));
+  return { done, release };
 }
 
-const queue = (options: Partial<ConstructorParameters<typeof SerialJobQueue>[0]> = {}) =>
-  new SerialJobQueue({ maxPerOwner: 5, maxQueued: 5, onError: () => undefined, ...options });
+const queue = (maxQueued = 2, maxPerOwner = 2, errors: unknown[] = []) =>
+  new SerialJobQueue({ maxPerOwner, maxQueued, onError: (error) => errors.push(error) });
 
-describe('serial insight queue (ADR-0076)', () => {
-  it('runs one job at a time, in arrival order', async () => {
-    const subject = queue();
+function reserve(target: SerialJobQueue, owner: string): Reservation {
+  const reservation = target.reserve(owner);
+  if (typeof reservation === 'string') throw new Error(`refused: ${reservation}`);
+  return reservation;
+}
+
+const job = (id: string, run: QueuedJob['run'] = () => Promise.resolve()): QueuedJob => ({ id, run, token: `t-${id}` });
+
+describe('weekly insight queue with reservations (ADR-0076)', () => {
+  it('runs one job at a time, in reservation order', async () => {
+    const target = queue();
     const order: string[] = [];
-    let running = 0;
-    let maxRunning = 0;
-    const gates = [deferred(), deferred(), deferred()];
-    gates.forEach((gate, index) => {
-      subject.enqueue({
-        id: `job-${index}`,
-        owner: `owner-${index}`,
-        run: async () => {
-          running += 1;
-          maxRunning = Math.max(maxRunning, running);
-          order.push(`start-${index}`);
-          await gate.promise;
-          order.push(`end-${index}`);
-          running -= 1;
-        },
-      });
-    });
-    expect(subject.activeCount + subject.waitingCount).toBe(3);
-    gates.forEach((gate) => gate.release());
-    await subject.whenIdle();
-    expect(maxRunning).toBe(1);
-    expect(order).toEqual(['start-0', 'end-0', 'start-1', 'end-1', 'start-2', 'end-2']);
+    const first = held();
+    reserve(target, 'a').start(job('1', async () => {
+      order.push('1 start');
+      await first.done;
+      order.push('1 end');
+    }));
+    reserve(target, 'b').start(job('2', () => {
+      order.push('2');
+      return Promise.resolve();
+    }));
+    expect(target.activeCount).toBe(1);
+    expect(target.waitingCount).toBe(1);
+    first.release();
+    await target.whenIdle();
+    expect(order).toEqual(['1 start', '1 end', '2']);
   });
 
-  it('does not add a job for an insight that is already queued or running', async () => {
-    const subject = queue();
-    const gate = deferred();
-    const run = vi.fn(() => gate.promise);
-    expect(subject.enqueue({ id: 'same', owner: 'a', run })).toBe('queued');
-    expect(subject.enqueue({ id: 'same', owner: 'a', run })).toBe('already_queued');
-    expect(subject.has('same')).toBe(true);
-    gate.release();
-    await subject.whenIdle();
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(subject.has('same')).toBe(false);
+  it('counts reservations against the limits, so a request that is still deciding holds its place', () => {
+    const target = queue(1, 1);
+    const running = held();
+    reserve(target, 'a').start(job('1', () => running.done));
+    const deciding = reserve(target, 'b');
+    expect(target.reserve('c')).toBe('full');
+    expect(target.reserve('b')).toBe('owner_limit');
+    deciding.release();
+    expect(typeof target.reserve('c')).toBe('object');
+    running.release();
   });
 
-  it('bounds the waiting line and the jobs of one person', async () => {
-    const gate = deferred();
-    const subject = queue({ maxPerOwner: 2, maxQueued: 1 });
-    expect(subject.enqueue({ id: '1', owner: 'a', run: () => gate.promise })).toBe('queued'); // running
-    expect(subject.enqueue({ id: '2', owner: 'a', run: () => gate.promise })).toBe('queued'); // waiting
-    expect(subject.admission('a')).toBe('owner_limit');
-    expect(subject.enqueue({ id: '3', owner: 'a', run: () => gate.promise })).toBe('owner_limit');
-    expect(subject.enqueue({ id: '4', owner: 'b', run: () => gate.promise })).toBe('full');
-    gate.release();
-    await subject.whenIdle();
-    expect(subject.admission('a')).toBe('ok');
+  it('gives a place back only when the reservation is released or its job has settled', async () => {
+    const target = queue(0, 1);
+    const running = held();
+    reserve(target, 'a').start(job('1', () => running.done));
+    expect(target.reserve('b')).toBe('full');
+    expect(target.reserve('a')).toBe('owner_limit');
+    running.release();
+    await target.whenIdle();
+    expect(typeof target.reserve('a')).toBe('object');
   });
 
-  it('keeps going after a job rejects, reporting the error', async () => {
-    const onError = vi.fn();
-    const subject = queue({ onError });
-    const after = vi.fn(() => Promise.resolve());
-    subject.enqueue({ id: '1', owner: 'a', run: () => Promise.reject(new Error('boom')) });
-    subject.enqueue({ id: '2', owner: 'a', run: after });
-    await subject.whenIdle();
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(after).toHaveBeenCalledTimes(1);
+  it('reports how many jobs are ahead of a reservation (for the lease of a queued row)', () => {
+    const target = queue(4, 4);
+    const running = held();
+    expect(reserve(target, 'a').ahead).toBe(0);
+    const target2 = queue(4, 4);
+    reserve(target2, 'a').start(job('1', () => running.done));
+    reserve(target2, 'b');
+    expect(reserve(target2, 'c').ahead).toBe(2);
+    running.release();
   });
 
-  it('stop cancels the running job, drops the waiting ones and refuses new jobs', async () => {
-    const subject = queue();
-    let seenSignal: AbortSignal | undefined;
-    const waiting = vi.fn(() => Promise.resolve());
-    subject.enqueue({
-      id: '1',
-      owner: 'a',
-      run: (signal) =>
-        new Promise<void>((resolve) => {
-          seenSignal = signal;
-          signal.addEventListener('abort', () => resolve());
-        }),
-    });
-    subject.enqueue({ id: '2', owner: 'b', run: waiting });
-    await Promise.resolve();
-    await subject.stop();
-    expect(seenSignal?.aborted).toBe(true);
-    expect(waiting).not.toHaveBeenCalled();
-    expect(subject.enqueue({ id: '3', owner: 'c', run: waiting })).toBe('stopped');
-    await expect(subject.whenIdle()).resolves.toBeUndefined();
+  it('a reservation is used once; releasing after starting changes nothing', () => {
+    const target = queue();
+    const reservation = reserve(target, 'a');
+    reservation.start(job('1'));
+    expect(() => reservation.start(job('2'))).toThrow('once');
+    reservation.release();
   });
 
-  it('refuses invalid limits', () => {
-    expect(() => queue({ maxQueued: -1 })).toThrow(RangeError);
-    expect(() => queue({ maxPerOwner: 0 })).toThrow(RangeError);
+  it('cancels a waiting job by dropping it and a running one by aborting its signal', async () => {
+    const target = queue();
+    let aborted = false;
+    reserve(target, 'a').start(job('1', (signal) => new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        aborted = true;
+        resolve();
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        aborted = true;
+        resolve();
+      }, { once: true });
+    })));
+    let ranSecond = false;
+    reserve(target, 'b').start(job('2', () => {
+      ranSecond = true;
+      return Promise.resolve();
+    }));
+    expect(target.has('2')).toBe(true);
+    target.cancel('2');
+    expect(target.has('2')).toBe(false);
+    target.cancel('1');
+    await target.whenIdle();
+    expect(aborted).toBe(true);
+    expect(ranSecond).toBe(false);
+  });
+
+  it('stops: refuses new work, aborts the running job, waits for it and returns the dropped ones', async () => {
+    const target = queue();
+    const settled: string[] = [];
+    reserve(target, 'a').start(job('1', (signal) => new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        settled.push('1');
+        resolve();
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        settled.push('1');
+        resolve();
+      }, { once: true });
+    })));
+    reserve(target, 'b').start(job('2'));
+    const pending = reserve(target, 'c');
+    const dropped = await target.stop();
+    expect(settled).toEqual(['1']);
+    expect(dropped.map((entry) => entry.token)).toEqual(['t-2']);
+    expect(target.reserve('d')).toBe('stopped');
+    pending.start(job('3'));
+    expect(target.has('3')).toBe(false);
+  });
+
+  it('reports a job that rejects and moves on', async () => {
+    const errors: unknown[] = [];
+    const target = queue(2, 2, errors);
+    reserve(target, 'a').start(job('1', () => Promise.reject(new Error('boom'))));
+    let ran = false;
+    reserve(target, 'b').start(job('2', () => {
+      ran = true;
+      return Promise.resolve();
+    }));
+    await target.whenIdle();
+    expect(errors).toHaveLength(1);
+    expect(ran).toBe(true);
+  });
+
+  it('validates its limits', () => {
+    expect(() => queue(-1, 1)).toThrow(RangeError);
+    expect(() => queue(1, 0)).toThrow(RangeError);
   });
 });

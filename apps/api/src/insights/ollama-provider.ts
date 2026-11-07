@@ -13,8 +13,10 @@ import {
 
 // Ollama's native chat API, for the weekly insight (ADR-0076). Unlike the run-search interpreter (ADR-0057), whose
 // destination is fixed to loopback, the base URL is configurable so that the API can reach an Ollama service on the
-// compose network; the configuration only accepts local destinations (loopback, a single-label service name or a
-// private address), never a public host. Redirects are refused, so nothing can move the request elsewhere.
+// compose network; the configuration only accepts loopback, private-network or single-label destinations, never a public
+// host name or address. Redirects are refused, so nothing can move the request elsewhere. A private-network destination
+// is NOT the same as "this machine": the prompt (computed numbers, no notes, coordinates or identifiers) travels to
+// whatever host answers on that address, in clear text unless the URL is https (ADR-0076, network boundary).
 
 /** Fixed generation settings. `num_ctx` is explicit because Ollama silently cuts a prompt that does not fit. */
 export const OLLAMA_INSIGHT_GENERATION = { numCtx: 4_096, temperature: 0, think: false } as const;
@@ -47,7 +49,7 @@ class AttemptFailure extends Error {
   }
 }
 
-/** One non-streaming chat request with the JSON schema as `format`; at most one retry of a transient failure. */
+/** One non-streaming chat request with the JSON schema as `format`; one attempt per call, never a retry. */
 export class OllamaProvider implements LlmProvider {
   public readonly model: string;
   readonly #chatUrl: string;
@@ -80,16 +82,14 @@ export class OllamaProvider implements LlmProvider {
       think: OLLAMA_INSIGHT_GENERATION.think,
     });
 
-    for (let attempt = 1; ; attempt += 1) {
-      if (options.signal?.aborted) throw new LlmProviderError('aborted', attempt - 1);
-      try {
-        return { attempts: attempt, value: await this.#attempt(body, options) };
-      } catch (error) {
-        const failure = error instanceof AttemptFailure ? error : new AttemptFailure('provider_error', true);
-        if (attempt >= 2 || !failure.retry || options.signal?.aborted) {
-          throw new LlmProviderError(options.signal?.aborted ? 'aborted' : failure.reason, attempt);
-        }
-      }
+    // One attempt. Whether to try again, and with how much of the budget left, is the generator's decision.
+    if (options.signal?.aborted) throw new LlmProviderError('aborted', false);
+    try {
+      return { value: await this.#attempt(body, options) };
+    } catch (error) {
+      const failure = error instanceof AttemptFailure ? error : new AttemptFailure('provider_error', true);
+      if (options.signal?.aborted) throw new LlmProviderError('aborted', false);
+      throw new LlmProviderError(failure.reason, failure.retry);
     }
   }
 

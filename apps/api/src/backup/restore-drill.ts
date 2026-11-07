@@ -193,7 +193,7 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
   );
   add(
     'surviving-insight-untouched',
-    'The weekly insight of a week without erased records is present and unchanged',
+    "Another person's weekly insight, of a week without erased records, is present and unchanged",
     afterFirst.presentInsights.survivorWeek && afterFirst.survivorInsightDigest === restored.survivorInsightDigest,
   );
   add(
@@ -503,11 +503,62 @@ export interface RoleFacts {
   superuser: boolean;
 }
 
+/** Sessions and locks on the drill databases when a step failed: names, states, waits and ages, never query text. */
+export interface DrillDiagnostics {
+  sessions: {
+    application: string;
+    backendType: string | null;
+    blockedBy: number;
+    database: string;
+    role: string;
+    state: string;
+    stateAgeSeconds: number | null;
+    transactionAgeSeconds: number | null;
+    waitEvent: string | null;
+    waitEventType: string | null;
+  }[];
+  ungrantedLocks: { count: number; lockType: string; mode: string }[];
+}
+
+/** Every operation must settle within this time, or the drill fails at that step with diagnostics (5 minutes). */
+export const DEFAULT_STEP_TIMEOUT_MS = 5 * 60_000;
+/** Collecting diagnostics after a failure may take this long. */
+const DIAGNOSTICS_TIMEOUT_MS = 15_000;
+
+export class DrillStepTimeoutError extends Error {
+  public constructor(operation: string, timeoutMs: number) {
+    super(`The drill operation ${operation} did not settle within ${timeoutMs} ms`);
+    this.name = 'DrillStepTimeoutError';
+  }
+}
+
+function settleWithin<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new DrillStepTimeoutError(operation, timeoutMs)), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
+/** The same operations, each bounded by `timeoutMs`. A late operation keeps running, but the drill does not wait on it. */
+export function withStepDeadlines(operations: DrillOperations, timeoutMs: number): DrillOperations {
+  const bounded = {} as Record<string, unknown>;
+  for (const name of Object.keys(operations) as (keyof DrillOperations)[]) {
+    const operation = Reflect.get(operations, name) as ((...args: unknown[]) => Promise<unknown>) | undefined;
+    if (typeof operation !== 'function') continue;
+    bounded[name] = (...args: unknown[]) => settleWithin(Promise.resolve(operation.apply(operations, args)), timeoutMs, name);
+  }
+  return bounded as unknown as DrillOperations;
+}
+
 /** Everything with side effects. The orchestrator only sequences, times, and judges what these return. */
 export interface DrillOperations {
   assertApplicationOffline(): Promise<void>;
   bootstrapTarget(): Promise<void>;
   cleanup(): Promise<void>;
+  /** PostgreSQL sessions and locks on the drill databases, read after a failure. */
+  diagnose?(): Promise<DrillDiagnostics>;
   copyJournalReadOnly(): Promise<JournalFacts & { readOnlyEnforced: boolean }>;
   /** Creates and migrates the source. It may stop `migrationsBehind` migrations short of the repository. */
   createSourceDatabase(): Promise<{ migrationsBehind: number }>;
@@ -558,7 +609,7 @@ export interface DrillReport {
   };
   environment: EnvironmentFacts | null;
   erasures: { exportedEntries: number | null; firstPass: ReapplyErasureRun | null; secondPass: ReapplyErasureRun | null };
-  failure?: { message: string; step: string };
+  failure?: { diagnostics?: DrillDiagnostics; message: string; step: string; timedOut?: boolean };
   generatedAt: string;
   journal: { exported: JournalFacts | null; firstPass: ReapplyRun | null; recoveryCopyReadOnlyEnforced: boolean | null; secondPass: ReapplyRun | null };
   migration: { backupBehindBy: number | null; firstRun: MigrationRun | null; secondRun: MigrationRun | null };
@@ -591,6 +642,8 @@ export interface DrillOptions {
   commands: readonly string[];
   commit: string;
   keep: boolean;
+  /** Upper bound of each drill operation (default DEFAULT_STEP_TIMEOUT_MS). */
+  stepTimeoutMs?: number;
 }
 
 export interface DrillResult {
@@ -617,7 +670,9 @@ export async function runRestoreDrill(input: {
   operations: DrillOperations;
   options: DrillOptions;
 }): Promise<DrillResult> {
-  const { clock, operations, options } = input;
+  const { clock, options } = input;
+  const unbounded = input.operations;
+  const operations = withStepDeadlines(unbounded, options.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS);
   const tracker = createRecoveryTracker();
   const mark = (): { at: string; t: number } => {
     const t = clock.monotonicNow();
@@ -896,7 +951,15 @@ export async function runRestoreDrill(input: {
       throw new Error('The measured drill recovery time exceeds the 4-hour target');
     }
   } catch (error) {
-    failure = { message: scrubMessage(error), step };
+    failure = { message: scrubMessage(error), step, ...(error instanceof DrillStepTimeoutError ? { timedOut: true } : {}) };
+    // Where it stopped and what PostgreSQL was doing then: observed evidence for a stuck or failed step.
+    if (unbounded.diagnose) {
+      try {
+        failure.diagnostics = await settleWithin(unbounded.diagnose(), DIAGNOSTICS_TIMEOUT_MS, 'diagnose');
+      } catch {
+        // Diagnostics are best effort; the failure itself is already recorded.
+      }
+    }
   }
 
   if (failure === undefined) {

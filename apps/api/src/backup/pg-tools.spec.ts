@@ -22,12 +22,17 @@ interface FakeCall {
 function fakeSpawn(behavior: {
   code?: number;
   error?: NodeJS.ErrnoException;
+  /** Never exits on its own: only kill() closes it, as a stuck tool. */
+  hang?: boolean;
   stderr?: string;
   stdout?: Buffer | string;
 }): { calls: FakeCall[]; spawn: SpawnFunction } {
   const calls: FakeCall[] = [];
   const spawn = ((command: string, args: string[], options: { env: Record<string, string | undefined> }) => {
     const child = new EventEmitter() as EventEmitter & {
+      kill: (signal?: string) => boolean;
+      killed: boolean;
+      exitCode: number | null;
       stderr: PassThrough;
       stdin: PassThrough;
       stdout: PassThrough;
@@ -35,7 +40,15 @@ function fakeSpawn(behavior: {
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
     child.stdin = new PassThrough();
+    child.killed = false;
+    child.exitCode = null;
+    child.kill = (signal?: string) => {
+      child.killed = true;
+      setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+      return true;
+    };
     calls.push({ args, command, env: options.env, stdin: child.stdin });
+    if (behavior.hang) return child;
     setImmediate(() => {
       if (behavior.error) {
         child.emit('error', behavior.error);
@@ -207,3 +220,24 @@ async function waitForCall(calls: FakeCall[]): Promise<PassThrough> {
   }
   return calls[0]!.stdin;
 }
+
+describe('PostgreSQL client tool deadlines', () => {
+  const connection = parsePgConnection('postgresql://u:secret@127.0.0.1:5433/db');
+
+  it('kills a pg_restore that does not finish within the deadline and fails with a timeout', async () => {
+    const runner = createPgToolRunner({ spawn: fakeSpawn({ hang: true }).spawn, timeoutMs: 30 });
+    const input = new PassThrough();
+    const pending = runner.restore(connection, input);
+    input.end('archive');
+    await expect(pending).rejects.toThrow('pg_restore did not finish within 30 ms and was stopped');
+  });
+
+  it('fails a pg_dump stream that does not finish within the deadline', async () => {
+    const runner = createPgToolRunner({ spawn: fakeSpawn({ hang: true }).spawn, timeoutMs: 30 });
+    await expect(drain(runner.dump(connection))).rejects.toThrow('pg_dump did not finish within 30 ms and was stopped');
+  });
+
+  it('refuses a non-positive deadline', () => {
+    expect(() => createPgToolRunner({ timeoutMs: 0 })).toThrow(RangeError);
+  });
+});

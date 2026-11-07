@@ -7,16 +7,23 @@ import type { Logger } from '../observability/logger.js';
 import { FakeProvider } from './fake-provider.js';
 import type { LlmProvider } from './llm-provider.js';
 import { OllamaProvider } from './ollama-provider.js';
-import { WeeklyInsightService } from './weekly-insight-service.js';
+import { WeeklyInsightService, type WeeklyInsightSettings } from './weekly-insight-service.js';
 
 /** Off: no queue work and no provider. These limits only matter when a provider exists. */
-const disabledSettings = { maxOutputTokens: 800, maxPerPerson: 1, maxQueue: 0, timeoutMs: 60_000 };
+const disabledSettings: WeeklyInsightSettings = {
+  attemptTimeoutMs: 60_000,
+  maxAttempts: 3,
+  maxOutputTokens: 800,
+  maxPerPerson: 1,
+  maxQueue: 0,
+  totalBudgetMs: 150_000,
+};
 
 /** The provider of the configured kind; exhaustive, with no fallback to another provider. */
 export function createLlmProvider(config: WeeklyInsightsConfig): LlmProvider {
   switch (config.provider) {
     case 'fake':
-      return new FakeProvider({ mode: config.fakeMode });
+      return new FakeProvider({ delayMs: config.fakeDelayMs, failingWeeks: config.fakeFailingWeeks, mode: config.fakeMode });
     case 'ollama':
       return new OllamaProvider({ baseUrl: config.baseUrl, maxResponseBytes: config.maxResponseBytes, model: config.model });
     default:
@@ -46,10 +53,12 @@ export function createWeeklyInsightService(options: {
     provider,
     settings: configured
       ? {
+          attemptTimeoutMs: configured.timeoutMs,
+          maxAttempts: configured.maxAttempts,
           maxOutputTokens: configured.maxOutputTokens,
           maxPerPerson: configured.maxPerPerson,
           maxQueue: configured.maxQueue,
-          timeoutMs: configured.timeoutMs,
+          totalBudgetMs: configured.totalBudgetMs,
         }
       : { ...disabledSettings, maxQueue: provider ? 16 : 0, maxPerPerson: provider ? 2 : 1 },
   });

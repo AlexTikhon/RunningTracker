@@ -12,6 +12,7 @@ const shortCodePattern = /^[A-Za-z0-9_.:-]{1,32}$/u;
  * than filtered by pattern, so a new sensitive field is safe by default.
  */
 const allowedFields = new Set([
+  'attempts',
   'count',
   'durationMs',
   'errorCode',

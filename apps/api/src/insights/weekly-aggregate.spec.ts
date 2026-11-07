@@ -4,15 +4,13 @@ import {
   aggregateWeek,
   canonicalJson,
   hasExtremeValues,
-  metricKeysOf,
-  numbersOf,
   resolveWeekWindow,
   roundTo,
   type CheckInRecord,
   type GpsRunRecord,
   type ManualActivityRecord,
 } from './weekly-aggregate.js';
-import { inputHashOf, weekActivitiesSql, weekCheckInsSql, weekGpsRunsSql } from './weekly-insight-service.js';
+import { inputHashOf, weekSourcesSql } from './weekly-insight-service.js';
 
 const WEEK = '2026-11-02'; // a Monday; Europe/Warsaw is on CET (UTC+1) all week
 const day = (offset: number) => `2026-11-0${2 + offset}`;
@@ -71,7 +69,9 @@ describe('weekly aggregation (ADR-0076)', () => {
       avgMinutes: null,
       avgQuality: null,
       daysReported: 0,
+      maxDay: null,
       maxMinutes: null,
+      minDay: null,
       minMinutes: null,
       qualityDaysReported: 0,
     });
@@ -81,7 +81,7 @@ describe('weekly aggregation (ADR-0076)', () => {
     ]);
     expect(aggregate.weight).toEqual({ daysReported: 0, deltaKg: null, firstDay: null, firstKg: null, lastDay: null, lastKg: null });
     expect(aggregate.manualActivities).toEqual({ byType: {}, count: 0, totalDurationMinutes: 0 });
-    expect(aggregate.gpsRuns).toEqual({ count: 0, distanceKm: null, runsWithoutDistance: 0, totalDurationMinutes: 0 });
+    expect(aggregate.gpsRuns).toEqual({ count: 0, distanceKm: null, runsWithCurrentDistance: 0, runsWithoutCurrentDistance: 0, totalDurationMinutes: 0 });
     expect(aggregate.flags).toEqual(['no_activities', 'no_check_ins']);
     expect(aggregate.week).toEqual({
       end: '2026-11-08',
@@ -106,7 +106,9 @@ describe('weekly aggregation (ADR-0076)', () => {
       avgMinutes: 452,
       avgQuality: 3.5,
       daysReported: 3,
+      maxDay: 'Saturday',
       maxMinutes: 500,
+      minDay: 'Wednesday',
       minMinutes: 405,
       qualityDaysReported: 2,
     });
@@ -125,6 +127,7 @@ describe('weekly aggregation (ADR-0076)', () => {
     });
     expect(aggregate.soreness.average).toBe(3.3);
     expect(aggregate.soreness.max).toBe(5);
+    expect(aggregate.soreness.maxDay).toBe('Wednesday');
     expect(aggregate.weight).toEqual({
       daysReported: 2,
       deltaKg: -0.55,
@@ -172,12 +175,12 @@ describe('weekly aggregation (ADR-0076)', () => {
       count: 3,
       totalDurationMinutes: 96,
     });
-    expect(aggregate.gpsRuns).toEqual({ count: 2, distanceKm: 5.01, runsWithoutDistance: 1, totalDurationMinutes: 65 });
+    expect(aggregate.gpsRuns).toEqual({ count: 2, distanceKm: 5.01, runsWithCurrentDistance: 1, runsWithoutCurrentDistance: 1, totalDurationMinutes: 65 });
     expect(aggregate.flags).toEqual(
       expect.arrayContaining(['manual_and_gps_runs_may_overlap', 'gps_distance_pending', 'no_check_ins']),
     );
     // No combined figure exists anywhere: 7.5 + 5.01 is not a value of the aggregate.
-    expect(numbersOf(aggregate)).not.toContain(12.51);
+    expect(canonicalJson(aggregate)).not.toContain('12.51');
   });
 
   it('flags the overlap only when both manual runs and GPS runs exist', () => {
@@ -298,25 +301,6 @@ describe('weekly aggregation (ADR-0076)', () => {
     expect(inputHashOf(build({ activities, checkIns: checkIns.slice(1) }))).not.toBe(inputHashOf(first));
   });
 
-  it('offers every non-null path as a metric key, and none for null values or array elements', () => {
-    const aggregate = build({
-      activities: [activity('2026-11-03T06:00:00Z', { distanceM: 5000 })],
-      checkIns: [checkIn(day(0), { mood: 4, sleepMinutes: 450 })],
-    });
-    const keys = metricKeysOf(aggregate);
-    expect(keys).toEqual(expect.arrayContaining([
-      'checkIns.daysWithData',
-      'manualActivities.byType.run.distanceKm',
-      'mood.byDay',
-      'sleep',
-      'sleep.avgMinutes',
-      'week.timeZone',
-    ]));
-    expect(keys).not.toContain('sleep.avgQuality');
-    expect(keys).not.toContain('weight.firstKg');
-    expect(keys.some((key) => /\d/u.test(key))).toBe(false);
-  });
-
   it('rounds half away from zero without producing negative zero', () => {
     expect(roundTo(2.345, 2)).toBe(2.35);
     expect(roundTo(-2.345, 2)).toBe(-2.35);
@@ -324,10 +308,12 @@ describe('weekly aggregation (ADR-0076)', () => {
     expect(roundTo(452.5, 0)).toBe(453);
   });
 
-  it('never selects notes or activity effort from the database', () => {
-    for (const sql of [weekCheckInsSql, weekActivitiesSql, weekGpsRunsSql]) {
-      expect(sql).not.toMatch(/\bnotes?\b/u);
-      expect(sql).not.toMatch(/\brpe\b/u);
-    }
+  it('never selects notes, activity effort, coordinates or identifiers for the model input', () => {
+    expect(weekSourcesSql).not.toMatch(/\bnotes?\b/u);
+    expect(weekSourcesSql).not.toMatch(/\brpe\b/u);
+    expect(weekSourcesSql).not.toMatch(/geom|point|latitude|longitude/u);
+    expect(weekSourcesSql).not.toMatch(/'id'|'runId'|'userId'/u);
+    // A GPS distance only from a summary that is current for the run's data.
+    expect(weekSourcesSql).toContain('summary.source_revision = run.data_revision');
   });
 });

@@ -60,7 +60,30 @@ export interface PgToolRunnerOptions {
   /** Receives every external command line, never including a secret. */
   onCommand?: (argv: string[]) => void;
   spawn?: SpawnFunction;
+  /**
+   * Upper bound of one pg_dump or pg_restore run (default 15 minutes); `--version` gets 30 seconds. A child that is
+   * still running then is killed and the call fails with a timeout error: no caller waits on a stuck tool forever.
+   */
+  timeoutMs?: number;
 }
+
+export const PG_TOOL_DEFAULT_TIMEOUT_MS = 15 * 60_000;
+const PG_TOOL_VERSION_TIMEOUT_MS = 30_000;
+
+/** Kills `child` after `ms`; `expired()` tells whether it did. Cleared when the child closes. */
+function deadline(child: ChildProcess, ms: number): { expired: () => boolean } {
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+    child.kill('SIGKILL');
+  }, ms);
+  timer.unref?.();
+  child.once('close', () => clearTimeout(timer));
+  child.once('error', () => clearTimeout(timer));
+  return { expired: () => fired };
+}
+
+const timedOut = (tool: PgTool, ms: number) => new Error(`${tool} did not finish within ${ms} ms and was stopped`);
 
 const containerNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u;
 const stderrTailChars = 2000;
@@ -85,6 +108,8 @@ function collectTail(stream: Readable | null, secrets: readonly string[]): () =>
 export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRunner {
   const spawn: SpawnFunction = options.spawn ?? nodeSpawn;
   const container = options.dockerContainer;
+  const timeoutMs = options.timeoutMs ?? PG_TOOL_DEFAULT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new RangeError('timeoutMs must be a positive integer');
   if (container !== undefined && !containerNamePattern.test(container)) {
     throw new Error('The container name must be a plain Docker container name or ID');
   }
@@ -138,6 +163,7 @@ export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRun
       const output = new PassThrough();
       const child = spawn(command, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
       const stderr = collectTail(child.stderr, secrets);
+      const bound = deadline(child, timeoutMs);
       let settled = false;
       child.stdout?.pipe(output, { end: false });
       child.once('error', (error: NodeJS.ErrnoException) => {
@@ -148,7 +174,9 @@ export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRun
       child.once('close', (code) => {
         if (settled) return;
         settled = true;
-        if (code === 0) {
+        if (bound.expired()) {
+          output.destroy(timedOut('pg_dump', timeoutMs));
+        } else if (code === 0) {
           output.end();
         } else {
           output.destroy(failure('pg_dump', code, stderr()));
@@ -166,6 +194,7 @@ export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRun
       const secrets = [connection.password];
       const child = spawn(command, argv, { env, stdio: ['pipe', 'ignore', 'pipe'] });
       const stderr = collectTail(child.stderr, secrets);
+      const bound = deadline(child, timeoutMs);
 
       return new Promise<void>((resolve, reject) => {
         let killedForInput = false;
@@ -198,6 +227,11 @@ export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRun
           finish(error.code === 'ENOENT' ? unavailable('pg_restore') : new Error('pg_restore could not be started'));
         });
         child.once('close', (code) => {
+          if (bound.expired()) {
+            input.destroy();
+            finish(timedOut('pg_restore', timeoutMs));
+            return;
+          }
           void inputSettled.then((inputError) => {
             if (code !== 0 && !killedForInput) {
               finish(failure('pg_restore', code, stderr()));
@@ -215,6 +249,7 @@ export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRun
       const { argv, command, env } = toolArguments(tool, ['--version']);
       const child = spawn(command, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
       const stderr = collectTail(child.stderr, []);
+      const bound = deadline(child, Math.min(timeoutMs, PG_TOOL_VERSION_TIMEOUT_MS));
       let output = '';
       child.stdout?.setEncoding('utf8');
       child.stdout?.on('data', (chunk: string) => {
@@ -225,7 +260,8 @@ export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRun
           reject(error.code === 'ENOENT' ? unavailable(tool) : new Error(`${tool} could not be started`));
         });
         child.once('close', (code) => {
-          if (code === 0) resolve();
+          if (bound.expired()) reject(timedOut(tool, Math.min(timeoutMs, PG_TOOL_VERSION_TIMEOUT_MS)));
+          else if (code === 0) resolve();
           else reject(failure(tool, code, stderr()));
         });
       });

@@ -16,6 +16,7 @@ export const loadDatabaseSuffix = '_load_test';
 
 const seededTables = [
   'weekly_insights',
+  'weekly_insight_source_gates',
   'activities',
   'daily_metrics',
   'erasure_ledger',

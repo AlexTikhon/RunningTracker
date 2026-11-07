@@ -14,6 +14,7 @@ import {
   type ReapplyRun,
   type RunLabelState,
 } from './restore-drill.js';
+import { renderDrillReportMarkdown } from './restore-drill-report.js';
 import { recoverySteps } from './restore-safety.js';
 
 const absent: RunLabelState = { points: 0, run: false, shares: 0, summaries: 0, tombstone: null };
@@ -614,6 +615,44 @@ describe('restore drill orchestration', () => {
     expect(calls).not.toContain('verifyReadiness');
     expect(calls).not.toContain('cleanup');
     expect(result.report.recovery.completedSteps).toEqual(recoverySteps.slice(0, 4));
+  });
+
+  it('bounds every step: an operation that never settles fails the drill at that step with PostgreSQL diagnostics', async () => {
+    const { calls, operations } = harness();
+    const stuck: DrillOperations = {
+      ...operations,
+      diagnose: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              application: 'running-tracker-migrations',
+              backendType: 'client backend',
+              blockedBy: 1,
+              database: 'running_tracker_restore_drill_x_target',
+              role: 'running_tracker_owner',
+              state: 'active',
+              stateAgeSeconds: 31,
+              transactionAgeSeconds: 31,
+              waitEvent: 'advisory',
+              waitEventType: 'Lock',
+            },
+          ],
+          ungrantedLocks: [{ count: 1, lockType: 'advisory', mode: 'ExclusiveLock' }],
+        }),
+      migrate: () => new Promise(() => undefined),
+    };
+    const result = await runRestoreDrill({ clock: fakeClock(), operations: stuck, options: { ...options, stepTimeoutMs: 50 } });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.report.failure).toMatchObject({
+      message: 'The drill operation migrate did not settle within 50 ms',
+      step: 'migrate',
+      timedOut: true,
+    });
+    expect(result.report.failure?.diagnostics?.sessions[0]).toMatchObject({ waitEvent: 'advisory', waitEventType: 'Lock' });
+    expect(result.report.failure?.diagnostics?.ungrantedLocks).toEqual([{ count: 1, lockType: 'advisory', mode: 'ExclusiveLock' }]);
+    expect(calls).not.toContain('reapplyDeletions');
+    expect(renderDrillReportMarkdown(result.report)).toContain('Lock/advisory');
   });
 
   it('fails without completing the permission step when recovered access differs from the lost source', async () => {

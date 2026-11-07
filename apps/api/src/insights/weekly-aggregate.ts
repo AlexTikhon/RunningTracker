@@ -1,4 +1,4 @@
-import { ACTIVITY_TYPES, addLocalDays, type ActivityType } from '@running-tracker/contracts';
+import { ACTIVITY_TYPES, WEEKDAY_NAMES, addLocalDays, type ActivityType } from '@running-tracker/contracts';
 
 import { localDateOf, startOfLocalDate } from '../runs/run-search-period.js';
 
@@ -10,8 +10,15 @@ import { localDateOf, startOfLocalDate } from '../runs/run-search-period.js';
 // Not used, by design: free-text notes (check-in notes, activity notes) and activity effort (RPE). They never reach
 // this function, so they can never reach the model.
 
-export const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const;
+export const WEEKDAYS = WEEKDAY_NAMES;
 export type Weekday = (typeof WEEKDAYS)[number];
+
+/**
+ * The aggregation, fact, grounding and safety policy (ADR-0076). Stored with every insight; a row of another policy is
+ * never presented as current. Change it whenever any of those rules changes meaning, so older answers are not trusted
+ * implicitly. Policy 1 was the Stop 1 checker (numbers anywhere in the aggregate, metric keys, safety lexicon only).
+ */
+export const WEEKLY_INSIGHT_POLICY_VERSION = 'weekly-insight-policy-2';
 
 /** Soreness at or above this value on any day makes the week "extreme": the suggestion may then only advise rest. */
 export const EXTREME_SORENESS_MIN = 8;
@@ -55,7 +62,10 @@ export interface ManualActivityRecord {
 }
 
 export interface GpsRunRecord {
-  /** From the run's published summary; null while the summary is not computed yet. */
+  /**
+   * From the run's published summary, only when that summary is current (its source_revision equals the run's
+   * data_revision). Null when no summary is published yet or a late upload made it stale: a data gap, never a distance.
+   */
   distanceM: number | null;
   finishedAtMs: number;
   startedAtMs: number;
@@ -99,9 +109,12 @@ export interface WeeklyAggregate {
   flags: WeeklyFlag[];
   gpsRuns: {
     count: number;
-    /** Sum over the runs with a computed distance; null when there is none. Never added to manual runs. */
+    /** Sum over the runs with a current summary; null when there is none. Never added to manual runs. */
     distanceKm: number | null;
-    runsWithoutDistance: number;
+    /** Runs whose distance is in `distanceKm`. */
+    runsWithCurrentDistance: number;
+    /** Runs without a current summary (none published yet, or stale after a late upload). */
+    runsWithoutCurrentDistance: number;
     totalDurationMinutes: number;
   };
   manualActivities: {
@@ -115,11 +128,22 @@ export interface WeeklyAggregate {
     avgMinutes: number | null;
     avgQuality: number | null;
     daysReported: number;
+    /** The earliest day with the longest night. */
+    maxDay: Weekday | null;
     maxMinutes: number | null;
+    /** The earliest day with the shortest night. */
+    minDay: Weekday | null;
     minMinutes: number | null;
     qualityDaysReported: number;
   };
-  soreness: { average: number | null; byDay: DayValue[]; daysReported: number; max: number | null };
+  soreness: {
+    average: number | null;
+    byDay: DayValue[];
+    daysReported: number;
+    max: number | null;
+    /** The earliest day with the highest soreness. */
+    maxDay: Weekday | null;
+  };
   week: { end: string; inProgress: boolean; start: string; timeZone: string; timeZoneSource: 'check_ins' | 'request' };
   weight: {
     daysReported: number;
@@ -232,6 +256,15 @@ export function aggregateWeek(input: {
   const soreness = days.flatMap((row) => (row.soreness === null ? [] : [row.soreness]));
   const weights = days.filter((row) => row.weightKg !== null);
   const avgSleepMinutes = average(sleepMinutes, 0);
+  const minSleep = sleepMinutes.length === 0 ? null : Math.min(...sleepMinutes);
+  const maxSleep = sleepMinutes.length === 0 ? null : Math.max(...sleepMinutes);
+  const maxSoreness = soreness.length === 0 ? null : Math.max(...soreness);
+  // The earliest day (days are sorted) whose value equals `target`.
+  const dayOf = (pick: (row: CheckInRecord) => number | null, target: number | null): Weekday | null => {
+    if (target === null) return null;
+    const row = days.find((candidate) => pick(candidate) === target);
+    return row ? weekdayOf(window, row.localDate) : null;
+  };
 
   const firstWeight = weights[0];
   const lastWeight = weights.at(-1);
@@ -276,7 +309,8 @@ export function aggregateWeek(input: {
     gpsRuns: {
       count: gpsRuns.length,
       distanceKm: gpsDistances.length === 0 ? null : roundTo(gpsDistances.reduce((sum, value) => sum + value, 0) / 1000, 2),
-      runsWithoutDistance: gpsRuns.length - gpsDistances.length,
+      runsWithCurrentDistance: gpsDistances.length,
+      runsWithoutCurrentDistance: gpsRuns.length - gpsDistances.length,
       totalDurationMinutes: Math.round(gpsRuns.reduce((sum, run) => sum + (run.finishedAtMs - run.startedAtMs), 0) / 60_000),
     },
     manualActivities: {
@@ -290,15 +324,18 @@ export function aggregateWeek(input: {
       avgMinutes: avgSleepMinutes,
       avgQuality: average(sleepQuality, 1),
       daysReported: sleepMinutes.length,
-      maxMinutes: sleepMinutes.length === 0 ? null : Math.max(...sleepMinutes),
-      minMinutes: sleepMinutes.length === 0 ? null : Math.min(...sleepMinutes),
+      maxDay: dayOf((row) => row.sleepMinutes, maxSleep),
+      maxMinutes: maxSleep,
+      minDay: dayOf((row) => row.sleepMinutes, minSleep),
+      minMinutes: minSleep,
       qualityDaysReported: sleepQuality.length,
     },
     soreness: {
       average: average(soreness, 1),
       byDay: byDay(window, days, (row) => row.soreness),
       daysReported: soreness.length,
-      max: soreness.length === 0 ? null : Math.max(...soreness),
+      max: maxSoreness,
+      maxDay: dayOf((row) => row.soreness, maxSoreness),
     },
     week: {
       end: window.end,
@@ -323,48 +360,9 @@ export function todayIn(timeZone: string, nowMs: number): string {
   return localDateOf(nowMs, timeZone);
 }
 
-/** True when the week has a soreness or sleep value that limits the suggestion to rest or professional advice. */
+/** True when the week has a soreness or sleep value for which code, not the model, selects the suggestion. */
 export function hasExtremeValues(aggregate: Pick<WeeklyAggregate, 'flags'>): boolean {
   return aggregate.flags.some((flag) => (EXTREME_FLAGS as readonly string[]).includes(flag));
-}
-
-/**
- * Every metric key the model may cite: the dotted path of every object property whose value is not null, intermediate
- * objects and arrays included (`sleep`, `sleep.avgMinutes`, `mood.byDay`). Array elements have no key of their own.
- */
-export function metricKeysOf(aggregate: WeeklyAggregate): string[] {
-  const keys: string[] = [];
-  const walk = (value: unknown, prefix: string): void => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) return;
-    for (const [key, child] of Object.entries(value)) {
-      if (child === null) continue;
-      const path = prefix === '' ? key : `${prefix}.${key}`;
-      keys.push(path);
-      walk(child, path);
-    }
-  };
-  walk(aggregate, '');
-  return keys.sort();
-}
-
-/** Every finite number in the aggregate, array elements included. These are the only numbers text may contain. */
-export function numbersOf(aggregate: WeeklyAggregate): number[] {
-  const numbers: number[] = [];
-  const walk = (value: unknown): void => {
-    if (typeof value === 'number') {
-      if (Number.isFinite(value)) numbers.push(value);
-      return;
-    }
-    if (value === null || typeof value !== 'object') return;
-    for (const child of Array.isArray(value) ? value : Object.values(value)) walk(child);
-  };
-  walk(aggregate);
-  return numbers;
-}
-
-/** Calendar dates the aggregate names (the week's first and last day). Text may write these and no other date. */
-export function datesOf(aggregate: WeeklyAggregate): string[] {
-  return [aggregate.week.start, aggregate.week.end];
 }
 
 /**
