@@ -36,6 +36,11 @@ export interface E2eEnvironment {
   // The same app served with a placeholder public Mapbox token, so the Coach map code path runs. Tests on this
   // origin intercept every provider request inside the browser; nothing is sent to Mapbox.
   readonly mapWebOrigin: string;
+  // A second development-session API with weekly insight generation explicitly off (WEEKLY_INSIGHTS_PROVIDER=off, the
+  // product default), and the demo-enabled app proxying to it: the weekly review scenario runs there. The main API keeps
+  // the FakeProvider for the AI insight scenarios, and the OIDC API's 20 s session is too short for a scenario of saves.
+  readonly reviewApiOrigin: string;
+  readonly reviewWebOrigin: string;
 }
 
 // Fixed rather than generated per run: playwright.config.ts is imported again in every worker, so a random
@@ -120,6 +125,8 @@ export function resolveE2eEnvironment(source: Record<string, string | undefined>
       webOrigin: 'http://127.0.0.1:5274',
     },
     ownerDatabaseUrl: owner.url,
+    reviewApiOrigin: 'http://127.0.0.1:3102',
+    reviewWebOrigin: 'http://127.0.0.1:5277',
     runnerUserId,
     runtimeDatabaseUrl: runtime.url,
     webOrigin: 'http://127.0.0.1:5273',

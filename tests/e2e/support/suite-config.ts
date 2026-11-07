@@ -35,17 +35,30 @@ export function suiteSettings(environment: E2eEnvironment) {
   } satisfies PlaywrightTestConfig;
 }
 
-// The development-session API on environment.apiOrigin: a local session endpoint for the suite users and the demo
-// people the demo sign-in buttons send (demoScenario creates them), and no identity provider.
+// Weekly insights (ADR-0076) with the deterministic FakeProvider only: no model, no network. A short delay makes the
+// queued and running states observable, and one week (three weeks back) fails every attempt.
+const fakeWeeklyInsights = () => ({
+  WEEKLY_INSIGHTS_FAKE_DELAY_MS: '1200',
+  WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS: failingInsightWeek(),
+  WEEKLY_INSIGHTS_PROVIDER: 'fake',
+});
+
+// A development-session API (by default on environment.apiOrigin): a local session endpoint for the suite users and the
+// demo people the demo sign-in buttons send (demoScenario creates them), and no identity provider.
 export function localSessionApi(
   environment: E2eEnvironment,
   options: {
     // Every web origin that signs in and out through this API.
     readonly allowedOrigins: readonly string[];
+    // Default: environment.apiOrigin.
+    readonly apiOrigin?: string;
     // The run-search interpreter variables, stated by each config rather than inherited from a developer's .env.
     readonly runSearchAi: Readonly<Record<string, string>>;
+    // Default 'fake'. 'off' is stated explicitly rather than left to a developer's .env.
+    readonly weeklyInsights?: 'fake' | 'off';
   },
 ): WebServerConfig {
+  const apiOrigin = options.apiOrigin ?? environment.apiOrigin;
   return {
     // The dev script without --watch, so a file change cannot restart the API mid-test.
     command: 'node --import tsx src/entrypoint.ts',
@@ -63,23 +76,19 @@ export function localSessionApi(
         environment.demoCoachUserId,
       ].join(','),
       MAINTENANCE_DATABASE_URL: environment.maintenanceDatabaseUrl,
-      PORT: new URL(environment.apiOrigin).port,
+      PORT: new URL(apiOrigin).port,
       ...options.runSearchAi,
       SESSION_COOKIE_SECURE: 'false',
       // One API process serves the whole suite and every test signs in at least once; sessions live in memory until
       // they expire. The default cap (100) was reached by the 131-test suite (ADR-0074 run: 14 late tests got
       // 503 SESSION_STORE_UNAVAILABLE), so the suite raises it. The product default is unchanged.
       SESSION_STORE_MAX_ENTRIES: '1000',
-      // Weekly insights (ADR-0076) with the deterministic FakeProvider only: no model, no network. A short delay makes
-      // the queued and running states observable, and one week (three weeks back) fails every attempt.
-      WEEKLY_INSIGHTS_FAKE_DELAY_MS: '1200',
-      WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS: failingInsightWeek(),
-      WEEKLY_INSIGHTS_PROVIDER: 'fake',
+      ...(options.weeklyInsights === 'off' ? { WEEKLY_INSIGHTS_PROVIDER: 'off' } : fakeWeeklyInsights()),
     },
     reuseExistingServer: false,
     stderr: 'pipe',
     stdout: 'pipe',
-    url: `${environment.apiOrigin}/api/health/ready`,
+    url: `${apiOrigin}/api/health/ready`,
   };
 }
 

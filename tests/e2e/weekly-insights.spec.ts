@@ -5,7 +5,7 @@ import { expect, test } from './support/fixtures.js';
 import { addDays, failingInsightWeek, INSIGHT_ZONE, mondayWeeksAgo } from './support/insight-weeks.js';
 import { expectOrganizationSelected, expectSignedIn, expectSignedOut } from './support/session.js';
 
-// The weekly Insights panel on the Check-in tab (ADR-0076), against the suite's API with the deterministic
+// The optional AI insight section on the Check-in tab (ADR-0076), against the suite's API with the deterministic
 // FakeProvider (WEEKLY_INSIGHTS_PROVIDER=fake: no model, no network). Weeks are computed from the real clock in the
 // browser zone, the same way the panel's week picker does.
 test.use({ locale: 'en-GB', timezoneId: INSIGHT_ZONE });
@@ -20,7 +20,7 @@ async function signInAndOpen(page: Page, environment: { demoWebOrigin: string },
   await expectOrganizationSelected(page, scenario.orgId);
   await page.getByRole('navigation', { name: 'Application view' }).getByRole('button', { name: 'Check-in' }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'Check-in' })).toBeVisible();
-  return page.getByRole('region', { name: 'Weekly insight' });
+  return page.getByRole('region', { name: 'AI insight (optional)' });
 }
 
 async function checkIn(page: Page, date: string, hours: string): Promise<void> {
@@ -32,6 +32,9 @@ async function checkIn(page: Page, date: string, hours: string): Promise<void> {
   await form.getByRole('button', { name: 'Save check-in' }).click();
   await expect(form.getByText('Check-in saved.')).toBeVisible();
 }
+
+// The week is chosen in the Weekly review section; the optional AI section follows it.
+const selectWeek = (page: Page, week: string) => page.getByRole('region', { name: 'Weekly review' }).getByLabel('Week').selectOption(week);
 
 const facts = (panel: Locator) => panel.getByRole('list', { name: 'Facts from your data' }).getByRole('listitem');
 
@@ -52,7 +55,7 @@ test('generates an insight, marks it stale when the week changes, regenerates it
   const panel = await signInAndOpen(page, environment, demoScenario);
   await checkIn(page, week, '7');
 
-  await panel.getByLabel('Week').selectOption(week);
+  await selectWeek(page, week);
   await expect(panel.getByText(/^No insight for /u)).toBeVisible();
   await panel.getByRole('button', { name: 'Generate insight' }).click();
   await expect(panel.locator('[data-insight-state="ready"]')).toBeVisible(settled);
@@ -61,7 +64,7 @@ test('generates an insight, marks it stale when the week changes, regenerates it
   await expect(panel.getByText('AI-generated text')).toBeVisible();
   await expect(panel.getByText(/It is not medical advice/u)).toBeVisible();
   await expect(facts(panel)).toContainText(['Days with a check-in: 1 of 7', 'Average sleep: 420 min']);
-  await expect(panel.getByRole('region', { name: 'Data gaps and limitations' })).toContainText('No check-in on 6 of 7 days');
+  await expect(panel.getByRole('region', { name: 'Data gaps and limitations' })).toContainText('No check-in values on 6 of 7 days');
   await expect(panel.getByRole('button', { name: 'Regenerate' })).toBeDisabled();
 
   // A new check-in in the same week does not delete the insight, but makes it stale.
@@ -83,7 +86,7 @@ test('shows a generation failure without model text and lets the person retry, c
   const week = failingInsightWeek();
   test.skip(week !== failingInsightWeek(Date.now() + 300_000), 'Too close to the start of a week in Warsaw');
   const panel = await signInAndOpen(page, environment, demoScenario);
-  await panel.getByLabel('Week').selectOption(week);
+  await selectWeek(page, week);
   await panel.getByRole('button', { name: 'Generate insight' }).click();
   await expect(panel.getByText(/did not answer in time or could not be reached/u)).toBeVisible(settled);
   await expect(panel.getByText(/You can try again\./u)).toBeVisible();
@@ -98,7 +101,7 @@ test('shows work lost with its process as interrupted, and regenerates it', asyn
   test.skip(week !== mondayWeeksAgo(2, Date.now() + 300_000), 'Too close to the start of a week in Warsaw');
   await seedInterruptedInsight(environment, demoScenario.orgId, demoScenario.runnerUserId, week);
   const panel = await signInAndOpen(page, environment, demoScenario);
-  await panel.getByLabel('Week').selectOption(week);
+  await selectWeek(page, week);
   await expect(panel.getByText(/Generation was interrupted/u)).toBeVisible(settled);
   await panel.getByRole('button', { name: 'Regenerate' }).click();
   await expect(panel.locator('[data-insight-state="ready"]')).toBeVisible(settled);

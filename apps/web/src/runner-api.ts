@@ -21,6 +21,7 @@ import {
   WEEKLY_INSIGHT_NOT_FOUND,
   weeklyInsightAcceptedSchema,
   weeklyInsightViewSchema,
+  weeklyReviewSchema,
   type ActivityListResponse,
   type ActivityView,
   type ArchiveMetadataResponse,
@@ -42,6 +43,7 @@ import {
   type SessionResponse,
   type WeeklyInsightAccepted,
   type WeeklyInsightView,
+  type WeeklyReview,
 } from '@running-tracker/contracts';
 
 import { requestJson } from './request.js';
@@ -633,4 +635,23 @@ export async function requestWeeklyInsight(
     signal,
   });
   return weeklyInsightAcceptedSchema.parse(requireSuccess(response));
+}
+
+// The deterministic weekly review: computed by the server on every read, never by a model, and never cached.
+export interface WeeklyReviewTarget {
+  orgId: string;
+  timeZone: string;
+  weekStart: string;
+}
+
+export async function readWeeklyReview(target: WeeklyReviewTarget, signal: AbortSignal): Promise<WeeklyReview> {
+  const query = new URLSearchParams({ timeZone: target.timeZone, weekStart: target.weekStart });
+  const response = await requestJson(`/api/orgs/${encodeURIComponent(target.orgId)}/weekly-review?${query.toString()}`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  const review = weeklyReviewSchema.parse(requireSuccess(response));
+  if (review.week.start !== target.weekStart) throw new Error('The server returned a different week');
+  return review;
 }

@@ -1,5 +1,5 @@
 import type { WeeklyInsightOutput, WeeklyInsightView } from '@running-tracker/contracts';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { readWeeklyInsight, requestWeeklyInsight, type CsrfCredentials } from './runner-api.js';
 import {
@@ -8,10 +8,11 @@ import {
   WeeklyInsightController,
   type InsightPanelSnapshot,
 } from './weekly-insight-controller.js';
-import { formatWeek, recentWeeks, statusSentence } from './weekly-insight.js';
+import { formatWeek, statusSentence } from './weekly-insight.js';
 
-// The weekly Insights panel of the Check-in tab (ADR-0076). Numbers are computed by the server and rendered by code;
-// a local AI model writes the prose around them, and that prose is labelled as such. Descriptive and non-medical.
+// The optional AI insight section of the Check-in tab (ADR-0076), secondary to the Weekly review above it. Numbers are
+// computed by the server and rendered by code; a local AI model writes the prose around them, and that prose is
+// labelled as such. Descriptive and non-medical. Its loading, failure and polling never affect the Weekly review.
 
 export interface InsightContentProps {
   output: WeeklyInsightOutput;
@@ -77,13 +78,15 @@ export interface InsightPanelViewProps {
   onCheckAgain: () => void;
   onGenerate: () => void;
   onRetryLoad: () => void;
-  onSelectWeek: (weekStart: string) => void;
   snapshot: InsightPanelSnapshot;
-  weeks: readonly { label: string; weekStart: string }[];
 }
 
-/** Everything the panel shows, from one snapshot. Pure, so every state is testable without a DOM. */
-export function InsightPanelView({ onCheckAgain, onGenerate, onRetryLoad, onSelectWeek, snapshot, weeks }: InsightPanelViewProps) {
+/**
+ * Everything the panel shows, from one snapshot. Pure, so every state is testable without a DOM. The week is chosen in
+ * the Weekly review section above; this optional section follows it. The facts it shows are the ones stored with the
+ * AI text when it was generated, never the current review's.
+ */
+export function InsightPanelView({ onCheckAgain, onGenerate, onRetryLoad, snapshot }: InsightPanelViewProps) {
   const { load } = snapshot;
   const view = load.kind === 'view' ? load.view : null;
   const active = view !== null && (view.status === 'queued' || view.status === 'running');
@@ -94,25 +97,13 @@ export function InsightPanelView({ onCheckAgain, onGenerate, onRetryLoad, onSele
   return (
     <section aria-labelledby="insight-title" className="insight-panel search-results">
       <div className="insight-panel__heading">
-        <h2 id="insight-title">Weekly insight</h2>
+        <h2 id="insight-title">AI insight (optional)</h2>
         <p className="insight-panel__positioning">
-          A short description of your week from your own check-ins, activities and GPS runs. It is not medical advice and
-          it does not diagnose anything. Notes are never used. Only you can see it.
+          Optional text about {formatWeek(snapshot.weekStart)} written by a local AI model, separate from the weekly review
+          above. It is not medical advice and it does not diagnose anything. Notes are never used. Only you can see it.
         </p>
       </div>
       <div className="insight-panel__controls">
-        <label>
-          Week
-          <select
-            disabled={snapshot.request === 'pending'}
-            onChange={(event) => onSelectWeek(event.target.value)}
-            value={snapshot.weekStart}
-          >
-            {weeks.map((week) => (
-              <option key={week.weekStart} value={week.weekStart}>{week.label}</option>
-            ))}
-          </select>
-        </label>
         {!snapshot.generationDisabled && (
           <button className="finish-action" disabled={!offer} onClick={onGenerate} type="button">
             {snapshot.request === 'pending' ? 'Asking…' : buttonLabel}
@@ -176,15 +167,17 @@ export interface WeeklyInsightPanelProps {
   refreshKey: number;
   signal: AbortSignal;
   timeZone: string;
-  today: string;
+  /** The week chosen in the Weekly review section. */
+  weekStart: string;
 }
 
-export function WeeklyInsightPanel({ csrf, orgId, refreshKey, signal, timeZone, today }: WeeklyInsightPanelProps) {
-  const weeks = useMemo(() => recentWeeks(today), [today]);
+export function WeeklyInsightPanel({ csrf, orgId, refreshKey, signal, timeZone, weekStart }: WeeklyInsightPanelProps) {
   const csrfRef = useRef(csrf);
   csrfRef.current = csrf;
+  const weekRef = useRef(weekStart);
+  weekRef.current = weekStart;
   const controller = useRef<WeeklyInsightController | null>(null);
-  const [snapshot, setSnapshot] = useState<InsightPanelSnapshot>(() => loadingInsight(weeks[0]!.weekStart));
+  const [snapshot, setSnapshot] = useState<InsightPanelSnapshot>(() => loadingInsight(weekStart));
 
   useEffect(() => {
     const next = new WeeklyInsightController({
@@ -195,15 +188,20 @@ export function WeeklyInsightPanel({ csrf, orgId, refreshKey, signal, timeZone, 
       request: requestWeeklyInsight,
       signal,
       timeZone,
-      weekStart: weeks[0]!.weekStart,
+      weekStart: weekRef.current,
     });
     controller.current = next;
+    setSnapshot(next.snapshot);
     next.start();
     return () => {
       next.dispose();
       if (controller.current === next) controller.current = null;
     };
-  }, [orgId, signal, timeZone, weeks]);
+  }, [orgId, signal, timeZone]);
+
+  useEffect(() => {
+    controller.current?.select(weekStart);
+  }, [weekStart]);
 
   const firstRender = useRef(true);
   useEffect(() => {
@@ -219,9 +217,7 @@ export function WeeklyInsightPanel({ csrf, orgId, refreshKey, signal, timeZone, 
       onCheckAgain={() => controller.current?.refresh()}
       onGenerate={() => controller.current?.generate()}
       onRetryLoad={() => controller.current?.refresh()}
-      onSelectWeek={(weekStart) => controller.current?.select(weekStart)}
       snapshot={snapshot}
-      weeks={weeks}
     />
   );
 }

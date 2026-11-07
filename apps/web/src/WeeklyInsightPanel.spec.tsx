@@ -29,9 +29,7 @@ function render(snapshot: Partial<InsightPanelSnapshot>): string {
       onCheckAgain={noop}
       onGenerate={noop}
       onRetryLoad={noop}
-      onSelectWeek={noop}
       snapshot={{ ...loadingInsight(WEEK), ...snapshot }}
-      weeks={weeks}
     />,
   );
 }
@@ -47,6 +45,10 @@ describe('weekly insight panel', () => {
 
   it('states its non-medical, descriptive positioning in every state', () => {
     expect(render({})).toContain('It is not medical advice and it does not diagnose anything');
+    // Secondary and optional: it follows the week chosen in the Weekly review and says which one.
+    expect(render({})).toContain('<h2 id="insight-title">AI insight (optional)</h2>');
+    expect(render({})).toContain('Optional text about 2 Nov – 8 Nov 2026 written by a local AI model, separate from the weekly review');
+    expect(render({})).not.toContain('<select');
   });
 
   it('renders the no-insight state with Generate, and explains a deleted insight', () => {

@@ -61,6 +61,15 @@ export default defineConfig({
     webApp(environment.mapWebOrigin, environment.apiOrigin, { VITE_MAPBOX_ACCESS_TOKEN: mapPlaceholderToken }),
     // The same app as `npm run demo:up` serves it: a dev server with the demo sign-in buttons turned on.
     webApp(environment.demoWebOrigin, environment.apiOrigin, { VITE_LOCAL_DEMO_ENABLED: 'true' }),
+    // Weekly insight generation explicitly off (the product default), for the deterministic weekly review scenario:
+    // a second development-session API and the demo-enabled app proxying to it.
+    localSessionApi(environment, {
+      allowedOrigins: [environment.reviewWebOrigin],
+      apiOrigin: environment.reviewApiOrigin,
+      runSearchAi: { RUN_SEARCH_AI_ENABLED: 'false' },
+      weeklyInsights: 'off',
+    }),
+    webApp(environment.reviewWebOrigin, environment.reviewApiOrigin, { VITE_LOCAL_DEMO_ENABLED: 'true' }),
     {
       // OpenID Connect stack. The provider (oidc-provider with its development login pages) ...
       command: 'node --import tsx support/oidc-provider-server.ts',

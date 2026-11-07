@@ -23,7 +23,9 @@ import {
 } from './daily-checkin.js';
 import { defaultTimeZone } from './run-search.js';
 import { deleteDailyMetrics, listDailyMetrics, putDailyMetrics, readDailyMetrics, type CsrfCredentials } from './runner-api.js';
+import { recentWeeks } from './weekly-insight.js';
 import { WeeklyInsightPanel } from './WeeklyInsightPanel.js';
+import { WeeklyReviewPanel } from './WeeklyReviewPanel.js';
 
 export interface DailyCheckInScreenProps {
   csrf: CsrfCredentials;
@@ -154,8 +156,12 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
   const [day, setDay] = useState<CheckInDaySnapshot>(() => loadingCheckInDay(today));
   const [history, setHistory] = useState<CheckInHistorySnapshot>(loadingCheckInHistory);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  // A saved or deleted day can make the week's insight stale or delete it: the Insights panel reads it again.
+  // A saved or deleted day changes the week's review and can make its AI insight stale or delete it: both sections read
+  // the week again.
   const [insightRefresh, setInsightRefresh] = useState(0);
+  // The week shown by the Weekly review and the optional AI insight below it, chosen in the review section.
+  const weeks = useMemo(() => recentWeeks(today), [today]);
+  const [weekStart, setWeekStart] = useState(() => weeks[0]!.weekStart);
   const dayController = useRef<CheckInDayController | null>(null);
   const historyController = useRef<CheckInHistoryController | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -353,7 +359,17 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
         snapshot={history}
       />
 
-      <WeeklyInsightPanel csrf={csrf} orgId={orgId} refreshKey={insightRefresh} signal={signal} timeZone={timeZone} today={today} />
+      <WeeklyReviewPanel
+        onSelectWeek={setWeekStart}
+        orgId={orgId}
+        refreshKey={insightRefresh}
+        signal={signal}
+        timeZone={timeZone}
+        weekStart={weekStart}
+        weeks={weeks}
+      />
+
+      <WeeklyInsightPanel csrf={csrf} orgId={orgId} refreshKey={insightRefresh} signal={signal} timeZone={timeZone} weekStart={weekStart} />
     </section>
   );
 }
