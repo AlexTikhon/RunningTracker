@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import type { PlaywrightTestConfig } from '@playwright/test';
 
 import type { E2eEnvironment } from './environment.js';
+import { failingInsightWeek } from './insight-weeks.js';
 
 // Shared by playwright.config.ts (the full suite) and playwright.smoke.config.ts (the pre-demo smoke), so both run
 // with the same timeouts, retries, worker count, diagnostics and teardown, and start the API and Vite the same way.
@@ -69,6 +70,11 @@ export function localSessionApi(
       // they expire. The default cap (100) was reached by the 131-test suite (ADR-0074 run: 14 late tests got
       // 503 SESSION_STORE_UNAVAILABLE), so the suite raises it. The product default is unchanged.
       SESSION_STORE_MAX_ENTRIES: '1000',
+      // Weekly insights (ADR-0076) with the deterministic FakeProvider only: no model, no network. A short delay makes
+      // the queued and running states observable, and one week (three weeks back) fails every attempt.
+      WEEKLY_INSIGHTS_FAKE_DELAY_MS: '1200',
+      WEEKLY_INSIGHTS_FAKE_FAILING_WEEKS: failingInsightWeek(),
+      WEEKLY_INSIGHTS_PROVIDER: 'fake',
     },
     reuseExistingServer: false,
     stderr: 'pipe',

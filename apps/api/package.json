@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --watch --import tsx src/entrypoint.ts",
     "eval:run-search": "node --import tsx src/evaluation/run-search-evaluation-main.ts",
+    "eval:weekly-insights": "node --import tsx src/evaluation/weekly-insight-evaluation-main.ts",
     "gps:analyze": "node --import tsx src/gps-traces/analyze-main.ts",
     "gps:report": "node --import tsx src/gps-traces/report-main.ts",
     "gps:sanitize": "node --import tsx src/gps-traces/sanitize-main.ts",

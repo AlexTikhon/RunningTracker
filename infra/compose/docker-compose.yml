@@ -20,6 +20,25 @@ services:
       - running_tracker_postgres:/var/lib/postgresql/data
       - ../../db/test-support/20-create-test-database.sql:/docker-entrypoint-initdb.d/20-create-test-database.sql:ro
 
+  # Optional local model for weekly insights (ADR-0076). Only started on request:
+  #   docker compose -f infra/compose/docker-compose.yml --profile ollama up -d ollama
+  #   docker compose -f infra/compose/docker-compose.yml exec ollama ollama pull qwen3:4b
+  # Nothing depends on it: the API starts and serves everything else without it (WEEKLY_INSIGHTS_PROVIDER=off by
+  # default). Published on loopback only, on 11435 so that an Ollama installed on the host keeps 11434; point the API
+  # at it with WEEKLY_INSIGHTS_OLLAMA_BASE_URL=http://127.0.0.1:11435. OLLAMA_NO_CLOUD refuses cloud models, so a
+  # prompt cannot be forwarded to a hosted model by this server.
+  ollama:
+    image: ollama/ollama:0.40.14@sha256:ebaef4f4c5d93660e1f25f8ad085a112f51ccfb0e8458073e71793959dba91c9
+    profiles: ["ollama"]
+    environment:
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_KEEP_ALIVE: "10m"
+    ports:
+      - "127.0.0.1:11435:11434"
+    volumes:
+      - running_tracker_ollama:/root/.ollama
+
 volumes:
   running_tracker_postgres:
+  running_tracker_ollama:
 

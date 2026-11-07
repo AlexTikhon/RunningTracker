@@ -18,6 +18,9 @@ import {
   runShareResponseSchema,
   runViewSchema,
   sessionResponseSchema,
+  WEEKLY_INSIGHT_NOT_FOUND,
+  weeklyInsightAcceptedSchema,
+  weeklyInsightViewSchema,
   type ActivityListResponse,
   type ActivityView,
   type ArchiveMetadataResponse,
@@ -37,6 +40,8 @@ import {
   type RunShareResponse,
   type RunView,
   type SessionResponse,
+  type WeeklyInsightAccepted,
+  type WeeklyInsightView,
 } from '@running-tracker/contracts';
 
 import { requestJson } from './request.js';
@@ -585,4 +590,47 @@ export async function readLiveTrackChangesPage(
   }
   const response = await requestJson(liveTrackUrl(input, '/changes', query), options);
   return liveTrackResponseSchema.parse(requireSuccess(response));
+}
+
+// Weekly insights (ADR-0076). Owner-only like the check-ins they are derived from.
+export interface WeeklyInsightTarget {
+  orgId: string;
+  weekStart: string;
+}
+
+function weeklyInsightPath(orgId: string): string {
+  return `/api/orgs/${encodeURIComponent(orgId)}/insights/weekly`;
+}
+
+// No insight for the week (never asked for, or deleted together with a source record) is not an error: it answers null.
+export async function readWeeklyInsight(target: WeeklyInsightTarget, signal: AbortSignal): Promise<WeeklyInsightView | null> {
+  const query = new URLSearchParams({ weekStart: target.weekStart });
+  const response = await requestJson(`${weeklyInsightPath(target.orgId)}?${query.toString()}`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  if (response.response.status === 404) {
+    const refusal = apiErrorResponseSchema.safeParse(response.payload);
+    if (refusal.success && refusal.data.error.code === WEEKLY_INSIGHT_NOT_FOUND) return null;
+  }
+  const view = weeklyInsightViewSchema.parse(requireSuccess(response));
+  if (view.weekStart !== target.weekStart) throw new Error('The server returned a different week');
+  return view;
+}
+
+// Asks for the week's insight. Safe to repeat: the same data returns the existing insight instead of generating again.
+export async function requestWeeklyInsight(
+  input: WeeklyInsightTarget & { timeZone: string },
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<WeeklyInsightAccepted> {
+  const response = await requestJson(weeklyInsightPath(input.orgId), {
+    body: JSON.stringify({ timeZone: input.timeZone, weekStart: input.weekStart }),
+    credentials: 'same-origin',
+    headers: mutationHeaders(csrf),
+    method: 'POST',
+    signal,
+  });
+  return weeklyInsightAcceptedSchema.parse(requireSuccess(response));
 }

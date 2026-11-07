@@ -23,6 +23,7 @@ import {
 } from './daily-checkin.js';
 import { defaultTimeZone } from './run-search.js';
 import { deleteDailyMetrics, listDailyMetrics, putDailyMetrics, readDailyMetrics, type CsrfCredentials } from './runner-api.js';
+import { WeeklyInsightPanel } from './WeeklyInsightPanel.js';
 
 export interface DailyCheckInScreenProps {
   csrf: CsrfCredentials;
@@ -153,6 +154,8 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
   const [day, setDay] = useState<CheckInDaySnapshot>(() => loadingCheckInDay(today));
   const [history, setHistory] = useState<CheckInHistorySnapshot>(loadingCheckInHistory);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // A saved or deleted day can make the week's insight stale or delete it: the Insights panel reads it again.
+  const [insightRefresh, setInsightRefresh] = useState(0);
   const dayController = useRef<CheckInDayController | null>(null);
   const historyController = useRef<CheckInHistoryController | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -177,6 +180,7 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
     setShowErrors(false);
     setDraft(emptyCheckInDraft);
     historyController.current?.refresh();
+    setInsightRefresh((count) => count + 1);
     heading.current?.focus();
   };
 
@@ -197,7 +201,10 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
       onChange: setDay,
       onDeleted: () => afterDeleted.current(),
       onLoaded: (date, existing) => afterLoaded.current(date, existing),
-      onSaved: () => historyController.current?.refresh(),
+      onSaved: () => {
+        historyController.current?.refresh();
+        setInsightRefresh((count) => count + 1);
+      },
       orgId,
       read: readDailyMetrics,
       remove: deleteDailyMetrics,
@@ -345,6 +352,8 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
         selectedDate={day.date}
         snapshot={history}
       />
+
+      <WeeklyInsightPanel csrf={csrf} orgId={orgId} refreshKey={insightRefresh} signal={signal} timeZone={timeZone} today={today} />
     </section>
   );
 }

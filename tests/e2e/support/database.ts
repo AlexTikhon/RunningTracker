@@ -467,3 +467,20 @@ export async function autoFinishRuns(environment: E2eEnvironment): Promise<numbe
     await client.end();
   }
 }
+
+// A weekly insight whose job was lost with its process (ADR-0076): still running, lease already expired. The insert
+// carries the current source revision, as migration 0032 requires of every writer.
+export async function seedInterruptedInsight(environment: E2eEnvironment, orgId: string, userId: string, weekStart: string): Promise<void> {
+  await withOwnerClient(environment, (client) =>
+    client.query(
+      `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, source_revision,
+                                    model, prompt_version, policy_version, status, job_token, lease_expires_at)
+       VALUES ($1, $2, $3::date, 'Europe/Warsaw', $3::date::timestamp AT TIME ZONE 'Europe/Warsaw',
+               ($3::date + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('e', 64),
+               coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
+               'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'running', gen_random_uuid(),
+               clock_timestamp() - interval '1 minute')`,
+      [orgId, userId, weekStart],
+    ),
+  );
+}

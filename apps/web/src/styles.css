@@ -386,3 +386,25 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .checkin-day--empty { background: transparent; border-style: dashed; }
 .checkin-day__empty { margin: 0; color: #7f8a82; font-size: 0.84rem; }
 @media (max-width: 40rem) { .checkin-day { grid-template-columns: 1fr auto; } .checkin-day dl, .checkin-day .activity-card__notes, .checkin-day__empty { grid-column: 1 / -1; } }
+
+/* Weekly insight panel (ADR-0076). Wraps at every width; nothing is wider than the column. */
+.insight-panel { margin-top: 1.5rem; }
+.insight-panel__heading h2 { margin: 0 0 0.35rem; }
+.insight-panel__positioning, .insight-panel__meta, .insight-suggestion__source { color: #a9b5ad; font-size: 0.86rem; margin: 0; }
+.insight-panel__controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.75rem; }
+.insight-panel__controls label { display: grid; gap: 0.3rem; min-width: 0; max-width: 100%; }
+.insight-panel__controls select { max-width: 100%; }
+.insight-panel__body { display: grid; gap: 0.75rem; min-width: 0; }
+.insight-panel__progress, .insight-panel__empty, .insight-panel__disabled { margin: 0; color: #d6e2da; }
+.insight-panel__problem { margin: 0; color: #ffd27a; }
+.insight-panel__stale { margin: 0; padding: 0.6rem 0.8rem; border: 1px solid #8a6d1f; border-radius: 0.6rem; background: #2a2412; color: #ffe2a0; }
+.insight-content { display: grid; gap: 0.75rem; padding: 0.9rem 1rem; border: 1px solid #2e3831; border-radius: 0.8rem; background: #151c17; overflow-wrap: anywhere; }
+.insight-content__ai-label { margin: 0; color: #a9b5ad; font-size: 0.86rem; }
+.insight-badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #34445f; color: #dbe6ff; font-size: 0.78rem; font-weight: 600; }
+.insight-content__summary { margin: 0; font-size: 1.02rem; }
+.insight-observations, .insight-gaps ul { display: grid; gap: 0.6rem; margin: 0; padding-left: 1.1rem; }
+.insight-observations p { margin: 0 0 0.3rem; }
+.insight-facts { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0; padding: 0; list-style: none; }
+.insight-facts li { padding: 0.15rem 0.55rem; border: 1px solid #3b4a40; border-radius: 0.5rem; background: #1d2620; font-size: 0.84rem; font-variant-numeric: tabular-nums; }
+.insight-suggestion h3, .insight-gaps h3 { margin: 0 0 0.3rem; font-size: 0.95rem; }
+.insight-suggestion p { margin: 0 0 0.25rem; }
