@@ -21,6 +21,7 @@ import {
   validateCheckInDraft,
   type CheckInDraft,
 } from './daily-checkin.js';
+import { DailyMovementSection } from './DailyMovementSection.js';
 import { defaultTimeZone } from './run-search.js';
 import { deleteDailyMetrics, listDailyMetrics, putDailyMetrics, readDailyMetrics, type CsrfCredentials } from './runner-api.js';
 import { recentWeeks } from './weekly-insight.js';
@@ -358,6 +359,10 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
         selectedDate={day.date}
         snapshot={history}
       />
+
+      {/* Manual movement (ADR-0078): its own form and history; a save or deletion there does not refresh the weekly
+          review or the AI insight, which do not read movement. */}
+      <DailyMovementSection csrf={csrf} orgId={orgId} signal={signal} timeZone={timeZone} today={today} />
 
       <WeeklyReviewPanel
         onSelectWeek={setWeekStart}

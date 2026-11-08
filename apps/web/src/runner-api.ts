@@ -7,6 +7,9 @@ import {
   DAILY_METRICS_NOT_FOUND,
   dailyMetricsListResponseSchema,
   dailyMetricsViewSchema,
+  DAILY_MOVEMENT_NOT_FOUND,
+  dailyMovementListResponseSchema,
+  dailyMovementViewSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
   organizationCoachListResponseSchema,
@@ -29,6 +32,9 @@ import {
   type DailyMetricsListResponse,
   type DailyMetricsView,
   type PutDailyMetricsRequest,
+  type DailyMovementListResponse,
+  type DailyMovementView,
+  type PutDailyMovementRequest,
   type ArchiveTrackResponse,
   type IngestPointsResponse,
   type LiveTrackResponse,
@@ -493,6 +499,78 @@ export async function listDailyMetrics(
     signal,
   });
   return dailyMetricsListResponseSchema.parse(requireSuccess(response));
+}
+
+// Manual daily movement (ADR-0078): owner-only steps and active energy, one manual record per person per local date,
+// replaced as a whole. The same shape of calls as daily check-ins, on its own path.
+export interface DailyMovementTarget {
+  localDate: string;
+  orgId: string;
+}
+
+function dailyMovementPath(orgId: string, localDate?: string): string {
+  const base = `/api/orgs/${encodeURIComponent(orgId)}/daily-movement`;
+  return localDate === undefined ? base : `${base}/${encodeURIComponent(localDate)}`;
+}
+
+// Naturally idempotent: the body is the whole day, so sending it again after an unknown outcome is always safe.
+// 201 when the day was first written, 200 when it was replaced or already held these values.
+export async function putDailyMovement(
+  target: DailyMovementTarget,
+  request: PutDailyMovementRequest,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<{ created: boolean; view: DailyMovementView }> {
+  const response = await requestJson(dailyMovementPath(target.orgId, target.localDate), {
+    body: JSON.stringify(request),
+    credentials: 'same-origin',
+    headers: mutationHeaders(csrf),
+    method: 'PUT',
+    signal,
+  });
+  const view = dailyMovementViewSchema.parse(requireSuccess(response));
+  if (view.localDate !== target.localDate) throw new Error('The server returned a different date');
+  return { created: response.response.status === 201, view };
+}
+
+// A day without a record is not an error for the form: it answers null.
+export async function readDailyMovement(target: DailyMovementTarget, signal: AbortSignal): Promise<DailyMovementView | null> {
+  const response = await requestJson(dailyMovementPath(target.orgId, target.localDate), {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  if (response.response.status === 404) {
+    const refusal = apiErrorResponseSchema.safeParse(response.payload);
+    if (refusal.success && refusal.data.error.code === DAILY_MOVEMENT_NOT_FOUND) return null;
+  }
+  const view = dailyMovementViewSchema.parse(requireSuccess(response));
+  if (view.localDate !== target.localDate) throw new Error('The server returned a different date');
+  return view;
+}
+
+// 204 in every case: deleted now, already deleted or never written are answered alike, so a retry is always safe.
+export async function deleteDailyMovement(target: DailyMovementTarget, csrf: CsrfCredentials, signal: AbortSignal): Promise<void> {
+  const response = await requestJson(dailyMovementPath(target.orgId, target.localDate), {
+    credentials: 'same-origin',
+    headers: { [csrf.headerName]: csrf.token },
+    method: 'DELETE',
+    signal,
+  });
+  requireSuccess(response);
+}
+
+export async function listDailyMovement(
+  input: { from: string; orgId: string; to: string },
+  signal: AbortSignal,
+): Promise<DailyMovementListResponse> {
+  const query = new URLSearchParams({ from: input.from, to: input.to });
+  const response = await requestJson(`${dailyMovementPath(input.orgId)}?${query.toString()}`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  return dailyMovementListResponseSchema.parse(requireSuccess(response));
 }
 
 export async function readRun(orgId: string, runId: string, signal?: AbortSignal): Promise<RunView> {

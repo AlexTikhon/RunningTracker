@@ -7,16 +7,17 @@ import { RunnerApiError, type CsrfCredentials, type DailyMetricsTarget } from '.
 // change of person, organization or session means new controllers, and disposing an old one (or ending its session)
 // aborts its request and silences it, so a late answer can never reach the new scope.
 
-function isAbort(error: unknown): boolean {
+// The helpers below are shared with the Movement section's controllers (ADR-0078).
+export function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
-function serverText(error: RunnerApiError): string {
+export function serverText(error: RunnerApiError): string {
   const reference = error.requestId === null ? '' : ` Reference ${error.requestId}.`;
   return `${error.message.replace(/[.\s]+$/u, '')}.${reference}`;
 }
 
-function followSession(signal: AbortSignal | undefined, dispose: () => void): void {
+export function followSession(signal: AbortSignal | undefined, dispose: () => void): void {
   if (signal === undefined) return;
   if (signal.aborted) {
     dispose();
@@ -25,7 +26,7 @@ function followSession(signal: AbortSignal | undefined, dispose: () => void): vo
   signal.addEventListener('abort', dispose, { once: true });
 }
 
-function lostAccess(error: unknown): boolean {
+export function lostAccess(error: unknown): boolean {
   return error instanceof RunnerApiError && (error.status === 401 || error.status === 403);
 }
 
