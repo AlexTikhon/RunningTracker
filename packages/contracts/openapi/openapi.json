@@ -35,6 +35,9 @@
       "name": "Daily movement"
     },
     {
+      "name": "Daily overview"
+    },
+    {
       "name": "Insights"
     },
     {
@@ -1027,6 +1030,41 @@
         }
       }
     },
+    "/api/orgs/{orgId}/daily-overview/{localDate}": {
+      "get": {
+        "tags": [
+          "Daily overview"
+        ],
+        "summary": "Compute the signed-in person's overview of one local date (Today)",
+        "description": "Owner-only derived health data (ADR-0082), computed by the app on every read and never stored; no language model is called, nothing is queued and nothing is written. Every source is read in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates; run sharing never adds another person's data. `localDate` must not be before 2000-01-01 nor after today in `timeZone` by server time (400 INVALID_REQUEST). Attribution: the check-in and the manually entered movement are those stored for `localDate` (their own calendar date), whatever zone they were saved in; their stored zone is returned and they are never moved to another date. Manual activities and GPS runs count on the date on which they started in `timeZone`: from that date's local midnight up to, not including, the next date's local midnight (23 or 25 hours around a daylight saving change). The response holds the check-in's values, whether it exists (a note-only check-in exists; the note text is never returned) and its stored zone; the movement values, whether they exist, their source (`manual`) and stored zone; manual activity counts and the full entered duration of the activities that started on the date (also of one that continued past midnight), by type; and the person's own finished GPS runs: their count, how many have a distance from a summary current for the run's data, and the sum of those distances only (a partial total covers exactly the `withCurrentDistance` runs). Manual activities and GPS runs are reported separately (they may describe the same session) and movement is never added to either. A value that was not recorded is null, never zero. No raw GPS points, notes or other free text. Answers `Cache-Control: no-store`, errors included.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/LocalDate"
+          },
+          {
+            "$ref": "#/components/parameters/OverviewTimeZone"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyOverview"
+                }
+              }
+            },
+            "description": "The overview of the date."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/weekly-review": {
       "get": {
         "tags": [
@@ -1767,6 +1805,17 @@
         "in": "query",
         "required": true,
         "description": "IANA time zone name, for example Europe/Warsaw. Decides the week's days only when the person has no check-in in that week; otherwise the zone stored on their check-ins does.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "OverviewTimeZone": {
+        "name": "timeZone",
+        "in": "query",
+        "required": true,
+        "description": "IANA time zone name, for example Europe/Warsaw. Decides \"today\" and the interval in which manual activities and GPS runs started; check-ins and movement keep their stored date.",
         "schema": {
           "type": "string",
           "minLength": 1,
@@ -5133,6 +5182,360 @@
           "provenance",
           "statements",
           "week"
+        ],
+        "additionalProperties": false
+      },
+      "DailyOverview": {
+        "type": "object",
+        "properties": {
+          "checkIn": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "recorded": {
+                    "type": "boolean",
+                    "const": false
+                  }
+                },
+                "required": [
+                  "recorded"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "recorded": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "hasNote": {
+                    "type": "boolean"
+                  },
+                  "mood": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "sleepMinutes": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1440
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "sleepQuality": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "soreness": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "timeZone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "weightKg": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 20,
+                        "maximum": 400
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recorded",
+                  "hasNote",
+                  "mood",
+                  "sleepMinutes",
+                  "sleepQuality",
+                  "soreness",
+                  "timeZone",
+                  "weightKg"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "day": {
+            "type": "object",
+            "properties": {
+              "localDate": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "startsAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "endsAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "inProgress": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "localDate",
+              "timeZone",
+              "startsAt",
+              "endsAt",
+              "inProgress"
+            ],
+            "additionalProperties": false
+          },
+          "gpsRuns": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "currentDistanceM": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "withCurrentDistance": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "withoutCurrentDistance": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "required": [
+              "count",
+              "currentDistanceM",
+              "withCurrentDistance",
+              "withoutCurrentDistance"
+            ],
+            "additionalProperties": false
+          },
+          "manualActivities": {
+            "type": "object",
+            "properties": {
+              "byType": {
+                "maxItems": 7,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10000
+                    },
+                    "enteredDurationS": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1728000000
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "count",
+                    "enteredDurationS"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "enteredDurationS": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1728000000
+              }
+            },
+            "required": [
+              "byType",
+              "count",
+              "enteredDurationS"
+            ],
+            "additionalProperties": false
+          },
+          "movement": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "recorded": {
+                    "type": "boolean",
+                    "const": false
+                  }
+                },
+                "required": [
+                  "recorded"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "recorded": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "activeEnergyKcal": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 20000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "manual"
+                    ]
+                  },
+                  "steps": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 200000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "timeZone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "recorded",
+                  "activeEnergyKcal",
+                  "source",
+                  "steps",
+                  "timeZone"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "computedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "overviewVersion": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "persisted": {
+                "type": "boolean",
+                "const": false
+              },
+              "snapshot": {
+                "type": "string",
+                "const": "single_read_only_transaction"
+              },
+              "source": {
+                "type": "string",
+                "const": "computed_by_app"
+              }
+            },
+            "required": [
+              "computedAt",
+              "overviewVersion",
+              "persisted",
+              "snapshot",
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "checkIn",
+          "day",
+          "gpsRuns",
+          "manualActivities",
+          "movement",
+          "provenance"
         ],
         "additionalProperties": false
       },

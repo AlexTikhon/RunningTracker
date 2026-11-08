@@ -4,6 +4,8 @@ import type { Pool } from 'pg';
 import { createActivityRouter } from './activities/activity.routes.js';
 import { createDailyMetricsRouter } from './daily-metrics/daily-metrics.routes.js';
 import { createDailyMovementRouter, dailyMovementNoStore } from './daily-movement/daily-movement.routes.js';
+import { DailyOverviewService, type DailyOverviewTestHooks } from './daily-overview/daily-overview-service.js';
+import { createDailyOverviewRouter, dailyOverviewNoStore } from './daily-overview/daily-overview.routes.js';
 import { createArchiveRouter } from './archive/archive.routes.js';
 import {
   ArchiveTileCache,
@@ -65,6 +67,8 @@ export interface AppDependencies {
   archiveTileCache?: ArchiveTileCacheStore;
   archiveTilePipeline?: ArchiveTilePipeline;
   archiveTileScheduler?: ArchiveTileGenerationScheduler;
+  /** Barriers inside the daily overview's read transaction, for snapshot tests. */
+  testOnlyDailyOverviewHooks?: DailyOverviewTestHooks;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   /** Replaces the configured interpreter in tests, so that no test can reach a provider. */
   testOnlyRunSearchInterpreter?: RunSearchInterpreter;
@@ -89,6 +93,7 @@ export function createApp({
   archiveTileCache,
   archiveTilePipeline,
   archiveTileScheduler,
+  testOnlyDailyOverviewHooks,
   testOnlyFaultInjector,
   testOnlyRunSearchInterpreter,
   testOnlyWeeklyInsightProvider,
@@ -97,7 +102,8 @@ export function createApp({
   weeklyInsights,
 }: AppDependencies): Express {
   if (
-    (testOnlyFaultInjector ||
+    (testOnlyDailyOverviewHooks ||
+      testOnlyFaultInjector ||
       testOnlyRouter ||
       testOnlyRunSearchInterpreter ||
       testOnlyWeeklyInsightProvider ||
@@ -157,6 +163,7 @@ export function createApp({
   });
   // Before the body parser, so that a malformed or oversized body's error answer is not cacheable either (ADR-0078).
   app.use('/api/orgs/:orgId/daily-movement', dailyMovementNoStore);
+  app.use('/api/orgs/:orgId/daily-overview', dailyOverviewNoStore);
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
   if (config.OIDC && oidcLoginStore) {
@@ -230,6 +237,18 @@ export function createApp({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+    }),
+  );
+  // The daily overview (Today, ADR-0082): read-only, derived on every read from the person's own records.
+  app.use(
+    '/api/orgs/:orgId/daily-overview',
+    createDailyOverviewRouter({
+      overview: new DailyOverviewService({
+        clock,
+        pool: pool as Pick<Pool, 'connect'>,
+        ...(testOnlyDailyOverviewHooks ? { hooks: testOnlyDailyOverviewHooks } : {}),
+      }),
       sessionManager: sessions,
     }),
   );

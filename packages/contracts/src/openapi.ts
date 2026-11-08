@@ -16,6 +16,7 @@ import {
   dailyMovementViewSchema,
   putDailyMovementRequestSchema,
 } from './daily-movement.js';
+import { dailyOverviewSchema } from './daily-overview.js';
 import {
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
@@ -107,6 +108,7 @@ export const openApiDocument = {
     { name: 'Activities' },
     { name: 'Daily metrics' },
     { name: 'Daily movement' },
+    { name: 'Daily overview' },
     { name: 'Insights' },
     { name: 'Shares' },
     { name: 'Live reads' },
@@ -429,6 +431,16 @@ export const openApiDocument = {
         responses: { '204': noContentResponse, ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/daily-overview/{localDate}': {
+      get: {
+        tags: ['Daily overview'],
+        summary: "Compute the signed-in person's overview of one local date (Today)",
+        description:
+          "Owner-only derived health data (ADR-0082), computed by the app on every read and never stored; no language model is called, nothing is queued and nothing is written. Every source is read in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates; run sharing never adds another person's data. `localDate` must not be before 2000-01-01 nor after today in `timeZone` by server time (400 INVALID_REQUEST). Attribution: the check-in and the manually entered movement are those stored for `localDate` (their own calendar date), whatever zone they were saved in; their stored zone is returned and they are never moved to another date. Manual activities and GPS runs count on the date on which they started in `timeZone`: from that date's local midnight up to, not including, the next date's local midnight (23 or 25 hours around a daylight saving change). The response holds the check-in's values, whether it exists (a note-only check-in exists; the note text is never returned) and its stored zone; the movement values, whether they exist, their source (`manual`) and stored zone; manual activity counts and the full entered duration of the activities that started on the date (also of one that continued past midnight), by type; and the person's own finished GPS runs: their count, how many have a distance from a summary current for the run's data, and the sum of those distances only (a partial total covers exactly the `withCurrentDistance` runs). Manual activities and GPS runs are reported separately (they may describe the same session) and movement is never added to either. A value that was not recorded is null, never zero. No raw GPS points, notes or other free text. Answers `Cache-Control: no-store`, errors included.",
+        parameters: [parameterRef('OrgId'), parameterRef('LocalDate'), parameterRef('OverviewTimeZone')],
+        responses: { '200': jsonResponse('The overview of the date.', 'DailyOverview'), ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/weekly-review': {
       get: {
         tags: ['Insights'],
@@ -687,6 +699,14 @@ export const openApiDocument = {
           "IANA time zone name, for example Europe/Warsaw. Decides the week's days only when the person has no check-in in that week; otherwise the zone stored on their check-ins does.",
         schema: { type: 'string', minLength: 1, maxLength: 64 },
       },
+      OverviewTimeZone: {
+        name: 'timeZone',
+        in: 'query',
+        required: true,
+        description:
+          'IANA time zone name, for example Europe/Warsaw. Decides "today" and the interval in which manual activities and GPS runs started; check-ins and movement keep their stored date.',
+        schema: { type: 'string', minLength: 1, maxLength: 64 },
+      },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
       CsrfToken: { name: 'x-csrf-token', in: 'header', required: true, schema: { type: 'string' } },
@@ -811,6 +831,7 @@ export const openApiDocument = {
       WeeklyInsightOutput: jsonSchema(weeklyInsightOutputSchema),
       WeeklyInsightView: jsonSchema(weeklyInsightViewSchema),
       WeeklyReview: jsonSchema(weeklyReviewSchema),
+      DailyOverview: jsonSchema(dailyOverviewSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
       RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),
       RunSearchInterpretationResponse: jsonSchema(runSearchInterpretationResponseSchema),
