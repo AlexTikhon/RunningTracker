@@ -10,7 +10,8 @@ import { createLogger, type LogLevel } from '../observability/logger.js';
 import { oidcExternalIdentity } from './identity-resolver.js';
 import { OidcLoginRejectedError, OidcProviderUnavailableError, type OidcClient } from './oidc-client.js';
 import { createOidcRouter } from './oidc-http.js';
-import { OidcLoginStore } from './oidc-login-store.js';
+import { InMemoryPendingLoginStore } from '../testing/in-memory-pending-logins.js';
+import { OidcLoginStoreUnavailableError, type PendingLoginStore } from './pending-login-store.js';
 import { SessionManager } from './session-manager.js';
 import { InMemorySessionStore } from './session-store.js';
 
@@ -41,6 +42,7 @@ interface Harness {
   clock: FixedClock;
   app: express.Express;
   client: { completions: Array<{ callbackUrl: string; pendingState: string }> };
+  loginStore: PendingLoginStore;
   logs: string[];
   sessions: SessionManager;
 }
@@ -49,6 +51,8 @@ function createHarness(
   options: {
     complete?: OidcClient['completeLogin'];
     begin?: OidcClient['beginLogin'];
+    /** Wraps the in-memory store, e.g. to make one of its operations fail like an unreachable database. */
+    wrapStore?: (store: PendingLoginStore) => PendingLoginStore;
     maxEntries?: number;
     resolve?: (identity: string) => Promise<string | undefined>;
     secureCookies?: boolean;
@@ -99,6 +103,8 @@ function createHarness(
   if (!oidc) {
     throw new Error('OIDC configuration expected');
   }
+  const memory = new InMemoryPendingLoginStore({ capacity: oidc.storeMaxEntries, clock, ttlMs: oidc.loginTtlMs });
+  const loginStore = options.wrapStore ? options.wrapStore(memory) : memory;
   const app = express();
   app.use(requestIdMiddleware);
   app.use(
@@ -112,7 +118,7 @@ function createHarness(
           logs.push(line);
         },
       }),
-      loginStore: new OidcLoginStore({ clock, maxEntries: oidc.storeMaxEntries, ttlMs: oidc.loginTtlMs }),
+      loginStore,
       resolveIdentity:
         options.resolve ??
         ((identity) =>
@@ -121,7 +127,7 @@ function createHarness(
     }),
   );
   app.use(apiErrorHandler());
-  return { app, clock, client: { completions }, logs, sessions };
+  return { app, clock, client: { completions }, loginStore, logs, sessions };
 }
 
 function cookieValue(response: request.Response, name: string): string | undefined {
@@ -392,6 +398,196 @@ describe('OIDC login routes', () => {
     for (const secret of ['very-secret-code', 'secret-provider-detail', 'subject-1', loginCookie, 'verifier']) {
       expect(output).not.toContain(secret);
     }
+  });
+
+  describe('pending-login store outages and lifecycle (ADR-0081)', () => {
+    const outage = () => new OidcLoginStoreUnavailableError('no connection', { cause: { code: 'ECONNREFUSED' } });
+
+    /** The in-memory store with one operation failing like an unreachable database; the others still work. */
+    function failing(operation: keyof PendingLoginStore, calls: string[] = []) {
+      return (store: PendingLoginStore): PendingLoginStore => ({
+        cancel: (loginId) => {
+          calls.push('cancel');
+          return operation === 'cancel' ? Promise.reject(outage()) : store.cancel(loginId);
+        },
+        completeReservation: (loginId, login) => {
+          calls.push('completeReservation');
+          return operation === 'completeReservation' ? Promise.reject(outage()) : store.completeReservation(loginId, login);
+        },
+        consume: (loginId) => {
+          calls.push('consume');
+          return operation === 'consume' ? Promise.reject(outage()) : store.consume(loginId);
+        },
+        reserve: (previous) => {
+          calls.push('reserve');
+          return operation === 'reserve' ? Promise.reject(outage()) : store.reserve(previous);
+        },
+      });
+    }
+
+    it('answers 503 with Retry-After and never contacts the provider when no reservation can be made', async () => {
+      const begin = vi.fn<OidcClient['beginLogin']>();
+      const harness = createHarness({ begin, wrapStore: failing('reserve') });
+
+      const response = await request(harness.app).get('/api/auth/login').expect(503);
+
+      expect(response.body).toMatchObject({ error: { code: 'LOGIN_TEMPORARILY_UNAVAILABLE' } });
+      expect(response.headers['retry-after']).toBe('5');
+      expect(setCookieLines(response)).toEqual([]);
+      expect(begin).not.toHaveBeenCalled();
+      expect(harness.logs.join('\n')).toContain('store_unavailable');
+      expect(harness.logs.join('\n')).toContain('ECONNREFUSED');
+    });
+
+    it('answers 503 without a login cookie and frees the reservation when completion cannot be stored', async () => {
+      const calls: string[] = [];
+      const harness = createHarness({ maxEntries: 1, wrapStore: failing('completeReservation', calls) });
+
+      const response = await request(harness.app).get('/api/auth/login').expect(503);
+
+      expect(response.body).toMatchObject({ error: { code: 'LOGIN_TEMPORARILY_UNAVAILABLE' } });
+      expect(setCookieLines(response)).toEqual([]);
+      expect(calls).toEqual(['reserve', 'completeReservation', 'cancel']);
+      // The only slot was released: the next reservation is admitted (and fails at completion again).
+      await request(harness.app).get('/api/auth/login').expect(503);
+      expect(calls.filter((call) => call === 'reserve')).toHaveLength(2);
+    });
+
+    it('still answers for the provider when the cancellation after a provider outage cannot be stored', async () => {
+      const calls: string[] = [];
+      const harness = createHarness({
+        begin: () => Promise.reject(new OidcProviderUnavailableError('discovery failed')),
+        wrapStore: failing('cancel', calls),
+      });
+
+      const response = await request(harness.app).get('/api/auth/login').expect(503);
+
+      expect(response.body).toMatchObject({ error: { code: 'IDENTITY_PROVIDER_UNAVAILABLE' } });
+      expect(calls).toEqual(['reserve', 'cancel']);
+      expect(harness.logs.join('\n')).toContain('auth.login.cancel_failed');
+    });
+
+    it('fails a callback as unavailable, not expired, when the attempt cannot be consumed, and never exchanges the code', async () => {
+      const harness = createHarness({ wrapStore: failing('consume') });
+      const loginCookie = await startLogin(harness);
+
+      const response = await request(harness.app)
+        .get('/api/auth/callback?code=secret-code&state=state-1')
+        .set('Cookie', `running_tracker_login=${loginCookie}`)
+        .expect(302);
+
+      expect(response.headers.location).toBe('/runner?sign_in_error=unavailable');
+      expect(setCookieLines(response)).toEqual([expect.stringContaining('running_tracker_login=; ')]);
+      expect(harness.client.completions).toEqual([]);
+      const output = harness.logs.join('\n');
+      expect(output).toContain('OidcLoginStoreUnavailableError');
+      for (const secret of [loginCookie, 'secret-code', 'state-1', 'verifier-1', 'nonce-1']) {
+        expect(output).not.toContain(secret);
+      }
+    });
+
+    it('does not repeat the exchange after an uncertain consume: the attempt is gone, and a retry is expired', async () => {
+      // The consume committed, but its answer was lost (as on a deadline): the first callback fails as unavailable.
+      let lose = true;
+      const harness = createHarness({
+        wrapStore: (store) => ({
+          cancel: (loginId) => store.cancel(loginId),
+          completeReservation: (loginId, login) => store.completeReservation(loginId, login),
+          consume: async (loginId) => {
+            const consumed = await store.consume(loginId);
+            if (lose) throw new OidcLoginStoreUnavailableError('no answer within 2000 ms');
+            return consumed;
+          },
+          reserve: (previous) => store.reserve(previous),
+        }),
+      });
+      const loginCookie = await startLogin(harness);
+      const callback = () =>
+        request(harness.app)
+          .get('/api/auth/callback?code=abc&state=state-1')
+          .set('Cookie', `running_tracker_login=${loginCookie}`);
+
+      expect((await callback().expect(302)).headers.location).toBe('/runner?sign_in_error=unavailable');
+      lose = false;
+      expect((await callback().expect(302)).headers.location).toBe('/runner?sign_in_error=login_expired');
+      expect(harness.client.completions).toEqual([]);
+    });
+
+    it('lets only one of two concurrent callbacks for one login reach the token exchange and create a session', async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const completions: string[] = [];
+      const harness = createHarness({
+        complete: async (_callbackUrl, pending) => {
+          completions.push(pending.state);
+          await gate;
+          return { issuer, subject: 'subject-1' };
+        },
+      });
+      const loginCookie = await startLogin(harness);
+      const callback = () =>
+        request(harness.app)
+          .get('/api/auth/callback?code=abc&state=state-1')
+          .set('Cookie', `running_tracker_login=${loginCookie}`)
+          .then((response) => response);
+
+      const first = callback();
+      const second = callback();
+      await vi.waitFor(() => expect(completions).toHaveLength(1));
+      release();
+      const responses = await Promise.all([first, second]);
+
+      expect(responses.map((response) => response.status).sort()).toEqual([200, 302]);
+      expect(responses.find((response) => response.status === 302)?.headers.location).toBe(
+        '/runner?sign_in_error=login_expired',
+      );
+      expect(completions).toEqual(['state-1']);
+    });
+
+    it('never hands an incomplete reservation to the token exchange', async () => {
+      // The provider is slow, so the browser's cookie from an earlier response is presented while the new reservation
+      // has not been completed yet: the callback consumes nothing usable and the exchange is never attempted.
+      let reserved: string | undefined;
+      let finishDiscovery: () => void = () => {};
+      const discovery = new Promise<void>((resolve) => {
+        finishDiscovery = resolve;
+      });
+      const harness = createHarness({
+        begin: async () => {
+          await discovery;
+          return { authorizationUrl, pending: { codeVerifier: 'v', nonce: 'n', state: 's' } };
+        },
+        wrapStore: (store) => {
+          const wrapped: PendingLoginStore = {
+            cancel: (loginId) => store.cancel(loginId),
+            completeReservation: (loginId, login) => store.completeReservation(loginId, login),
+            consume: (loginId) => store.consume(loginId),
+            reserve: async (previous) => {
+              reserved = await store.reserve(previous);
+              return reserved;
+            },
+          };
+          return wrapped;
+        },
+      });
+      const login = request(harness.app).get('/api/auth/login').then((response) => response);
+      await vi.waitFor(() => expect(reserved).toBeDefined());
+
+      const early = await request(harness.app)
+        .get('/api/auth/callback?code=abc&state=s')
+        .set('Cookie', `running_tracker_login=${reserved}`)
+        .expect(302);
+      finishDiscovery();
+
+      expect(early.headers.location).toBe('/runner?sign_in_error=login_expired');
+      expect(harness.client.completions).toEqual([]);
+      // The reservation was consumed, so completing it fails and the login answers 503 without a cookie.
+      const answered = await login;
+      expect(answered.status).toBe(503);
+      expect(setCookieLines(answered)).toEqual([]);
+    });
   });
 
   it('omits the Secure attribute only when the deployment explicitly allows plain HTTP', async () => {

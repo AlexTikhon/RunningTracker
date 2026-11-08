@@ -3,6 +3,7 @@ import process from 'node:process';
 import type { Pool } from 'pg';
 
 import { createApp } from './app.js';
+import { PostgresPendingLoginStore } from './auth/postgres-pending-login-store.js';
 import { PostgresSessionStore } from './auth/postgres-session-store.js';
 import { SessionManager } from './auth/session-manager.js';
 import { systemClock, type Clock } from './clock.js';
@@ -26,6 +27,7 @@ import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-f
 import { runAccessJournalExportOnce } from './maintenance/run-access-journal-export.js';
 import { runDeletionJournalExportOnce } from './maintenance/run-deletion-journal-export.js';
 import { runErasureLedgerExportOnce } from './maintenance/run-erasure-ledger-export.js';
+import { runOidcLoginPurgeOnce } from './maintenance/run-oidc-login-purge.js';
 import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runRetentionDeleteOnce } from './maintenance/run-retention-delete.js';
 import { runSessionPurgeOnce } from './maintenance/run-session-purge.js';
@@ -133,6 +135,18 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     }),
     ttlMs: config.SESSION_TTL_MS,
   });
+  // Pending OIDC logins live in PostgreSQL too (ADR-0081): a login started before a restart, or on another instance
+  // with the same database and OIDC configuration, can complete. No process-memory fallback and no cache; a store that
+  // cannot answer fails the sign-in.
+  const oidcLoginStore = config.OIDC
+    ? new PostgresPendingLoginStore({
+        capacity: config.OIDC.storeMaxEntries,
+        clock,
+        operationTimeoutMs: config.SESSION_STORE_TIMEOUT_MS,
+        pool,
+        ttlMs: config.OIDC.loginTtlMs,
+      })
+    : undefined;
   const liveSseHub = createLiveSseHub({
     clock,
     config,
@@ -147,6 +161,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     config,
     liveConnections: liveSseHub,
     metrics,
+    ...(oidcLoginStore ? { oidcLoginStore } : {}),
     pool,
     sessionManager,
     weeklyInsights,
@@ -200,6 +215,14 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     metrics: metrics.maintenance,
     runOnce: () => runSessionPurgeOnce(maintenancePool, clock),
     taskName: 'Expired session purge',
+  });
+  // Runs whether or not OIDC is configured: rows left by an earlier configuration still expire and are removed.
+  const oidcLoginPurgeRunner = new PeriodicRunner({
+    clock,
+    intervalMs: config.SESSION_PURGE_INTERVAL_MS,
+    metrics: metrics.maintenance,
+    runOnce: () => runOidcLoginPurgeOnce(maintenancePool, clock),
+    taskName: 'Expired pending login purge',
   });
   let deletionJournalSink: DeletionJournalSink | undefined;
   if (config.DELETION_JOURNAL_DIR !== undefined) {
@@ -265,6 +288,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
       retentionDeleteRunner.stop();
       tombstoneReclaimRunner.stop();
       sessionPurgeRunner.stop();
+      oidcLoginPurgeRunner.stop();
       summaryRunner.stop();
     },
   };
@@ -289,6 +313,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   retentionDeleteRunner.start();
   tombstoneReclaimRunner.start();
   sessionPurgeRunner.start();
+  oidcLoginPurgeRunner.start();
   deletionJournalRunner?.start();
   accessJournalRunner?.start();
   erasureLedgerRunner?.start();

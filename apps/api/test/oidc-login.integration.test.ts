@@ -12,6 +12,7 @@ import {
   OidcLoginRejectedError,
   OidcProviderUnavailableError,
 } from '../src/auth/oidc-client.js';
+import { PostgresPendingLoginStore } from '../src/auth/postgres-pending-login-store.js';
 import { PostgresSessionStore } from '../src/auth/postgres-session-store.js';
 import { SessionManager } from '../src/auth/session-manager.js';
 import { systemClock } from '../src/clock.js';
@@ -72,8 +73,8 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
     return { origin: `http://127.0.0.1:${port}`, server };
   }
 
-  // Each mount is its own API instance with its own session store object over the shared database (ADR-0080), the
-  // way two processes would be; they share only PostgreSQL.
+  // Each mount is its own API instance with its own session and pending-login store objects over the shared database
+  // (ADR-0080, ADR-0081), the way two processes would be; they share only PostgreSQL.
   function mount(listening: { origin: string; server: Server }, issuer: string): RunningApp {
     const config = validateEnvironment({
       ALLOWED_ORIGINS: listening.origin,
@@ -96,7 +97,17 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
       }),
       ttlMs: config.SESSION_TTL_MS,
     });
-    listening.server.on('request', createApp({ clock: systemClock, config, pool: runtimePool, sessionManager }));
+    const oidcLoginStore = new PostgresPendingLoginStore({
+      capacity: config.OIDC!.storeMaxEntries,
+      clock: systemClock,
+      operationTimeoutMs: config.SESSION_STORE_TIMEOUT_MS,
+      pool: runtimePool,
+      ttlMs: config.OIDC!.loginTtlMs,
+    });
+    listening.server.on(
+      'request',
+      createApp({ clock: systemClock, config, oidcLoginStore, pool: runtimePool, sessionManager }),
+    );
     return { config, origin: listening.origin };
   }
 
@@ -134,6 +145,7 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
   beforeEach(async () => {
     await prepareTenantIsolationFixtures(ownerPool, expectedOwner);
     await ownerPool.query('DELETE FROM app_private.auth_sessions');
+    await ownerPool.query('DELETE FROM app_private.oidc_pending_logins');
     const listening = await listen();
     provider = await startTestProvider({
       clientId,

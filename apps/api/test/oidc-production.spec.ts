@@ -9,6 +9,7 @@ import { createApp } from '../src/app.js';
 import { systemClock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
 import type { DatabasePool } from '../src/database/database.js';
+import { inMemoryPendingLoginStore } from '../src/testing/in-memory-pending-logins.js';
 import { inMemorySessionManager } from '../src/testing/in-memory-sessions.js';
 
 const connect = vi.fn(() => Promise.reject(new Error('The database must not be used by these tests')));
@@ -42,9 +43,11 @@ const production = {
 
 describe('production sign-in surface', () => {
   const sessions = inMemorySessionManager(systemClock, validateEnvironment(production));
+  const oidcLoginStore = inMemoryPendingLoginStore(systemClock, validateEnvironment(production).OIDC!);
   const app = createApp({
     clock: systemClock,
     config: validateEnvironment(production),
+    oidcLoginStore,
     pool,
     sessionManager: sessions,
   });
@@ -55,6 +58,7 @@ describe('production sign-in surface', () => {
         ...production,
         OIDC_ISSUER_URL: `https://127.0.0.1:${await closedPort()}`,
       }),
+      oidcLoginStore,
       pool,
       sessionManager: sessions,
     });
@@ -79,6 +83,12 @@ describe('production sign-in surface', () => {
 
   it('keeps the session endpoint closed without a session', async () => {
     await request(app).get('/api/session').expect(401);
+  });
+
+  it('refuses to start OIDC sign-in without a pending-login store, rather than keep logins in process memory (ADR-0081)', () => {
+    expect(() => createApp({ clock: systemClock, config: validateEnvironment(production), pool, sessionManager: sessions })).toThrow(
+      'OIDC sign-in requires a pending-login store',
+    );
   });
 
   it('does not mount the OIDC routes when OIDC is not configured', async () => {

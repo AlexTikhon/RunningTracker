@@ -486,10 +486,12 @@ export async function seedInterruptedInsight(environment: E2eEnvironment, orgId:
   );
 }
 
-// ADR-0080: the suite's API processes keep sessions in this test database's shared store. Removing them after a run
-// keeps runs independent of each other (one run must not fill the shared capacity for the next).
+// ADR-0080, ADR-0081: the suite's API processes keep sessions and pending OIDC logins in this test database's shared
+// stores. Removing them after a run keeps runs independent of each other (one run must not fill a shared capacity for
+// the next).
 export async function removeSuiteSessions(environment: E2eEnvironment): Promise<void> {
   await withOwnerTransaction(environment, async (client) => {
     await client.query('DELETE FROM app_private.auth_sessions');
+    await client.query('DELETE FROM app_private.oidc_pending_logins');
   });
 }

@@ -7,7 +7,12 @@ import type { Logger } from '../observability/logger.js';
 import { describeError } from '../observability/logger.js';
 import { oidcExternalIdentity, type IdentityResolver } from './identity-resolver.js';
 import { OidcLoginRejectedError, OidcProviderUnavailableError, type OidcClient } from './oidc-client.js';
-import { OidcLoginStoreCapacityError, type OidcLoginStore } from './oidc-login-store.js';
+import {
+  OidcLoginStoreCapacityError,
+  OidcLoginStoreUnavailableError,
+  type PendingLogin,
+  type PendingLoginStore,
+} from './pending-login-store.js';
 import { parseCookie, sessionCookie } from './session-http.js';
 import type { SessionManager } from './session-manager.js';
 
@@ -22,7 +27,8 @@ export interface OidcRouterDependencies {
   client: OidcClient;
   config: Environment;
   logger: Logger;
-  loginStore: OidcLoginStore;
+  /** PostgreSQL in the API process (ADR-0081); an explicit in-memory store in unit tests. Never a fallback. */
+  loginStore: PendingLoginStore;
   resolveIdentity: IdentityResolver;
   sessionManager: SessionManager;
 }
@@ -109,9 +115,12 @@ export function createOidcRouter({
     inFlight += 1;
     let loginId: string | undefined;
     try {
-      loginId = loginStore.reserve(parseCookie(request.header('cookie'), loginCookieName));
+      // Capacity is taken before the provider is contacted, so a full store never starts provider work. No database
+      // connection or transaction is held while discovery runs: each store call is one short statement.
+      loginId = await loginStore.reserve(parseCookie(request.header('cookie'), loginCookieName));
       const { authorizationUrl, pending } = await client.beginLogin();
-      if (!loginStore.completeReservation(loginId, pending)) {
+      // False when the reservation expired during discovery, or this browser replaced or used it meanwhile.
+      if (!(await loginStore.completeReservation(loginId, pending))) {
         throw new OidcLoginStoreCapacityError();
       }
       response.setHeader(
@@ -120,13 +129,24 @@ export function createOidcRouter({
       );
       response.redirect(302, authorizationUrl.toString());
     } catch (error) {
-      if (loginId !== undefined) loginStore.take(loginId);
+      if (loginId !== undefined) {
+        // Frees the slot now; if the store cannot answer, the reservation still expires on its own.
+        await loginStore.cancel(loginId).catch((cancelError: unknown) => {
+          logger.warn('auth.login.cancel_failed', describeError(cancelError));
+        });
+      }
       if (error instanceof OidcProviderUnavailableError) {
         logger.warn('auth.login.failed', { reason: 'provider_unavailable', ...describeError(error) });
         throw new ApiError(503, 'IDENTITY_PROVIDER_UNAVAILABLE', 'The identity provider is unavailable');
       }
       if (error instanceof OidcLoginStoreCapacityError) {
         logger.warn('auth.login.failed', { reason: 'store_full' });
+        throw new ApiError(503, 'LOGIN_TEMPORARILY_UNAVAILABLE', 'Sign-in is temporarily unavailable');
+      }
+      if (error instanceof OidcLoginStoreUnavailableError) {
+        // The same answer as a full store for the browser; the log tells an outage from a full store.
+        logger.warn('auth.login.failed', { reason: 'store_unavailable', ...describeError(error) });
+        response.setHeader('Retry-After', '5');
         throw new ApiError(503, 'LOGIN_TEMPORARILY_UNAVAILABLE', 'Sign-in is temporarily unavailable');
       }
       throw error;
@@ -139,8 +159,22 @@ export function createOidcRouter({
     response.setHeader('Referrer-Policy', 'no-referrer');
     // The attempt is single use whatever happens next, and its cookie is always cleared.
     const loginId = parseCookie(request.header('cookie'), loginCookieName);
-    const pending = loginId === undefined ? undefined : loginStore.take(loginId);
     response.setHeader('Set-Cookie', clearedLoginCookie(secure));
+    if (loginId === undefined) {
+      fail(response, 'login_expired');
+      return;
+    }
+    // Consumed BEFORE any provider work, atomically across instances: of two callbacks for one login, at most one
+    // receives it and reaches the token exchange. A store that cannot answer is not an expired login: the sign-in
+    // fails as unavailable. Its outcome may be uncertain (the removal may have committed), so the exchange is never
+    // attempted and never retried; the person starts a new sign-in (at most once, ADR-0081).
+    let pending: PendingLogin | undefined;
+    try {
+      pending = await loginStore.consume(loginId);
+    } catch (error) {
+      fail(response, 'unavailable', error);
+      return;
+    }
     if (pending === undefined) {
       fail(response, 'login_expired');
       return;

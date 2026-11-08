@@ -17,7 +17,7 @@ import {
 import { createDatabaseIdentityResolver } from './auth/identity-resolver.js';
 import { createOidcClient } from './auth/oidc-client.js';
 import { createOidcRouter } from './auth/oidc-http.js';
-import { OidcLoginStore } from './auth/oidc-login-store.js';
+import type { PendingLoginStore } from './auth/pending-login-store.js';
 import type { SessionManager } from './auth/session-manager.js';
 import { createSessionRouter } from './auth/session-http.js';
 import type { Clock } from './clock.js';
@@ -53,6 +53,11 @@ export interface AppDependencies {
   config: Environment;
   logger?: Logger;
   metrics?: ApiMetrics;
+  /**
+   * Required when OIDC is configured: production wires the PostgreSQL store (main.ts, ADR-0081), so a login can complete
+   * after a restart or on another instance; tests pass an explicit in-memory one. There is no default.
+   */
+  oidcLoginStore?: PendingLoginStore;
   pool: DatabasePool;
   /** Required: production wires the PostgreSQL store (main.ts); tests pass an explicit in-memory one. */
   sessionManager: SessionManager;
@@ -77,6 +82,7 @@ export function createApp({
   config,
   logger = defaultLogger,
   metrics = createApiMetrics(),
+  oidcLoginStore,
   pool,
   sessionManager,
   liveConnections,
@@ -99,6 +105,9 @@ export function createApp({
     config.APP_ENV !== 'test'
   ) {
     throw new Error('test-only app dependencies require APP_ENV=test');
+  }
+  if (config.OIDC && oidcLoginStore === undefined) {
+    throw new Error('OIDC sign-in requires a pending-login store');
   }
 
   const app = express();
@@ -150,18 +159,14 @@ export function createApp({
   app.use('/api/orgs/:orgId/daily-movement', dailyMovementNoStore);
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
-  if (config.OIDC) {
+  if (config.OIDC && oidcLoginStore) {
     app.use(
       '/api/auth',
       createOidcRouter({
         client: createOidcClient(config.OIDC, clock),
         config,
         logger,
-        loginStore: new OidcLoginStore({
-          clock,
-          maxEntries: config.OIDC.storeMaxEntries,
-          ttlMs: config.OIDC.loginTtlMs,
-        }),
+        loginStore: oidcLoginStore,
         resolveIdentity: createDatabaseIdentityResolver(pool as Pick<Pool, 'connect'>),
         sessionManager: sessions,
       }),

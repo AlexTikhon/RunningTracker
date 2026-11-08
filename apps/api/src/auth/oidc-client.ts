@@ -2,7 +2,7 @@ import * as openid from 'openid-client';
 
 import type { Clock } from '../clock.js';
 import type { OidcConfig } from '../config/oidc-config.js';
-import type { PendingLogin } from './oidc-login-store.js';
+import type { PendingLogin } from './pending-login-store.js';
 
 /** The provider refused or the response failed validation: state, nonce, issuer, audience, signature, expiry. */
 export class OidcLoginRejectedError extends Error {

@@ -9,6 +9,7 @@ import {
   type PendingLoginStore,
 } from '../auth/pending-login-store.js';
 import type { Clock } from '../clock.js';
+import type { OidcConfig } from '../config/oidc-config.js';
 
 interface StoredAttempt {
   expiresAt: number;
@@ -87,4 +88,12 @@ export class InMemoryPendingLoginStore implements PendingLoginStore {
     if (loginIdPattern.test(loginId)) this.#attempts.delete(pendingLoginDigest(loginId));
     return Promise.resolve();
   }
+}
+
+/** The in-memory store sized from a test configuration's OIDC settings, for tests that do not exercise storage. */
+export function inMemoryPendingLoginStore(
+  clock: Pick<Clock, 'utcNow'>,
+  oidc: Pick<OidcConfig, 'loginTtlMs' | 'storeMaxEntries'>,
+): InMemoryPendingLoginStore {
+  return new InMemoryPendingLoginStore({ capacity: oidc.storeMaxEntries, clock, ttlMs: oidc.loginTtlMs });
 }
