@@ -1,5 +1,9 @@
 # Product direction (from 2026-11-06)
 
+**Working product name: SomaLane** (from 2026-11-08): a personal activity, nutrition and health tracker with an
+optional, evidence-based assistant. It is a direction, not a rename: packages, database identifiers, cookies,
+environment variables and the repository keep the Running Tracker names.
+
 Running Tracker was paused on 2026-11-06 as a hardened local demo of GPS run capture, live coaching and a
 revision-safe archive. It is now resumed with a broader direction: an **activity, health and nutrition tracker with
 an AI coach that runs on a local Ollama model**. The existing run capture, archive and coach views stay as they are;
@@ -14,6 +18,8 @@ commitment to dates or to every item below.
    - Generic activities with manual entry (step 1, [ADR-0072](adr/0072-owner-only-manual-activities.md)).
    - GPX/TCX/FIT import into activities.
    - Daily check-in: weight, sleep, mood (and soreness).
+   - Daily movement: steps and active energy, manual entry first ([ADR-0078](adr/0078-manual-daily-movement.md));
+     phone/watch import later, under its own provenance.
    - Meal log.
 2. **Deterministic analytics.** SQL, with versioned snapshots: weekly volume, pace trends, training load, personal
    bests. A unified read model over `runs` and `activities` (a view or a union) belongs here.
@@ -29,13 +35,18 @@ commitment to dates or to every item below.
   words them. A number in model output that is not in the facts bundle is a defect.
 - **Model output only proposes; the person confirms.** The same pattern as the natural-language search filter
   (ADR-0057): a proposal is validated against a strict contract and changes nothing until the person accepts it.
-- **Health data is owner-only by default.** Activities, check-ins and meals are visible only to the person who
+- **Health data is owner-only by default.** Activities, check-ins, movement and meals are visible only to the person who
   recorded them. A coach sees none of it, even with run sharing grants, unless a later, explicit, per-category grant
   exists. Such a grant is a separate decision with its own ADR; run sharing never implies it.
 - **A deletion of health data stays deleted.** Every owner-only entity records its erasures in the erasure ledger,
   which leaves the database host and is replayed after a restore (ADR-0073). A new entity uses its extension point.
 - **Each slice is a vertical slice:** migration with row-level security, strict contracts, API, web screen, tests at
   every layer and documentation, without changing existing behaviour that it does not own.
+- **Provenance is the server's.** A client never names an owner, an organization or a source. Data from different
+  sources (manual entry, a later import) is stored side by side, never overwritten by another source and never added
+  together into one daily total (ADR-0078).
+- **No derived health numbers without a definition.** Nothing estimates calories from steps or similar; a value is
+  either what the person or a device reported, or a computation with its own decision record.
 
 ## Current step
 
@@ -54,3 +65,9 @@ model met the target. The first deterministic analytics item is the **weekly rev
 described in sentences written by code from the same aggregate, computed on every read, never stored, and independent of
 any model. It is the primary weekly view; AI text is an optional, separately labelled section. Multi-week trends,
 baselines and a unified manual/GPS read model remain to be decided.
+
+Daily movement is [ADR-0078](adr/0078-manual-daily-movement.md): `daily_movement` (steps, user-reported active
+energy), one manual record per person per local date, owner-only, replaced by PUT, with server-owned `source:
+manual` provenance and erasures in the ledger. It keeps the ADR-0074 date rules and is deliberately not an input of the
+weekly review or AI insights. Proposed next slice: a read-only movement line in the weekly review (coverage of days
+with steps, and the manual source named), defined in its own decision, before any import.

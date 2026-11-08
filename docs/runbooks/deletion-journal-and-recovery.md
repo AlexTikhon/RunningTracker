@@ -111,7 +111,8 @@ Nothing may connect as the runtime or maintenance role in the meantime.
    must report only `already_applied`). It only removes access and never reconstructs a
    grant. Procedure, outcomes and limits: `docs/runbooks/backup-and-restore.md` step 8
    and ADR-0045. Do not open access until it is done and verified.
-8. **Replay erasures of owner-only health records** (activities, ADR-0073; daily check-ins, ADR-0074) from the same
+8. **Replay erasures of owner-only health records** (activities, ADR-0073; daily check-ins, ADR-0074; daily movement,
+   ADR-0078, entity type `daily_movement`) from the same
    journal copy with `npm run restore:reapply-erasures -- --journal-dir <copy>`, owner
    login, exactly as in step 5. It reads every `erasure-ledger-*.ndjson` file first and
    stops on a malformed one. Outcomes: `erased` (the erased record was back in the
@@ -128,8 +129,8 @@ Nothing may connect as the runtime or maintenance role in the meantime.
 - Deletions committed but not yet exported when the node is lost are gone; the run
   can reappear after a restore. Its owner must delete it again. The window is one
   export interval while healthy and unbounded while the exporter is failing. The same
-  holds for activity and check-in erasures in the erasure ledger (ADR-0073, ADR-0074).
-- If the erasure ledger cannot be written, an activity or check-in DELETE fails (HTTP 500)
+  holds for activity, check-in and movement erasures in the erasure ledger (ADR-0073, ADR-0074, ADR-0078).
+- If the erasure ledger cannot be written, an activity, check-in or movement DELETE fails (HTTP 500)
   and the record stays; nothing is erased without its record. Fix the database, then the
   owner retries.
 - Files are not signed. Whoever can write to the directory can add an entry, which

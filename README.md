@@ -22,6 +22,7 @@ What exists, stage by stage (the evidence for each is in [docs/progress.md](docs
 - Step 2 (ADR-0074): a daily **Check-in** tab (weight, sleep, sleep quality, mood, soreness, a note) with one record per person per local date, owner-only, replaced as a whole by PUT; deletions use the same erasure ledger. See "Daily check-in" below.
 - Step 3 (ADR-0076): a **weekly insight** on the Check-in tab. Code computes every number as a fact; an optional local Ollama model writes number-free prose and cites facts that must match exactly; erasure of a source can never leave an insight behind. Off by default. See "Weekly insights" below.
 - Deterministic weekly review (ADR-0077): the primary weekly view on the Check-in tab, computed and worded by code on every read (coverage with explicit denominators, values, GPS distance gaps, limitations), never stored and independent of any model; the AI insight is an optional section below it. See "Weekly review" below.
+- Daily movement (ADR-0078): a **Movement** section on the Check-in tab for steps and active energy entered by hand, one manual record per person per local date, owner-only, with server-owned "manual" provenance and erasures in the same ledger. No phone or watch import yet, no calorie estimate, and not an input of the weekly review or AI insights. See "Daily movement" below. The working product direction is called SomaLane (`docs/product-direction.md`); no package, identifier or repository was renamed.
 
 **What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider, and the OpenID Connect flow only in Chromium), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. The full browser suite runs in Chromium; desktop Firefox, on Windows, runs the 18-test core gate (runner, coach and sharing workflows) and the 24-test pre-demo smoke, but not OpenID Connect sign-in or the real map runtime; no real Mapbox basemap was rendered in any browser; nothing ran in Safari, a mobile browser or on a phone with real GPS. No production RPO or RTO is claimed. Two read endpoints named in the SDD (`/archive/runs`, `/live/nearby`) remain unimplemented; `/runs/{runId}/track?mode=archive` now reads published finished-run geometry and metrics (ADR-0066). To see it working locally, run `npm run demo:up` and press **Demo runner** or **Demo coach** in the browser; the walk-through and its recorded rehearsal are in [docs/runbooks/demo.md](docs/runbooks/demo.md), and interview notes in [docs/interview.md](docs/interview.md).
 
@@ -148,6 +149,35 @@ Step 2, decided in [ADR-0074](docs/adr/0074-daily-check-in-local-date-and-put-re
 | `DELETE /api/orgs/:orgId/daily-metrics/:localDate` | Hard delete recorded in the erasure ledger (`daily_metric`), `204` in every case; replayed by `restore:reapply-erasures` after a restore. |
 
 The web tab defaults to today in the browser's zone, can pick an earlier date (and shows what is stored for it), and lists the last 14 days with the empty days visible. There is no stored profile time zone: the browser's zone is sent with each write, as for run search. A day with a record can be deleted from the form after an inline confirmation ([ADR-0075](docs/adr/0075-session-store-capacity-ci-shape-checkin-delete.md)); while a save or a deletion is pending the other waits, and so does a change of date. No charts, and no protection against two devices overwriting each other's edit of the same day (last write wins).
+
+## Daily movement
+
+Decided in [ADR-0078](docs/adr/0078-manual-daily-movement.md). Migration `0033_daily_movement.sql` adds `daily_movement`: one row per person, organization, **local calendar date** and source, with nullable `steps` (0 to 200,000) and `active_energy_kcal` (0 to 20,000, one decimal; the active energy the person reports, not resting energy, total expenditure or food), at least one of them present; a recorded 0 is a value, a missing value is unknown. `source` is `'manual'`, set by the database default: the runtime role cannot write it, so a client cannot claim an import. A later phone/watch importer stores its own rows under its own source value and never overwrites the manual one; a read model then picks one source per day and never adds them. Access is the check-in template (owner-only RLS, value-column UPDATE only, database clocks); run sharing never grants it. Migration `0034` keeps the erasure replay of a movement day from touching weekly insights, which do not read movement.
+
+| Request | Answer |
+|---|---|
+| `PUT /api/orgs/:orgId/daily-movement/:localDate` | Creates (`201`) or fully replaces (`200`) the day's `steps` and `activeEnergyKcal`; omitted fields are cleared. An exact retry changes nothing, not even `updatedAt`. The body carries `timeZone` (IANA) and no owner, organization or source: the date must not be after today in that zone by server time, nor before 2000-01-01; the zone of the first write is kept. |
+| `GET /api/orgs/:orgId/daily-movement?from=&to=` | The person's manual days in an inclusive range of at most 92 days, ascending. |
+| `GET /api/orgs/:orgId/daily-movement/:localDate` | The day with `source: "manual"`, otherwise `404 DAILY_MOVEMENT_NOT_FOUND`. |
+| `DELETE /api/orgs/:orgId/daily-movement/:localDate` | Hard delete recorded in the erasure ledger (`daily_movement`), `204` in every case; replayed by `restore:reapply-erasures` after a restore. |
+
+Every response is `Cache-Control: no-store`, errors included (also a malformed JSON body's). Example:
+
+```http
+PUT /api/orgs/7b1e…/daily-movement/2026-11-07
+Content-Type: application/json
+X-CSRF-Token: …
+
+{"steps": 8042, "activeEnergyKcal": 412.5, "timeZone": "Europe/Warsaw"}
+
+201 Created
+Cache-Control: no-store
+
+{"activeEnergyKcal": 412.5, "createdAt": "2026-11-07T18:02:11.204Z", "localDate": "2026-11-07", "source": "manual",
+ "steps": 8042, "timeZone": "Europe/Warsaw", "updatedAt": "2026-11-07T18:02:11.204Z"}
+```
+
+The Check-in tab's **Movement** section (below the check-in history) has its own date, "Steps (optional)" and "Active energy (kcal)" fields, the source line "Manually entered", Save, Delete after confirmation and a 14-day history; it says that phone and watch synchronization is not connected yet. Saving movement does not refresh the weekly review or the AI insight.
 
 ## Weekly review
 

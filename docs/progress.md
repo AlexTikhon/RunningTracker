@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-06 (resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-08 (manual daily movement, ADR-0078, is the last section; before it: resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3519,3 +3519,34 @@ post-save expectation.
 
 **Not established.** Hosted CI is reported with the change. The browser scenario ran only in Chromium on Windows; the
 narrow-screen check forces Verdana to approximate Linux fonts. No real model was run (none needed).
+
+## Manual daily movement (ADR-0078) (2026-11-08)
+
+Branch `feat/daily-movement` from `main` at 4bedf43 (the deterministic weekly review). A dedicated owner-only
+`daily_movement` entity (steps, user-reported active energy), one manual record per person per local date, with
+server-owned `source: manual` provenance, the ADR-0074 date rules, erasures through the existing ledger, and a Movement
+section on the Check-in tab. Migrations 0033 and 0034; no dependency, no infrastructure; weekly insights, the weekly
+review contract, check-ins and GPS capture unchanged. SomaLane is now the documented working product name (no renames).
+`AGENTS.md` does not exist in the repository; `docs/agent-kickoff.md` and the ADRs were the instructions read.
+
+**Executed checks.**
+
+| Command | Before (4bedf43) | After |
+|---|---|---|
+| `npm run verify` | 2,836: scripts 90, API 1,535, web 1,006, contracts 188, fixtures 14, simulator 3 | 2,897: scripts 90, API 1,540 (+4 route coverage, one per new operation; +1 drill evaluation test; the ledger format test gained assertions), web 1,051 (+45: client 5, draft/history 11, controllers 13, rendering 16), contracts 199 (+11), fixtures 14, simulator 3 |
+| `npm run test:integration` | 702 in 58 files | 767 in 60 files (+37 `daily-movement-access`, +28 `daily-movement-http`), 149 s; the restore drill (real `pg_dump`/`pg_restore`) now deletes and replays three records, movement day M among them |
+| Affected Chromium specs (`daily-movement`, `daily-checkin`, `weekly-review`, `weekly-insights`) | n/a | 7 passed (60 s) |
+| Full `npm run test:e2e` | 136 | 137 passed in 13.4 min (136 + `daily-movement.spec.ts`; the harness's deliberately failing test printed its expected `x`) |
+
+**Mutation checks** (each red, then restored): the upsert without its "values unchanged" guard: the exact-retry HTTP
+test failed. The 0034 wrapper without the movement exception (applied to the test database): the "a movement replay
+changes no weekly insight and no insight source revision" test failed. The movement day controller's late-answer guard
+reduced to "not disposed": 2 controller tests failed. `GRANT INSERT (source)` to the runtime role: the column-privilege
+and declared-ACL tests failed.
+
+Found while testing: one SQL test compared the ledger rows of a two-row DELETE in a fixed order; PostgreSQL visits rows
+in physical order, which changed after an UPDATE, so the comparison is now order-independent (3/3 runs after the fix).
+
+**Not established.** No phone, watch or health platform was involved: the import design in ADR-0078 is a design only.
+The browser flow ran only in Chromium on Windows. A malformed check-in body's `400` still lacks `no-store`
+(pre-existing; the movement routes mount the header before the body parser). Hosted CI is reported with the change.
