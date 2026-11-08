@@ -25,6 +25,12 @@ function tokenDigest(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('base64url');
 }
 
+/**
+ * Opaque session tokens over an asynchronous store (ADR-0080). Every method that reaches the store rejects with
+ * SessionStoreUnavailableError when the store cannot answer; that is never turned into "no session" here, so a
+ * caller can tell an outage from a refusal. Expiry is absolute from the issue instant and is checked against this
+ * process's clock on every read, so a session is refused from its expiry instant on.
+ */
 export class SessionManager {
   readonly #clock: Clock;
   readonly #store: SessionStore;
@@ -41,7 +47,7 @@ export class SessionManager {
     this.#ttlMs = ttlMs;
   }
 
-  public create(userId: string): CreatedSession {
+  public async create(userId: string): Promise<CreatedSession> {
     const sessionToken = this.#generateToken();
     const csrfToken = this.#generateToken();
     const issuedAt = this.#clock.utcNow();
@@ -52,41 +58,25 @@ export class SessionManager {
       tokenDigest: tokenDigest(sessionToken),
       userId,
     };
-    this.#store.set(record);
+    await this.#store.insert(record);
     return { record, sessionToken };
   }
 
-  public resolve(sessionToken: string): StoredSession | undefined {
+  public async resolve(sessionToken: string): Promise<StoredSession | undefined> {
     if (!opaqueTokenPattern.test(sessionToken)) {
       return undefined;
     }
-    const digest = tokenDigest(sessionToken);
-    const record = this.#store.get(digest);
-    if (!record) {
-      return undefined;
-    }
-    if (record.expiresAt.getTime() <= this.#clock.utcNow().getTime()) {
-      this.#store.delete(digest);
-      return undefined;
-    }
-    return record;
+    return this.#findLive(tokenDigest(sessionToken));
   }
 
-  public isActive(
-    session: Pick<StoredSession, 'tokenDigest' | 'userId'>,
-  ): boolean {
-    const record = this.#store.get(session.tokenDigest);
-    if (!record) {
-      return false;
-    }
-    if (record.expiresAt.getTime() <= this.#clock.utcNow().getTime()) {
-      this.#store.delete(session.tokenDigest);
-      return false;
-    }
-    return record.userId === session.userId;
+  /** Whether this exact session is still stored, unexpired and for the same identity. Resolves only to a boolean. */
+  public async isActive(session: Pick<StoredSession, 'tokenDigest' | 'userId'>): Promise<boolean> {
+    const record = await this.#findLive(session.tokenDigest);
+    return record !== undefined && record.userId === session.userId;
   }
 
-  public revoke(sessionToken: string): boolean {
+  /** Resolves once the removal is committed; rejects, and revokes nothing it can vouch for, when the store fails. */
+  public async revoke(sessionToken: string): Promise<boolean> {
     if (!opaqueTokenPattern.test(sessionToken)) {
       return false;
     }
@@ -100,6 +90,15 @@ export class SessionManager {
     const expected = Buffer.from(record.csrfToken, 'utf8');
     const actual = Buffer.from(candidate, 'utf8');
     return expected.byteLength === actual.byteLength && timingSafeEqual(expected, actual);
+  }
+
+  async #findLive(digest: string): Promise<StoredSession | undefined> {
+    const now = this.#clock.utcNow();
+    const record = await this.#store.find(digest, now);
+    if (!record || record.expiresAt.getTime() <= now.getTime()) {
+      return undefined;
+    }
+    return record;
   }
 
   #generateToken(): string {
