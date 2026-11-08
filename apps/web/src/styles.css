@@ -426,3 +426,19 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .review-coverage dl div { display: flex; justify-content: space-between; gap: 0.5rem; min-width: 0; }
 .review-coverage dt { color: #a9b5ad; }
 .review-coverage dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.review-movement { display: grid; gap: 0.5rem; min-width: 0; }
+.review-movement h3 { margin: 0; font-size: 0.95rem; }
+.review-movement__source { margin: 0; color: #a9b5ad; font-size: 0.86rem; }
+.review-movement__totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 0.35rem 1rem; margin: 0; }
+.review-movement__totals div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.25rem 0.5rem; min-width: 0; }
+.review-movement__totals dt { color: #a9b5ad; }
+.review-movement__totals dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.review-movement__days { display: grid; gap: 0.35rem; margin: 0; padding: 0; list-style: none; }
+.review-movement__day { display: grid; grid-template-columns: minmax(5.5rem, auto) 1fr; align-items: baseline; gap: 0.25rem 0.75rem; padding: 0.45rem 0.7rem; border: 1px solid #2e3831; border-radius: 0.6rem; min-width: 0; }
+.review-movement__day time { font-weight: 700; }
+.review-movement__day dl { display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; margin: 0; min-width: 0; }
+.review-movement__day dt { color: #7f8a82; font-size: 0.68rem; }
+.review-movement__day dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.review-movement__day p { margin: 0; color: #7f8a82; font-size: 0.84rem; }
+.review-movement__day--missing { border-style: dashed; }
+@media (max-width: 40rem) { .review-movement__day { grid-template-columns: 1fr; } }

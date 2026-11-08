@@ -21,6 +21,7 @@ import {
   validateCheckInDraft,
   type CheckInDraft,
 } from './daily-checkin.js';
+import { afterConfirmedChange, initialRefreshKeys, type CheckInChange, type CheckInRefreshKeys } from './check-in-refresh.js';
 import { DailyMovementSection } from './DailyMovementSection.js';
 import { defaultTimeZone } from './run-search.js';
 import { deleteDailyMetrics, listDailyMetrics, putDailyMetrics, readDailyMetrics, type CsrfCredentials } from './runner-api.js';
@@ -157,9 +158,10 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
   const [day, setDay] = useState<CheckInDaySnapshot>(() => loadingCheckInDay(today));
   const [history, setHistory] = useState<CheckInHistorySnapshot>(loadingCheckInHistory);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  // A saved or deleted day changes the week's review and can make its AI insight stale or delete it: both sections read
-  // the week again.
-  const [insightRefresh, setInsightRefresh] = useState(0);
+  // A saved or deleted check-in changes the week's review and can make its AI insight stale or delete it: both sections
+  // read the week again. A saved or deleted movement day changes the review only (ADR-0079).
+  const [refreshKeys, setRefreshKeys] = useState<CheckInRefreshKeys>(initialRefreshKeys);
+  const refreshAfter = (change: CheckInChange) => setRefreshKeys((keys) => afterConfirmedChange(keys, change));
   // The week shown by the Weekly review and the optional AI insight below it, chosen in the review section.
   const weeks = useMemo(() => recentWeeks(today), [today]);
   const [weekStart, setWeekStart] = useState(() => weeks[0]!.weekStart);
@@ -187,7 +189,7 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
     setShowErrors(false);
     setDraft(emptyCheckInDraft);
     historyController.current?.refresh();
-    setInsightRefresh((count) => count + 1);
+    refreshAfter('check-in');
     heading.current?.focus();
   };
 
@@ -210,7 +212,7 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
       onLoaded: (date, existing) => afterLoaded.current(date, existing),
       onSaved: () => {
         historyController.current?.refresh();
-        setInsightRefresh((count) => count + 1);
+        setRefreshKeys((keys) => afterConfirmedChange(keys, 'check-in'));
       },
       orgId,
       read: readDailyMetrics,
@@ -360,21 +362,28 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
         snapshot={history}
       />
 
-      {/* Manual movement (ADR-0078): its own form and history; a save or deletion there does not refresh the weekly
-          review or the AI insight, which do not read movement. */}
-      <DailyMovementSection csrf={csrf} orgId={orgId} signal={signal} timeZone={timeZone} today={today} />
+      {/* Manual movement (ADR-0078): its own form and history. A confirmed save or deletion there refreshes the weekly
+          review, which shows movement (ADR-0079), and never the AI insight, which does not read it. */}
+      <DailyMovementSection
+        csrf={csrf}
+        onChanged={() => refreshAfter('movement')}
+        orgId={orgId}
+        signal={signal}
+        timeZone={timeZone}
+        today={today}
+      />
 
       <WeeklyReviewPanel
         onSelectWeek={setWeekStart}
         orgId={orgId}
-        refreshKey={insightRefresh}
+        refreshKey={refreshKeys.review}
         signal={signal}
         timeZone={timeZone}
         weekStart={weekStart}
         weeks={weeks}
       />
 
-      <WeeklyInsightPanel csrf={csrf} orgId={orgId} refreshKey={insightRefresh} signal={signal} timeZone={timeZone} weekStart={weekStart} />
+      <WeeklyInsightPanel csrf={csrf} orgId={orgId} refreshKey={refreshKeys.insight} signal={signal} timeZone={timeZone} weekStart={weekStart} />
     </section>
   );
 }

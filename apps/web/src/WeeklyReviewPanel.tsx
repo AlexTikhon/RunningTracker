@@ -1,6 +1,7 @@
-import type { WeeklyReview, WeeklyReviewCoverage } from '@running-tracker/contracts';
+import type { WeeklyReview, WeeklyReviewCoverage, WeeklyReviewMovement } from '@running-tracker/contracts';
 import { useEffect, useRef, useState } from 'react';
 
+import { formatActiveEnergy, formatSteps, movementSourceLabel } from './daily-movement.js';
 import { readWeeklyReview } from './runner-api.js';
 import { loadingReview, WeeklyReviewController, type ReviewSnapshot } from './weekly-review-controller.js';
 import { formatWeek } from './weekly-insight.js';
@@ -47,8 +48,74 @@ function zoneLine(review: WeeklyReview): string {
     : `Days are read in ${week.timeZone}, the time zone of this device (no check-in this week has one).`;
 }
 
-const isEmptyWeek = (review: WeeklyReview) =>
-  review.coverage.daysWithCheckInRecord === 0 && review.coverage.manualActivities.count === 0 && review.coverage.gpsRuns.count === 0;
+/** Nothing of any source in the week. A movement day counts, also one with only recorded zeros. */
+export const isEmptyWeek = (review: WeeklyReview) =>
+  review.coverage.daysWithCheckInRecord === 0 &&
+  review.coverage.manualActivities.count === 0 &&
+  review.coverage.gpsRuns.count === 0 &&
+  review.movement.daysWithRecord === 0;
+
+const dayLabel = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC', weekday: 'short' });
+
+/** "Mon 2 Nov": a calendar date, formatted without any zone shift. */
+export function formatReviewDay(localDate: string): string {
+  return dayLabel.format(new Date(`${localDate}T12:00:00Z`)).replace(',', '');
+}
+
+/** The week's movement totals with their coverage; a metric never recorded says so instead of showing 0. */
+export function movementTotalRows(movement: WeeklyReviewMovement): { label: string; value: string }[] {
+  const { activeEnergyKcal, daysInWeek, steps } = movement;
+  const ofWeek = (days: number) => `on ${days} of ${daysInWeek} days`;
+  return [
+    { label: 'Days with movement', value: `${movement.daysWithRecord} of ${daysInWeek}` },
+    {
+      label: 'Steps, recorded total',
+      value: steps.recordedTotal === null ? 'Not recorded on any day' : `${formatSteps(steps.recordedTotal)} ${ofWeek(steps.daysRecorded)}`,
+    },
+    {
+      label: 'Active energy, recorded total',
+      value:
+        activeEnergyKcal.recordedTotal === null
+          ? 'Not recorded on any day'
+          : `${formatActiveEnergy(activeEnergyKcal.recordedTotal)} ${ofWeek(activeEnergyKcal.daysRecorded)}`,
+    },
+  ];
+}
+
+/** Manual movement of the week: totals with coverage, then every day, a day without a record shown as such. */
+export function ReviewMovement({ movement, weekTimeZone }: { movement: WeeklyReviewMovement; weekTimeZone: string }) {
+  return (
+    <section aria-labelledby="review-movement-title" className="review-movement">
+      <h3 id="review-movement-title">Steps and active energy</h3>
+      <p className="review-movement__source">
+        <span className="review-badge">{movementSourceLabel(movement.source)}</span> Steps and active energy you entered by hand,
+        shown on their own and not added to activities or GPS runs. A day without a value is unknown, not zero.
+      </p>
+      <dl className="review-movement__totals">
+        {movementTotalRows(movement).map((row) => (
+          <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>
+        ))}
+      </dl>
+      <ul aria-label="Movement by day" className="review-movement__days">
+        {movement.days.map((day) => (
+          <li className={day.recorded ? 'review-movement__day' : 'review-movement__day review-movement__day--missing'} key={day.localDate}>
+            <time dateTime={day.localDate}>{formatReviewDay(day.localDate)}</time>
+            {day.recorded ? (
+              <dl>
+                <div><dt>Steps</dt><dd>{day.steps === null ? 'Not recorded' : formatSteps(day.steps)}</dd></div>
+                <div><dt>Active energy</dt><dd>{day.activeEnergyKcal === null ? 'Not recorded' : formatActiveEnergy(day.activeEnergyKcal)}</dd></div>
+                <div><dt>Source</dt><dd>{movementSourceLabel(day.source)}</dd></div>
+                {day.timeZone !== weekTimeZone && <div><dt>Saved in</dt><dd>{day.timeZone}</dd></div>}
+              </dl>
+            ) : (
+              <p>No movement recorded</p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 /** A computed review: statements, coverage, numbers, data gaps and where it comes from. */
 export function ReviewContent({ review }: { review: WeeklyReview }) {
@@ -68,6 +135,7 @@ export function ReviewContent({ review }: { review: WeeklyReview }) {
           ))}
         </dl>
       </section>
+      <ReviewMovement movement={review.movement} weekTimeZone={review.week.timeZone} />
       {review.facts.length > 0 && (
         <section aria-label="Numbers" className="review-numbers">
           <h3>Numbers</h3>
@@ -113,8 +181,8 @@ export function ReviewPanelView({ onRefresh, onSelectWeek, snapshot, weeks }: Re
       <div className="insight-panel__heading">
         <h2 id="review-title">Weekly review</h2>
         <p className="insight-panel__positioning">
-          <span className="review-badge">Computed by the app</span> Counted from your own check-ins, manual activities and GPS
-          runs each time you open it. No AI model writes this section. It describes what was recorded; it is not medical
+          <span className="review-badge">Computed by the app</span> Counted from your own check-ins, manual activities, GPS
+          runs and manually entered movement each time you open it. No AI model writes this section. It describes what was recorded; it is not medical
           advice. Only you can see it.
         </p>
       </div>
@@ -146,7 +214,7 @@ export function ReviewPanelView({ onRefresh, onSelectWeek, snapshot, weeks }: Re
 export interface WeeklyReviewPanelProps {
   onSelectWeek: (weekStart: string) => void;
   orgId: string;
-  /** Changes whenever a check-in of this person was saved or deleted: the section reads its week again. */
+  /** Changes whenever a check-in or a movement day of this person was saved or deleted: the section reads its week again. */
   refreshKey: number;
   signal: AbortSignal;
   timeZone: string;

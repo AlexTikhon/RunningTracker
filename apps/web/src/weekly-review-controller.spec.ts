@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { RunnerApiError, type WeeklyReviewTarget } from './runner-api.js';
 import { WeeklyInsightController, type InsightPanelSnapshot } from './weekly-insight-controller.js';
 import { WeeklyReviewController, type ReviewReader, type ReviewSnapshot } from './weekly-review-controller.js';
-import { reviewFixture } from './weekly-review-fixtures.js';
+import { movementFixture, reviewFixture } from './weekly-review-fixtures.js';
 
 const WEEK = '2026-11-02';
 const OTHER = '2026-10-26';
@@ -162,5 +162,54 @@ describe('weekly review controller', () => {
     expect(insightSnapshots.at(-1)!.load.kind).toBe('error');
     expect(review.last().load.kind).toBe('ready');
     insight.dispose();
+  });
+
+  describe('after movement saves and deletions (ADR-0079)', () => {
+    const withMovement = reviewFixture({ movement: movementFixture([{ activeEnergyKcal: 412.5, offset: 1, steps: 8042 }]) });
+    const withoutMovement = reviewFixture();
+
+    it('a refresh reads the selected week again, never another one', async () => {
+      const reader = deferredReader();
+      const { controller, last } = harness(reader.read);
+      controller.start();
+      reader.calls[0]!.resolve(withoutMovement);
+      await flush();
+      controller.select(OTHER);
+      reader.calls[1]!.resolve(forWeek(OTHER));
+      await flush();
+      controller.refresh(); // a movement day was saved
+      expect(reader.calls[2]!.target.weekStart).toBe(OTHER);
+      expect(last().weekStart).toBe(OTHER);
+      expect(last().load).toMatchObject({ kind: 'ready', refreshing: true });
+    });
+
+    it('a save then a deletion: the older answer, which still has the deleted day, never replaces the newer one', async () => {
+      const reader = deferredReader();
+      const { controller, last } = harness(reader.read);
+      controller.start();
+      reader.calls[0]!.resolve(withoutMovement);
+      await flush();
+      controller.refresh(); // saved
+      controller.refresh(); // deleted, before the first refresh answered
+      expect(reader.calls[1]!.signal.aborted).toBe(true);
+      reader.calls[2]!.resolve(withoutMovement);
+      await flush();
+      reader.calls[1]!.resolve(withMovement); // late
+      await flush();
+      expect(last()).toEqual({ load: { kind: 'ready', refreshing: false, review: withoutMovement }, weekStart: WEEK });
+    });
+
+    it('a failed refresh after a deletion does not keep showing the deleted day', async () => {
+      const reader = deferredReader();
+      const { controller, last } = harness(reader.read);
+      controller.start();
+      reader.calls[0]!.resolve(withMovement);
+      await flush();
+      controller.refresh();
+      reader.calls[1]!.reject(new RunnerApiError('Unavailable', 503, 'SERVICE_UNAVAILABLE', 'req-1'));
+      await flush();
+      expect(last().load.kind).toBe('error');
+      expect(JSON.stringify(last())).not.toContain('8042');
+    });
   });
 });

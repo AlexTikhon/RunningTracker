@@ -7,7 +7,8 @@ import { RunnerApiError, type WeeklyReviewTarget } from './runner-api.js';
 // aborts its request and silences it, so a late answer can never reach the new scope.
 //
 // No polling: the review is recomputed by the server on each read, and is read again only when the week changes, after
-// a check-in of this person is saved or deleted (refresh), or when the person asks for it. The latest request wins:
+// a check-in or a movement day of this person is saved or deleted (refresh, which keeps the selected week), or when the
+// person asks for it. The latest request wins:
 // starting another one aborts the one in flight, and an answer for another week or an older request is dropped.
 
 export type ReviewLoad =

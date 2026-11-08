@@ -6,8 +6,8 @@ import { loadingInsight } from './weekly-insight-controller.js';
 import { recentWeeks } from './weekly-insight.js';
 import { InsightPanelView } from './WeeklyInsightPanel.js';
 import { loadingReview, type ReviewSnapshot } from './weekly-review-controller.js';
-import { reviewFixture } from './weekly-review-fixtures.js';
-import { coverageRows, ReviewPanelView } from './WeeklyReviewPanel.js';
+import { movementFixture, reviewFixture } from './weekly-review-fixtures.js';
+import { coverageRows, formatReviewDay, isEmptyWeek, movementTotalRows, ReviewPanelView } from './WeeklyReviewPanel.js';
 
 const WEEK = '2026-11-02';
 const weeks = recentWeeks('2026-11-11');
@@ -107,5 +107,87 @@ describe('weekly review section', () => {
     const aiSection = page.slice(page.indexOf('id="insight-title"'));
     expect(aiSection).not.toContain('data-fact=');
     expect(aiSection).not.toContain('data-statement=');
+    expect(aiSection).not.toContain('Steps and active energy');
+  });
+});
+
+describe('weekly review section: movement (ADR-0079)', () => {
+  // The required regression: Monday steps 0, Tuesday both values, Wednesday energy only (saved in another zone).
+  const regression = movementFixture([
+    { activeEnergyKcal: null, offset: 0, steps: 0 },
+    { activeEnergyKcal: 412.5, offset: 1, steps: 8042 },
+    { activeEnergyKcal: 250, offset: 2, steps: null, timeZone: 'America/New_York' },
+  ]);
+  const ready = (review = reviewFixture()) => render({ load: { kind: 'ready', refreshing: false, review } });
+
+  it('shows recorded totals with their coverage, every day, missing values and the manual source', () => {
+    const html = ready(reviewFixture({ movement: regression }));
+    expect(html).toContain('<h3 id="review-movement-title">Steps and active energy</h3>');
+    expect(html).toContain('aria-labelledby="review-movement-title"');
+    expect(html).toContain('<dt>Days with movement</dt><dd>3 of 7</dd>');
+    expect(html).toContain('<dt>Steps, recorded total</dt><dd>8,042 steps on 2 of 7 days</dd>');
+    expect(html).toContain('<dt>Active energy, recorded total</dt><dd>662.5 kcal on 2 of 7 days</dd>');
+    expect(html).toContain('<span class="review-badge">Manually entered</span>');
+    expect(html).toContain('not added to activities or GPS runs. A day without a value is unknown, not zero.');
+    const start = html.indexOf('aria-label="Movement by day"');
+    const days = html.slice(start, html.indexOf('</ul>', start));
+    expect(days.match(/<li /gu)).toHaveLength(7);
+    expect(days).toContain('<time dateTime="2026-11-02">Mon 2 Nov</time><dl><div><dt>Steps</dt><dd>0 steps</dd></div><div><dt>Active energy</dt><dd>Not recorded</dd></div>');
+    expect(days).toContain('<dd>8,042 steps</dd></div><div><dt>Active energy</dt><dd>412.5 kcal</dd>');
+    expect(days).toContain('<dt>Steps</dt><dd>Not recorded</dd></div><div><dt>Active energy</dt><dd>250 kcal</dd>');
+    expect(days.match(/<dd>Manually entered<\/dd>/gu)).toHaveLength(3);
+    // The stored zone is named only where it differs from the zone the week is read in.
+    expect(days.match(/<dt>Saved in<\/dt>/gu)).toHaveLength(1);
+    expect(days).toContain('<dt>Saved in</dt><dd>America/New_York</dd>');
+    expect(days.match(/<p>No movement recorded<\/p>/gu)).toHaveLength(4);
+    expect(days).toContain('<time dateTime="2026-11-08">Sun 8 Nov</time><p>No movement recorded</p>');
+  });
+
+  it('says a metric was not recorded instead of showing 0, and shows a recorded zero total as 0', () => {
+    expect(movementTotalRows(movementFixture([]))).toEqual([
+      { label: 'Days with movement', value: '0 of 7' },
+      { label: 'Steps, recorded total', value: 'Not recorded on any day' },
+      { label: 'Active energy, recorded total', value: 'Not recorded on any day' },
+    ]);
+    expect(movementTotalRows(movementFixture([{ activeEnergyKcal: null, offset: 0, steps: 0 }, { activeEnergyKcal: null, offset: 3, steps: 0 }]))).toEqual([
+      { label: 'Days with movement', value: '2 of 7' },
+      { label: 'Steps, recorded total', value: '0 steps on 2 of 7 days' },
+      { label: 'Active energy, recorded total', value: 'Not recorded on any day' },
+    ]);
+    expect(movementTotalRows(movementFixture([{ activeEnergyKcal: 0.1, offset: 0, steps: null }, { activeEnergyKcal: 0.2, offset: 1, steps: null }]))[2]).toEqual({
+      label: 'Active energy, recorded total',
+      value: '0.3 kcal on 2 of 7 days',
+    });
+  });
+
+  it('treats a movement-only week, even one of recorded zeros, as not empty; an empty week still says so', () => {
+    const emptyCoverage = {
+      ...reviewFixture().coverage,
+      daysWithCheckInRecord: 0,
+      daysWithCheckInValues: 0,
+      gpsRuns: { count: 0, withCurrentDistance: 0, withoutCurrentDistance: 0 },
+      manualActivities: { count: 0, withDistance: 0 },
+      metrics: { mood: { daysRecorded: 0 }, sleepDuration: { daysRecorded: 0 }, sleepQuality: { daysRecorded: 0 }, soreness: { daysRecorded: 0 }, weight: { daysRecorded: 0 } },
+      noteOnlyDays: 0,
+    };
+    const nothing = reviewFixture({ coverage: emptyCoverage });
+    const zeroOnly = reviewFixture({ coverage: emptyCoverage, movement: movementFixture([{ activeEnergyKcal: null, offset: 4, steps: 0 }]) });
+    expect(isEmptyWeek(nothing)).toBe(true);
+    expect(isEmptyWeek(zeroOnly)).toBe(false);
+    expect(ready(nothing)).toContain('Nothing is recorded for 2 Nov – 8 Nov 2026 yet.');
+    const html = ready(zeroOnly);
+    expect(html).not.toContain('Nothing is recorded');
+    expect(html).toContain('<dt>Steps, recorded total</dt><dd>0 steps on 1 of 7 days</dd>');
+  });
+
+  it('keeps the movement of the shown review while refreshing, and shows none while loading or after an error', () => {
+    const review = reviewFixture({ movement: regression });
+    expect(render({ load: { kind: 'ready', refreshing: true, review } })).toContain('8,042 steps on 2 of 7 days');
+    expect(render({})).not.toContain('Steps and active energy');
+    expect(render({ load: { kind: 'error', message: 'The review could not be loaded.' } })).not.toContain('Steps and active energy');
+  });
+
+  it('formats a calendar date without shifting it by a zone', () => {
+    expect(['2026-11-02', '2026-03-29', '2026-10-25'].map(formatReviewDay)).toEqual(['Mon 2 Nov', 'Sun 29 Mar', 'Sun 25 Oct']);
   });
 });

@@ -30,7 +30,8 @@ import {
 
 // The Movement section of the Check-in tab (ADR-0078): steps and active energy entered by hand for one local date,
 // owner-only, separate from the check-in above it (its own form, request, history and deletion). Nothing here is sent
-// to AI insights or the weekly review, and nothing is imported from a phone or a watch.
+// to AI insights, and nothing is imported from a phone or a watch. The weekly review reads movement on its own; a
+// confirmed save or deletion here tells the screen (onChanged) so that the review reads its week again (ADR-0079).
 
 export interface MovementHistoryProps {
   disabled: boolean;
@@ -248,6 +249,8 @@ export function MovementFormView(props: MovementFormViewProps) {
 
 export interface DailyMovementSectionProps {
   csrf: CsrfCredentials;
+  /** Called once per confirmed save and once per confirmed deletion (never for a failed or unconfirmed one). */
+  onChanged?: () => void;
   orgId: string;
   // The session's signal: ending or replacing the session silences every request of this section.
   signal: AbortSignal;
@@ -257,9 +260,11 @@ export interface DailyMovementSectionProps {
 
 // Mounted inside the Check-in screen, which the parent keys by session, person and organization: a change of any of
 // them starts this section from an empty form and history, and its controllers are disposed with the old screen.
-export function DailyMovementSection({ csrf, orgId, signal, timeZone, today }: DailyMovementSectionProps) {
+export function DailyMovementSection({ csrf, onChanged, orgId, signal, timeZone, today }: DailyMovementSectionProps) {
   const csrfRef = useRef(csrf);
   csrfRef.current = csrf;
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
   const [dateInput, setDateInput] = useState(today);
   const [draft, setDraft] = useState<MovementDraft>(emptyMovementDraft);
   const [showErrors, setShowErrors] = useState(false);
@@ -282,6 +287,7 @@ export function DailyMovementSection({ csrf, orgId, signal, timeZone, today }: D
     setShowErrors(false);
     setDraft(emptyMovementDraft);
     historyController.current?.refresh();
+    onChangedRef.current?.();
     heading.current?.focus();
   };
 
@@ -302,7 +308,10 @@ export function DailyMovementSection({ csrf, orgId, signal, timeZone, today }: D
       onChange: setDay,
       onDeleted: () => afterDeleted.current(),
       onLoaded: (_date, existing) => afterLoaded.current(existing),
-      onSaved: () => historyController.current?.refresh(),
+      onSaved: () => {
+        historyController.current?.refresh();
+        onChangedRef.current?.();
+      },
       orgId,
       read: readDailyMovement,
       remove: deleteDailyMovement,
