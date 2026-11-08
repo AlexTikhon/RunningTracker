@@ -175,3 +175,16 @@ insight, which do not read it. The check-in form, its request and its semantics 
 - A malformed check-in body's `400` has no `no-store` header (pre-existing, not changed by this slice).
 - Movement is not shown in the weekly review or in trends; whether and how it enters them is a later decision.
 - Erasures committed but not yet exported when the node is lost still come back with an old backup (ADR-0073).
+
+## Addendum (2026-11-08, ADR-0079)
+
+- **Precision gap closed.** Decision 1 said more decimals are refused, never rounded; that held for the API only. A
+  `numeric(6,1)` column rounds before CHECK constraints run, so a direct database write of 412.55 became 412.6 and
+  -0.01 became 0.0. Migration 0035 makes the column an unconstrained `numeric` with a precision CHECK
+  (`value = round(value, 1)`) beside the range CHECK; the database now accepts exactly what the contract accepts (tested
+  through the runtime role). A value keeps the scale it was written with (`0` rather than `0.0`); the API view is
+  unchanged.
+- **Movement is now shown in the weekly review** ([ADR-0079](0079-weekly-review-movement.md)), review-only: it is still
+  not an input of AI insights (facts, hashes, policies, gates, triggers and the 0034 replay exception unchanged), and a
+  movement save or deletion now refreshes the review, never the AI insight. The "Boundaries kept" and "Not established"
+  lines above about the weekly review describe the state before ADR-0079.

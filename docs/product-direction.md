@@ -68,6 +68,10 @@ baselines and a unified manual/GPS read model remain to be decided.
 
 Daily movement is [ADR-0078](adr/0078-manual-daily-movement.md): `daily_movement` (steps, user-reported active
 energy), one manual record per person per local date, owner-only, replaced by PUT, with server-owned `source:
-manual` provenance and erasures in the ledger. It keeps the ADR-0074 date rules and is deliberately not an input of the
-weekly review or AI insights. Proposed next slice: a read-only movement line in the weekly review (coverage of days
-with steps, and the manual source named), defined in its own decision, before any import.
+manual` provenance and erasures in the ledger. It keeps the ADR-0074 date rules and is not an input of AI insights.
+
+The weekly review shows movement since [ADR-0079](adr/0079-weekly-review-movement.md): a review-only part read in the
+same snapshot (days with a record, steps and active energy each against the 7 calendar days, recorded totals with their
+coverage, the seven days with the manual source), never added to activity figures and never part of the AI input. The
+same change made the database refuse, instead of round, active energy with a meaningful second decimal (migration
+0035).

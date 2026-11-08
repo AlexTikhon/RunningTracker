@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-08 (manual daily movement, ADR-0078, is the last section; before it: resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-08 (manual daily movement in the weekly review, ADR-0079, is the last section; before it: manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3550,3 +3550,35 @@ in physical order, which changed after an UPDATE, so the comparison is now order
 **Not established.** No phone, watch or health platform was involved: the import design in ADR-0078 is a design only.
 The browser flow ran only in Chromium on Windows. A malformed check-in body's `400` still lacks `no-store`
 (pre-existing; the movement routes mount the header before the body parser). Hosted CI is reported with the change.
+
+## Manual daily movement in the weekly review (ADR-0079) (2026-11-08)
+
+Branch `feat/weekly-review-movement` from `main` at d0dd56a (ADR-0078; its hosted main CI run 42460943099 passed). Two
+parts: migration 0035 closes the active energy precision gap found in review (a `numeric(6,1)` column rounded 412.55
+to 412.6 and -0.01 to 0.0 before its CHECK constraints ran; the column is now an unconstrained `numeric` with range and
+precision CHECKs), and the deterministic weekly review gains a review-only `movement` part and `movement.*` statements
+(`weekly-review-2`), read as a second statement in the same `REPEATABLE READ READ ONLY` transaction, shown inside the
+Weekly review on the Check-in tab and refreshed after movement saves and deletions. AI insights, their inputs, gates,
+triggers and migration 0034 are unchanged; `WEEKLY_INSIGHTS_PROVIDER` stays `off` by default.
+
+**Executed checks.**
+
+| Command | Before (d0dd56a) | After |
+|---|---|---|
+| `npm run verify` | 2,897: scripts 90, API 1,540, web 1,051, contracts 199, fixtures 14, simulator 3 | 2,922: scripts 90, API 1,548 (+8 review unit tests), web 1,062 (+11: review rendering 5, controller 3, refresh keys 3), contracts 205 (+6), fixtures 14, simulator 3 |
+| `npm run test:integration` | 767 in 60 files | 790 in 60 files (+16 `daily-movement-access`: runtime-role precision writes and the contract/database agreement; +7 `weekly-review-http`), 202 s; the restore drill now applies 0035 to a restored 0034 backup and its surviving movement day keeps its digest |
+| Affected Chromium specs (`weekly-review`, `daily-movement`, `daily-checkin`) | 4 | 5 passed; the new movement scenario 3/3 with `--repeat-each=3` |
+| Full `npm run test:e2e` | 137 | 138 passed in 15.2 min (137 + the movement scenario in weekly-review.spec.ts) |
+
+**Mutation checks** (each red, then restored): the column back at `numeric(6,1)` without the precision constraint: 15
+database tests failed. The review transaction without `REPEATABLE READ`: the interleaved-write test failed. Energy
+added as floats: the 0.1 + 0.2 test failed. The manual-source filter removed: the week-boundaries test failed. The
+Check-in screen not wiring the Movement section's `onChanged`: the Chromium scenario failed at its first review update.
+
+Found while testing: the first heading of the review's movement block, "Movement this week", made Playwright's
+`getByLabel('Week')` (a case-insensitive substring match) ambiguous with the week picker and broke the existing review
+scenario; the block is now "Steps and active energy". New API writes store energy as sent (`0`, not `0.0`); one HTTP
+test compared that text and was updated, the API view is unchanged.
+
+**Not established.** No import source exists, so source precedence is still a design (ADR-0078). Movement is not in
+trends or AI insights. The browser flow ran only in Chromium on Windows. Hosted CI is reported with the change.

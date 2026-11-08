@@ -127,3 +127,11 @@ demo-enabled Vite proxying to it (5277). Test harness only; no product configura
   renaming them changes the prompt input and belongs with a prompt version change.
 - Whether AI text should be offered at all for a week the review already describes well: a product decision after a
   fresh validation set, not part of this change.
+
+## Addendum (2026-11-08): movement in the review
+
+[ADR-0079](0079-weekly-review-movement.md) adds manual daily movement as a review-only `movement` part and
+`movement.*` statements, read in the same snapshot as a second statement, and raises `WEEKLY_REVIEW_VERSION` to
+`weekly-review-2`. Nothing above changes meaning: the aggregate, facts, data gaps, coverage denominators and the zone
+rule are the same, and AI insights still do not read movement. The Check-in screen now refreshes the review (not the AI
+insight) after a movement save or deletion as well.
