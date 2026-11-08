@@ -24,6 +24,24 @@ describe('App', () => {
     expect(markup).toMatch(/<button type="button">Check-in<\/button>/u);
   });
 
+  it('shows the SomaLane brand, with Today first in the navigation and Runner still the start view', () => {
+    const markup = renderToStaticMarkup(<App />);
+
+    expect(markup).toContain('<div class="brand" aria-label="SomaLane"><span class="brand-mark" aria-hidden="true">SL</span><span>SomaLane</span></div>');
+    expect(markup).not.toContain('Running Tracker');
+    const navigation = /<nav class="view-switcher" aria-label="Application view">(.*?)<\/nav>/u.exec(markup)?.[1] ?? '';
+    expect([...navigation.matchAll(/<button[^>]*>([^<]+)<\/button>/gu)].map((match) => match[1])).toEqual([
+      'Today',
+      'Runner',
+      'Coach',
+      'Archive',
+      'Activity',
+      'Check-in',
+    ]);
+    expect(navigation).toContain('<button aria-current="page" type="button">Runner</button>');
+    expect(navigation).toContain('<button type="button">Today</button>');
+  });
+
   it('never asks for an organization identifier', () => {
     const markup = renderToStaticMarkup(<App />);
 

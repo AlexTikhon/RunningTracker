@@ -8,6 +8,9 @@ import { ArchiveScreen } from './ArchiveScreen.js';
 import { RunDetailScreen } from './RunDetailScreen.js';
 import { defaultTimeZone } from './run-search.js';
 import { CoachScreen } from './CoachScreen.js';
+import type { TodayAction } from './daily-overview.js';
+import { inScope, navigationFor, type AppView, type EditorIntent, type KeptDate } from './navigation-intent.js';
+import { TodayScreen } from './TodayScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { localDemoEnabled } from './demo-sign-in.js';
 import { DemoSignIn } from './DemoSignIn.js';
@@ -52,7 +55,6 @@ import {
 } from './writer-lease.js';
 
 type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
-type ActiveView = 'activity' | 'archive' | 'checkin' | 'coach' | 'runner';
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 
@@ -111,7 +113,13 @@ export function App() {
   // null until the stored choice has been restored: capture must not start, and the select must not change,
   // before then, or a restored Simulator run would briefly start the Device GPS.
   const [captureSourceKind, setCaptureSourceKind] = useState<CaptureSourceKind | null>(null);
-  const [activeView, setActiveView] = useState<ActiveView>('runner');
+  // The page still opens on Runner, whose startup restores and recovers an active run; Today is first in the navigation
+  // but is not the start view (ADR-0082).
+  const [activeView, setActiveView] = useState<AppView>('runner');
+  // Today's selected date, kept while the person looks at other views, and the editor a Today action opens. Both are
+  // tied to the scope they were made in (navigation-intent.ts) and forgotten on sign-out.
+  const [todayDate, setTodayDate] = useState<KeptDate | null>(null);
+  const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
   const [runnerResult, setRunnerResult] = useState<{ orgId: string; runId: string; signal: AbortSignal; userId: string } | null>(null);
   const resultTimeZone = useMemo(() => defaultTimeZone(), []);
   const captureController = useRef<CaptureController | null>(null);
@@ -151,6 +159,8 @@ export function App() {
     setCaptureSourceKind(null);
     setCapture({ status: 'idle' });
     setWriter({ status: 'unclaimed' });
+    setTodayDate(null);
+    setEditorIntent(null);
   }, []);
   const { session, refreshSession, signOut, signOutState, verification } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
   const { choose: chooseOrganization, discovery, prefer: preferOrganization, reload: reloadOrganizations, selectedOrgId } =
@@ -781,49 +791,47 @@ export function App() {
       ? needsOrganization ?? ''
       : `An active session is required before the ${what} can open.`;
 
+  // The session, person and organization the owner-only views are keyed by.
+  const viewScope = session.status === 'ready' && selectedOrgId !== null
+    ? `${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`
+    : null;
+  // A navigation button opens a view as it always did: with no editor intent. Changing views never touches the run's
+  // capture, upload queue, writer lease or recovery, which App owns whatever view is shown.
+  const openView = (view: AppView) => {
+    setRunnerResult(null);
+    setEditorIntent(null);
+    setActiveView(view);
+  };
+  const openFromToday = (action: TodayAction) => {
+    if (viewScope === null) return;
+    const next = navigationFor(action, viewScope);
+    setRunnerResult(null);
+    setEditorIntent(next.editor);
+    setActiveView(next.view);
+  };
+  const navigation: Array<{ label: string; view: AppView }> = [
+    { label: 'Today', view: 'today' },
+    { label: 'Runner', view: 'runner' },
+    { label: 'Coach', view: 'coach' },
+    { label: 'Archive', view: 'archive' },
+    { label: 'Activity', view: 'activity' },
+    { label: 'Check-in', view: 'checkin' },
+  ];
+  const checkInIntent = inScope(editorIntent, viewScope);
+
   return (
     <main>
       <header className="topbar">
-        <div className="brand" aria-label="Running Tracker">
-          <span className="brand-mark" aria-hidden="true">RT</span>
-          <span>Running Tracker</span>
+        <div className="brand" aria-label="SomaLane">
+          <span className="brand-mark" aria-hidden="true">SL</span>
+          <span>SomaLane</span>
         </div>
         <nav className="view-switcher" aria-label="Application view">
-          <button
-            aria-current={activeView === 'runner' ? 'page' : undefined}
-            onClick={() => { setRunnerResult(null); setActiveView('runner'); }}
-            type="button"
-          >
-            Runner
-          </button>
-          <button
-            aria-current={activeView === 'coach' ? 'page' : undefined}
-            onClick={() => { setRunnerResult(null); setActiveView('coach'); }}
-            type="button"
-          >
-            Coach
-          </button>
-          <button
-            aria-current={activeView === 'archive' ? 'page' : undefined}
-            onClick={() => { setRunnerResult(null); setActiveView('archive'); }}
-            type="button"
-          >
-            Archive
-          </button>
-          <button
-            aria-current={activeView === 'activity' ? 'page' : undefined}
-            onClick={() => { setRunnerResult(null); setActiveView('activity'); }}
-            type="button"
-          >
-            Activity
-          </button>
-          <button
-            aria-current={activeView === 'checkin' ? 'page' : undefined}
-            onClick={() => { setRunnerResult(null); setActiveView('checkin'); }}
-            type="button"
-          >
-            Check-in
-          </button>
+          {navigation.map(({ label, view }) => (
+            <button aria-current={activeView === view ? 'page' : undefined} key={view} onClick={() => openView(view)} type="button">
+              {label}
+            </button>
+          ))}
         </nav>
         <div className="service-health" aria-label="Service health">
           <StatusDot label="API" value={health.api} />
@@ -944,6 +952,25 @@ export function App() {
         )}
       </div>
 
+      {activeView === 'today' && (
+        session.status === 'ready' && selectedOrgId !== null && viewScope !== null ? (
+          // Owner-only daily overview (ADR-0082). Mounted only while open, so every opening reads the day again (after an
+          // edit or a deletion in another view too); keyed by session, person and organization, so no request or answer
+          // crosses a change of scope. The selected date is kept here, for this scope only.
+          <TodayScreen
+            key={viewScope}
+            onAction={openFromToday}
+            onSelectDate={(localDate) => setTodayDate({ localDate, scope: viewScope })}
+            orgId={selectedOrgId}
+            selectedDate={inScope(todayDate, viewScope)?.localDate ?? null}
+            signal={session.signal}
+            timeZone={resultTimeZone}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('daily overview')}</section>
+        )
+      )}
+
       {activeView === 'coach' && (
         session.status === 'ready' && selectedOrgId !== null ? (
           // A new session, person or organization is a new screen: nothing shown under the previous scope, not even for
@@ -998,6 +1025,7 @@ export function App() {
           <DailyCheckInScreen
             key={`${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`}
             csrf={session.session.csrf}
+            intent={checkInIntent === null ? undefined : { localDate: checkInIntent.localDate, section: checkInIntent.section }}
             orgId={selectedOrgId}
             signal={session.signal}
           />

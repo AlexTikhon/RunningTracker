@@ -74,6 +74,29 @@ describe('DailyCheckInScreen', () => {
   });
 });
 
+describe('DailyCheckInScreen opened from Today (ADR-0082)', () => {
+  const today = localDateIn(defaultTimeZone(), nowMs);
+  const open = (intent: { localDate: string; section: 'check-in' | 'movement' }) =>
+    renderToStaticMarkup(
+      <DailyCheckInScreen csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }} intent={intent} nowMs={nowMs} orgId={orgId} signal={new AbortController().signal} />,
+    );
+  const dateInputs = (html: string) => [...html.matchAll(/<input max="[^"]+" min="2000-01-01" type="date" value="([^"]+)"\/>/gu)].map((match) => match[1]);
+
+  it('opens the check-in editor on the intent date and leaves the movement editor on today', () => {
+    expect(dateInputs(open({ localDate: '2026-10-25', section: 'check-in' }))).toEqual(['2026-10-25', today]);
+  });
+
+  it('opens the movement editor on the intent date and leaves the check-in editor on today', () => {
+    expect(dateInputs(open({ localDate: '2026-10-25', section: 'movement' }))).toEqual([today, '2026-10-25']);
+  });
+
+  it('ignores an intent date after today or before 2000', () => {
+    for (const localDate of ['2099-01-01', '1999-12-31', 'not-a-date']) {
+      expect(dateInputs(open({ localDate, section: 'movement' })), localDate).toEqual([today, today]);
+    }
+  });
+});
+
 describe('CheckInDeletion', () => {
   const props: CheckInDeletionProps = {
     confirming: false,

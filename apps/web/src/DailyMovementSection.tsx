@@ -249,6 +249,10 @@ export function MovementFormView(props: MovementFormViewProps) {
 
 export interface DailyMovementSectionProps {
   csrf: CsrfCredentials;
+  /** Opened from Today's movement action (ADR-0082): focus the section's heading when it mounts. */
+  focusOnOpen?: boolean;
+  /** The date the form opens on (read when the section mounts); today when omitted. The parent checks it. */
+  initialDate?: string | undefined;
   /** Called once per confirmed save and once per confirmed deletion (never for a failed or unconfirmed one). */
   onChanged?: () => void;
   orgId: string;
@@ -260,15 +264,16 @@ export interface DailyMovementSectionProps {
 
 // Mounted inside the Check-in screen, which the parent keys by session, person and organization: a change of any of
 // them starts this section from an empty form and history, and its controllers are disposed with the old screen.
-export function DailyMovementSection({ csrf, onChanged, orgId, signal, timeZone, today }: DailyMovementSectionProps) {
+export function DailyMovementSection({ csrf, focusOnOpen = false, initialDate, onChanged, orgId, signal, timeZone, today }: DailyMovementSectionProps) {
   const csrfRef = useRef(csrf);
   csrfRef.current = csrf;
   const onChangedRef = useRef(onChanged);
   onChangedRef.current = onChanged;
-  const [dateInput, setDateInput] = useState(today);
+  const [opening] = useState(() => ({ date: initialDate ?? today, focus: focusOnOpen }));
+  const [dateInput, setDateInput] = useState(opening.date);
   const [draft, setDraft] = useState<MovementDraft>(emptyMovementDraft);
   const [showErrors, setShowErrors] = useState(false);
-  const [day, setDay] = useState<MovementDaySnapshot>(() => loadingMovementDay(today));
+  const [day, setDay] = useState<MovementDaySnapshot>(() => loadingMovementDay(opening.date));
   const [history, setHistory] = useState<MovementHistorySnapshot>(loadingMovementHistory);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const dayController = useRef<MovementDayController | null>(null);
@@ -304,7 +309,7 @@ export function DailyMovementSection({ csrf, onChanged, orgId, signal, timeZone,
   useEffect(() => {
     const next = new MovementDayController({
       csrf: () => csrfRef.current,
-      date: today,
+      date: opening.date,
       onChange: setDay,
       onDeleted: () => afterDeleted.current(),
       onLoaded: (_date, existing) => afterLoaded.current(existing),
@@ -325,7 +330,13 @@ export function DailyMovementSection({ csrf, onChanged, orgId, signal, timeZone,
       next.dispose();
       if (dayController.current === next) dayController.current = null;
     };
-  }, [orgId, signal, timeZone, today]);
+  }, [opening, orgId, signal, timeZone, today]);
+
+  useEffect(() => {
+    if (!opening.focus) return;
+    heading.current?.focus();
+    heading.current?.scrollIntoView({ block: 'start' });
+  }, [opening]);
 
   const chooseDate = (value: string) => {
     setDateInput(value);

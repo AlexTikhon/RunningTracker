@@ -36,6 +36,11 @@ export interface DailyCheckInScreenProps {
   signal: AbortSignal;
   // For tests: the instant whose date in the person's zone is "today". Defaults to the time the screen opens.
   nowMs?: number;
+  /**
+   * A navigation intent from Today (ADR-0082): open `section`'s editor on `localDate` and move focus to it. Read when the
+   * screen mounts only; the other editor opens on today as usual. A date after today, or not a real date, is ignored.
+   */
+  intent?: { localDate: string; section: 'check-in' | 'movement' } | undefined;
 }
 
 const scaleOptions = (low: number, high: number) =>
@@ -147,15 +152,24 @@ export function CheckInDeletion({ confirming, dateLabel, disabled, failure, onCa
 // Daily check-in of the signed-in person (ADR-0074). The parent keys it by session, person and organization, so a
 // change of any of them starts from a clean form and history with no request carried over. Owner-only: nothing here
 // is visible to a coach or another member.
-export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInScreenProps) {
+export function DailyCheckInScreen({ csrf, intent, nowMs, orgId, signal }: DailyCheckInScreenProps) {
   const timeZone = useMemo(() => defaultTimeZone(), []);
   const today = useMemo(() => localDateIn(timeZone, nowMs ?? Date.now()), [nowMs, timeZone]);
+  // The intent is read once, when the screen opens.
+  const [opening] = useState(() => {
+    const valid = intent !== undefined && checkInDateProblem(intent.localDate, today) === null ? intent : undefined;
+    return {
+      checkInDate: valid?.section === 'check-in' ? valid.localDate : today,
+      focus: valid?.section,
+      movementDate: valid?.section === 'movement' ? valid.localDate : undefined,
+    };
+  });
   const csrfRef = useRef(csrf);
   csrfRef.current = csrf;
-  const [dateInput, setDateInput] = useState(today);
+  const [dateInput, setDateInput] = useState(opening.checkInDate);
   const [draft, setDraft] = useState<CheckInDraft>(emptyCheckInDraft);
   const [showErrors, setShowErrors] = useState(false);
-  const [day, setDay] = useState<CheckInDaySnapshot>(() => loadingCheckInDay(today));
+  const [day, setDay] = useState<CheckInDaySnapshot>(() => loadingCheckInDay(opening.checkInDate));
   const [history, setHistory] = useState<CheckInHistorySnapshot>(loadingCheckInHistory);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   // A saved or deleted check-in changes the week's review and can make its AI insight stale or delete it: both sections
@@ -206,7 +220,7 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
   useEffect(() => {
     const next = new CheckInDayController({
       csrf: () => csrfRef.current,
-      date: today,
+      date: opening.checkInDate,
       onChange: setDay,
       onDeleted: () => afterDeleted.current(),
       onLoaded: (date, existing) => afterLoaded.current(date, existing),
@@ -227,7 +241,12 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
       next.dispose();
       if (dayController.current === next) dayController.current = null;
     };
-  }, [orgId, signal, timeZone, today]);
+  }, [opening, orgId, signal, timeZone, today]);
+
+  // Opened from Today's check-in action: focus lands on this screen's heading, as after a deletion.
+  useEffect(() => {
+    if (opening.focus === 'check-in') heading.current?.focus();
+  }, [opening]);
 
   const chooseDate = (value: string) => {
     setDateInput(value);
@@ -366,6 +385,8 @@ export function DailyCheckInScreen({ csrf, nowMs, orgId, signal }: DailyCheckInS
           review, which shows movement (ADR-0079), and never the AI insight, which does not read it. */}
       <DailyMovementSection
         csrf={csrf}
+        focusOnOpen={opening.focus === 'movement'}
+        initialDate={opening.movementDate}
         onChanged={() => refreshAfter('movement')}
         orgId={orgId}
         signal={signal}
