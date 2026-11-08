@@ -442,3 +442,22 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .review-movement__day p { margin: 0; color: #7f8a82; font-size: 0.84rem; }
 .review-movement__day--missing { border-style: dashed; }
 @media (max-width: 40rem) { .review-movement__day { grid-template-columns: 1fr; } }
+
+/* Today (ADR-0082): a read-only overview of one day, one card per source. */
+.today-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.75rem; }
+.today-controls label { display: grid; gap: 0.3rem; min-width: 0; max-width: 100%; }
+.today-day { margin: 0; color: #b8c2bb; font-size: 0.86rem; line-height: 1.45; overflow-wrap: anywhere; }
+.today-content { display: grid; gap: 1rem; }
+.today-content > p { grid-column: 1 / -1; margin: 0; }
+.today-card { display: grid; align-content: start; justify-items: start; gap: 0.6rem; min-width: 0; padding: 1rem; border: 1px solid #2e3831; border-radius: 0.9rem; background: #151c17; }
+.today-card h2 { margin: 0; font-size: 1.25rem; }
+.today-card p { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.today-rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8.5rem), 1fr)); gap: 0.5rem 1rem; width: 100%; margin: 0; }
+.today-rows div { display: grid; gap: 0.15rem; min-width: 0; }
+.today-rows dt { color: #7f8a82; font-size: 0.72rem; }
+.today-rows dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.today-rows__missing dd { color: #8b968e; font-weight: 500; }
+.today-missing { color: #9ba59d; }
+.today-empty { padding: 0.8rem 1rem; border: 1px dashed #344038; border-radius: 0.8rem; color: #dfe8e1; }
+.today-note, .today-meta { color: #8b968e; font-size: 0.8rem; }
+@media (min-width: 60rem) { .today-content { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -10,6 +10,7 @@ import {
   DAILY_MOVEMENT_NOT_FOUND,
   dailyMovementListResponseSchema,
   dailyMovementViewSchema,
+  dailyOverviewSchema,
   ingestPointsResponseSchema,
   liveTrackResponseSchema,
   organizationCoachListResponseSchema,
@@ -35,6 +36,7 @@ import {
   type DailyMovementListResponse,
   type DailyMovementView,
   type PutDailyMovementRequest,
+  type DailyOverview,
   type ArchiveTrackResponse,
   type IngestPointsResponse,
   type LiveTrackResponse,
@@ -732,4 +734,20 @@ export async function readWeeklyReview(target: WeeklyReviewTarget, signal: Abort
   const review = weeklyReviewSchema.parse(requireSuccess(response));
   if (review.week.start !== target.weekStart) throw new Error('The server returned a different week');
   return review;
+}
+
+// The daily overview (Today, ADR-0082): computed by the server on every read from the person's own records, never cached.
+export interface DailyOverviewTarget {
+  localDate: string;
+  orgId: string;
+  timeZone: string;
+}
+
+export async function readDailyOverview(target: DailyOverviewTarget, signal: AbortSignal): Promise<DailyOverview> {
+  const query = new URLSearchParams({ timeZone: target.timeZone });
+  const path = `/api/orgs/${encodeURIComponent(target.orgId)}/daily-overview/${encodeURIComponent(target.localDate)}`;
+  const response = await requestJson(`${path}?${query.toString()}`, { cache: 'no-store', credentials: 'same-origin', signal });
+  const overview = dailyOverviewSchema.parse(requireSuccess(response));
+  if (overview.day.localDate !== target.localDate) throw new Error('The server returned a different date');
+  return overview;
 }
