@@ -115,8 +115,15 @@ runtime configuration: a new or changed value takes effect only after an image r
 configured" notice. The same variable works for the local transport profile. `.env` files stay out of
 the build context, so only this one value is passed.
 
-An API restart ends every open live stream and every session (the store is
-in-memory; people sign in again). Clients reconnect and recover from stored data.
+An API restart ends every open live stream, but not the sessions: they are stored in
+PostgreSQL (ADR-0080), so a browser's cookie keeps working after the restart until its original
+expiry, and clients reconnect and recover from stored data. Two things do not survive a restart: a
+sign-in that was in progress at the identity provider (pending OIDC logins are process-local; the
+person sees "sign-in expired" and starts again) and the in-memory rate limits. While the database
+cannot answer a session check within `SESSION_STORE_TIMEOUT_MS`, requests get `503
+SESSION_STORE_UNAVAILABLE` (no one is signed out). Every API instance on one database should use the
+same `SESSION_STORE_MAX_ENTRIES`. Several API replicas are not supported yet: an OIDC callback must
+reach the instance that started the login.
 
 ## Verify a deployment
 
@@ -235,9 +242,9 @@ current permissions, open) and the local drill are in the same runbook.
 
 | Gap | Owner |
 |---|---|
-| Sign-in against a real identity provider (the mechanism is verified against a test provider only, ADR-0046), provider-side logout, a shared session store, provisioning through the application | operator / later |
+| Sign-in against a real identity provider (the mechanism is verified against a test provider only, ADR-0046), provider-side logout, durable pending OIDC logins (needed before running several API replicas), provisioning through the application | operator / later |
 | A scheduled daily backup on this host, off-host backup storage, key custody, and a backup-age alert (the commands and a local restore drill exist, P12.3; production RPO/RTO is not established) | operator |
-| Sessions after a restore (process memory: everyone signs in again). Revoked shares and deactivated memberships are restored by the access-restriction journal (P12.4, ADR-0045) | none |
+| Sessions after a restore: by design none survives (backups exclude session rows and the restore runs `restore:clear-sessions`, ADR-0080), so everyone signs in again. Revoked shares and deactivated memberships are restored by the access-restriction journal (P12.4, ADR-0045) | none |
 | Full Content-Security-Policy (only `frame-ancestors` is set; a script/style/connect policy must be validated against the Mapbox map in a browser) | before public launch |
 | General request rate limiting at the proxy. Only sign-in initiation is limited (ADR-0048: five per minute per direct address with burst four at the edge, plus process-wide admission in the API); no other route is, because there is no measured per-client traffic model to size it | before public launch |
 | Encryption of database traffic inside the Docker network (single host; unencrypted by design here) and of the data volume at rest (a host/disk concern) | operator |

@@ -64,8 +64,9 @@ first sign-in and is retried by the next one.
 3. `docker compose -f infra/compose/docker-compose.production.yml --env-file <env file> up -d --no-deps --force-recreate --wait api`
 4. Revoke the old secret at the provider.
 
-Recreating the API ends every application session (they are process memory); people sign in again, which is
-usually a single redirect while their provider session is alive.
+Recreating the API keeps application sessions (they are stored in PostgreSQL, ADR-0080). Only a sign-in that was
+at the provider at that moment is lost (pending logins are process memory): the person sees "sign-in expired" and
+starts again, which is usually a single redirect while their provider session is alive.
 
 ## Provision a person
 
@@ -105,8 +106,8 @@ UPDATE memberships SET active = false WHERE org_id = '<organization id>' AND use
 ```
 
 **Disabling the person at the provider is not enough on its own.** It stops new sign-ins, but an application
-session that already exists stays valid until it expires (`SESSION_TTL_MS`, 8 hours by default) or the API
-restarts. Deactivate the membership as well; lower `SESSION_TTL_MS` if that window is too long. Do not delete the
+session that already exists stays valid until it expires (`SESSION_TTL_MS`, 8 hours by default) or is signed out;
+an API restart no longer ends it (ADR-0080). Deactivate the membership as well; lower `SESSION_TTL_MS` if that window is too long. Do not delete the
 `users` row: runs and memberships reference it.
 
 ## When sign-in fails
@@ -141,6 +142,6 @@ IndexedDB for that user. Reauthentication restores them with the new session's C
 | Verification against a real provider | Not performed |
 | Logout at the provider (RP-initiated logout) | `DELETE /api/session` ends the application session only. The web app's Sign out button calls it (ADR-0049), so the next sign-in completes without a login page while the provider session lives |
 | Provisioning through the application | Manual SQL by design for now |
-| Shared session store | Sessions are process memory; a restart signs everyone out |
+| Durable pending logins | Sessions are in PostgreSQL and survive a restart (ADR-0080), but a login in progress at the provider is process memory: it must restart after an API restart, and with several API replicas the callback would have to reach the instance that started it. Run one API instance until this is built |
 | Provider-side re-validation of a live session | A disabled provider account keeps its session until expiry |
 | MFA, password policy, account recovery | The provider's responsibility |

@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-08 (manual daily movement in the weekly review, ADR-0079, is the last section; before it: manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-08 (durable PostgreSQL sessions, ADR-0080, is the last section; before it: manual daily movement in the weekly review, ADR-0079, and manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3582,3 +3582,45 @@ test compared that text and was updated, the API view is unchanged.
 
 **Not established.** No import source exists, so source precedence is still a design (ADR-0078). Movement is not in
 trends or AI insights. The browser flow ran only in Chromium on Windows. Hosted CI is reported with the change.
+
+## Durable PostgreSQL sessions (ADR-0080) (2026-11-08)
+
+Branch `feat/durable-sessions` from `main` at 8f78c1e (ADR-0079, already on `main`). Sessions move from a process-local
+`Map` to `app_private.auth_sessions` (migration 0036): digest, user, CSRF token, issue and expiry only, no table
+privilege for any application role, and runtime access only through create/read/revoke-by-digest functions. The store
+boundary is asynchronous; every caller awaits it (authentication, `/api/session`, the OIDC callback, run
+interpretation's last check, live streams). An unanswered store is a 503 that leaves the cookie alone; a sign-out
+clears the cookie only after its delete commits. Live streams check every open session once per poll cycle
+(single-flight, bounded, fail closed). Backups exclude session rows and the restore runs `restore:clear-sessions`
+(new drill step `sessions_cleared`). Pending OIDC logins stay process-local. No web change was needed: the client
+already treats a 503 as "could not ask" and a failed sign-out as "still signed in" (ADR-0054).
+
+**Executed checks.**
+
+| Command | Before (8f78c1e) | After |
+|---|---|---|
+| `npm run verify` | 2,922: scripts 90, API 1,548, web 1,062, contracts 205, fixtures 14, simulator 3 | 2,937: API 1,563 (+15: store contract on the in-memory store +2 net, manager outage propagation 1, HTTP outage/sign-out/sign-in 3, live hub session checks 4, interpretation outage 1, `restore:clear-sessions` CLI 4); others unchanged |
+| `npm run test:integration` | 790 in 60 files | 815 in 63 files (+25, below), 220 s, restore drill included |
+| Full `npm run test:e2e` | 138 | 138 passed in 13.7 min (no new browser test; the harness now gives all three suite APIs the raised shared cap and empties the session table at teardown, which left 0 rows) |
+
+New integration files: `postgres-session-store` (20: the shared contract on PostgreSQL, persistence across store
+instances, expiry boundary, cross-instance revocation, concurrent capacity, bounded cleanup, privileges, unreachable and
+timed-out store with recovery), `session-runtime` (3: cross-instance live-stream stop, streams closed on outage, HTTP 503
+without cookie changes), `session-restart` (1: real API processes; sign in, stop, start a new process, the kept cookie
+works; a sign-out there holds in the next process; no secret in any process output). `backup-restore` gains the restore
+invalidation test (application backup and a dump that kept session rows) and session assertions in both drill runs;
+`oidc-login` now runs on the PostgreSQL store with a second API instance (digest-only storage, cross-instance cookie
+and sign-out).
+
+**Mutation checks** (each red, then restored): `create_auth_session` without its advisory lock admitted 12, 12 and 11
+of 24 racing sign-ins into 8 free slots (expected 8), three runs out of three. `main.ts` back on the in-memory store:
+the process-restart test answered 401 after the restart.
+
+Found while testing: a signal-terminated child process has `exitCode === null` and `signalCode` set, so the restart
+test's cleanup waited forever for a second exit; the poll cycle's extra await made the live hub spec's three-microtask
+`settle()` too short (now one macrotask turn).
+
+**Not established.** Several API replicas: sessions are shared, but an OIDC callback must reach the instance that
+started the login. The restore proof is a workstation run that signs in with the local development session, not OIDC;
+no production identity provider or host was exercised. Commit 1 of this branch (storage) does not typecheck on its own:
+the asynchronous boundary needs the caller changes of commit 2. Hosted CI is reported with the change.
