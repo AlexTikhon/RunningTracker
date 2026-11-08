@@ -184,16 +184,19 @@ runtime or maintenance role in the meantime.
    Then **replay erasures** of owner-only health records (activities, ADR-0073; daily check-ins, ADR-0074; daily movement, ADR-0078) from the same journal copy:
    `RESTORE_DATABASE_URL=<owner URL of the fresh database> npm run restore:reapply-erasures -- --journal-dir /path/to/journal-copy`.
    Run it twice; the second run must report no `erased` (outcomes in `docs/runbooks/deletion-journal-and-recovery.md`, step 8).
-   Finally **clear every stored session** (ADR-0080), as the owner role:
+   Finally **clear every stored session and pending sign-in** (ADR-0080, ADR-0081), as the owner role:
    `RESTORE_DATABASE_URL=<owner URL of the fresh database> npm run restore:clear-sessions`.
-   Application backups never contain session rows (`backup:create` dumps the `app_private.auth_sessions` schema
-   without its data), but an older or hand-made dump may, including sessions that were signed out after it. The
-   command prints `sessions cleared: N` and `sessions remaining: 0`, and fails if any row is left; do not reopen the
-   database until it succeeds. Afterwards no session cookie from before the restore authenticates, valid or revoked:
-   everyone signs in again. A second run reports `sessions cleared: 0`.
+   Application backups never contain session or pending-login rows (`backup:create` dumps the
+   `app_private.auth_sessions` and `app_private.oidc_pending_logins` schemas without their data), but an older or
+   hand-made dump may, including sessions that were signed out after it and sign-ins that were at the provider. The
+   command keeps its name and prints `sessions cleared: N`, `sessions remaining: 0`, then (since ADR-0081)
+   `pending logins cleared: N` and `pending logins remaining: 0`, and fails if any row of either is left; do not
+   reopen the database until it succeeds. Afterwards no session cookie from before the restore authenticates, valid
+   or revoked, and no sign-in started before it can complete (`login_expired`): everyone signs in again. A second
+   run reports `0` cleared for both. Scripts that read the first three lines keep working.
 10. **Open the database deliberately.** The drill and the bootstrap leave the application logins without
     `CONNECT` on the restored database. Only after steps 4 to 9 succeeded and the application version is
-    the one the migrations belong to (step 9 includes clearing sessions):
+    the one the migrations belong to (step 9 includes clearing sessions and pending sign-ins):
 
     ```sql
     GRANT CONNECT ON DATABASE <fresh database> TO running_tracker_runtime, running_tracker_maintenance;
@@ -225,10 +228,11 @@ Scenario: runs A (owner-deleted after the backup), B (annual-retention-deleted a
 (survivor), and D (created and deleted after the backup). On C, after the backup: one share revoked and
 one narrowed through the share API's own functions, and one member deactivated by SQL; two more people
 are left untouched. The report states who could read C on the lost source, in the restored backup and
-after recovery, as the runtime role under row-level security. Sessions (ADR-0080): with `--current-schema` the
-owner is signed in on the source when the backup is taken, and the drill checks that the restored database holds no
-session row and that `restore:clear-sessions` leaves none (recovery step `sessions_cleared`); the default source
-predates the session table, which the catch-up migration creates empty.
+after recovery, as the runtime role under row-level security. Sessions and pending sign-ins (ADR-0080, ADR-0081):
+the owner is signed in on the source when the backup is taken, and with `--current-schema` a sign-in is also pending
+at the provider; the drill checks that the restored database holds neither and that `restore:clear-sessions` leaves
+neither (recovery step `sessions_cleared`, reported separately). The default source is one migration behind (0036):
+it has sessions but predates the pending-login table, which the catch-up migration creates empty.
 It exits 0 only if every check passes; otherwise it exits 1, keeps both databases, and the report says
 which step failed. Flags: `--current-schema` (source at the repository's latest migration), `--keep`
 (keep the databases after success), `--suffix`, `--work-dir`. `npm run restore:drill -- --cleanup`
@@ -241,7 +245,11 @@ journal file; an access journal file that tries to grant access (rejected before
 replay of the access journal; and an application session still connected. One test (ADR-0080) signs two browser
 sessions in on a current-schema source, takes a dump that keeps session rows, signs one of them out, then takes an
 application backup; after restoring either one and running `restore:clear-sessions`, both old cookies are refused,
-a new sign-in works, and the health data equals the source at backup time. They are skipped when
+a new sign-in works, and the health data equals the source at backup time. Another (ADR-0081) provisions an OIDC
+identity at a local test provider, leaves a sign-in at the provider while a dump that keeps pending-login rows is
+taken, restores that dump, and shows the row is back until `restore:clear-sessions` removes it; on the reopened
+database the old callback answers `login_expired` without reaching the provider's token endpoint, and a new OIDC
+sign-in completes. They are skipped when
 `RESTORE_DRILL_ADMIN_URL` is unset; the repository's CI sets it (ADR-0075).
 
 ### Reading a drill report

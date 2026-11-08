@@ -3,6 +3,8 @@
 - Status: accepted; implemented and verified locally (unit, real PostgreSQL integration including the restore drill
   and a real API process restart, Chromium end-to-end). Hosted CI: see the final report of the change.
 - Date: 2026-11-08
+- Amended by: ADR-0081. Pending OIDC logins are now in PostgreSQL as well, so the first bullet of "Explicit
+  boundaries" below no longer holds; `restore:clear-sessions` also clears them.
 - Supersedes: the in-memory session store of ADR-0007 for the API process. Keeps ADR-0075's capacity policy (expired
   first, then refuse; never evict a live session) and ADR-0054's client rules (only a 401 ends a confirmed session).
 - Relates to: ADR-0046 (OIDC sign-in, which ends in the same session record), ADR-0023 (live stream authorization

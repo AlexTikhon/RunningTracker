@@ -117,13 +117,18 @@ the build context, so only this one value is passed.
 
 An API restart ends every open live stream, but not the sessions: they are stored in
 PostgreSQL (ADR-0080), so a browser's cookie keeps working after the restart until its original
-expiry, and clients reconnect and recover from stored data. Two things do not survive a restart: a
-sign-in that was in progress at the identity provider (pending OIDC logins are process-local; the
-person sees "sign-in expired" and starts again) and the in-memory rate limits. While the database
-cannot answer a session check within `SESSION_STORE_TIMEOUT_MS`, requests get `503
-SESSION_STORE_UNAVAILABLE` (no one is signed out). Every API instance on one database should use the
-same `SESSION_STORE_MAX_ENTRIES`. Several API replicas are not supported yet: an OIDC callback must
-reach the instance that started the login.
+expiry, and clients reconnect and recover from stored data. A sign-in that is at the identity
+provider during the restart also completes afterwards: pending OIDC logins are stored in PostgreSQL
+(ADR-0081). The in-memory rate limits and admission counters do not survive a restart. While the
+database cannot answer a session check within `SESSION_STORE_TIMEOUT_MS`, requests get `503
+SESSION_STORE_UNAVAILABLE` (no one is signed out), and sign-in answers `503
+LOGIN_TEMPORARILY_UNAVAILABLE` at `/api/auth/login` or `sign_in_error=unavailable` at the callback.
+Every API instance on one database should use the same `SESSION_STORE_MAX_ENTRIES` and
+`OIDC_STORE_MAX_ENTRIES`, and the same `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, client secret and
+`OIDC_REDIRECT_URI` (the stable public origin, not an instance address): then an OIDC callback may
+reach any instance. This is not general multi-replica support: login admission, run-search
+admission, the weekly insight queue, the archive tile cache and metrics are still per process
+(ADR-0081, Explicit boundaries), and this profile runs one API container.
 
 ## Verify a deployment
 
@@ -242,7 +247,7 @@ current permissions, open) and the local drill are in the same runbook.
 
 | Gap | Owner |
 |---|---|
-| Sign-in against a real identity provider (the mechanism is verified against a test provider only, ADR-0046), provider-side logout, durable pending OIDC logins (needed before running several API replicas), provisioning through the application | operator / later |
+| Sign-in against a real identity provider (the mechanism is verified against a test provider only, ADR-0046), provider-side logout, the remaining process-local state before running several API replicas (login and run-search admission, the weekly insight queue, the archive tile cache, metrics; ADR-0081), provisioning through the application | operator / later |
 | A scheduled daily backup on this host, off-host backup storage, key custody, and a backup-age alert (the commands and a local restore drill exist, P12.3; production RPO/RTO is not established) | operator |
 | Sessions after a restore: by design none survives (backups exclude session rows and the restore runs `restore:clear-sessions`, ADR-0080), so everyone signs in again. Revoked shares and deactivated memberships are restored by the access-restriction journal (P12.4, ADR-0045) | none |
 | Full Content-Security-Policy (only `frame-ancestors` is set; a script/style/connect policy must be validated against the Mapbox map in a browser) | before public launch |

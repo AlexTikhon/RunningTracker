@@ -64,9 +64,10 @@ first sign-in and is retried by the next one.
 3. `docker compose -f infra/compose/docker-compose.production.yml --env-file <env file> up -d --no-deps --force-recreate --wait api`
 4. Revoke the old secret at the provider.
 
-Recreating the API keeps application sessions (they are stored in PostgreSQL, ADR-0080). Only a sign-in that was
-at the provider at that moment is lost (pending logins are process memory): the person sees "sign-in expired" and
-starts again, which is usually a single redirect while their provider session is alive.
+Recreating the API keeps application sessions (ADR-0080) and sign-ins that are at the provider at that moment
+(ADR-0081): both are stored in PostgreSQL, so a person who comes back from the provider after the restart completes
+their sign-in. A callback that arrives while no API is answering fails at the proxy; the person starts again. Keep the
+old secret valid until the new process is up, so that a code issued before the switch can still be exchanged.
 
 ## Provision a person
 
@@ -119,10 +120,10 @@ token or subject).
 |---|---|---|
 | `not_provisioned` | The identity is not in `users`, or its issuer spelling differs | The `external_identity` value against the discovery `issuer` and the provider's subject |
 | `denied` | The provider refused or the response failed validation: wrong client secret, redirect URI not registered, altered state, expired or reused code | Client secret file, the registered redirect URI, server clock (ID-token times are checked) |
-| `login_expired` | The attempt is older than `OIDC_LOGIN_TTL_MS` (10 minutes), was started in another browser, or was already used | Start again from the app |
-| `unavailable` | Provider outage, timeout, a 5xx, or a non-conforming response while exchanging the code | Provider status; API container reaches the issuer over HTTPS |
+| `login_expired` | The attempt is older than `OIDC_LOGIN_TTL_MS` (10 minutes), was started in another browser, was already used, or predates a database restore | Start again from the app |
+| `unavailable` | Provider outage, timeout, a 5xx, or a non-conforming response while exchanging the code; or PostgreSQL could not answer when the attempt was consumed (`auth.login.failed` with `errorName: OidcLoginStoreUnavailableError`). The code is never exchanged twice | Provider status; API container reaches the issuer over HTTPS; database health |
 | HTTP 503 `IDENTITY_PROVIDER_UNAVAILABLE` at `/api/auth/login` | Discovery failed, or the provider does not advertise PKCE S256 | `curl` the discovery document from inside the API container |
-| HTTP 503 `LOGIN_TEMPORARILY_UNAVAILABLE` | The pending-login store is full (100 attempts in 10 minutes) | Traffic to `/api/auth/login`; the browser's previous attempt is replaced when restarting |
+| HTTP 503 `LOGIN_TEMPORARILY_UNAVAILABLE` | The shared pending-login store is full (100 attempts in 10 minutes across every instance; log `reason: store_full`), or PostgreSQL could not answer (`reason: store_unavailable`, with `Retry-After: 5`) | Traffic to `/api/auth/login`; database health; the browser's previous attempt is replaced when restarting |
 | HTTP 429 at login / `LOGIN_RATE_LIMITED` from the API | Public-edge per-IP throttling, or application admission (five in flight, thirty per minute) | Wait and retry; investigate abandoned initiations and abusive traffic |
 
 The production nginx proxy is the public edge: it limits the direct socket address to five login
@@ -142,6 +143,6 @@ IndexedDB for that user. Reauthentication restores them with the new session's C
 | Verification against a real provider | Not performed |
 | Logout at the provider (RP-initiated logout) | `DELETE /api/session` ends the application session only. The web app's Sign out button calls it (ADR-0049), so the next sign-in completes without a login page while the provider session lives |
 | Provisioning through the application | Manual SQL by design for now |
-| Durable pending logins | Sessions are in PostgreSQL and survive a restart (ADR-0080), but a login in progress at the provider is process memory: it must restart after an API restart, and with several API replicas the callback would have to reach the instance that started it. Run one API instance until this is built |
+| General multi-replica operation | Sessions (ADR-0080) and pending sign-ins (ADR-0081) are shared through PostgreSQL, so a sign-in survives a restart and may complete on another instance. Every instance must use the same `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, secret and `OIDC_REDIRECT_URI` (the stable external origin, never an instance address), the same `OIDC_STORE_MAX_ENTRIES`, and synchronized clocks. The login admission limits (five in flight, thirty per minute) are still per process, and other process-local state remains (ADR-0081, Explicit boundaries): one API instance is still the supported deployment |
 | Provider-side re-validation of a live session | A disabled provider account keeps its session until expiry |
 | MFA, password policy, account recovery | The provider's responsibility |

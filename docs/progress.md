@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-08 (durable PostgreSQL sessions, ADR-0080, is the last section; before it: manual daily movement in the weekly review, ADR-0079, and manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-08 (durable pending OIDC logins, ADR-0081, is the last section; before it: durable PostgreSQL sessions, ADR-0080; manual daily movement in the weekly review, ADR-0079, and manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3624,3 +3624,55 @@ test's cleanup waited forever for a second exit; the poll cycle's extra await ma
 started the login. The restore proof is a workstation run that signs in with the local development session, not OIDC;
 no production identity provider or host was exercised. Commit 1 of this branch (storage) does not typecheck on its own:
 the asynchronous boundary needs the caller changes of commit 2. Hosted CI is reported with the change.
+
+## Durable pending OIDC logins (ADR-0081) (2026-11-08)
+
+Branch `feat/durable-oidc-logins` from `main` at e16a209 (ADR-0080). Pending OpenID Connect logins move from a
+process-local `Map` to `app_private.oidc_pending_logins` (migration 0037): the digest of the login identifier,
+reservation and expiry instants, and once completed the PKCE verifier, state and nonce; no table privilege for any
+application role; runtime access only through reserve/complete/consume/cancel-by-digest functions. The lifecycle is
+unchanged and every step is awaited: reserve before discovery, complete after it, cancel on failure, consume before any
+provider work. Consumption deletes the row in the statement that returns it, so of two callbacks on any instances at
+most one reaches the token exchange; an uncertain consume fails the sign-in (`unavailable`) and is never retried (at
+most once, not exactly once). Capacity (`OIDC_STORE_MAX_ENTRIES`) is shared and counts reservations and completed
+attempts under an advisory lock. Backups exclude the rows; `restore:clear-sessions` keeps its name and first three
+output lines and now also clears pending logins, with separate counts. No web change: the closed `sign_in_error` set
+and the `/login` 503 code are unchanged.
+
+**Executed checks.**
+
+| Command | Before (e16a209) | After |
+|---|---|---|
+| `npm run verify` | 2,937: scripts 90, API 1,563, web 1,062, contracts 205, fixtures 14, simulator 3 | 2,952: API 1,578 (+15: pending-login contract and helpers on the in-memory store 12, old synchronous store spec removed -7, route outage/lifecycle 7, `createApp` guard 1, drill clearing check 1, `restore:clear-sessions` CLI +1); others unchanged |
+| `npm run test:integration` | 815 in 63 files | 847 in 65 files (+32, below), 281 s, none skipped, restore drill included |
+| Full `npm run test:e2e` | 138 | 138 passed in 14.5 min (`chromium` and `chromium-oidc`; no new browser test, the OIDC API process now stores pending logins in PostgreSQL; teardown left 0 pending logins and 0 sessions) |
+
+New integration files: `postgres-pending-login-store` (26: the shared contract on PostgreSQL, digest-only storage and a
+fixed expiry, table constraints, completion on another instance after the creating pool is gone, expiry and incomplete
+state across instances, 24 racing reservations on three pools, six lock-queued consumers on three pools with exactly one
+winner, ten unsynchronized consume races, bounded cleanup including a forced rescanning plan, privileges and exact
+grants, reaching only a known digest, unreachable store, deadline and recovery, an uncertain consume),
+`oidc-login-restart` (5: real API processes behind one reverse-proxy origin and a real loopback provider; restart,
+A-to-B, simultaneous callbacks on two instances with exactly one token request, altered state and tampered stored nonce,
+provider and database failure with recovery; no secret in any process output). `backup-restore` gains the OIDC restore
+test (a pre-restore sign-in in a dump that carried its row cannot complete after `restore:clear-sessions`; a new OIDC
+sign-in completes) and pending-login assertions in both drill runs; `oidc-login` runs on the PostgreSQL store.
+
+**Mutation checks** (each red, then restored): `reserve_oidc_login` without its advisory lock, and `consume_oidc_login`
+as read-then-delete (both with a 20 ms widening of the race window), failed all three concurrency tests. `main.ts` back
+on the in-memory store failed four of the five real-process scenarios (restart and A-to-B included). The purge and
+reservation sweep written as `IN (SELECT ... LIMIT)` fail the forced-rescan test (700 deleted for a limit of 500).
+
+Found while testing: one full integration run failed in the purge test with "returned an invalid result". The cause
+reproduced directly: a plan that re-runs a `LIMIT ... FOR UPDATE SKIP LOCKED` subquery inside `IN (...)` skips rows the
+statement already deleted, so the limit is not a bound. Migration 0037 now chooses each batch in a `MATERIALIZED` CTE;
+the plan of the failed run itself was not captured. Migration 0036's session functions have the same pattern (only
+expired sessions are affected) and are left for a follow-up. PostgreSQL rejects regex repetition bounds above 255, so
+the material constraint is 1 to 255 characters.
+
+**Not established.** General multi-replica deployment: login and run-search admission, the weekly insight queue, the
+archive tile cache and metrics are still per process, and only one API container is deployed. No production identity
+provider or host was exercised; the protocol scenarios use a local oidc-provider. Each commit was checked to compile on
+its own (commit 1 in a detached worktree: typecheck, lint, 1,577 unit tests; the first of two unit runs there reported
+one failure whose name was not captured, and the second run passed; commit 2 by a repository-wide typecheck at that
+commit). Hosted CI is reported with the change.
