@@ -23,6 +23,7 @@ What exists, stage by stage (the evidence for each is in [docs/progress.md](docs
 - Step 3 (ADR-0076): a **weekly insight** on the Check-in tab. Code computes every number as a fact; an optional local Ollama model writes number-free prose and cites facts that must match exactly; erasure of a source can never leave an insight behind. Off by default. See "Weekly insights" below.
 - Deterministic weekly review (ADR-0077): the primary weekly view on the Check-in tab, computed and worded by code on every read (coverage with explicit denominators, values, GPS distance gaps, limitations), never stored and independent of any model; the AI insight is an optional section below it. See "Weekly review" below.
 - Daily movement (ADR-0078): a **Movement** section on the Check-in tab for steps and active energy entered by hand, one manual record per person per local date, owner-only, with server-owned "manual" provenance and erasures in the same ledger. No phone or watch import yet, no calorie estimate, and not an input of AI insights; the weekly review shows it (ADR-0079). See "Daily movement" below. The working product direction is called SomaLane (`docs/product-direction.md`); no package, identifier or repository was renamed.
+- Today (ADR-0082): a read-only **Today** view, first in the navigation, showing one day of the person's own check-in, manually entered movement, manual activities and GPS runs, computed on every read and never stored; its actions open the existing check-in and movement editors on the selected date. The visible application name is now **SomaLane** (header and browser title only). See "Today" below.
 
 **What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider, and the OpenID Connect flow only in Chromium), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. The full browser suite runs in Chromium; desktop Firefox, on Windows, runs the 18-test core gate (runner, coach and sharing workflows) and the 24-test pre-demo smoke, but not OpenID Connect sign-in or the real map runtime; no real Mapbox basemap was rendered in any browser; nothing ran in Safari, a mobile browser or on a phone with real GPS. No production RPO or RTO is claimed. Two read endpoints named in the SDD (`/archive/runs`, `/live/nearby`) remain unimplemented; `/runs/{runId}/track?mode=archive` now reads published finished-run geometry and metrics (ADR-0066). To see it working locally, run `npm run demo:up` and press **Demo runner** or **Demo coach** in the browser; the walk-through and its recorded rehearsal are in [docs/runbooks/demo.md](docs/runbooks/demo.md), and interview notes in [docs/interview.md](docs/interview.md).
 
@@ -178,6 +179,21 @@ Cache-Control: no-store
 ```
 
 The Check-in tab's **Movement** section (below the check-in history) has its own date, "Steps (optional)" and "Active energy (kcal)" fields, the source line "Manually entered", Save, Delete after confirmation and a 14-day history; it says that phone and watch synchronization is not connected yet. A confirmed save or deletion of movement refreshes the weekly review (in the week it shows) and never the AI insight.
+
+## Today
+
+Decided in [ADR-0082](docs/adr/0082-today-daily-overview.md). `GET /api/orgs/:orgId/daily-overview/:localDate?timeZone=<IANA>` returns one day of the signed-in person's own records, read in one `REPEATABLE READ READ ONLY` transaction and never stored (`Cache-Control: no-store`, errors included). The date must not be before 2000-01-01 nor after today in `timeZone` by server time.
+
+| Part | What it holds | Which records |
+|---|---|---|
+| `day` | The date, the requested zone, the half-open UTC interval of the date in that zone (23 or 25 hours around a daylight saving change), `inProgress` | |
+| `checkIn` | `recorded`; sleep, sleep quality, mood, soreness, weight (`null` when not recorded); `hasNote` (never the note text); the stored zone | The check-in **stored for the date**, whatever zone it was saved in |
+| `movement` | `recorded`; steps and active energy as entered; `source: "manual"`; the stored zone | The manual movement **stored for the date** |
+| `manualActivities` | `count` and `enteredDurationS` (the full entered duration), in total and by type | Activities that **started** on the date in `timeZone`, also one that continued past midnight |
+| `gpsRuns` | `count`, `withCurrentDistance`, `withoutCurrentDistance`, and `currentDistanceM` (the sum over the runs with a current summary only; `null` when none) | The person's own finished runs that **started** on the date; never a run shared with them |
+| `provenance` | `computed_by_app`, `persisted: false`, `single_read_only_transaction`, `daily-overview-1`, the computation time | |
+
+Manual activities and GPS runs are never added together, movement is never added to either, nothing is estimated, and a missing value is unknown, never 0. The web **Today** view (first in the navigation; the page still opens on Runner, whose run recovery is unchanged) defaults to today in the browser's zone, can pick an earlier date, has a manual Refresh and no polling, and keeps its date while you look at other views. "Add/Edit check-in" and "Add/Edit movement" open the existing editors on the Check-in tab for the selected date; "Open Activities" and "Open Runner" open those views. Opening Today again reads the day again, so edits and deletions show at once.
 
 ## Weekly review
 

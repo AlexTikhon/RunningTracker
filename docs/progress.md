@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-08 (durable pending OIDC logins, ADR-0081, is the last section; before it: durable PostgreSQL sessions, ADR-0080; manual daily movement in the weekly review, ADR-0079, and manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-08 (Today, the daily overview, ADR-0082, is the last section; before it: bounded session cleanup, migration 0038; durable pending OIDC logins, ADR-0081; durable PostgreSQL sessions, ADR-0080; manual daily movement in the weekly review, ADR-0079, and manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -3738,3 +3738,67 @@ E2E was not rerun: no browser-visible code changed.
 **Not established.** The plan of the original failed run behind ADR-0081 was never captured; the rescanning plan is
 forced with planner settings. Purge counts are still read from `ROW_COUNT`. A sweep can remove fewer than 100 rows
 while a concurrent purge holds candidates (by design). Hosted CI is reported with the change.
+
+## Today, the daily overview, and the SomaLane name (ADR-0082) (2026-11-08)
+
+Branch `feat/today-overview` from `main` at dae3c37 (bounded session cleanup; hosted CI run 42510682762 green). A
+read-only **Today** view built from existing data, and the visible application name **SomaLane**. No migration, table,
+persisted summary, background job, model call, dependency or infrastructure; weekly review, AI insights and the
+check-in and movement contracts are unchanged.
+
+- **API.** `GET /api/orgs/:orgId/daily-overview/:localDate?timeZone=<IANA>`, owner-only, `no-store` on every response
+  (before the body parser). Strict path and query; the shared 2000-01-01 lower bound; a date after today in the requested
+  zone by the injected clock is `400`. One authenticated `REPEATABLE READ READ ONLY` transaction: membership, a
+  day-record statement (check-in, manual movement) and a timestamped-source statement (activities, finished GPS runs),
+  each naming organization and owner under RLS.
+- **Daily semantics.** Check-in and movement belong to their stored `local_date` and are never moved by the view zone;
+  their stored zone is returned and explained. Activities and runs belong to the date they started in the requested
+  zone, `[startOfLocalDate(d), startOfLocalDate(d + 1))`, so 23 and 25 hours on the Warsaw change dates.
+  `enteredDurationS` is the full entered duration of activities started on the date (a cross-midnight activity counts
+  in full on its start date). GPS distance only from summaries current for the run's data revision, with separate
+  `withCurrentDistance`/`withoutCurrentDistance` counts and a total over exactly the former. A note-only check-in is a
+  record without its text. Manual and GPS figures separate; movement never added; missing is `null`, zero is `0`.
+- **Web.** Today is the first navigation button; Runner stays the start view (startup recovery unchanged) and stays
+  mounted. `DailyOverviewController` (latest request wins, date change clears and aborts, late answers and failures of
+  an abandoned date dropped, disposed with the session) and a pure `TodayView` (loading, refreshing, empty, error with
+  Retry, access denied; "Manually entered"; "Not recorded"; zone, 23/25-hour, partial-distance and overlap notes). Actions
+  emit a `TodayAction`; App turns the editor ones into a scoped `EditorIntent` read once by the Check-in screen, which opens
+  that section's existing editor on the date and focuses it. Today's selected date is kept per scope during ordinary
+  navigation and cleared on sign-out. Header, brand label, SL mark and browser title say SomaLane.
+
+**Executed checks.**
+
+| Command | Before (dae3c37) | After |
+|---|---|---|
+| `npm run verify` | 2,952: scripts 90, API 1,578, web 1,062, contracts 205, fixtures 14, simulator 3 | 3,013: API 1,589 (+11: day intervals across the Warsaw changes and zone edges, overview mapping, the OpenAPI route), web 1,103 (+41: presentation, controller, Today view states and actions, API client, navigation intents, App brand and order, check-in screen intents), contracts 214 (+9); others unchanged |
+| `npm run test:integration` | 856 in 65 files | 875 in 66 files (+19, below), 323 s including the contracts build, none skipped, restore drill included |
+| Full `npm run test:e2e` | 138 | 141 passed in 15.6 min (`chromium` and `chromium-oidc`; +3, below; the harness spec's deliberately failing test is expected to fail) |
+
+New integration file `daily-overview-http` (19): empty, note-only (no note text in the response), movement-only with
+recorded zeros, partial and fully recorded days; stored-date semantics with Tokyo and Kiritimati records viewed from four
+zones and their neighbouring dates; millisecond midnight boundaries in Warsaw and New York; a cross-midnight activity;
+the Warsaw spring-forward (23 h) and fall-back (25 h, both 02:30s) windows; current, stale and missing summaries and a
+recording run; an overlapping manual and GPS run with movement; owner, other member, run-sharing grantee, other
+organization (`403`) and anonymous (`401`), all `no-store`; writes committed between the two statements not seen and seen
+by the next read; the next read after HTTP deletions of a check-in, movement day and activity; reads change no row
+count; the future-date rule at UTC+14; invalid dates, zones, queries, a repeated parameter, a malformed body.
+
+New Chromium file `today.spec.ts` (3): the demo runner saves a check-in and movement through the existing editors opened
+from Today (each on Today's date, focus on the opened editor), inspects Today, edits and deletes both, returns to the same
+kept date and sees the updated and missing values, checks the SomaLane title and brand, and sign-out forgets the date;
+at 375 px with a wide font no horizontal scroll, and an answer held for an abandoned date is never shown; a simulated run
+started on Runner keeps capturing, uploading and owning the writer while Today is visible (fewer than 6 points on the
+server when Today opened, all 6 while it stayed open), then finishes with 6 contiguous points and appears on Today.
+
+**Mutation checks** (each red, then restored): the read transaction without the `REPEATABLE READ` snapshot fails the
+interleaved-write test; the GPS statement without `run.user_id = $2` fails the grantee isolation test.
+
+**Commits compile on their own.** Commits 1 and 2 were checked in a detached worktree (node_modules junctioned; the
+contracts are identical in all three code commits): contracts, API and web typecheck at commit 1; API and web typecheck
+and 1,096 web tests at commit 2. Commit 3 is the verified branch head.
+
+**Not established.** No real iPhone, Safari or WebKit evidence: the 375 px check is a Chromium viewport. "Today" is
+fixed when the screen opens. The zone is the client's word. Overlap between manual and GPS records is reported, not
+resolved. Today is not the start view. No HealthKit or other import; the next planned phase is an iPhone/HealthKit
+integration spike that must first establish access to macOS/Xcode and a physical iPhone. Hosted CI is reported with the
+change.

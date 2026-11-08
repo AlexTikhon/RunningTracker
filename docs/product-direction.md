@@ -2,7 +2,8 @@
 
 **Working product name: SomaLane** (from 2026-11-08): a personal activity, nutrition and health tracker with an
 optional, evidence-based assistant. It is a direction, not a rename: packages, database identifiers, cookies,
-environment variables and the repository keep the Running Tracker names.
+environment variables and the repository keep the Running Tracker names. Since ADR-0082 the visible application (header,
+brand label and browser title) says SomaLane.
 
 Running Tracker was paused on 2026-11-06 as a hardened local demo of GPS run capture, live coaching and a
 revision-safe archive. It is now resumed with a broader direction: an **activity, health and nutrition tracker with
@@ -75,3 +76,11 @@ same snapshot (days with a record, steps and active energy each against the 7 ca
 coverage, the seven days with the manual source), never added to activity figures and never part of the AI input. The
 same change made the database refuse, instead of round, active energy with a meaningful second decimal (migration
 0035).
+
+**Today** is [ADR-0082](adr/0082-today-daily-overview.md): the first product view across the data foundation, a
+read-only overview of one day of the person's own records, computed on every read in one snapshot and never stored.
+Check-in and movement belong to their stored calendar date; manual activities and GPS runs to the date they started in
+the viewer's zone (23 or 25 hours around a daylight saving change). Manual activities and GPS runs stay separate,
+movement is never added to either, a missing value is unknown, and there are no targets, trends or advice. Its actions
+open the existing editors for the selected date. The next planned phase is an iPhone/HealthKit integration spike, which
+must first establish access to macOS/Xcode and a physical iPhone; it is not started.
