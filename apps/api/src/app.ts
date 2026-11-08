@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 
 import { createActivityRouter } from './activities/activity.routes.js';
 import { createDailyMetricsRouter } from './daily-metrics/daily-metrics.routes.js';
+import { createDailyMovementRouter, dailyMovementNoStore } from './daily-movement/daily-movement.routes.js';
 import { createArchiveRouter } from './archive/archive.routes.js';
 import {
   ArchiveTileCache,
@@ -144,6 +145,8 @@ export function createApp({
     response.setHeader('Cache-Control', 'no-store');
     next();
   });
+  // Before the body parser, so that a malformed or oversized body's error answer is not cacheable either (ADR-0078).
+  app.use('/api/orgs/:orgId/daily-movement', dailyMovementNoStore);
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
   if (config.OIDC) {
@@ -208,6 +211,16 @@ export function createApp({
   app.use(
     '/api/orgs/:orgId/daily-metrics',
     createDailyMetricsRouter({
+      clock,
+      config,
+      pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+    }),
+  );
+  // Manual daily movement (ADR-0078): owner-only, not an insight or weekly review source.
+  app.use(
+    '/api/orgs/:orgId/daily-movement',
+    createDailyMovementRouter({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,

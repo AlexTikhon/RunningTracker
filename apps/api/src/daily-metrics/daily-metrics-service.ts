@@ -86,7 +86,8 @@ export const dailyMetricsRangeSql = `SELECT ${projection}
   ORDER BY metric.local_date`;
 
 // Trailing zeros of the microsecond fraction are dropped, at least three digits stay, as for activities and runs.
-function transportTimestamp(value: string): string {
+// Shared with daily movement (ADR-0078).
+export function transportTimestamp(value: string): string {
   const matched = /^(.*\.)(\d{6})Z$/u.exec(value);
   if (!matched) {
     throw new Error('PostgreSQL returned an unexpected UTC timestamp representation');
@@ -113,8 +114,8 @@ function mapDailyMetrics(row: DailyMetricsRow): DailyMetricsView {
 const notFound = () =>
   new ApiError(404, DAILY_METRICS_NOT_FOUND, 'No check-in is recorded for this date');
 
-// `Intl` accepts any letter case; the stored zone is the platform's canonical spelling.
-function canonicalTimeZone(timeZone: string): string {
+// `Intl` accepts any letter case; the stored zone is the platform's canonical spelling. Shared with daily movement.
+export function canonicalTimeZone(timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone;
 }
 

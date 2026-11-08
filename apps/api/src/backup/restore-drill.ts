@@ -97,14 +97,20 @@ export type ActivityLabel = 'E' | 'F';
 export type DailyMetricLabel = 'G' | 'H';
 
 /**
+ * The fixture movement days of the same scenario (ADR-0078): M is in the backup and its owner deletes it after the
+ * backup; N is in the backup and untouched. Movement is not an insight source, so no insight depends on them.
+ */
+export type DailyMovementLabel = 'M' | 'N';
+
+/**
  * The fixture weekly insights of the same scenario (ADR-0076), all in the backup: one for the week of activity E, one for
  * the week of check-in day G, and one for a week without any erased record. The replay must delete the first two (the
  * derived data of the erased records) and leave the third as it was.
  */
 export type InsightLabel = 'activityWeek' | 'checkInWeek' | 'survivorWeek';
 
-/** The number of owner-only records the scenario deletes after the backup: activity E and day G. */
-export const ERASURES_AFTER_BACKUP = 2;
+/** The number of owner-only records the scenario deletes after the backup: activity E, check-in day G and movement day M. */
+export const ERASURES_AFTER_BACKUP = 3;
 
 export interface ActivityState {
   /** Rows waiting in the restored database's own erasure-ledger outbox. */
@@ -112,12 +118,15 @@ export interface ActivityState {
   present: Record<ActivityLabel, boolean>;
   presentDays: Record<DailyMetricLabel, boolean>;
   presentInsights: Record<InsightLabel, boolean>;
+  presentMovementDays: Record<DailyMovementLabel, boolean>;
   /** Digest over the surviving activity's row, so its content is compared, not just its presence. */
   survivorDigest: string;
   /** Digest over the surviving day's row. */
   survivorDayDigest: string;
   /** Digest over the surviving insight's row. */
   survivorInsightDigest: string;
+  /** Digest over the surviving movement day's row. */
+  survivorMovementDigest: string;
 }
 
 export interface ReapplyErasureRun {
@@ -134,7 +143,10 @@ export interface ErasureEvaluationInput {
   second: ReapplyErasureRun;
 }
 
-/** Pure comparison of the activities and check-in days in the restored database before and after each erasure replay. */
+/**
+ * Pure comparison of the activities, check-in days and movement days in the restored database before and after each
+ * erasure replay.
+ */
 export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] {
   const { afterFirst, afterSecond, first, restored, second } = input;
   const checks: Check[] = [];
@@ -155,8 +167,13 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
     restored.presentDays.G && restored.presentDays.H,
   );
   add(
+    'erased-daily-movement-existed-in-backup',
+    'Movement day M, deleted after the backup, and the surviving movement day N are both in the restored backup',
+    restored.presentMovementDays.M && restored.presentMovementDays.N,
+  );
+  add(
     'erasure-first-pass-outcomes',
-    'The first erasure replay erased exactly the activity and the check-in day deleted after the backup and reported no other outcome',
+    'The first erasure replay erased exactly the activity, the check-in day and the movement day deleted after the backup and reported no other outcome',
     first.entries === ERASURES_AFTER_BACKUP &&
       first.outcomes.erased === ERASURES_AFTER_BACKUP &&
       othersZero(first, 'erased'),
@@ -172,6 +189,11 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
     !afterFirst.presentDays.G,
   );
   add(
+    'erased-daily-movement-absent',
+    'After the replay, movement day M is gone from the restored database',
+    !afterFirst.presentMovementDays.M,
+  );
+  add(
     'surviving-activity-untouched',
     'The surviving activity F is present and unchanged',
     afterFirst.present.F && afterFirst.survivorDigest === restored.survivorDigest,
@@ -180,6 +202,11 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
     'surviving-daily-metric-untouched',
     'The surviving check-in day H is present and unchanged',
     afterFirst.presentDays.H && afterFirst.survivorDayDigest === restored.survivorDayDigest,
+  );
+  add(
+    'surviving-daily-movement-untouched',
+    'The surviving movement day N is present and unchanged',
+    afterFirst.presentMovementDays.N && afterFirst.survivorMovementDigest === restored.survivorMovementDigest,
   );
   add(
     'derived-insights-existed-in-backup',
@@ -208,7 +235,7 @@ export function evaluateErasureRecovery(input: ErasureEvaluationInput): Check[] 
   );
   add(
     'erasure-second-pass-changes-nothing',
-    'The activities, the check-in days, the weekly insights and the erasure outbox after the second replay are identical to those after the first',
+    'The activities, the check-in days, the movement days, the weekly insights and the erasure outbox after the second replay are identical to those after the first',
     deepEqual(afterSecond, afterFirst),
   );
   return checks;

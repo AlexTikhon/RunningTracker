@@ -10,6 +10,7 @@ import { systemClock, type Clock } from '../clock.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { deleteActivity } from '../activities/activity-service.js';
 import { deleteDailyMetrics } from '../daily-metrics/daily-metrics-service.js';
+import { deleteDailyMovement } from '../daily-movement/daily-movement-service.js';
 import { createFileDeletionJournalSink } from '../maintenance/deletion-journal-sink.js';
 import { runAccessJournalExportOnce } from '../maintenance/run-access-journal-export.js';
 import { runDeletionJournalExportOnce } from '../maintenance/run-deletion-journal-export.js';
@@ -91,6 +92,12 @@ const ids = {
   dailyMetrics: {
     G: '2020-01-18',
     H: '2020-01-19',
+  },
+  // ADR-0078: movement day M is deleted by its owner after the backup, N survives. The same fixed dates as G and H:
+  // another table, and movement is not an insight source, so no insight of the scenario depends on them.
+  dailyMovement: {
+    M: '2020-01-18',
+    N: '2020-01-19',
   },
   // ADR-0076: activity E and F start on a fixed date too, in the week before G and H, for the same reason.
   activityStartedAt: '2020-01-08T09:00:00.000Z',
@@ -485,6 +492,9 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
           insight_check_in: boolean;
           insight_digest: string | null;
           insight_survivor: boolean;
+          m: boolean;
+          movement_digest: string | null;
+          n: boolean;
           outbox: string;
         }>(
           `SELECT EXISTS (SELECT 1 FROM activities WHERE org_id = $1 AND id = $2) AS e,
@@ -499,7 +509,11 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
                   EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $4 AND week_start = $8::date) AS insight_check_in,
                   EXISTS (SELECT 1 FROM weekly_insights WHERE org_id = $1 AND user_id = $10 AND week_start = $9::date) AS insight_survivor,
                   (SELECT md5(insight::text) FROM weekly_insights AS insight
-                   WHERE org_id = $1 AND user_id = $10 AND week_start = $9::date) AS insight_digest`,
+                   WHERE org_id = $1 AND user_id = $10 AND week_start = $9::date) AS insight_digest,
+                  EXISTS (SELECT 1 FROM daily_movement WHERE org_id = $1 AND user_id = $4 AND local_date = $11::date) AS m,
+                  EXISTS (SELECT 1 FROM daily_movement WHERE org_id = $1 AND user_id = $4 AND local_date = $12::date) AS n,
+                  (SELECT md5(movement::text) FROM daily_movement AS movement
+                   WHERE org_id = $1 AND user_id = $4 AND local_date = $12::date) AS movement_digest`,
           [
             ids.org,
             ids.activities.E,
@@ -511,6 +525,8 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
             ids.insightWeeks.checkInWeek,
             ids.insightWeeks.survivorWeek,
             ids.keeperUser,
+            ids.dailyMovement.M,
+            ids.dailyMovement.N,
           ],
         );
         const value = row.rows[0]!;
@@ -523,8 +539,10 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
             checkInWeek: value.insight_check_in,
             survivorWeek: value.insight_survivor,
           },
+          presentMovementDays: { M: value.m, N: value.n },
           survivorDayDigest: value.day_digest ?? 'missing',
           survivorInsightDigest: value.insight_digest ?? 'missing',
+          survivorMovementDigest: value.movement_digest ?? 'missing',
           survivorDigest: value.digest ?? 'missing',
         } satisfies ActivityState;
       });
@@ -630,6 +648,10 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       // ADR-0074: and deletes check-in day G the same way.
       await withAuthenticatedTenantTransaction(runtimePool, session, ids.org, (client) =>
         deleteDailyMetrics(client, session, ids.org, ids.dailyMetrics.G),
+      );
+      // ADR-0078: and deletes movement day M the same way.
+      await withAuthenticatedTenantTransaction(runtimePool, session, ids.org, (client) =>
+        deleteDailyMovement(client, session, ids.org, ids.dailyMovement.M),
       );
 
       const journal = await withClient(source.ownerUrl, (client) =>
@@ -940,6 +962,13 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
            VALUES ($1, $2, $3, 'Europe/Warsaw', 71.80, 455, 4, 'drill fixture'),
                   ($1, $2, $4, 'Europe/Warsaw', NULL, 400, 3, NULL)`,
           [ids.org, ids.ownerUser, ids.dailyMetrics.G, ids.dailyMetrics.H],
+        );
+        // ADR-0078: two of the owner's manual movement days, both in the backup (a zero is a recorded value).
+        await client.query(
+          `INSERT INTO daily_movement (org_id, user_id, local_date, time_zone, steps, active_energy_kcal)
+           VALUES ($1, $2, $3, 'Europe/Warsaw', 9120, 388.5),
+                  ($1, $2, $4, 'Europe/Warsaw', 0, NULL)`,
+          [ids.org, ids.ownerUser, ids.dailyMovement.M, ids.dailyMovement.N],
         );
         // ADR-0076: weekly insights in the backup, ready ones so that a resurrected insight would carry text: the
         // owner's for the weeks of E and G, and the keeper's for a week without erased records (a replay invalidates

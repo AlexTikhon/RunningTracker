@@ -132,20 +132,23 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         applied: 0,
         skipped_unknown_organization: 0,
       });
-      // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G (the
-      // backup is at 0028, which has daily_metrics). The restored backup brought both back, the ledger replay removed
-      // them again, and a second replay changed nothing.
-      expect(report.erasures.exportedEntries).toBe(2);
-      expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 2, skipped_different_record: 0 });
-      expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 2, erased: 0, skipped_different_record: 0 });
+      // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G.
+      // ADR-0078: and movement day M (the backup is one migration behind, at 0033, which has daily_movement). The
+      // restored backup brought all three back, the ledger replay removed them again, and a second replay changed nothing.
+      expect(report.erasures.exportedEntries).toBe(3);
+      expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 3, skipped_different_record: 0 });
+      expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 3, erased: 0, skipped_different_record: 0 });
       const erasureCheckIds = [
         'erased-activity-existed-in-backup',
         'erased-daily-metric-existed-in-backup',
+        'erased-daily-movement-existed-in-backup',
         'erasure-first-pass-outcomes',
         'erased-activity-absent',
         'erased-daily-metric-absent',
+        'erased-daily-movement-absent',
         'surviving-activity-untouched',
         'surviving-daily-metric-untouched',
+        'surviving-daily-movement-untouched',
         'derived-insights-existed-in-backup',
         'derived-insights-erased',
         'surviving-insight-untouched',

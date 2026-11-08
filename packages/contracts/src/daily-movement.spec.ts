@@ -11,6 +11,7 @@ import {
   dailyMovementListResponseSchema,
   dailyMovementPathSchema,
   dailyMovementViewSchema,
+  openApiDocument,
   putDailyMetricsRequestSchema,
   putDailyMovementRequestSchema,
 } from './index.js';
@@ -131,5 +132,29 @@ describe('daily movement path, range and view', () => {
     expect(dailyMovementListResponseSchema.safeParse({ items: Array.from({ length: 92 }, () => view) }).success).toBe(true);
     expect(dailyMovementListResponseSchema.safeParse({ items: Array.from({ length: 93 }, () => view) }).success).toBe(false);
     expect(DAILY_MOVEMENT_NOT_FOUND).toBe('DAILY_MOVEMENT_NOT_FOUND');
+  });
+});
+
+describe('daily movement OpenAPI operations', () => {
+  it('documents the range list and the three day operations, with CSRF on mutations', () => {
+    const list = openApiDocument.paths['/api/orgs/{orgId}/daily-movement'];
+    const item = openApiDocument.paths['/api/orgs/{orgId}/daily-movement/{localDate}'];
+    expect(Object.keys(list).sort()).toEqual(['get']);
+    expect(Object.keys(item).sort()).toEqual(['delete', 'get', 'put']);
+    expect(list.get.parameters).toContainEqual({ $ref: '#/components/parameters/DailyMetricsFrom' });
+    expect(list.get.parameters).toContainEqual({ $ref: '#/components/parameters/DailyMetricsTo' });
+    for (const operation of [item.put, item.delete]) {
+      expect(operation.parameters).toContainEqual({ $ref: '#/components/parameters/CsrfToken' });
+      expect(operation.parameters).toContainEqual({ $ref: '#/components/parameters/Origin' });
+    }
+    expect(Object.keys(item.put.responses).sort()).toEqual(['200', '201', 'default']);
+    expect(Object.keys(item.delete.responses).sort()).toEqual(['204', 'default']);
+    const schemas = openApiDocument.components.schemas;
+    expect(schemas.PutDailyMovementRequest).toBeDefined();
+    expect(schemas.DailyMovementView).toBeDefined();
+    expect(schemas.DailyMovementListResponse).toBeDefined();
+    // The request schema cannot carry a source; the view names the only one.
+    expect(JSON.stringify(schemas.PutDailyMovementRequest)).not.toContain('source');
+    expect(JSON.stringify(schemas.DailyMovementView)).toContain('manual');
   });
 });

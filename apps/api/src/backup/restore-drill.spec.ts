@@ -105,23 +105,28 @@ const firstAccessRun: ReapplyAccessRun = { entries: 5, files: 1, outcomes: acces
 const secondAccessRun: ReapplyAccessRun = { entries: 5, files: 1, outcomes: accessOutcomes({ already_applied: 5 }) };
 
 // ADR-0073: activity E is deleted after the backup, F survives. ADR-0074: check-in day G likewise, H survives.
+// ADR-0078: movement day M likewise, N survives.
 const restoredActivities: ActivityState = {
   outboxRows: 0,
   present: { E: true, F: true },
   presentDays: { G: true, H: true },
   presentInsights: { activityWeek: true, checkInWeek: true, survivorWeek: true },
+  presentMovementDays: { M: true, N: true },
   survivorDayDigest: 'digest-h',
   survivorDigest: 'digest-f',
   survivorInsightDigest: 'digest-insight',
+  survivorMovementDigest: 'digest-n',
 };
 const activitiesAfterFirst: ActivityState = {
-  outboxRows: 2,
+  outboxRows: 3,
   present: { E: false, F: true },
   presentDays: { G: false, H: true },
   presentInsights: { activityWeek: false, checkInWeek: false, survivorWeek: true },
+  presentMovementDays: { M: false, N: true },
   survivorDayDigest: 'digest-h',
   survivorDigest: 'digest-f',
   survivorInsightDigest: 'digest-insight',
+  survivorMovementDigest: 'digest-n',
 };
 const erasureOutcomes = (overrides: Partial<ReapplyErasureRun['outcomes']>): ReapplyErasureRun['outcomes'] => ({
   absent: 0,
@@ -129,8 +134,8 @@ const erasureOutcomes = (overrides: Partial<ReapplyErasureRun['outcomes']>): Rea
   skipped_different_record: 0,
   ...overrides,
 });
-const firstErasureRun: ReapplyErasureRun = { entries: 2, files: 1, outcomes: erasureOutcomes({ erased: 2 }) };
-const secondErasureRun: ReapplyErasureRun = { entries: 2, files: 1, outcomes: erasureOutcomes({ absent: 2 }) };
+const firstErasureRun: ReapplyErasureRun = { entries: 3, files: 1, outcomes: erasureOutcomes({ erased: 3 }) };
+const secondErasureRun: ReapplyErasureRun = { entries: 3, files: 1, outcomes: erasureOutcomes({ absent: 3 }) };
 
 function evaluateErasures(overrides: Partial<Parameters<typeof evaluateErasureRecovery>[0]> = {}) {
   return evaluateErasureRecovery({
@@ -152,11 +157,14 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
     expect(checks.map((check) => check.id)).toEqual([
       'erased-activity-existed-in-backup',
       'erased-daily-metric-existed-in-backup',
+      'erased-daily-movement-existed-in-backup',
       'erasure-first-pass-outcomes',
       'erased-activity-absent',
       'erased-daily-metric-absent',
+      'erased-daily-movement-absent',
       'surviving-activity-untouched',
       'surviving-daily-metric-untouched',
+      'surviving-daily-movement-untouched',
       'derived-insights-existed-in-backup',
       'derived-insights-erased',
       'surviving-insight-untouched',
@@ -193,7 +201,7 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
   it('fails when the erased activity is still there after the replay (resurrection)', () => {
     const resurrected = { ...activitiesAfterFirst, present: { E: true, F: true } };
     const noReplay = erasureOutcomes({});
-    expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: resurrected, first: { entries: 2, files: 1, outcomes: noReplay } }))).toEqual(
+    expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: resurrected, first: { entries: 3, files: 1, outcomes: noReplay } }))).toEqual(
       expect.arrayContaining(['erasure-first-pass-outcomes', 'erased-activity-absent']),
     );
   });
@@ -203,12 +211,29 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
       'erased-daily-metric-existed-in-backup',
     );
     const resurrected = { ...activitiesAfterFirst, presentDays: { G: true, H: true } };
-    const onlyActivity = { entries: 2, files: 1, outcomes: erasureOutcomes({ erased: 1, skipped_different_record: 1 }) };
+    const onlyActivity = { entries: 3, files: 1, outcomes: erasureOutcomes({ erased: 2, skipped_different_record: 1 }) };
     expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: resurrected, first: onlyActivity }))).toEqual(
       expect.arrayContaining(['erasure-first-pass-outcomes', 'erased-daily-metric-absent']),
     );
     expect(failed(evaluateErasures({ afterFirst: { ...activitiesAfterFirst, survivorDayDigest: 'other' } }))).toContain(
       'surviving-daily-metric-untouched',
+    );
+  });
+
+  it('fails when the erased movement day was not in the backup, is still there after the replay, or the survivor changed (ADR-0078)', () => {
+    expect(failed(evaluateErasures({ restored: { ...restoredActivities, presentMovementDays: { M: false, N: true } } }))).toContain(
+      'erased-daily-movement-existed-in-backup',
+    );
+    const resurrected = { ...activitiesAfterFirst, presentMovementDays: { M: true, N: true } };
+    const withoutMovement = { entries: 3, files: 1, outcomes: erasureOutcomes({ absent: 1, erased: 2 }) };
+    expect(failed(evaluateErasures({ afterFirst: resurrected, afterSecond: resurrected, first: withoutMovement }))).toEqual(
+      expect.arrayContaining(['erasure-first-pass-outcomes', 'erased-daily-movement-absent']),
+    );
+    expect(failed(evaluateErasures({ afterFirst: { ...activitiesAfterFirst, survivorMovementDigest: 'other' } }))).toContain(
+      'surviving-daily-movement-untouched',
+    );
+    expect(failed(evaluateErasures({ afterFirst: { ...activitiesAfterFirst, presentMovementDays: { M: false, N: false } } }))).toContain(
+      'surviving-daily-movement-untouched',
     );
   });
 
@@ -221,7 +246,10 @@ describe('erasure recovery evaluation (ADR-0073)', () => {
 
   it('fails when the second replay erases again or changes the state', () => {
     expect(failed(evaluateErasures({ second: firstErasureRun }))).toContain('erasure-second-pass-idempotent');
-    expect(failed(evaluateErasures({ afterSecond: { ...activitiesAfterFirst, outboxRows: 3 } }))).toContain('erasure-second-pass-changes-nothing');
+    expect(failed(evaluateErasures({ afterSecond: { ...activitiesAfterFirst, outboxRows: 4 } }))).toContain('erasure-second-pass-changes-nothing');
+    expect(
+      failed(evaluateErasures({ afterSecond: { ...activitiesAfterFirst, presentMovementDays: { M: true, N: true } } })),
+    ).toContain('erasure-second-pass-changes-nothing');
   });
 });
 

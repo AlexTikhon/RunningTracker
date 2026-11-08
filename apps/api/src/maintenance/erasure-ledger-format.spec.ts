@@ -26,9 +26,13 @@ describe('erasure ledger format', () => {
     expect(parseErasureLedgerFile('f', text)).toEqual([entry, { ...entry, seq: '8' }]);
   });
 
-  it('knows activities and daily check-ins (ADR-0074), and nothing else', () => {
+  it('knows activities, daily check-ins (ADR-0074) and daily movement (ADR-0078), and nothing else', () => {
     const daily = { ...entry, entityType: 'daily_metric' as const, seq: '9' };
-    expect(parseErasureLedgerFile('f', serializeErasureLedgerEntries([entry, daily]))).toEqual([entry, daily]);
+    const movement = { ...entry, entityType: 'daily_movement' as const, seq: '10' };
+    expect(parseErasureLedgerFile('f', serializeErasureLedgerEntries([entry, daily, movement]))).toEqual([entry, daily, movement]);
+    for (const unknown of ['daily_steps', 'movement', 'daily_movement_import']) {
+      expect(() => parseErasureLedgerFile('f', `${JSON.stringify({ ...entry, entityType: unknown })}\n`)).toThrow('line 1 is not a valid entry');
+    }
   });
 
   it('carries identifiers and timestamps only', () => {

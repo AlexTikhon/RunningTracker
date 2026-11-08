@@ -12,6 +12,11 @@ import {
   putDailyMetricsRequestSchema,
 } from './daily-metrics.js';
 import {
+  dailyMovementListResponseSchema,
+  dailyMovementViewSchema,
+  putDailyMovementRequestSchema,
+} from './daily-movement.js';
+import {
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
   archiveTrackResponseSchema,
@@ -101,6 +106,7 @@ export const openApiDocument = {
     { name: 'Runs' },
     { name: 'Activities' },
     { name: 'Daily metrics' },
+    { name: 'Daily movement' },
     { name: 'Insights' },
     { name: 'Shares' },
     { name: 'Live reads' },
@@ -375,6 +381,46 @@ export const openApiDocument = {
         summary: "Delete the signed-in person's check-in for one local date",
         description:
           'A permanent hard delete. 204 in every case: deleted now, already deleted, never written, or a date in the future. The erasure is recorded in the erasure ledger in the same statement and exported off the database host, so a restored backup is cleaned by `restore:reapply-erasures` (ADR-0073). If the ledger cannot be written the deletion is not performed and the request fails (5xx); retrying is safe.',
+        parameters: [parameterRef('OrgId'), parameterRef('LocalDate'), ...csrfParameters],
+        responses: { '204': noContentResponse, ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/daily-movement': {
+      get: {
+        tags: ['Daily movement'],
+        summary: "List the signed-in person's own manually entered movement days in a date range",
+        description:
+          "Owner-only health data (ADR-0078): the owner is the session's identity and is never a parameter; coaches, other members and run-sharing grantees never see another person's movement. `from` and `to` are inclusive local dates (YYYY-MM-DD), not before 2000-01-01, `from` not after `to`, at most 92 days (the daily metrics bounds). Only days with a record are returned, ordered by `localDate` ascending. Answers `Cache-Control: no-store`, errors included.",
+        parameters: [parameterRef('OrgId'), parameterRef('DailyMetricsFrom'), parameterRef('DailyMetricsTo')],
+        responses: { '200': jsonResponse('The days with a record in the range.', 'DailyMovementListResponse'), ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/daily-movement/{localDate}': {
+      put: {
+        tags: ['Daily movement'],
+        summary: "Create or fully replace the signed-in person's manual movement for one local date",
+        description:
+          'Steps and user-reported active energy (kcal, one decimal; not resting energy, total expenditure or food intake; never estimated from steps). Naturally idempotent: the body is the whole day, so sending it again changes nothing (not even `updatedAt`). Omitted and null are equal and mean "not recorded"; a 0 is a recorded value; at least one value is required. 201 when the day is first written, 200 when it is replaced or unchanged. The provenance (`source: manual`) is set by the server: a request cannot name an owner, an organization or a source (unknown fields are refused). `timeZone` is the IANA zone the person is in now: `localDate` must not be before 2000-01-01 nor after today in that zone by server time (400 INVALID_REQUEST). The zone is stored with the day when it is first written and never rewritten (ADR-0074 rules).',
+        parameters: [parameterRef('OrgId'), parameterRef('LocalDate'), ...csrfParameters],
+        requestBody: requestBody('PutDailyMovementRequest'),
+        responses: {
+          '200': jsonResponse('The day was replaced, or already held these values.', 'DailyMovementView'),
+          '201': jsonResponse('The day was written for the first time.', 'DailyMovementView'),
+          ...defaultErrors,
+        },
+      },
+      get: {
+        tags: ['Daily movement'],
+        summary: "Read the signed-in person's manual movement for one local date",
+        description: 'A day without a record is 404 DAILY_MOVEMENT_NOT_FOUND; so is anyone else\'s. Answers `Cache-Control: no-store`.',
+        parameters: [parameterRef('OrgId'), parameterRef('LocalDate')],
+        responses: { '200': jsonResponse('The day.', 'DailyMovementView'), ...defaultErrors },
+      },
+      delete: {
+        tags: ['Daily movement'],
+        summary: "Delete the signed-in person's manual movement for one local date",
+        description:
+          'A permanent hard delete. 204 in every case: deleted now, already deleted, never written, or a date in the future. The erasure is recorded in the erasure ledger in the same statement (entity type `daily_movement`) and exported off the database host, so a restored backup is cleaned by `restore:reapply-erasures` (ADR-0073, ADR-0078). If the ledger cannot be written the deletion is not performed and the request fails (5xx); retrying is safe. A day written again after a deletion is a new record version that the old erasure cannot delete.',
         parameters: [parameterRef('OrgId'), parameterRef('LocalDate'), ...csrfParameters],
         responses: { '204': noContentResponse, ...defaultErrors },
       },
@@ -753,6 +799,9 @@ export const openApiDocument = {
       PutDailyMetricsRequest: jsonSchema(putDailyMetricsRequestSchema),
       DailyMetricsView: jsonSchema(dailyMetricsViewSchema),
       DailyMetricsListResponse: jsonSchema(dailyMetricsListResponseSchema),
+      PutDailyMovementRequest: jsonSchema(putDailyMovementRequestSchema),
+      DailyMovementView: jsonSchema(dailyMovementViewSchema),
+      DailyMovementListResponse: jsonSchema(dailyMovementListResponseSchema),
       CreateWeeklyInsightRequest: jsonSchema(createWeeklyInsightRequestSchema),
       WeeklyInsightAccepted: jsonSchema(weeklyInsightAcceptedSchema),
       WeeklyInsightOutput: jsonSchema(weeklyInsightOutputSchema),
