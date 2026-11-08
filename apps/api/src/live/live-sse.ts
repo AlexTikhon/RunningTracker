@@ -68,7 +68,11 @@ export interface LiveSseHubOptions {
   pollIntervalMs: number;
   readState: ReadLiveState;
   streamIdGenerator?: () => string;
-  validateSession: (session: LiveSubscription['session']) => boolean;
+  /**
+   * Asks the session store whether this session is still live (ADR-0080). Only a resolved `true` keeps a connection;
+   * `false`, a rejection (store unreachable or timed out) or anything else closes it.
+   */
+  validateSession: (session: LiveSubscription['session']) => Promise<boolean>;
 }
 
 function subscriptionKey(subscription: LiveSubscription): string {
@@ -98,6 +102,7 @@ export class LiveSseHub implements LiveConnectionManager {
   #openingConnections = 0;
   #polling = false;
   #pollTimer: ReturnType<typeof setTimeout> | undefined;
+  #sessionCheck: Promise<void> | undefined;
   #stopped = false;
 
   public constructor({
@@ -138,23 +143,28 @@ export class LiveSseHub implements LiveConnectionManager {
       this.#metrics?.rejected.inc();
       throw new ApiError(503, 'LIVE_CONNECTION_LIMIT', 'The live connection limit is reached');
     }
-    if (!this.#validateSession(subscription.session)) {
-      throw new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required');
-    }
 
+    // Counted from here, so that concurrent openings awaiting the store cannot overshoot the limit together. A store
+    // that cannot answer rejects the opening (503 via the error handler) before any header is sent.
     this.#openingConnections += 1;
     let initial: LiveStateSnapshot;
     try {
+      if ((await this.#validateSession(subscription.session)) !== true) {
+        throw new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required');
+      }
       initial = await this.#readState(subscription);
+      if (this.#stopped) {
+        throw new ApiError(503, 'LIVE_UNAVAILABLE', 'Live streaming is shutting down');
+      }
+      if ((await this.#validateSession(subscription.session)) !== true) {
+        throw new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required');
+      }
     } finally {
       this.#openingConnections -= 1;
     }
 
     if (this.#stopped) {
       throw new ApiError(503, 'LIVE_UNAVAILABLE', 'Live streaming is shutting down');
-    }
-    if (!this.#validateSession(subscription.session)) {
-      throw new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required');
     }
 
     const id = this.#nextConnectionId++;
@@ -213,12 +223,15 @@ export class LiveSseHub implements LiveConnectionManager {
     if (this.#stopped || this.#connections.size === 0) {
       return;
     }
-    this.#removeInvalidSessions();
-    if (this.#connections.size === 0) {
-      return;
-    }
     this.#polling = true;
     const cycleStartedAt = this.#clock.monotonicNow();
+    // Every cycle first asks the store about every open session; only connections that pass receive this cycle's
+    // private state. So a revocation committed on any instance stops delivery within one poll interval plus one cycle.
+    await this.#checkSessions();
+    if (this.#stopped || this.#connections.size === 0) {
+      this.#polling = false;
+      return;
+    }
 
     const entries = [...this.#subscriptions.entries()];
     let cursor = 0;
@@ -261,11 +274,8 @@ export class LiveSseHub implements LiveConnectionManager {
   }
 
   #publish(connection: LiveConnection, snapshot: LiveStateSnapshot): void {
+    // The session passed this cycle's check (#checkSessions) or the connection would be closed already.
     if (connection.closed) {
-      return;
-    }
-    if (!this.#validateSession(connection.session)) {
-      this.#closeConnection(connection, true);
       return;
     }
     if (connection.blocked) {
@@ -305,11 +315,8 @@ export class LiveSseHub implements LiveConnectionManager {
   }
 
   #drain(connection: LiveConnection): void {
+    // The pending snapshot belongs to the latest cycle, whose session check this still-open connection passed.
     if (connection.closed || !connection.blocked) {
-      return;
-    }
-    if (!this.#validateSession(connection.session)) {
-      this.#closeConnection(connection, true);
       return;
     }
     connection.blocked = false;
@@ -330,11 +337,8 @@ export class LiveSseHub implements LiveConnectionManager {
       return;
     }
     for (const connection of this.#connections.values()) {
+      // A comment line carries no private state; session checks run with every poll cycle instead.
       if (connection.closed || connection.blocked) {
-        continue;
-      }
-      if (!this.#validateSession(connection.session)) {
-        this.#closeConnection(connection, true);
         continue;
       }
       try {
@@ -376,11 +380,51 @@ export class LiveSseHub implements LiveConnectionManager {
     }
   }
 
-  #removeInvalidSessions(): void {
-    for (const connection of [...this.#connections.values()]) {
-      if (!this.#validateSession(connection.session)) {
-        this.#closeConnection(connection, true);
+  /**
+   * One store question per distinct open session, at most `pollConcurrency` at a time, each bounded by the store's
+   * own deadline. Single flight: a caller arriving while a check runs waits for that check instead of starting
+   * another. No database connection is held between checks. A session that is not confirmed live, because the
+   * store said so or because it could not answer, has all its connections closed (fail closed); the browser
+   * reconnects through the authenticated route, which answers 401 or 503 as appropriate.
+   */
+  #checkSessions(): Promise<void> {
+    this.#sessionCheck ??= this.#runSessionCheck().finally(() => {
+      this.#sessionCheck = undefined;
+    });
+    return this.#sessionCheck;
+  }
+
+  async #runSessionCheck(): Promise<void> {
+    const bySession = new Map<string, LiveConnection[]>();
+    for (const connection of this.#connections.values()) {
+      const key = `${connection.session.tokenDigest}:${connection.session.userId}`;
+      const group = bySession.get(key);
+      if (group) group.push(connection);
+      else bySession.set(key, [connection]);
+    }
+    const groups = [...bySession.values()];
+    let cursor = 0;
+    let failures = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < groups.length) {
+        const group = groups[cursor++];
+        const first = group?.[0];
+        if (!group || !first) continue;
+        let active = false;
+        try {
+          active = (await this.#validateSession(first.session)) === true;
+        } catch {
+          failures += 1;
+        }
+        if (!active) {
+          for (const connection of group) this.#closeConnection(connection, true);
+        }
       }
+    };
+    await Promise.all(Array.from({ length: Math.min(this.#pollConcurrency, groups.length) }, () => worker()));
+    if (failures > 0) {
+      // Counts only: never a digest, user or connection identifier.
+      this.#logger.warn('live.session_check.failed', { failedSessions: failures, reason: 'store_unavailable' });
     }
   }
 

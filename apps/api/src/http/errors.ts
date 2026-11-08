@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 
+import { SessionStoreUnavailableError } from '../auth/session-store.js';
 import { classifyDatabaseTimeout } from '../database/database-errors.js';
 import { describeError } from '../observability/logger.js';
 import { getRequestId } from './request-id.js';
@@ -58,6 +59,21 @@ const databaseTimeoutErrors = {
   ),
 } as const;
 
+/** Seconds a client should wait before asking again after the session store could not answer. */
+export const SESSION_STORE_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * The session store could not say whether a session is valid (ADR-0080). Access is refused, but this is not a 401:
+ * the browser keeps its cookie and its last confirmed session, and asks again (ADR-0054).
+ */
+export function sessionStoreUnavailable(): ApiError {
+  return new ApiError(
+    503,
+    'SESSION_STORE_UNAVAILABLE',
+    'Sessions cannot be checked right now; retry shortly',
+  );
+}
+
 export function apiErrorHandler(budgets: DatabaseBudgetsMs = {}): ErrorRequestHandler {
   return (error, request, response, next) => {
     if (response.headersSent) {
@@ -73,10 +89,15 @@ export function apiErrorHandler(budgets: DatabaseBudgetsMs = {}): ErrorRequestHa
         ? new ApiError(413, 'BATCH_TOO_LARGE', 'The request body exceeds 64 KiB')
         : error instanceof ApiError
           ? error
-          : databaseTimeout !== undefined
-            ? databaseTimeoutErrors[databaseTimeout]
-            : new ApiError(500, 'INTERNAL_ERROR', 'An unexpected server error occurred');
+          : error instanceof SessionStoreUnavailableError
+            ? sessionStoreUnavailable()
+            : databaseTimeout !== undefined
+              ? databaseTimeoutErrors[databaseTimeout]
+              : new ApiError(500, 'INTERNAL_ERROR', 'An unexpected server error occurred');
 
+    if (normalized.code === 'SESSION_STORE_UNAVAILABLE' && normalized.statusCode === 503) {
+      response.setHeader('Retry-After', String(SESSION_STORE_RETRY_AFTER_SECONDS));
+    }
     if (normalized.statusCode >= 500) {
       // The HTTP metrics middleware emits the single failure log line and adds this.
       const timeoutMs =

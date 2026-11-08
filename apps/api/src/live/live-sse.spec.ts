@@ -9,6 +9,7 @@ import { createApiMetrics } from '../observability/api-metrics.js';
 import { createLogger } from '../observability/logger.js';
 import type { DatabasePool } from '../database/database.js';
 import { ApiError } from '../http/errors.js';
+import { inMemorySessionManager } from '../testing/in-memory-sessions.js';
 import type { PoolClient } from 'pg';
 
 import {
@@ -110,10 +111,10 @@ function snapshotWithRun(index: number): LiveStateSnapshot {
   };
 }
 
+// Every fake here resolves at once, so one macrotask turn drains the whole chain of microtasks a poll cycle makes
+// (session check, reads, publication), however many awaits it takes (ADR-0080 added the session check).
 async function settle(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function eventData(frame: string): Record<string, unknown> {
@@ -194,7 +195,7 @@ describe('LiveSseHub', () => {
       pollIntervalMs: 2_000,
       readState,
       streamIdGenerator: () => '99999999-9999-4999-8999-999999999999',
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
     });
     const first = new FakeStreamResponse();
     const second = new FakeStreamResponse();
@@ -233,7 +234,7 @@ describe('LiveSseHub', () => {
       pollIntervalMs: 2_000,
       readState: () => Promise.resolve(snapshot(readIndex++)),
       streamIdGenerator: () => '99999999-9999-4999-8999-999999999999',
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
     });
     const response = new FakeStreamResponse();
     response.writeResults.push(false, true);
@@ -272,7 +273,7 @@ describe('LiveSseHub', () => {
       pollIntervalMs: 20_000,
       readState: () => Promise.resolve(snapshot(readIndex++)),
       streamIdGenerator: () => '99999999-9999-4999-8999-999999999999',
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
     });
     const response = new FakeStreamResponse();
 
@@ -300,7 +301,7 @@ describe('LiveSseHub', () => {
       pollConcurrency: 1,
       pollIntervalMs: 2_000,
       readState,
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
     });
     const opening = hub.connect(
       subscription(),
@@ -333,7 +334,7 @@ describe('LiveSseHub', () => {
       pollConcurrency: 1,
       pollIntervalMs: 2_000,
       readState: () => new Promise((resolve) => (releaseRead = resolve)),
-      validateSession: () => active,
+      validateSession: () => Promise.resolve(active),
     });
     const response = new FakeStreamResponse();
     const opening = hub.connect(subscription(), new EventEmitter(), response);
@@ -359,7 +360,7 @@ describe('LiveSseHub', () => {
       pollConcurrency: 1,
       pollIntervalMs: 2_000,
       readState,
-      validateSession: (session) => activeSessions.has(session.tokenDigest),
+      validateSession: (session) => Promise.resolve(activeSessions.has(session.tokenDigest)),
     });
     const revoked = new FakeStreamResponse();
     const retained = new FakeStreamResponse();
@@ -387,7 +388,7 @@ describe('LiveSseHub', () => {
       pollConcurrency: 1,
       pollIntervalMs: 20_000,
       readState: () => Promise.resolve(snapshot(0)),
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
     });
     const response = new FakeStreamResponse();
     const expiring = subscription();
@@ -418,7 +419,7 @@ describe('LiveSseHub', () => {
           new ApiError(403, 'ORG_ACCESS_DENIED', 'The current identity cannot access this organization'),
         );
       },
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
     });
     const response = new FakeStreamResponse();
     response.writeResults.push(false);
@@ -446,7 +447,7 @@ describe('LiveSseHub', () => {
         const index = readIndex++;
         return Promise.resolve(index < 2 ? snapshotWithRun(index) : snapshot(index));
       },
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
     });
     const response = new FakeStreamResponse();
     response.writeResults.push(false, true);
@@ -481,11 +482,13 @@ describe('GET /api/orgs/:orgId/live', () => {
       return Promise.resolve();
     });
     const pool: DatabasePool = { connect: vi.fn() };
+    const clock = controlledClock();
     const app = createApp({
-      clock: controlledClock(),
+      clock,
       config,
       liveConnections: { connect },
       pool,
+      sessionManager: inMemorySessionManager(clock, config),
     });
     const login = await request(app)
       .post('/api/session')
@@ -524,7 +527,7 @@ describe('P11.1 LiveSseHub metrics', () => {
       pollConcurrency: 1,
       pollIntervalMs: 2_000,
       readState: () => Promise.resolve(snapshot(0)),
-      validateSession: () => true,
+      validateSession: () => Promise.resolve(true),
       ...overrides,
     });
     return { clock, hub, metrics };
@@ -588,5 +591,113 @@ describe('P11.1 LiveSseHub metrics', () => {
     });
     expect(logged[0]).not.toContain('secret');
     hub.stop();
+  });
+});
+
+describe('LiveSseHub session checks against an asynchronous store (ADR-0080)', () => {
+  function hubWith(validateSession: (session: { tokenDigest: string }) => Promise<boolean>, logged: string[] = []) {
+    const clock = controlledClock();
+    const readState = vi.fn<ReadLiveState>(() => Promise.resolve(snapshot(0)));
+    const hub = new LiveSseHub({
+      backpressureTimeoutMs: 10_000,
+      clock,
+      heartbeatIntervalMs: 15_000,
+      logger: createLogger({
+        clock: { utcNow: () => new Date('2031-01-01T00:00:00.000Z') },
+        write: (_level, line) => void logged.push(line),
+      }),
+      maxConnections: 4,
+      pollConcurrency: 2,
+      pollIntervalMs: 2_000,
+      readState,
+      validateSession,
+    });
+    return { clock, hub, readState };
+  }
+
+  it('closes every connection of a session the store cannot vouch for, and logs only a count', async () => {
+    let outage = false;
+    const logged: string[] = [];
+    const { clock, hub, readState } = hubWith(
+      () => (outage ? Promise.reject(new Error('connection refused secret-digest')) : Promise.resolve(true)),
+      logged,
+    );
+    const tabOne = new FakeStreamResponse();
+    const tabTwo = new FakeStreamResponse();
+    await hub.connect(subscription('session-1'), new EventEmitter(), tabOne);
+    await hub.connect(subscription('session-1'), new EventEmitter(), tabTwo);
+    readState.mockClear();
+
+    outage = true;
+    clock.advanceBy(2_000);
+    await settle();
+
+    expect(tabOne.ended).toBe(true);
+    expect(tabTwo.ended).toBe(true);
+    // No private state was read or written for the unverified session.
+    expect(readState).not.toHaveBeenCalled();
+    expect(tabOne.chunks).toHaveLength(1);
+    expect(logged.join('\n')).toContain('live.session_check.failed');
+    expect(logged.join('\n')).not.toMatch(/secret|session-1|connection refused/u);
+    hub.stop();
+  });
+
+  it('treats anything but a resolved true as inactive', async () => {
+    const answers: unknown[] = [true, true, 'yes'];
+    const { clock, hub } = hubWith(() => Promise.resolve(answers.shift() as boolean));
+    const response = new FakeStreamResponse();
+    await hub.connect(subscription(), new EventEmitter(), response);
+
+    clock.advanceBy(2_000);
+    await settle();
+
+    expect(response.ended).toBe(true);
+    hub.stop();
+  });
+
+  it('asks once per distinct session per cycle and never starts a check while one is still running', async () => {
+    const pending: Array<(active: boolean) => void> = [];
+    let hold = false;
+    const validate = vi.fn<(session: { tokenDigest: string }) => Promise<boolean>>(() =>
+      hold ? new Promise<boolean>((resolve) => pending.push(resolve)) : Promise.resolve(true),
+    );
+    const { clock, hub, readState } = hubWith(validate);
+    await hub.connect(subscription('session-1'), new EventEmitter(), new FakeStreamResponse());
+    await hub.connect(subscription('session-1'), new EventEmitter(), new FakeStreamResponse());
+    await hub.connect(subscription('session-2'), new EventEmitter(), new FakeStreamResponse());
+    validate.mockClear();
+    readState.mockClear();
+
+    hold = true;
+    clock.advanceBy(2_000);
+    await settle();
+    // Two tabs of session-1 share one question; session-2 gets its own.
+    expect(validate.mock.calls.map(([session]) => session.tokenDigest).sort()).toEqual(['session-1', 'session-2']);
+
+    // The store is slow: time passes, but no second check and no read starts until the first check finishes.
+    clock.advanceBy(10_000);
+    clock.advanceBy(15_000);
+    await settle();
+    expect(validate).toHaveBeenCalledTimes(2);
+    expect(readState).not.toHaveBeenCalled();
+
+    hold = false;
+    for (const resolve of pending.splice(0)) resolve(true);
+    await settle();
+    // Both sessions are the same identity in the same organization: one shared read.
+    expect(readState).toHaveBeenCalledTimes(1);
+    hub.stop();
+  });
+
+  it('refuses to open a stream when the store cannot answer, before any header is sent', async () => {
+    const outage = new Error('store unavailable');
+    const { hub, readState } = hubWith(() => Promise.reject(outage));
+    const response = new FakeStreamResponse();
+
+    await expect(hub.connect(subscription(), new EventEmitter(), response)).rejects.toBe(outage);
+
+    expect(readState).not.toHaveBeenCalled();
+    expect(response.headers.size).toBe(0);
+    expect(response.chunks).toHaveLength(0);
   });
 });

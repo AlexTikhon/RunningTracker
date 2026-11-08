@@ -74,12 +74,12 @@ describe('coach discovery against PostgreSQL row-level security', () => {
     await ownerPool?.end();
   });
 
-  function cookieFor(userId: string): string {
-    return `${sessionCookieName}=${sessionManager.create(userId).sessionToken}`;
+  async function cookieFor(userId: string): Promise<string> {
+    return `${sessionCookieName}=${(await sessionManager.create(userId)).sessionToken}`;
   }
 
   async function coachesSeenBy(userId: string, orgId: string): Promise<string[]> {
-    const response = await request(app).get(`/api/orgs/${orgId}/coaches`).set('Cookie', cookieFor(userId));
+    const response = await request(app).get(`/api/orgs/${orgId}/coaches`).set('Cookie', await cookieFor(userId));
     expect(response.status).toBe(200);
     expect(response.headers['cache-control']).toBe('no-store');
     return organizationCoachListResponseSchema.parse(response.body).items.map((item) => item.userId);
@@ -138,7 +138,7 @@ describe('coach discovery against PostgreSQL row-level security', () => {
       [ids.userOrgA, ids.orgB],
       [ids.userInactive, ids.orgA],
     ] as const) {
-      const response = await request(app).get(`/api/orgs/${orgId}/coaches`).set('Cookie', cookieFor(userId));
+      const response = await request(app).get(`/api/orgs/${orgId}/coaches`).set('Cookie', await cookieFor(userId));
       expect(response.status).toBe(403);
       expect((response.body as { error: { code: string } }).error.code).toBe('ORG_ACCESS_DENIED');
       expect(JSON.stringify(response.body)).not.toContain(ids.userStranger);
@@ -149,7 +149,7 @@ describe('coach discovery against PostgreSQL row-level security', () => {
     const response = await request(app)
       .get(`/api/orgs/${ids.orgA}/coaches`)
       .query({ role: 'runner' })
-      .set('Cookie', cookieFor(ids.userOrgA));
+      .set('Cookie', await cookieFor(ids.userOrgA));
 
     expect(response.status).toBe(400);
     expect(JSON.stringify(response.body)).not.toContain(ids.userStranger);

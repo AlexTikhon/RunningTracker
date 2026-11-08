@@ -259,7 +259,17 @@ const environmentSchema = z
     LIVE_SSE_MAX_CONNECTIONS: z.coerce.number().int().positive().max(1_000).default(64),
     LIVE_SSE_POLL_CONCURRENCY: z.coerce.number().int().positive().max(8).default(2),
     SESSION_COOKIE_SECURE: environmentBoolean.default(true),
+    // The capacity of the shared PostgreSQL session store (ADR-0080): give every instance on one database the same value.
     SESSION_STORE_MAX_ENTRIES: z.coerce.number().int().positive().max(10_000).default(100),
+    // Upper bound of one session store operation, connection checkout included.
+    SESSION_STORE_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(2_000),
+    // How often maintenance removes one bounded batch of expired session rows.
+    SESSION_PURGE_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60 * 1_000)
+      .default(900_000),
     SESSION_TTL_MS: z.coerce
       .number()
       .int()

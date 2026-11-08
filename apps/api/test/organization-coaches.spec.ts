@@ -47,7 +47,7 @@ function stubPool(rows: ReadonlyArray<{ user_id: string }>, member = true) {
   return { connect, pool, statements };
 }
 
-function appWith(rows: ReadonlyArray<{ user_id: string }>, member = true) {
+async function appWith(rows: ReadonlyArray<{ user_id: string }>, member = true) {
   const sessionManager = new SessionManager({
     clock: systemClock,
     store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
@@ -55,13 +55,13 @@ function appWith(rows: ReadonlyArray<{ user_id: string }>, member = true) {
   });
   const database = stubPool(rows, member);
   const app = createApp({ clock: systemClock, config, pool: database.pool, sessionManager });
-  const cookie = `${sessionCookieName}=${sessionManager.create(user).sessionToken}`;
+  const cookie = `${sessionCookieName}=${(await sessionManager.create(user)).sessionToken}`;
   return { app, cookie, database };
 }
 
 describe('GET /api/orgs/:orgId/coaches', () => {
   it('requires a session and does not touch the database without one', async () => {
-    const { app, database } = appWith([{ user_id: coachA }]);
+    const { app, database } = await appWith([{ user_id: coachA }]);
 
     const response = await request(app).get(`/api/orgs/${orgA}/coaches`);
 
@@ -70,7 +70,7 @@ describe('GET /api/orgs/:orgId/coaches', () => {
   });
 
   it('returns the identifiers the database function reports, in that order, uncached', async () => {
-    const { app, cookie, database } = appWith([{ user_id: coachA }, { user_id: coachB }]);
+    const { app, cookie, database } = await appWith([{ user_id: coachA }, { user_id: coachB }]);
 
     const response = await request(app).get(`/api/orgs/${orgA}/coaches`).set('Cookie', cookie);
 
@@ -85,7 +85,7 @@ describe('GET /api/orgs/:orgId/coaches', () => {
   });
 
   it('refuses a non-member before asking for coaches', async () => {
-    const { app, cookie, database } = appWith([{ user_id: coachA }], false);
+    const { app, cookie, database } = await appWith([{ user_id: coachA }], false);
 
     const response = await request(app).get(`/api/orgs/${orgA}/coaches`).set('Cookie', cookie);
 
@@ -95,7 +95,7 @@ describe('GET /api/orgs/:orgId/coaches', () => {
   });
 
   it('refuses any query parameter and a malformed organization without touching the database', async () => {
-    const { app, cookie, database } = appWith([{ user_id: coachA }]);
+    const { app, cookie, database } = await appWith([{ user_id: coachA }]);
 
     const withQuery = await request(app).get(`/api/orgs/${orgA}/coaches`).query({ role: 'runner' }).set('Cookie', cookie);
     const malformed = await request(app).get('/api/orgs/not-a-uuid/coaches').set('Cookie', cookie);
@@ -106,7 +106,7 @@ describe('GET /api/orgs/:orgId/coaches', () => {
   });
 
   it('fails closed when the database returns something outside the contract', async () => {
-    const { app, cookie } = appWith([{ user_id: 'not-a-uuid' }]);
+    const { app, cookie } = await appWith([{ user_id: 'not-a-uuid' }]);
 
     const response = await request(app).get(`/api/orgs/${orgA}/coaches`).set('Cookie', cookie);
 

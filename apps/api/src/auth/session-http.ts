@@ -5,7 +5,11 @@ import { z } from 'zod';
 import type { Environment } from '../config/environment.js';
 import { ApiError } from '../http/errors.js';
 import type { SessionManager } from './session-manager.js';
-import { SessionStoreCapacityError, type StoredSession } from './session-store.js';
+import {
+  SessionStoreCapacityError,
+  SessionUserUnknownError,
+  type StoredSession,
+} from './session-store.js';
 
 export const sessionCookieName = 'running_tracker_session';
 export const csrfHeaderName = 'x-csrf-token';
@@ -74,10 +78,19 @@ const requireJson: RequestHandler = (request, _response, next) => {
   next();
 };
 
+// Every authenticated request asks the store (ADR-0080): no positive cache can hide a revocation committed by another
+// instance. A store that cannot answer fails the request with 503 SESSION_STORE_UNAVAILABLE (errors.ts), never 401,
+// and never touches the cookie, so a transient outage does not sign anyone out.
 export function createSessionAuthentication(sessionManager: SessionManager): RequestHandler {
-  return (request, _response, next) => {
+  return async (request, _response, next) => {
     const token = parseCookie(request.header('cookie'), sessionCookieName);
-    const session = token ? sessionManager.resolve(token) : undefined;
+    let session: StoredSession | undefined;
+    try {
+      session = token ? await sessionManager.resolve(token) : undefined;
+    } catch (error) {
+      next(error);
+      return;
+    }
     if (!token || !session) {
       next(new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required'));
       return;
@@ -133,7 +146,7 @@ export function createSessionRouter(config: Environment, sessionManager: Session
   });
 
   if (config.LOCAL_AUTH_ENABLED) {
-    router.post('/', requireAllowedOrigin(config), requireJson, (request, response, next) => {
+    router.post('/', requireAllowedOrigin(config), requireJson, async (request, response, next) => {
       const parsed = localSessionRequestSchema.safeParse(request.body);
       if (!parsed.success) {
         next(
@@ -149,7 +162,7 @@ export function createSessionRouter(config: Environment, sessionManager: Session
       }
 
       try {
-        const created = sessionManager.create(parsed.data.userId);
+        const created = await sessionManager.create(parsed.data.userId);
         response.setHeader('Set-Cookie', sessionCookie(created.sessionToken, config));
         response.status(201).json({
           csrf: { headerName: csrfHeaderName, token: created.record.csrfToken },
@@ -159,8 +172,10 @@ export function createSessionRouter(config: Environment, sessionManager: Session
       } catch (error) {
         next(
           error instanceof SessionStoreCapacityError
-            ? new ApiError(503, 'SESSION_STORE_UNAVAILABLE', 'The local session store is full')
-            : error,
+            ? new ApiError(503, 'SESSION_STORE_UNAVAILABLE', 'The session store is full')
+            : error instanceof SessionUserUnknownError
+              ? new ApiError(403, 'LOCAL_IDENTITY_DENIED', 'The local identity is not allowed')
+              : error,
         );
       }
     });
@@ -175,11 +190,18 @@ export function createSessionRouter(config: Environment, sessionManager: Session
     });
   });
 
+  // The cookie is cleared only after the revocation is committed. When the store fails the answer is 503 and the
+  // cookie stays: the browser must not believe it signed out while the session still works on the server.
   router.delete(
     '/',
     ...createAuthenticatedMutationProtection(config, sessionManager),
-    (request, response) => {
-      sessionManager.revoke(getSessionToken(request));
+    async (request, response, next) => {
+      try {
+        await sessionManager.revoke(getSessionToken(request));
+      } catch (error) {
+        next(error);
+        return;
+      }
       response.setHeader('Set-Cookie', clearedSessionCookie(config));
       response.status(204).end();
     },

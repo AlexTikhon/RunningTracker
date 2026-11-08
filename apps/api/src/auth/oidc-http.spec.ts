@@ -177,7 +177,7 @@ describe('OIDC login routes', () => {
     expect(session).toContain('SameSite=Strict');
     expect(session).toContain('Secure');
     const sessionToken = session?.split(';')[0]?.slice('running_tracker_session='.length) ?? '';
-    expect(harness.sessions.resolve(sessionToken)?.userId).toBe(userId);
+    expect((await harness.sessions.resolve(sessionToken))?.userId).toBe(userId);
     expect(setCookieLines(response).find((line) => line.startsWith('running_tracker_login='))).toContain(
       'Max-Age=0',
     );
@@ -295,7 +295,7 @@ describe('OIDC login routes', () => {
 
   it('fails a callback as unavailable when the session store is full of live sessions, and signs nobody out (ADR-0075)', async () => {
     const harness = createHarness({ sessionMaxEntries: 1 });
-    const signedIn = harness.sessions.create(userId);
+    const signedIn = await harness.sessions.create(userId);
     const loginCookie = await startLogin(harness);
 
     const callback = await request(harness.app)
@@ -305,7 +305,7 @@ describe('OIDC login routes', () => {
 
     expect(callback.headers.location).toBe('/runner?sign_in_error=unavailable');
     expect(setCookieLines(callback).some((line) => line.startsWith('running_tracker_session='))).toBe(false);
-    expect(harness.sessions.resolve(signedIn.sessionToken)?.userId).toBe(userId);
+    expect((await harness.sessions.resolve(signedIn.sessionToken))?.userId).toBe(userId);
 
     // Once the existing session has expired, the next sign-in takes its slot.
     harness.clock.now = signedIn.record.expiresAt.getTime();
@@ -315,7 +315,7 @@ describe('OIDC login routes', () => {
       .set('Cookie', `running_tracker_login=${retryCookie}`)
       .expect(200);
     expect(setCookieLines(retry).some((line) => line.startsWith('running_tracker_session='))).toBe(true);
-    expect(harness.sessions.resolve(signedIn.sessionToken)).toBeUndefined();
+    expect(await harness.sessions.resolve(signedIn.sessionToken)).toBeUndefined();
   });
 
   it('is bounded: a full pending-login store answers 503 instead of growing', async () => {

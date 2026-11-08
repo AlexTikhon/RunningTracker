@@ -53,8 +53,8 @@ function appWith(rows: ReadonlyArray<{ organization_id: string }>) {
   });
   const database = stubPool(rows);
   const app = createApp({ clock: systemClock, config, pool: database.pool, sessionManager });
-  const cookieFor = (userId: string): string =>
-    `${sessionCookieName}=${sessionManager.create(userId).sessionToken}`;
+  const cookieFor = async (userId: string): Promise<string> =>
+    `${sessionCookieName}=${(await sessionManager.create(userId)).sessionToken}`;
   return { app, cookieFor, database };
 }
 
@@ -72,7 +72,7 @@ describe('GET /api/organizations', () => {
   it('returns the identifiers the database function reports, in that order, uncached', async () => {
     const { app, cookieFor } = appWith([{ organization_id: orgA }, { organization_id: orgB }]);
 
-    const response = await request(app).get('/api/organizations').set('Cookie', cookieFor(user));
+    const response = await request(app).get('/api/organizations').set('Cookie', await cookieFor(user));
 
     expect(response.status).toBe(200);
     expect(response.headers['cache-control']).toBe('no-store');
@@ -82,7 +82,7 @@ describe('GET /api/organizations', () => {
   it('answers an empty membership list with an empty array, not an authorization error', async () => {
     const { app, cookieFor } = appWith([]);
 
-    const response = await request(app).get('/api/organizations').set('Cookie', cookieFor(user));
+    const response = await request(app).get('/api/organizations').set('Cookie', await cookieFor(user));
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ items: [] });
@@ -91,7 +91,7 @@ describe('GET /api/organizations', () => {
   it("asks only about the session's own identity and sets no organization", async () => {
     const { app, cookieFor, database } = appWith([{ organization_id: orgA }]);
 
-    await request(app).get('/api/organizations').set('Cookie', cookieFor(otherUser));
+    await request(app).get('/api/organizations').set('Cookie', await cookieFor(otherUser));
 
     expect(database.statements.map(({ text, parameters }) => [text, parameters])).toEqual([
       ['BEGIN', undefined],
@@ -107,7 +107,7 @@ describe('GET /api/organizations', () => {
     const response = await request(app)
       .get('/api/organizations')
       .query({ userId: otherUser })
-      .set('Cookie', cookieFor(user));
+      .set('Cookie', await cookieFor(user));
 
     expect(response.status).toBe(400);
     expect((response.body as { error: { code: string } }).error.code).toBe('INVALID_REQUEST');
@@ -117,7 +117,7 @@ describe('GET /api/organizations', () => {
   it('fails closed when the database returns something outside the contract', async () => {
     const { app, cookieFor } = appWith([{ organization_id: 'not-a-uuid' }]);
 
-    const response = await request(app).get('/api/organizations').set('Cookie', cookieFor(user));
+    const response = await request(app).get('/api/organizations').set('Cookie', await cookieFor(user));
 
     expect(response.status).toBe(500);
     expect(JSON.stringify(response.body)).not.toContain('not-a-uuid');

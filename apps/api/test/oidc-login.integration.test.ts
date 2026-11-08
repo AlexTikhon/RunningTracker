@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -11,6 +12,8 @@ import {
   OidcLoginRejectedError,
   OidcProviderUnavailableError,
 } from '../src/auth/oidc-client.js';
+import { PostgresSessionStore } from '../src/auth/postgres-session-store.js';
+import { SessionManager } from '../src/auth/session-manager.js';
 import { systemClock } from '../src/clock.js';
 import {
   loadIntegrationTestConfiguration,
@@ -69,6 +72,8 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
     return { origin: `http://127.0.0.1:${port}`, server };
   }
 
+  // Each mount is its own API instance with its own session store object over the shared database (ADR-0080), the
+  // way two processes would be; they share only PostgreSQL.
   function mount(listening: { origin: string; server: Server }, issuer: string): RunningApp {
     const config = validateEnvironment({
       ALLOWED_ORIGINS: listening.origin,
@@ -81,7 +86,17 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
       OIDC_REDIRECT_URI: `${listening.origin}/api/auth/callback`,
       SESSION_COOKIE_SECURE: 'false',
     });
-    listening.server.on('request', createApp({ clock: systemClock, config, pool: runtimePool }));
+    const sessionManager = new SessionManager({
+      clock: systemClock,
+      store: new PostgresSessionStore({
+        capacity: config.SESSION_STORE_MAX_ENTRIES,
+        clock: systemClock,
+        operationTimeoutMs: config.SESSION_STORE_TIMEOUT_MS,
+        pool: runtimePool,
+      }),
+      ttlMs: config.SESSION_TTL_MS,
+    });
+    listening.server.on('request', createApp({ clock: systemClock, config, pool: runtimePool, sessionManager }));
     return { config, origin: listening.origin };
   }
 
@@ -118,6 +133,7 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
 
   beforeEach(async () => {
     await prepareTenantIsolationFixtures(ownerPool, expectedOwner);
+    await ownerPool.query('DELETE FROM app_private.auth_sessions');
     const listening = await listen();
     provider = await startTestProvider({
       clientId,
@@ -167,6 +183,20 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
       .expect(200);
     await request(app.origin).get(runListPath).expect(401);
 
+    // The database holds the token's digest, never the token (ADR-0080).
+    const token = (sessionCookie as string).slice('running_tracker_session='.length);
+    const stored = await ownerPool.query<{ token_digest: string; user_id: string }>(
+      'SELECT token_digest, user_id FROM app_private.auth_sessions',
+    );
+    expect(stored.rows).toEqual([
+      { token_digest: createHash('sha256').update(token, 'utf8').digest('base64url'), user_id: ids.userDual },
+    ]);
+    expect(JSON.stringify(stored.rows)).not.toContain(token);
+
+    // A second API instance on the same database accepts the same cookie ...
+    const other = mount(await listen(), provider.issuer);
+    await request(other.origin).get(runListPath).set('Cookie', sessionCookie as string).expect(200);
+
     await request(app.origin)
       .delete('/api/session')
       .set('Cookie', sessionCookie as string)
@@ -177,6 +207,10 @@ describe('OIDC sign-in against a real provider and PostgreSQL', () => {
       .get('/api/session')
       .set('Cookie', sessionCookie as string)
       .expect(401);
+    // ... and refuses it from the moment the sign-out on the first one is committed.
+    await request(other.origin).get('/api/session').set('Cookie', sessionCookie as string).expect(401);
+    await request(other.origin).get(runListPath).set('Cookie', sessionCookie as string).expect(401);
+    expect((await ownerPool.query('SELECT 1 FROM app_private.auth_sessions')).rowCount).toBe(0);
   });
 
   it('does not sign in, and does not create a user for, an identity nobody provisioned', async () => {

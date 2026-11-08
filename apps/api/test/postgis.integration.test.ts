@@ -9,6 +9,7 @@ import {
   type Environment,
 } from '../src/config/environment.js';
 import { createDatabasePool, DatabaseProbe } from '../src/database/database.js';
+import { inMemorySessionManager } from '../src/testing/in-memory-sessions.js';
 
 describe('PostGIS integration', () => {
   let app: ReturnType<typeof createApp> | undefined;
@@ -18,7 +19,7 @@ describe('PostGIS integration', () => {
   beforeAll(() => {
     config = loadIntegrationTestConfiguration().environment;
     pool = createDatabasePool({ ...config, DB_POOL_MAX: 2 });
-    app = createApp({ clock: systemClock, config, pool });
+    app = createApp({ clock: systemClock, config, pool, sessionManager: inMemorySessionManager(systemClock, config) });
   });
 
   afterAll(async () => {

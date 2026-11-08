@@ -245,7 +245,7 @@ describe('P08.1 live-state database snapshot', () => {
       store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
       ttlMs: config.SESSION_TTL_MS,
     });
-    const session = sessionManager.create(ids.userDual);
+    const session = await sessionManager.create(ids.userDual);
     let attempts = 0;
     const waiters = new Map<number, () => void>();
     const waitForAttempt = (target: number): Promise<void> =>
@@ -327,7 +327,7 @@ describe('P08.1 live-state database snapshot', () => {
       store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
       ttlMs: config.SESSION_TTL_MS,
     });
-    const session = sessionManager.create(ids.userDual);
+    const session = await sessionManager.create(ids.userDual);
     const app = createApp({ clock: systemClock, config, pool: runtimePool, sessionManager });
     const server = createServer(app);
     await new Promise<void>((resolve, reject) => {

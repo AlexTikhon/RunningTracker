@@ -6,6 +6,7 @@ import { createApp } from '../src/app.js';
 import type { Clock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
 import type { DatabasePool } from '../src/database/database.js';
+import { inMemorySessionManager } from '../src/testing/in-memory-sessions.js';
 
 const methods = ['get', 'put', 'post', 'delete'] as const;
 type Method = (typeof methods)[number];
@@ -75,7 +76,7 @@ function operations(): Operation[] {
 }
 
 async function answerFor(operation: Operation): Promise<{ code: unknown; status: number }> {
-  const app = createApp({ clock, config, pool });
+  const app = createApp({ clock, config, pool, sessionManager: inMemorySessionManager(clock, config) });
   const response = await request(app)[operation.method](operation.path);
   const body = response.body as { error?: { code?: unknown } } | undefined;
   return { code: body?.error?.code, status: response.status };

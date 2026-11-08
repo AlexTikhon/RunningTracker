@@ -94,6 +94,7 @@
           "Session"
         ],
         "summary": "Read the current session",
+        "description": "Sessions are stored in PostgreSQL and survive an API restart until their original expiry (ADR-0080). 401 AUTH_REQUIRED means the session is unknown, signed out or expired. 503 SESSION_STORE_UNAVAILABLE (with Retry-After) means the store could not be asked: no access is granted, the cookie is left alone, and the client should keep its last confirmed session and ask again. The same 503 can answer any session-authenticated route.",
         "responses": {
           "200": {
             "content": {
@@ -115,6 +116,7 @@
           "Session"
         ],
         "summary": "Revoke the current session",
+        "description": "Answers 204 and clears the cookie only after the revocation is committed; from then on every API instance on the same database refuses the session. 503 SESSION_STORE_UNAVAILABLE means the revocation could not be committed: the cookie is not cleared and the session may still be valid, so the client must not report a sign-out.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Origin"

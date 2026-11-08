@@ -73,7 +73,7 @@ describe('organization discovery against PostgreSQL row-level security', () => {
   });
 
   async function organizationsOf(userId: string): Promise<string[]> {
-    const cookie = `${sessionCookieName}=${sessionManager.create(userId).sessionToken}`;
+    const cookie = `${sessionCookieName}=${(await sessionManager.create(userId)).sessionToken}`;
     const response = await request(app).get('/api/organizations').set('Cookie', cookie);
     expect(response.status).toBe(200);
     return organizationListResponseSchema.parse(response.body).items.map((item) => item.organizationId);
@@ -125,7 +125,7 @@ describe('organization discovery against PostgreSQL row-level security', () => {
   });
 
   it('cannot be pointed at another user through the request', async () => {
-    const cookie = `${sessionCookieName}=${sessionManager.create(ids.userOrgB).sessionToken}`;
+    const cookie = `${sessionCookieName}=${(await sessionManager.create(ids.userOrgB)).sessionToken}`;
 
     const response = await request(app)
       .get('/api/organizations')

@@ -8,12 +8,12 @@ import {
 } from '@running-tracker/contracts';
 import type { PoolClient } from 'pg';
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../src/app.js';
 import { SessionManager } from '../src/auth/session-manager.js';
 import { csrfHeaderName } from '../src/auth/session-http.js';
-import { InMemorySessionStore } from '../src/auth/session-store.js';
+import { InMemorySessionStore, SessionStoreUnavailableError } from '../src/auth/session-store.js';
 import type { Clock } from '../src/clock.js';
 import { validateEnvironment, type Environment } from '../src/config/environment.js';
 import type { DatabasePool } from '../src/database/database.js';
@@ -353,10 +353,24 @@ describe('POST /runs/search/interpretations', () => {
       expect(h.database.open).toBe(0);
     });
 
+    it('answers 503, not the proposal and not a 401, when the session store cannot answer the last check', async () => {
+      // Only the revalidation asks isActive; the request itself was authenticated through resolve.
+      const isActive = vi
+        .spyOn(h.sessions, 'isActive')
+        .mockRejectedValue(new SessionStoreUnavailableError('test outage'));
+      const response = await post(h).expect(503);
+      expect(errorOf(response).code).toBe('SESSION_STORE_UNAVAILABLE');
+      expect(response.headers['retry-after']).toBe('5');
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(JSON.stringify(response.body)).not.toContain('previous-month');
+      expect(isActive).toHaveBeenCalledTimes(1);
+      isActive.mockRestore();
+    });
+
     it('returns the authorization error, not the proposal, when the session ended in the meantime', async () => {
-      h.interpreter.behaviour = (input, options) => {
+      h.interpreter.behaviour = async (input, options) => {
         const token = h.cookie.split('=')[1]!;
-        h.sessions.revoke(token);
+        await h.sessions.revoke(token);
         return answerWith()(input, options);
       };
       const response = await post(h).expect(401);

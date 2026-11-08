@@ -18,9 +18,8 @@ import { createDatabaseIdentityResolver } from './auth/identity-resolver.js';
 import { createOidcClient } from './auth/oidc-client.js';
 import { createOidcRouter } from './auth/oidc-http.js';
 import { OidcLoginStore } from './auth/oidc-login-store.js';
-import { SessionManager } from './auth/session-manager.js';
+import type { SessionManager } from './auth/session-manager.js';
 import { createSessionRouter } from './auth/session-http.js';
-import { InMemorySessionStore } from './auth/session-store.js';
 import type { Clock } from './clock.js';
 import type { Environment } from './config/environment.js';
 import { DatabaseProbe, type DatabasePool } from './database/database.js';
@@ -55,7 +54,8 @@ export interface AppDependencies {
   logger?: Logger;
   metrics?: ApiMetrics;
   pool: DatabasePool;
-  sessionManager?: SessionManager;
+  /** Required: production wires the PostgreSQL store (main.ts); tests pass an explicit in-memory one. */
+  sessionManager: SessionManager;
   liveConnections?: LiveConnectionManager;
   archiveTileCache?: ArchiveTileCacheStore;
   archiveTilePipeline?: ArchiveTilePipeline;
@@ -103,13 +103,7 @@ export function createApp({
 
   const app = express();
   const database = new DatabaseProbe(pool, clock, config.DB_QUERY_TIMEOUT_MS);
-  const sessions =
-    sessionManager ??
-    new SessionManager({
-      clock,
-      store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
-      ttlMs: config.SESSION_TTL_MS,
-    });
+  const sessions = sessionManager;
   const live =
     liveConnections ??
     createLiveSseHub({

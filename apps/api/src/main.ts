@@ -3,8 +3,8 @@ import process from 'node:process';
 import type { Pool } from 'pg';
 
 import { createApp } from './app.js';
+import { PostgresSessionStore } from './auth/postgres-session-store.js';
 import { SessionManager } from './auth/session-manager.js';
-import { InMemorySessionStore } from './auth/session-store.js';
 import { systemClock, type Clock } from './clock.js';
 import { loadEnvironment } from './config/environment.js';
 import {
@@ -28,6 +28,7 @@ import { runDeletionJournalExportOnce } from './maintenance/run-deletion-journal
 import { runErasureLedgerExportOnce } from './maintenance/run-erasure-ledger-export.js';
 import { runRawPurgeOnce } from './maintenance/run-raw-purge.js';
 import { runRetentionDeleteOnce } from './maintenance/run-retention-delete.js';
+import { runSessionPurgeOnce } from './maintenance/run-session-purge.js';
 import { runSummaryPublicationBatch } from './maintenance/run-summary-publication.js';
 import { runTombstoneReclaimOnce } from './maintenance/run-tombstone-reclaim.js';
 import { createApiMetrics } from './observability/api-metrics.js';
@@ -120,9 +121,16 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   }
   observePool(pool, { clock, metrics, name: 'runtime' });
   observePool(maintenancePool, { clock, metrics, name: 'maintenance' });
+  // Sessions live in PostgreSQL (ADR-0080): a restart keeps them, and every instance on the database sees the same
+  // sign-outs. There is no in-memory fallback; a store that cannot answer refuses access with 503.
   const sessionManager = new SessionManager({
     clock,
-    store: new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES),
+    store: new PostgresSessionStore({
+      capacity: config.SESSION_STORE_MAX_ENTRIES,
+      clock,
+      operationTimeoutMs: config.SESSION_STORE_TIMEOUT_MS,
+      pool,
+    }),
     ttlMs: config.SESSION_TTL_MS,
   });
   const liveSseHub = createLiveSseHub({
@@ -185,6 +193,13 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
     metrics: metrics.maintenance,
     runOnce: () => runTombstoneReclaimOnce(maintenancePool, clock),
     taskName: 'Run tombstone reclamation',
+  });
+  const sessionPurgeRunner = new PeriodicRunner({
+    clock,
+    intervalMs: config.SESSION_PURGE_INTERVAL_MS,
+    metrics: metrics.maintenance,
+    runOnce: () => runSessionPurgeOnce(maintenancePool, clock),
+    taskName: 'Expired session purge',
   });
   let deletionJournalSink: DeletionJournalSink | undefined;
   if (config.DELETION_JOURNAL_DIR !== undefined) {
@@ -249,6 +264,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
       rawPurgeRunner.stop();
       retentionDeleteRunner.stop();
       tombstoneReclaimRunner.stop();
+      sessionPurgeRunner.stop();
       summaryRunner.stop();
     },
   };
@@ -272,6 +288,7 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
   rawPurgeRunner.start();
   retentionDeleteRunner.start();
   tombstoneReclaimRunner.start();
+  sessionPurgeRunner.start();
   deletionJournalRunner?.start();
   accessJournalRunner?.start();
   erasureLedgerRunner?.start();

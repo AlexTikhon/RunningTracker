@@ -9,6 +9,7 @@ import { createApp } from '../src/app.js';
 import { systemClock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
 import type { DatabasePool } from '../src/database/database.js';
+import { inMemorySessionManager } from '../src/testing/in-memory-sessions.js';
 
 const connect = vi.fn(() => Promise.reject(new Error('The database must not be used by these tests')));
 const pool: DatabasePool = { connect };
@@ -40,10 +41,12 @@ const production = {
 };
 
 describe('production sign-in surface', () => {
+  const sessions = inMemorySessionManager(systemClock, validateEnvironment(production));
   const app = createApp({
     clock: systemClock,
     config: validateEnvironment(production),
     pool,
+    sessionManager: sessions,
   });
   const unreachableProviderApp = async () =>
     createApp({
@@ -53,6 +56,7 @@ describe('production sign-in surface', () => {
         OIDC_ISSUER_URL: `https://127.0.0.1:${await closedPort()}`,
       }),
       pool,
+      sessionManager: sessions,
     });
 
   it('has no development login: POST /api/session does not exist', async () => {
@@ -86,6 +90,7 @@ describe('production sign-in surface', () => {
         MAINTENANCE_DATABASE_URL: production.MAINTENANCE_DATABASE_URL,
       }),
       pool,
+      sessionManager: sessions,
     });
 
     await request(local).get('/api/auth/login').expect(404);

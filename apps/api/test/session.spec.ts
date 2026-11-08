@@ -9,10 +9,11 @@ import {
   csrfHeaderName,
   sessionCookieName,
 } from '../src/auth/session-http.js';
-import { InMemorySessionStore } from '../src/auth/session-store.js';
+import { InMemorySessionStore, SessionStoreUnavailableError } from '../src/auth/session-store.js';
 import type { Clock } from '../src/clock.js';
 import { validateEnvironment, type Environment } from '../src/config/environment.js';
 import type { DatabasePool } from '../src/database/database.js';
+import { inMemorySessionManager } from '../src/testing/in-memory-sessions.js';
 
 const allowedUser = '11111111-1111-4111-8111-111111111111';
 const otherUser = '22222222-2222-4222-8222-222222222222';
@@ -132,22 +133,47 @@ async function createLocalSession(
 }
 
 describe('HTTP session boundary', () => {
-  it('reports whether the exact stored session is still active', () => {
+  it('reports whether the exact stored session is still active', async () => {
     const clock = new ControlledClock();
     const config = localAuthConfig();
     const manager = deterministicManager(clock, config);
-    const created = manager.create(allowedUser);
+    const created = await manager.create(allowedUser);
 
-    expect(manager.isActive(created.record)).toBe(true);
+    expect(await manager.isActive(created.record)).toBe(true);
     expect(
-      manager.isActive({ ...created.record, userId: otherUser }),
+      await manager.isActive({ ...created.record, userId: otherUser }),
     ).toBe(false);
-    expect(manager.revoke(created.sessionToken)).toBe(true);
-    expect(manager.isActive(created.record)).toBe(false);
+    expect(await manager.revoke(created.sessionToken)).toBe(true);
+    expect(await manager.isActive(created.record)).toBe(false);
 
-    const expiring = manager.create(allowedUser);
+    const expiring = await manager.create(allowedUser);
+    clock.now = new Date(expiring.record.expiresAt.getTime() - 1);
+    expect(await manager.isActive(expiring.record)).toBe(true);
+    expect((await manager.resolve(expiring.sessionToken))?.userId).toBe(allowedUser);
     clock.now = new Date(expiring.record.expiresAt);
-    expect(manager.isActive(expiring.record)).toBe(false);
+    expect(await manager.isActive(expiring.record)).toBe(false);
+    expect(await manager.resolve(expiring.sessionToken)).toBeUndefined();
+  });
+
+  it('propagates a store outage instead of reporting a missing or inactive session', async () => {
+    const clock = new ControlledClock();
+    const config = localAuthConfig();
+    const outage = new SessionStoreUnavailableError('test outage');
+    const manager = new SessionManager({
+      clock,
+      store: {
+        delete: () => Promise.reject(outage),
+        find: () => Promise.reject(outage),
+        insert: () => Promise.reject(outage),
+      },
+      ttlMs: config.SESSION_TTL_MS,
+    });
+    const token = 'A'.repeat(43);
+
+    await expect(manager.create(allowedUser)).rejects.toBe(outage);
+    await expect(manager.resolve(token)).rejects.toBe(outage);
+    await expect(manager.isActive({ tokenDigest: 'd'.repeat(43), userId: allowedUser })).rejects.toBe(outage);
+    await expect(manager.revoke(token)).rejects.toBe(outage);
   });
 
   it('creates, reads, and revokes an opaque local session with aligned cookie attributes', async () => {
@@ -232,7 +258,7 @@ describe('HTTP session boundary', () => {
 
     clock.now = new Date('2026-09-21T10:00:02.000Z');
     const revoked = await createLocalSession(app);
-    manager.revoke(revoked.cookie.slice(sessionCookieName.length + 1));
+    await manager.revoke(revoked.cookie.slice(sessionCookieName.length + 1));
     await request(app)
       .get('/api/session')
       .set('Cookie', revoked.cookie)
@@ -364,7 +390,7 @@ describe('HTTP session boundary', () => {
       MAINTENANCE_DATABASE_URL:
         'postgresql://running_tracker_maintenance:password@127.0.0.1:5433/test',
     });
-    const disabledApp = createApp({ clock, config: disabled, pool });
+    const disabledApp = createApp({ clock, config: disabled, pool, sessionManager: inMemorySessionManager(clock, disabled) });
     await request(disabledApp)
       .post('/api/session')
       .set('Origin', allowedOrigin)
@@ -409,5 +435,85 @@ describe('HTTP session boundary', () => {
 
     clock.now = new Date('2026-09-21T10:00:01.000Z');
     await createLocalSession(app, otherUser);
+  });
+
+  describe('when the session store cannot answer (ADR-0080)', () => {
+    function flakyApp() {
+      const clock = new ControlledClock();
+      const config = localAuthConfig();
+      const inner = new InMemorySessionStore(config.SESSION_STORE_MAX_ENTRIES);
+      const failing = { delete: false, find: false, insert: false };
+      const outage = (): Promise<never> => Promise.reject(new SessionStoreUnavailableError('test outage'));
+      const store = {
+        delete: (digest: string) => (failing.delete ? outage() : inner.delete(digest)),
+        find: (digest: string, now: Date) => (failing.find ? outage() : inner.find(digest, now)),
+        insert: (session: Parameters<InMemorySessionStore['insert']>[0]) =>
+          failing.insert ? outage() : inner.insert(session),
+      };
+      const manager = new SessionManager({ clock, store, ttlMs: config.SESSION_TTL_MS });
+      const testRouter = Router();
+      testRouter.get('/test/protected', ...createAuthenticatedMutationProtection(config, manager).slice(0, 1), (_request, response) => {
+        response.status(204).end();
+      });
+      const app = createApp({ clock, config, pool, sessionManager: manager, testOnlyRouter: testRouter });
+      return { app, failing };
+    }
+
+    it('answers 503 with Retry-After, never 401, and leaves the cookie alone', async () => {
+      const { app, failing } = flakyApp();
+      const signedIn = await createLocalSession(app);
+      failing.find = true;
+
+      for (const path of ['/api/session', '/api/test/protected']) {
+        const response = await request(app).get(path).set('Cookie', signedIn.cookie).expect(503);
+        expect(errorCode(response)).toBe('SESSION_STORE_UNAVAILABLE');
+        expect(response.headers['retry-after']).toBe('5');
+        expect(response.headers['set-cookie']).toBeUndefined();
+      }
+
+      // The same cookie works again as soon as the store answers.
+      failing.find = false;
+      await request(app).get('/api/session').set('Cookie', signedIn.cookie).expect(200);
+    });
+
+    it('does not report a sign-out it could not commit, and keeps the session usable', async () => {
+      const { app, failing } = flakyApp();
+      const signedIn = await createLocalSession(app);
+      failing.delete = true;
+
+      const refused = await request(app)
+        .delete('/api/session')
+        .set('Cookie', signedIn.cookie)
+        .set('Origin', allowedOrigin)
+        .set(csrfHeaderName, signedIn.csrfToken)
+        .expect(503);
+      expect(errorCode(refused)).toBe('SESSION_STORE_UNAVAILABLE');
+      expect(refused.headers['set-cookie']).toBeUndefined();
+      await request(app).get('/api/session').set('Cookie', signedIn.cookie).expect(200);
+
+      failing.delete = false;
+      const done = await request(app)
+        .delete('/api/session')
+        .set('Cookie', signedIn.cookie)
+        .set('Origin', allowedOrigin)
+        .set(csrfHeaderName, signedIn.csrfToken)
+        .expect(204);
+      expect(String(done.headers['set-cookie'])).toContain('Max-Age=0');
+      await request(app).get('/api/session').set('Cookie', signedIn.cookie).expect(401);
+    });
+
+    it('refuses a local sign-in it could not store, with 503 and no cookie', async () => {
+      const { app, failing } = flakyApp();
+      failing.insert = true;
+
+      const response = await request(app)
+        .post('/api/session')
+        .set('Origin', allowedOrigin)
+        .type('application/json')
+        .send({ userId: allowedUser })
+        .expect(503);
+      expect(errorCode(response)).toBe('SESSION_STORE_UNAVAILABLE');
+      expect(response.headers['set-cookie']).toBeUndefined();
+    });
   });
 });

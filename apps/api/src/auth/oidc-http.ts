@@ -167,9 +167,10 @@ export function createOidcRouter({
       return;
     }
 
+    // A full or unreachable session store ends the attempt as `unavailable`; nothing is stored, no cookie is set.
     let created;
     try {
-      created = sessionManager.create(userId);
+      created = await sessionManager.create(userId);
     } catch (error) {
       fail(response, 'unavailable', error);
       return;

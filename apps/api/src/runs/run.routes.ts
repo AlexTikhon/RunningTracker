@@ -26,10 +26,11 @@ import {
   getAuthenticatedSession,
 } from '../auth/session-http.js';
 import type { SessionManager } from '../auth/session-manager.js';
+import { SessionStoreUnavailableError } from '../auth/session-store.js';
 import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
-import { ApiError } from '../http/errors.js';
+import { ApiError, sessionStoreUnavailable } from '../http/errors.js';
 import { getRequestId } from '../http/request-id.js';
 import type { ApiMetrics } from '../observability/api-metrics.js';
 import type { TestOnlyFaultInjector } from '../testing/fault-injection.js';
@@ -190,8 +191,16 @@ export function createRunRouter({
 
         const result = await interpretation.interpret({
           requestId: getRequestId(request),
+          // The session is asked for again before the answer leaves (ADR-0080: possibly revoked on another instance).
+          // An unreachable store is a 503, not a 401; the interpretation layer would otherwise report it as a 500.
           revalidate: async () => {
-            if (!sessionManager.isActive(session)) {
+            let active: boolean;
+            try {
+              active = (await sessionManager.isActive(session)) === true;
+            } catch (error) {
+              throw error instanceof SessionStoreUnavailableError ? sessionStoreUnavailable() : error;
+            }
+            if (!active) {
               throw new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required');
             }
             await verifyAccess();

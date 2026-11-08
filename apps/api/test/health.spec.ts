@@ -6,6 +6,7 @@ import { createApp } from '../src/app.js';
 import { systemClock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
 import type { DatabaseClient, DatabasePool } from '../src/database/database.js';
+import { inMemorySessionManager } from '../src/testing/in-memory-sessions.js';
 
 const productionCursorSigningKey = Buffer.from(
   'health-test-deployment-cursor-key-material',
@@ -61,6 +62,7 @@ describe('health endpoints', () => {
           clock: systemClock,
           config: guardedConfig,
           pool,
+          sessionManager: inMemorySessionManager(systemClock, guardedConfig),
           testOnlyFaultInjector: {
             shouldDropPointIngestionResponseAfterCommit: () => true,
           },
@@ -73,7 +75,7 @@ describe('health endpoints', () => {
   it('reports liveness and readiness when PostgreSQL responds', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] });
     const { pool, release } = poolWithQuery(query);
-    const app = createApp({ clock: systemClock, config, pool });
+    const app = createApp({ clock: systemClock, config, pool, sessionManager: inMemorySessionManager(systemClock, config) });
 
     await request(app)
       .get('/api/health/live')
@@ -92,7 +94,7 @@ describe('health endpoints', () => {
     const { pool } = poolWithQuery(
       vi.fn().mockRejectedValue(new Error('postgresql://user:secret@database/internal')),
     );
-    const app = createApp({ clock: systemClock, config, pool });
+    const app = createApp({ clock: systemClock, config, pool, sessionManager: inMemorySessionManager(systemClock, config) });
 
     await request(app)
       .get('/api/health/ready')
