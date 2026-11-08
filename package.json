@@ -36,6 +36,7 @@
     "restore:reapply-deletions": "npm run restore:reapply-deletions --workspace=@running-tracker/api --",
     "restore:reapply-access": "npm run restore:reapply-access --workspace=@running-tracker/api --",
     "restore:reapply-erasures": "npm run restore:reapply-erasures --workspace=@running-tracker/api --",
+    "restore:clear-sessions": "npm run restore:clear-sessions --workspace=@running-tracker/api --",
     "load:explain": "npm run load:explain --workspace=@running-tracker/api --",
     "load:report": "npm run load:report --workspace=@running-tracker/api --",
     "load:run": "npm run load:run --workspace=@running-tracker/api --",

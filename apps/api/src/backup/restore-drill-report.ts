@@ -213,6 +213,28 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '',
   );
 
+  out.push('## Sessions (ADR-0080)', '');
+  out.push(
+    table([
+      [
+        'session rows in the source at backup time',
+        report.sessions === null
+          ? 'not reached'
+          : report.sessions.sourceRowsAtBackup === null
+            ? 'no session table (older schema)'
+            : String(report.sessions.sourceRowsAtBackup),
+      ],
+      ['session rows in the restored database', report.sessions === null ? 'not reached' : String(report.sessions.restoredRows)],
+      ['removed by restore:clear-sessions', report.sessions === null ? 'not reached' : String(report.sessions.cleared)],
+      ['remaining before reopening', report.sessions === null ? 'not reached' : String(report.sessions.remaining)],
+    ]),
+    '',
+  );
+  out.push(
+    'Backups keep the session table\'s schema but never its rows, and the restore clears the table again, so no session cookie issued before the restore, revoked or not, authenticates afterwards: everyone signs in again.',
+    '',
+  );
+
   out.push('## Roles and security', '');
   if (report.roles.length === 0) {
     out.push('Not reached.', '');
@@ -249,6 +271,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
       '- A second reapplication was idempotent: only marker_present outcomes, and an identical database state.',
       '- Access that was revoked after the backup (a share revoked, a share narrowed, a member deactivated) was still present in the restored backup, and was removed again by `restore:reapply-access` from the exported journal: the recovered permissions equal those of the lost source, and the people concerned can no longer read the surviving run as the runtime role under row-level security. Nobody gained access, the second pass changed nothing, and the changes were journaled again on the recovered node.',
       '- Activity E and check-in day G, deleted by their owner after the backup, were back in the restored backup and were removed again by `restore:reapply-erasures` from the exported erasure ledger; activity F and day H were unchanged, the replayed erasures were journaled again, and a second replay reported only absent outcomes and changed nothing.',
+      '- The restored database held no stored session, and `restore:clear-sessions` left none before the database could be reopened (ADR-0080).',
       '- The three application roles are not superuser and have no BYPASSRLS, CREATEDB or CREATEROLE.',
       '- Failure paths fail closed: wrong key, corrupted or truncated backup, malformed journal, migration checksum mismatch, and an out-of-order recovery step are covered by automated tests.',
       '',
@@ -263,8 +286,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '- Encryption key custody. The key was a local file. Storing it separately from the backups, backing it up, rotating it and recovering it are operator decisions that this repository does not solve.',
     '- Access restrictions that were committed but not yet exported when a node is lost (the same recovery point as the deletion journal): a revoked share or deactivated membership in that window comes back with an old backup, and the exporter\'s health decides how large the window is.',
     '- Access granted after the backup, and shares that were revoked and granted again: by design these are not reconstructed from the journal, so they have to be granted again.',
-    '- Credentials and sessions. Sessions are held in process memory and are gone after a restart, and no identity provider exists yet (P12.1), so no credential was restored or exercised.',
-    '- Production sign-in (P12.1): no identity provider is selected, so no end-to-end login was exercised.',
+    '- Credentials and sign-in. The drill restores no credential and signs nobody in; that a pre-restore cookie is refused and a new sign-in works on a restored database is shown by the opt-in integration test (ADR-0080), not by this drill, and no production identity provider was exercised (production sign-in, P12.1).',
     '- Deletions that were committed but not yet exported when a node is lost (journal recovery point, ADR-0037), and a mount that accepts writes but is not durable.',
     '- Activity erasures that were committed but not yet exported when a node is lost (the same recovery point, ADR-0073): such an activity comes back with an old backup.',
     '- Daily scheduling and 7-day retention running unattended on a host: the commands exist and are tested; nothing here ran on a schedule.',

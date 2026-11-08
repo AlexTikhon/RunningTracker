@@ -46,8 +46,18 @@ export function formatPgConnection(connection: PgConnection): string {
 
 export type PgTool = 'pg_dump' | 'pg_restore';
 
+/**
+ * Tables whose schema is backed up without their rows (ADR-0080). Authenticated sessions are only meaningful for the
+ * running database: a restore must make everyone sign in again, and a backup must not carry live bearer-token digests
+ * or CSRF tokens. A name that does not exist yet (a database older than migration 0036) matches nothing.
+ */
+export const BACKUP_EXCLUDED_TABLE_DATA = ['app_private.auth_sessions'] as const;
+
 export interface PgToolRunner {
-  /** pg_dump --format=custom. The stream errors, rather than just ending, when the dump failed. */
+  /**
+   * pg_dump --format=custom, without the rows of BACKUP_EXCLUDED_TABLE_DATA. The stream errors, rather than just
+   * ending, when the dump failed.
+   */
   dump(connection: PgConnection): Readable;
   /** Resolves only after pg_restore consumed all of `input` and exited with status 0. */
   restore(connection: PgConnection, input: Readable): Promise<void>;
@@ -158,7 +168,11 @@ export function createPgToolRunner(options: PgToolRunnerOptions = {}): PgToolRun
 
   return {
     dump(connection) {
-      const { argv, command, env } = toolArguments('pg_dump', ['--format=custom'], connection);
+      const { argv, command, env } = toolArguments(
+        'pg_dump',
+        ['--format=custom', ...BACKUP_EXCLUDED_TABLE_DATA.map((table) => `--exclude-table-data=${table}`)],
+        connection,
+      );
       const secrets = [connection.password];
       const output = new PassThrough();
       const child = spawn(command, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });

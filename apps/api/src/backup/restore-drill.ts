@@ -135,6 +135,35 @@ export interface ReapplyErasureRun {
   outcomes: Record<ReapplyErasureOutcome, number>;
 }
 
+/** What the restore-time session clearing found and did (ADR-0080). Counts only. */
+export interface SessionClearRun {
+  cleared: number;
+  remaining: number;
+  /** Session rows in the restored database before clearing; application backups carry none. */
+  restoredRows: number;
+  /** Session rows the source held when the backup was taken; null when its schema had no session table yet. */
+  sourceRowsAtBackup: number | null;
+}
+
+/** A restored database must authenticate no session from before the restore, revoked or not. */
+export function evaluateSessionRecovery(run: SessionClearRun): Check[] {
+  return [
+    {
+      description:
+        run.sourceRowsAtBackup === null
+          ? 'The backup predates the session table, so the restored database held no session rows'
+          : `The backup carried no session rows although the source held ${run.sourceRowsAtBackup} at backup time (pg_dump --exclude-table-data)`,
+      id: 'sessions-not-in-backup',
+      passed: run.restoredRows === 0 && (run.sourceRowsAtBackup === null || run.sourceRowsAtBackup > 0),
+    },
+    {
+      description: 'restore:clear-sessions left no stored session: every earlier session cookie is refused and everyone signs in again',
+      id: 'sessions-cleared-before-reopening',
+      passed: run.remaining === 0,
+    },
+  ];
+}
+
 export interface ErasureEvaluationInput {
   afterFirst: ActivityState;
   afterSecond: ActivityState;
@@ -584,6 +613,8 @@ export interface DrillOperations {
   assertApplicationOffline(): Promise<void>;
   bootstrapTarget(): Promise<void>;
   cleanup(): Promise<void>;
+  /** Clears every stored session in the restored database with restore:clear-sessions (ADR-0080). */
+  clearSessions(): Promise<SessionClearRun>;
   /** PostgreSQL sessions and locks on the drill databases, read after a failure. */
   diagnose?(): Promise<DrillDiagnostics>;
   copyJournalReadOnly(): Promise<JournalFacts & { readOnlyEnforced: boolean }>;
@@ -649,6 +680,7 @@ export interface DrillReport {
   rpo: { backupRecoveryPointMs: number; targetMs: number; withinTarget: boolean };
   rto: { measuredMs: number; targetMs: number; withinTarget: boolean };
   schemaVersion: 1;
+  sessions: SessionClearRun | null;
   status: 'failed' | 'passed';
   timeline: {
     backupCreatedAt: string;
@@ -721,6 +753,7 @@ export async function runRestoreDrill(input: {
   let secondAccessPass: ReapplyAccessRun | null = null;
   let firstErasurePass: ReapplyErasureRun | null = null;
   let secondErasurePass: ReapplyErasureRun | null = null;
+  let sessions: SessionClearRun | null = null;
   let effectiveAccess: DrillReport['access']['effectiveAccess'] = null;
   let roles: RoleFacts[] = [];
   let checks: Check[] = [];
@@ -954,6 +987,17 @@ export async function runRestoreDrill(input: {
     }
     tracker.complete('erasure_outcomes_verified');
 
+    // ADR-0080: no session from before the restore may authenticate once the database is reopened.
+    step = 'clear-sessions';
+    sessions = await operations.clearSessions();
+    const sessionChecks = evaluateSessionRecovery(sessions);
+    checks = [...checks, ...sessionChecks];
+    const sessionsFailed = sessionChecks.filter((check) => !check.passed);
+    if (sessionsFailed.length > 0) {
+      throw new Error(`Session clearing verification failed: ${sessionsFailed.map((check) => check.id).join(', ')}`);
+    }
+    tracker.complete('sessions_cleared');
+
     step = 'verify-readiness';
     const readiness = await operations.verifyReadiness();
     roles = readiness.roles;
@@ -1071,6 +1115,7 @@ export async function runRestoreDrill(input: {
       withinTarget: totalRecoveryMs > 0 && totalRecoveryMs <= rtoTargetMs,
     },
     schemaVersion: 1,
+    sessions,
     status: failure ? 'failed' : 'passed',
     timeline,
   };

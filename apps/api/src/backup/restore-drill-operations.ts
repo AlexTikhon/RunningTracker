@@ -20,6 +20,7 @@ import { runReapplyAccessCli } from '../restore/reapply-access-cli.js';
 import { loadAccessJournal, reapplyAccessOutcomes, type ReapplyAccessOutcome } from '../restore/reapply-access.js';
 import { runReapplyCli } from '../restore/reapply-deletions-cli.js';
 import { loadDeletionJournal, reapplyOutcomes, type ReapplyOutcome } from '../restore/reapply-deletions.js';
+import { runClearSessionsCli } from '../restore/clear-sessions-cli.js';
 import { runReapplyErasuresCli } from '../restore/reapply-erasures-cli.js';
 import {
   loadErasureLedger,
@@ -51,6 +52,7 @@ import {
   type RoleFacts,
   type RunLabel,
   type RunLabelState,
+  type SessionClearRun,
 } from './restore-drill.js';
 import {
   assertDatabaseMayBeDropped,
@@ -140,6 +142,20 @@ export const DRILL_CONNECTION_LIMITS = {
 export const DRILL_SCRIPT_TIMEOUT_MS = 180_000;
 /** Closing the drill's pools may take this long before it is reported as a failure. */
 export const DRILL_POOL_CLOSE_TIMEOUT_MS = 10_000;
+
+async function hasSessionTable(client: Client): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass('app_private.auth_sessions') IS NOT NULL AS present",
+  );
+  return result.rows[0]?.present === true;
+}
+
+/** Stored sessions, or null when the schema predates the session table (migration 0036). */
+async function countSessions(client: Client): Promise<number | null> {
+  if (!(await hasSessionTable(client))) return null;
+  const result = await client.query<{ count: string }>('SELECT count(*)::text AS count FROM app_private.auth_sessions');
+  return Number(result.rows[0]!.count);
+}
 
 async function withClient<T>(url: string, work: (client: Client) => Promise<T>): Promise<T> {
   const client = new Client({ application_name: 'running-tracker-restore-drill', connectionString: url, ...DRILL_CONNECTION_LIMITS });
@@ -232,6 +248,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
   let sourcePools: Pool[] = [];
   let sourceMaintenancePool: Pool | undefined;
   let sourceRuntimePool: Pool | undefined;
+  let sourceSessionRowsAtBackup: number | null = null;
 
   function requireKey(): Buffer {
     if (!key) throw new Error('The backup encryption key is not loaded');
@@ -430,6 +447,27 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       });
     },
 
+    async clearSessions() {
+      const restoredRows = await withClient(target.ownerUrl, countSessions);
+      if (restoredRows === null) {
+        throw new Error('The restored and migrated database has no session table');
+      }
+      onCommand(`restore:clear-sessions  (RESTORE_DATABASE_URL = owner of ${target.database})`);
+      const lines: string[] = [];
+      await runClearSessionsCli({ argv: [], env: { RESTORE_DATABASE_URL: target.ownerUrl }, log: (line) => lines.push(line) });
+      const value = (name: string): number => {
+        const line = lines.find((entry) => entry.startsWith(`${name}: `));
+        if (!line) throw new Error('The session clearing report is incomplete');
+        return Number(line.slice(name.length + 2));
+      };
+      const remaining = await withClient(target.ownerUrl, countSessions);
+      return {
+        cleared: value('sessions cleared'),
+        remaining: remaining ?? 0,
+        restoredRows,
+        sourceRowsAtBackup: sourceSessionRowsAtBackup,
+      } satisfies SessionClearRun;
+    },
     async bootstrapTarget() {
       await runScript('bootstrap-database.mjs', target);
       // Quarantine: the application logins cannot even connect until a later stage opens the database.
@@ -1001,6 +1039,16 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
            VALUES ($1, $2, $3, true, true), ($1, $2, $4, false, true), ($1, $2, $5, false, true)`,
           [ids.org, ids.runs.C, ids.granteeTwoUser, ids.leaverUser, ids.keeperUser],
         );
+        // ADR-0080: on a schema that has the session table, the owner is signed in when the backup is taken. An older
+        // schema has no such table, and none is added for the drill.
+        if (await hasSessionTable(client)) {
+          await client.query(
+            `INSERT INTO app_private.auth_sessions (token_digest, user_id, csrf_token, issued_at, expires_at)
+             VALUES ($1, $2, $3, now(), now() + interval '8 hours')`,
+            [createHash('sha256').update('drill-session', 'utf8').digest('base64url'), ids.ownerUser,
+              createHash('sha256').update('drill-csrf', 'utf8').digest('base64url')],
+          );
+        }
       });
     },
 
@@ -1017,6 +1065,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
     },
 
     async takeBackup() {
+      sourceSessionRowsAtBackup = await withClient(source.ownerUrl, countSessions);
       const created = await createBackup({
         clock,
         connection: parsePgConnection(source.adminUrl),
@@ -1119,6 +1168,15 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
            FROM unnest(ARRAY['running_tracker_runtime', 'running_tracker_maintenance']) AS role`,
         );
         add('erasure-ledger-denied-to-application', 'The runtime and maintenance roles have no access to the erasure ledger table or its replay function', erasure.rows[0]!.ledger === false && erasure.rows[0]!.replay === false);
+        const sessionStore = await client.query<{ clear: boolean; table: boolean }>(
+          `SELECT bool_or(has_table_privilege(role, 'app_private.auth_sessions', 'SELECT')
+                          OR has_table_privilege(role, 'app_private.auth_sessions', 'INSERT')
+                          OR has_table_privilege(role, 'app_private.auth_sessions', 'UPDATE')
+                          OR has_table_privilege(role, 'app_private.auth_sessions', 'DELETE')) AS table,
+                  bool_or(has_function_privilege(role, 'app_private.clear_auth_sessions()', 'EXECUTE')) AS clear
+           FROM unnest(ARRAY['running_tracker_runtime', 'running_tracker_maintenance']) AS role`,
+        );
+        add('session-store-denied-to-application', 'The runtime and maintenance roles cannot read, list or change the session table directly, nor clear it (ADR-0080)', sessionStore.rows[0]!.table === false && sessionStore.rows[0]!.clear === false);
         add('application-cannot-connect', 'The runtime and maintenance roles cannot connect to the restored database: the drill leaves it closed, and opening it is an explicit operator step', privileges.rows[0]!.connect === false);
         const sessions = await client.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM pg_stat_activity

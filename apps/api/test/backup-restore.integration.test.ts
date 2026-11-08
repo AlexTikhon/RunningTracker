@@ -1,18 +1,27 @@
-import { randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Client } from 'pg';
+import { Client, Pool } from 'pg';
+import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { verifyBackupFile } from '../src/backup/backup-envelope.js';
+import { createApp } from '../src/app.js';
+import { PostgresSessionStore } from '../src/auth/postgres-session-store.js';
+import { sessionCookieName } from '../src/auth/session-http.js';
+import { SessionManager } from '../src/auth/session-manager.js';
+import { createBackup } from '../src/backup/backup-create.js';
+import { createBackupDecryptor, verifyBackupFile } from '../src/backup/backup-envelope.js';
 import { loadBackupKey } from '../src/backup/backup-key.js';
 import { operatorEnvironment } from '../src/backup/operator-environment.js';
 import { runRestoreDrill, type DrillOperations } from '../src/backup/restore-drill.js';
 import { createRestoreDrillOperations } from '../src/backup/restore-drill-operations.js';
 import { renderDrillReportMarkdown } from '../src/backup/restore-drill-report.js';
+import { createPgToolRunner, parsePgConnection } from '../src/backup/pg-tools.js';
 import { parseDrillConfiguration } from '../src/backup/restore-safety.js';
 import { systemClock } from '../src/clock.js';
+import { validateEnvironment } from '../src/config/environment.js';
 
 // These tests create, restore into, and drop throwaway *_restore_drill_* databases on the local
 // server and run pg_dump/pg_restore, so they run only where the drill is configured (see .env.example).
@@ -133,9 +142,11 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         skipped_unknown_organization: 0,
       });
       // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G.
-      // ADR-0078: and movement day M (the backup is one migration behind, at 0034, which has daily_movement). The
+      // ADR-0078: and movement day M (the backup is one migration behind, at 0035, which has daily_movement). The
       // restored backup brought all three back, the ledger replay removed them again, and a second replay changed nothing.
-      // The one migration applied after the restore is 0035 (active energy precision): surviving day N keeps its digest.
+      // The one migration applied after the restore is 0036 (durable sessions, ADR-0080): it creates the empty session
+      // table, so the older backup held no session at all, and restore:clear-sessions found nothing to remove.
+      expect(report.sessions).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null });
       expect(report.erasures.exportedEntries).toBe(3);
       expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 3, skipped_different_record: 0 });
       expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 3, erased: 0, skipped_different_record: 0 });
@@ -196,6 +207,13 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       expect(report.failure).toBeUndefined();
       expect(exitCode).toBe(0);
       expect(report.migration.firstRun?.applied).toBe(0);
+      // ADR-0080: the source held one session at backup time; the backup carried none.
+      expect(report.sessions).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
+      expect(report.checks.filter((check) => check.id.startsWith('session')).map((check) => [check.id, check.passed])).toEqual([
+        ['sessions-not-in-backup', true],
+        ['sessions-cleared-before-reopening', true],
+        ['session-store-denied-to-application', true],
+      ]);
     },
     drillTimeout,
   );
@@ -422,6 +440,141 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       expect(exitCode).toBe(0);
       expect(connectError).toBeInstanceOf(Error);
       expect((connectError as Error).message).toMatch(/permission denied for database|not currently accepting|does not exist/u);
+    },
+    drillTimeout,
+  );
+
+  // ADR-0080: an ordinary restart keeps sessions; a restore never brings one back. Current schema on purpose: the
+  // previous-schema drill predates the session table, and no artificial migration is added to change that.
+  it(
+    'refuses every pre-restore session cookie, valid or revoked, even from a dump that carried session rows, keeps health data, and lets people sign in again',
+    async () => {
+      const { configuration, databases, drillDirectory, operations } = await harness('current');
+      const key = await loadBackupKey(configuration.keyFile);
+      const docker = configuration.dockerContainer ? { dockerContainer: configuration.dockerContainer } : {};
+      const runner = createPgToolRunner(docker);
+      await operations.prepare();
+      await operations.createSourceDatabase();
+      await operations.seedScenario();
+
+      const pools: Pool[] = [];
+      const managerFor = (runtimeUrl: string): SessionManager => {
+        const pool = new Pool({ connectionString: runtimeUrl, max: 2 });
+        pool.on('error', () => undefined);
+        pools.push(pool);
+        return new SessionManager({
+          clock: systemClock,
+          store: new PostgresSessionStore({ capacity: 100, clock: systemClock, operationTimeoutMs: 5_000, pool }),
+          ttlMs: 8 * 60 * 60 * 1_000,
+        });
+      };
+      cleanups.push(async () => {
+        await Promise.allSettled(pools.map((pool) => pool.end()));
+      });
+      const healthCounts = (url: string) =>
+        withAdmin(url, async (client) => {
+          const result = await client.query<Record<string, string>>(
+            `SELECT (SELECT count(*) FROM runs)::text AS runs, (SELECT count(*) FROM activities)::text AS activities,
+                    (SELECT count(*) FROM daily_metrics)::text AS daily_metrics,
+                    (SELECT count(*) FROM daily_movement)::text AS daily_movement`,
+          );
+          return result.rows[0];
+        });
+      const digestStored = (url: string, token: string) =>
+        withAdmin(url, async (client) => {
+          const digest = createHash('sha256').update(token, 'utf8').digest('base64url');
+          const result = await client.query('SELECT 1 FROM app_private.auth_sessions WHERE token_digest = $1', [digest]);
+          return result.rowCount === 1;
+        });
+
+      // Two people's browsers are signed in on the source, through the runtime role's own functions.
+      const userId = await withAdmin(databases.source.ownerUrl, async (client) => {
+        const result = await client.query<{ id: string }>('SELECT id FROM users ORDER BY id LIMIT 1');
+        return result.rows[0]!.id;
+      });
+      const source = managerFor(databases.source.runtimeUrl);
+      const valid = await source.create(userId);
+      const revoked = await source.create(userId);
+
+      // A hand-made dump that kept the session rows (pg_dump without the exclusion), then a sign-out after it.
+      const carryingRunner = createPgToolRunner({
+        ...docker,
+        spawn: (command, args, spawnOptions) =>
+          spawn(command, args.filter((arg) => !arg.startsWith('--exclude-table-data=')), spawnOptions),
+      });
+      const carrying = await createBackup({
+        clock: systemClock,
+        connection: parsePgConnection(databases.source.adminUrl),
+        directory: join(drillDirectory, 'carrying'),
+        key,
+        runner: carryingRunner,
+      });
+      expect(await source.revoke(revoked.sessionToken)).toBe(true);
+      // And an application backup, which excludes the rows.
+      await operations.takeBackup();
+      const atBackup = await healthCounts(databases.source.ownerUrl);
+      expect(Number(atBackup!.activities) + Number(atBackup!.daily_metrics) + Number(atBackup!.daily_movement)).toBeGreaterThan(0);
+
+      const config = (side: typeof databases.target) =>
+        validateEnvironment({
+          ALLOWED_ORIGINS: 'http://127.0.0.1:5173',
+          APP_ENV: 'test',
+          DATABASE_URL: side.runtimeUrl,
+          LOCAL_AUTH_ENABLED: 'true',
+          LOCAL_AUTH_USER_IDS: userId,
+          MAINTENANCE_DATABASE_URL: side.maintenanceUrl,
+          SESSION_COOKIE_SECURE: 'false',
+        });
+      const openAndProve = async (): Promise<void> => {
+        await withAdmin(databases.target.adminUrl, (client) =>
+          client.query(`GRANT CONNECT ON DATABASE ${databases.target.database} TO running_tracker_runtime`),
+        );
+        const target = managerFor(databases.target.runtimeUrl);
+        const appPool = pools.at(-1)!;
+        const app = createApp({ clock: systemClock, config: config(databases.target), pool: appPool, sessionManager: target });
+        for (const token of [valid.sessionToken, revoked.sessionToken]) {
+          await request(app).get('/api/session').set('Cookie', `${sessionCookieName}=${token}`).expect(401);
+          expect(await target.resolve(token)).toBeUndefined();
+        }
+        // A new sign-in works on the recovered database.
+        const signIn = await request(app)
+          .post('/api/session')
+          .set('Origin', 'http://127.0.0.1:5173')
+          .type('application/json')
+          .send({ userId })
+          .expect(201);
+        const cookie = String((signIn.headers['set-cookie'] as unknown as string[])[0]).split(';', 1)[0]!;
+        await request(app).get('/api/session').set('Cookie', cookie).expect(200);
+        // Health data survived as the recovery rules say (nothing was deleted after this backup).
+        expect(await healthCounts(databases.target.ownerUrl)).toEqual(atBackup);
+        await Promise.allSettled(pools.splice(-1).map((pool) => pool.end()));
+      };
+
+      // 1. The application backup: the restored table is empty before anything clears it.
+      await operations.createTargetDatabase();
+      await operations.bootstrapTarget();
+      await operations.restoreBackup();
+      await operations.migrate();
+      const fromApplicationBackup = await operations.clearSessions();
+      expect(fromApplicationBackup).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 2 });
+      await openAndProve();
+
+      // 2. The dump that carried session rows: the revoked session's row is back until restore:clear-sessions runs.
+      await withAdmin(databases.adminMaintenanceUrl, (client) =>
+        client.query(`DROP DATABASE ${databases.target.database} WITH (FORCE)`),
+      );
+      await operations.createTargetDatabase();
+      await operations.bootstrapTarget();
+      await verifyBackupFile(carrying.path, key);
+      const { stream } = await createBackupDecryptor(carrying.path, key);
+      await runner.restore(parsePgConnection(databases.target.adminUrl), stream);
+      await operations.migrate();
+      expect(await digestStored(databases.target.ownerUrl, revoked.sessionToken)).toBe(true);
+      expect(await digestStored(databases.target.ownerUrl, valid.sessionToken)).toBe(true);
+      const fromCarryingDump = await operations.clearSessions();
+      expect(fromCarryingDump).toMatchObject({ cleared: 3, remaining: 0, restoredRows: 3 });
+      expect(await digestStored(databases.target.ownerUrl, revoked.sessionToken)).toBe(false);
+      await openAndProve();
     },
     drillTimeout,
   );

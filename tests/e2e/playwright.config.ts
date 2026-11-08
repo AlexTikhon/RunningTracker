@@ -102,6 +102,8 @@ export default defineConfig({
         PORT: new URL(oidc.apiOrigin).port,
         // The production default. Chromium stores a Secure cookie for a loopback origin over plain http.
         SESSION_COOKIE_SECURE: 'true',
+        // The three suite APIs share one session table in the test database (ADR-0080), so they share its capacity.
+        SESSION_STORE_MAX_ENTRIES: '1000',
         SESSION_TTL_MS: String(oidc.sessionTtlMs),
       },
       reuseExistingServer: false,

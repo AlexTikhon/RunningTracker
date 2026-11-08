@@ -70,6 +70,7 @@ function passedReport(): DrillReport {
         'access_outcomes_verified',
         'erasures_reapplied',
         'erasure_outcomes_verified',
+        'sessions_cleared',
         'readiness_verified',
         'current_permissions_restored',
       ],
@@ -81,6 +82,7 @@ function passedReport(): DrillReport {
     rpo: { backupRecoveryPointMs: 300_000, targetMs: 86_400_000, withinTarget: true },
     rto: { measuredMs: 9100, targetMs: 14_400_000, withinTarget: true },
     schemaVersion: 1,
+    sessions: { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null },
     status: 'passed',
     timeline: {
       backupCreatedAt: '2026-10-01T10:00:00.000Z',

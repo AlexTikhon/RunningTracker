@@ -376,6 +376,7 @@ function harness(fail?: { at: keyof DrillOperations; error?: Error }): Harness {
     assertApplicationOffline: step('assertApplicationOffline', undefined),
     bootstrapTarget: step('bootstrapTarget', undefined),
     cleanup: step('cleanup', undefined),
+    clearSessions: step('clearSessions', { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null }),
     copyJournalReadOnly: step('copyJournalReadOnly', {
       accessEntries: 5,
       entries: 3,
@@ -541,6 +542,7 @@ describe('restore drill orchestration', () => {
       'inspectActivities',
       'reapplyErasures',
       'inspectActivities',
+      'clearSessions',
       'verifyReadiness',
       'cleanup',
     ]);
