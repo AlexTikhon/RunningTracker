@@ -12,6 +12,10 @@ export interface TestProviderOptions {
 export interface TestProvider {
   close(): Promise<void>;
   issuer: string;
+  /** Requests that reached the token endpoint so far: each one is an authorization code exchange attempt. */
+  tokenRequestCount(): number;
+  /** While true, every provider request answers 503, like a provider outage. */
+  setFailing(failing: boolean): void;
   /**
    * Drives the provider's development login and consent pages like a browser would, following
    * redirects until the provider sends the browser to anything outside its own origin, and
@@ -66,7 +70,16 @@ export async function startTestProvider(options: TestProviderOptions): Promise<T
     pkce: { required: () => true },
   });
   const handle = provider.callback();
+  let tokenRequests = 0;
+  let failing = false;
   server.on('request', (incoming, outgoing) => {
+    if (new URL(incoming.url ?? '/', issuer).pathname === '/token') tokenRequests += 1;
+    if (failing) {
+      outgoing.statusCode = 503;
+      outgoing.setHeader('content-type', 'application/json');
+      outgoing.end(JSON.stringify({ error: 'temporarily_unavailable' }));
+      return;
+    }
     void handle(incoming, outgoing);
   });
 
@@ -115,6 +128,10 @@ export async function startTestProvider(options: TestProviderOptions): Promise<T
         server.closeAllConnections();
       }),
     issuer,
+    setFailing: (value) => {
+      failing = value;
+    },
     signIn,
+    tokenRequestCount: () => tokenRequests,
   };
 }

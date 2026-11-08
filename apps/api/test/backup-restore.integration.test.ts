@@ -8,6 +8,8 @@ import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app.js';
+import { pendingLoginDigest } from '../src/auth/pending-login-store.js';
+import { PostgresPendingLoginStore } from '../src/auth/postgres-pending-login-store.js';
 import { PostgresSessionStore } from '../src/auth/postgres-session-store.js';
 import { sessionCookieName } from '../src/auth/session-http.js';
 import { SessionManager } from '../src/auth/session-manager.js';
@@ -22,6 +24,7 @@ import { createPgToolRunner, parsePgConnection } from '../src/backup/pg-tools.js
 import { parseDrillConfiguration } from '../src/backup/restore-safety.js';
 import { systemClock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
+import { startTestProvider } from './oidc-test-provider.js';
 
 // These tests create, restore into, and drop throwaway *_restore_drill_* databases on the local
 // server and run pg_dump/pg_restore, so they run only where the drill is configured (see .env.example).
@@ -591,6 +594,137 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       });
       expect(await digestStored(databases.target.ownerUrl, revoked.sessionToken)).toBe(false);
       await openAndProve();
+    },
+    drillTimeout,
+  );
+
+  // ADR-0081: an ordinary restart keeps pending OIDC logins; a restore never does. A sign-in that was between the
+  // redirect to the provider and its callback when the backup was taken cannot complete on the recovered database, even
+  // from a dump that carried its row, and a new sign-in through the same identity provider works. A real oidc-provider on
+  // loopback runs the protocol; the external callback origin is fixed, as a deployment's would be.
+  it(
+    'refuses a pre-restore OIDC sign-in after recovery, even from a dump that carried it, and completes a new one',
+    async () => {
+      const { configuration, databases, drillDirectory, operations } = await harness('current');
+      const key = await loadBackupKey(configuration.keyFile);
+      const docker = configuration.dockerContainer ? { dockerContainer: configuration.dockerContainer } : {};
+      const runner = createPgToolRunner(docker);
+      const externalOrigin = 'http://127.0.0.1:5173';
+      const oidcClient = { clientId: 'restore-test', clientSecret: 'restore-test-secret' };
+      const provider = await startTestProvider({ ...oidcClient, redirectUri: `${externalOrigin}/api/auth/callback` });
+      cleanups.push(() => provider.close());
+      await operations.prepare();
+      await operations.createSourceDatabase();
+      await operations.seedScenario();
+
+      const pools: Pool[] = [];
+      cleanups.push(async () => {
+        await Promise.allSettled(pools.map((pool) => pool.end()));
+      });
+      // One API instance over one side's database, with the stores main.ts wires.
+      const appOn = (side: typeof databases.source) => {
+        const config = validateEnvironment({
+          ALLOWED_ORIGINS: externalOrigin,
+          APP_ENV: 'test',
+          DATABASE_URL: side.runtimeUrl,
+          MAINTENANCE_DATABASE_URL: side.maintenanceUrl,
+          OIDC_CLIENT_ID: oidcClient.clientId,
+          OIDC_CLIENT_SECRET: oidcClient.clientSecret,
+          OIDC_ISSUER_URL: provider.issuer,
+          OIDC_REDIRECT_URI: `${externalOrigin}/api/auth/callback`,
+          SESSION_COOKIE_SECURE: 'false',
+        });
+        const pool = new Pool({ connectionString: side.runtimeUrl, max: 3 });
+        pool.on('error', () => undefined);
+        pools.push(pool);
+        const sessionManager = new SessionManager({
+          clock: systemClock,
+          store: new PostgresSessionStore({ capacity: 100, clock: systemClock, operationTimeoutMs: 5_000, pool }),
+          ttlMs: config.SESSION_TTL_MS,
+        });
+        const oidcLoginStore = new PostgresPendingLoginStore({
+          capacity: 100,
+          clock: systemClock,
+          operationTimeoutMs: 5_000,
+          pool,
+          ttlMs: config.OIDC!.loginTtlMs,
+        });
+        return createApp({ clock: systemClock, config, oidcLoginStore, pool, sessionManager });
+      };
+      const setCookies = (response: request.Response): string[] =>
+        (response.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+      const beginSignIn = async (app: ReturnType<typeof appOn>) => {
+        const started = await request(app).get('/api/auth/login').expect(302);
+        const loginCookie = setCookies(started)[0]!.split(';', 1)[0]!;
+        const returned = await provider.signIn(new URL(started.headers.location as string), 'alice');
+        return { callbackPath: `${returned.pathname}${returned.search}`, loginCookie };
+      };
+      const loginStored = (url: string, loginCookie: string) =>
+        withAdmin(url, async (client) => {
+          const digest = pendingLoginDigest(loginCookie.slice('running_tracker_login='.length));
+          const result = await client.query('SELECT 1 FROM app_private.oidc_pending_logins WHERE login_digest = $1', [digest]);
+          return result.rowCount === 1;
+        });
+
+      // The identity is provisioned on the source, so every backup carries it.
+      const userId = await withAdmin(databases.source.ownerUrl, async (client) => {
+        const result = await client.query<{ id: string }>('SELECT id FROM users ORDER BY id LIMIT 1');
+        await client.query('UPDATE users SET external_identity = $1 WHERE id = $2', [
+          `${provider.issuer}|alice`,
+          result.rows[0]!.id,
+        ]);
+        return result.rows[0]!.id;
+      });
+
+      // A browser is at the provider, its login stored on the source, when the backups are taken.
+      const pending = await beginSignIn(appOn(databases.source));
+      expect(await loginStored(databases.source.ownerUrl, pending.loginCookie)).toBe(true);
+      const carryingRunner = createPgToolRunner({
+        ...docker,
+        spawn: (command, args, spawnOptions) =>
+          spawn(command, args.filter((arg) => !arg.startsWith('--exclude-table-data=')), spawnOptions),
+      });
+      const carrying = await createBackup({
+        clock: systemClock,
+        connection: parsePgConnection(databases.source.adminUrl),
+        directory: join(drillDirectory, 'carrying-logins'),
+        key,
+        runner: carryingRunner,
+      });
+      await operations.takeBackup();
+
+      // The dump that carried the rows: the pending login is back until restore:clear-sessions removes it, with the
+      // drill's own seeded one.
+      await operations.createTargetDatabase();
+      await operations.bootstrapTarget();
+      await verifyBackupFile(carrying.path, key);
+      const { stream } = await createBackupDecryptor(carrying.path, key);
+      await runner.restore(parsePgConnection(databases.target.adminUrl), stream);
+      await operations.migrate();
+      expect(await loginStored(databases.target.ownerUrl, pending.loginCookie)).toBe(true);
+      const cleared = await operations.clearSessions();
+      expect(cleared.pendingLogins).toEqual({ cleared: 2, remaining: 0, restoredRows: 2, sourceRowsAtBackup: 2 });
+      expect(await loginStored(databases.target.ownerUrl, pending.loginCookie)).toBe(false);
+
+      // Reopened: the pre-restore sign-in cannot complete and reaches no provider; a new sign-in does.
+      await withAdmin(databases.target.adminUrl, (client) =>
+        client.query(`GRANT CONNECT ON DATABASE ${databases.target.database} TO running_tracker_runtime`),
+      );
+      const recovered = appOn(databases.target);
+      const exchangesBefore = provider.tokenRequestCount();
+      const stale = await request(recovered).get(pending.callbackPath).set('Cookie', pending.loginCookie).expect(302);
+      expect(stale.headers.location).toBe('/?sign_in_error=login_expired');
+      expect(setCookies(stale).some((line) => line.startsWith(`${sessionCookieName}=`))).toBe(false);
+      expect(provider.tokenRequestCount()).toBe(exchangesBefore);
+
+      const fresh = await beginSignIn(recovered);
+      const completed = await request(recovered).get(fresh.callbackPath).set('Cookie', fresh.loginCookie).expect(200);
+      const sessionCookie = setCookies(completed)
+        .find((line) => line.startsWith(`${sessionCookieName}=`))!
+        .split(';', 1)[0]!;
+      const session = await request(recovered).get('/api/session').set('Cookie', sessionCookie).expect(200);
+      expect(session.body).toMatchObject({ identity: { userId } });
+      expect(provider.tokenRequestCount()).toBe(exchangesBefore + 1);
     },
     drillTimeout,
   );
