@@ -11,7 +11,17 @@ import {
   type ManualActivityRecord,
 } from './weekly-aggregate.js';
 import { inputHashOf } from './weekly-insight-service.js';
-import { buildWeeklyReview, describeWeek, formatDuration, reviewDetailOf, type ReviewDetail } from './weekly-review.js';
+import {
+  buildWeeklyReview,
+  describeWeek,
+  formatDuration,
+  formatKcalTenths,
+  kcalTenthsOf,
+  movementOf,
+  reviewDetailOf,
+  type MovementDayRecord,
+  type ReviewDetail,
+} from './weekly-review.js';
 
 const WEEK = '2026-11-02'; // a Monday; Europe/Warsaw is on CET (UTC+1) all week
 const day = (offset: number) => `2026-11-0${2 + offset}`;
@@ -39,6 +49,7 @@ function review(input: {
   activities?: ManualActivityRecord[];
   checkIns?: CheckInRecord[];
   gpsRuns?: GpsRunRecord[];
+  movement?: MovementDayRecord[];
   requestTimeZone?: string;
   today?: string;
   weekStart?: string;
@@ -47,8 +58,22 @@ function review(input: {
   const activities = input.activities ?? [];
   const window = resolveWeekWindow({ checkIns, requestTimeZone: input.requestTimeZone ?? 'Europe/Warsaw', weekStart: input.weekStart ?? WEEK });
   const aggregate = aggregateWeek({ activities, checkIns, gpsRuns: input.gpsRuns ?? [], todayLocalDate: input.today ?? '2026-11-20', window });
-  return buildWeeklyReview({ aggregate, computedAt: '2026-11-20T10:00:00.000Z', detail: reviewDetailOf({ activities, checkIns, window }) });
+  return buildWeeklyReview({
+    aggregate,
+    computedAt: '2026-11-20T10:00:00.000Z',
+    detail: reviewDetailOf({ activities, checkIns, window }),
+    movement: input.movement ?? [],
+  });
 }
+
+/** A stored manual movement day; energy in kcal is converted to integer tenths as the database read does. */
+const moved = (localDate: string, steps: number | null, kcal: string | null, timeZone = 'Europe/Warsaw'): MovementDayRecord => ({
+  activeEnergyTenths: kcal === null ? null : kcalTenthsOf(kcal),
+  localDate,
+  source: 'manual',
+  steps,
+  timeZone,
+});
 
 const codes = (built: WeeklyReview) => built.statements.map((statement) => statement.code);
 const text = (built: WeeklyReview, code: WeeklyReviewStatementCode) => built.statements.find((statement) => statement.code === code)?.text;
@@ -103,7 +128,8 @@ describe('weekly review: the three-of-four sleep regression', () => {
 describe('weekly review: empty, partial and complete weeks', () => {
   it('an empty week says nothing was recorded, has no metric facts and no zero values', () => {
     const built = review({ requestTimeZone: 'Europe/Warsaw' });
-    expect(codes(built)).toEqual(['week.time_zone_from_request', 'check_ins.none', 'manual.none', 'gps.none']);
+    expect(codes(built)).toEqual(['week.time_zone_from_request', 'check_ins.none', 'manual.none', 'gps.none', 'movement.none']);
+    expect(text(built, 'movement.none')).toBe('No daily movement was recorded this week.');
     expect(text(built, 'check_ins.none')).toBe('No check-ins were recorded this week.');
     expect(built.facts.map((fact) => fact.id)).toEqual(['check_ins.days_with_data', 'check_ins.days_missing', 'check_ins.coverage', 'manual.activities', 'gps.runs']);
     expect(built.dataGaps.map((gap) => gap.code)).toEqual(['no_check_ins', 'no_activities']);
@@ -284,6 +310,9 @@ describe('weekly review: contract, provenance and wording', () => {
       gpsRuns: [gpsRun('2026-11-03T07:00:00Z', 30, null), gpsRun('2026-11-05T07:00:00Z', 30, 4_000)],
       today: day(4),
     }),
+    // Movement: extreme values, zeros, a single metric, and days saved in other zones.
+    review({ movement: [moved(day(0), 200_000, '20000.0', 'America/New_York'), moved(day(1), 0, '0.0'), moved(day(2), null, '0.1', 'Asia/Tokyo')] }),
+    review({ movement: [0, 1, 2, 3, 4, 5, 6].map((offset) => moved(day(offset), 0, null)) }),
   ];
 
   it('is a valid, app-computed, unpersisted review with stable unique codes', () => {
@@ -313,11 +342,169 @@ describe('weekly review: contract, provenance and wording', () => {
     const window = resolveWeekWindow({ checkIns, requestTimeZone: 'Europe/Warsaw', weekStart: WEEK });
     const aggregate = aggregateWeek({ activities: [], checkIns, gpsRuns: [], todayLocalDate: '2026-11-20', window });
     const before = inputHashOf(aggregate);
-    buildWeeklyReview({ aggregate, computedAt: '2026-11-20T10:00:00.000Z', detail: reviewDetailOf({ activities: [], checkIns, window }) });
+    const snapshot = structuredClone(aggregate);
+    const built = buildWeeklyReview({
+      aggregate,
+      computedAt: '2026-11-20T10:00:00.000Z',
+      detail: reviewDetailOf({ activities: [], checkIns, window }),
+      movement: [moved(day(0), 8042, '412.5'), moved(day(1), 0, null)],
+    });
+    expect(built.movement.daysWithRecord).toBe(2);
+    expect(aggregate).toEqual(snapshot);
     expect(inputHashOf(aggregate)).toBe(before);
+    // Movement reaches neither the shared facts nor the data gaps.
+    const without = buildWeeklyReview({ aggregate, computedAt: '2026-11-20T10:00:00.000Z', detail: reviewDetailOf({ activities: [], checkIns, window }), movement: [] });
+    expect([built.facts, built.dataGaps, built.coverage]).toEqual([without.facts, without.dataGaps, without.coverage]);
+    expect(JSON.stringify(built.facts)).not.toMatch(/step|energy|kcal|movement/iu);
   });
 
   it('formats durations with units', () => {
     expect([formatDuration(0), formatDuration(45), formatDuration(60), formatDuration(403)]).toEqual(['0 min', '45 min', '1 h', '6 h 43 min']);
+  });
+});
+
+describe('weekly review: manual daily movement (ADR-0079)', () => {
+  // The required regression: Monday steps 0 and no energy, Tuesday both, Wednesday energy only, other days missing.
+  const regression = review({ movement: [moved(day(0), 0, null), moved(day(1), 8042, '412.5'), moved(day(2), null, '250.0')] });
+
+  it('counts record days and each metric on its own against the 7 calendar days', () => {
+    expect(regression.movement).toEqual({
+      activeEnergyKcal: { daysRecorded: 2, recordedTotal: 662.5 },
+      days: [
+        { activeEnergyKcal: null, localDate: '2026-11-02', recorded: true, source: 'manual', steps: 0, timeZone: 'Europe/Warsaw' },
+        { activeEnergyKcal: 412.5, localDate: '2026-11-03', recorded: true, source: 'manual', steps: 8042, timeZone: 'Europe/Warsaw' },
+        { activeEnergyKcal: 250, localDate: '2026-11-04', recorded: true, source: 'manual', steps: null, timeZone: 'Europe/Warsaw' },
+        { localDate: '2026-11-05', recorded: false },
+        { localDate: '2026-11-06', recorded: false },
+        { localDate: '2026-11-07', recorded: false },
+        { localDate: '2026-11-08', recorded: false },
+      ],
+      daysInWeek: 7,
+      daysWithRecord: 3,
+      source: 'manual',
+      steps: { daysRecorded: 2, recordedTotal: 8042 },
+    });
+    expect(text(regression, 'movement.steps_recorded')).toBe(
+      'Steps were recorded on 2 of 7 days, 8,042 steps in total on those days; the other 5 days are unknown.',
+    );
+    expect(text(regression, 'movement.active_energy_recorded')).toBe(
+      'Active energy was recorded on 2 of 7 days, 662.5 kcal in total on those days; the other 5 days are unknown.',
+    );
+    expect(text(regression, 'movement.manual_source')).toBe(
+      'Steps and active energy were entered manually; they are shown on their own and not added to the activity or GPS run figures.',
+    );
+    expect(codes(regression)).not.toContain('movement.time_zones');
+  });
+
+  it('does not change check-in coverage or its denominators, and a movement-only week is not an empty one', () => {
+    const empty = review({});
+    expect(regression.coverage).toEqual(empty.coverage);
+    expect(regression.facts).toEqual(empty.facts);
+    expect(regression.dataGaps).toEqual(empty.dataGaps);
+    expect(text(regression, 'check_ins.none')).toBe('No check-ins were recorded this week.');
+    expect(codes(regression)).not.toContain('movement.none');
+    // Recorded zeros only: still a week with movement.
+    const zeroOnly = review({ movement: [moved(day(4), 0, null)] });
+    expect(zeroOnly.movement.daysWithRecord).toBe(1);
+    expect(codes(zeroOnly)).not.toContain('movement.none');
+    // A day with values and a note-only day (a record without values): the same denominators with movement on other days.
+    const checkIns = [checkIn(day(0), { mood: 3 }), checkIn(day(1))];
+    const withCheckIns = review({ checkIns });
+    const withBoth = review({ checkIns, movement: [moved(day(1), 100, null), moved(day(5), 100, '20.5')] });
+    expect(withBoth.coverage).toEqual(withCheckIns.coverage);
+    expect(withBoth.coverage).toMatchObject({ daysWithCheckInRecord: 2, daysWithCheckInValues: 1, noteOnlyDays: 1 });
+    expect(text(withBoth, 'check_ins.coverage')).toBe('Check-ins with values on 1 of 7 days of the week.');
+  });
+
+  it('adds energy as integer tenths: 0.1 + 0.2 is 0.3 exactly, in the payload, its JSON and the sentence', () => {
+    expect(0.1 + 0.2).not.toBe(0.3); // what adding the numbers would give
+    const built = review({ movement: [moved(day(0), null, '0.1'), moved(day(1), null, '0.2')] });
+    expect(built.movement.activeEnergyKcal.recordedTotal).toBe(0.3);
+    expect(JSON.stringify(built.movement.activeEnergyKcal)).toBe('{"daysRecorded":2,"recordedTotal":0.3}');
+    expect(text(built, 'movement.active_energy_recorded')).toBe(
+      'Active energy was recorded on 2 of 7 days, 0.3 kcal in total on those days; the other 5 days are unknown.',
+    );
+    const seven = review({ movement: [0, 1, 2, 3, 4, 5, 6].map((offset) => moved(day(offset), null, '0.1')) });
+    expect(seven.movement.activeEnergyKcal.recordedTotal).toBe(0.7);
+    const large = review({ movement: [0, 1, 2, 3, 4, 5, 6].map((offset) => moved(day(offset), 200_000, '19999.9')) });
+    expect(large.movement.activeEnergyKcal.recordedTotal).toBe(139_999.3);
+    expect(large.movement.steps.recordedTotal).toBe(1_400_000);
+    expect(text(large, 'movement.steps_recorded')).toBe('Steps were recorded on all 7 days, 1,400,000 steps in total.');
+    expect(text(large, 'movement.active_energy_recorded')).toBe('Active energy was recorded on all 7 days, 139,999.3 kcal in total.');
+  });
+
+  it('reads stored energy text exactly and refuses anything with a meaningful second decimal', () => {
+    expect(['412.5', '0.0', '0', '250', '412.50', '20000.000', '0.1'].map(kcalTenthsOf)).toEqual([4125, 0, 0, 2500, 4125, 200_000, 1]);
+    for (const bad of ['412.55', '-0.1', '1e3', 'NaN', 'Infinity', '', '.5', '412.', '123456']) {
+      expect(() => kcalTenthsOf(bad), bad).toThrow(/more than one meaningful decimal/u);
+    }
+    expect([formatKcalTenths(0), formatKcalTenths(3), formatKcalTenths(6625), formatKcalTenths(2500), formatKcalTenths(1_399_993)]).toEqual([
+      '0',
+      '0.3',
+      '662.5',
+      '250',
+      '139,999.3',
+    ]);
+  });
+
+  it('an all-zero metric has total 0 and nonzero coverage; a metric never recorded has total null and zero coverage', () => {
+    const built = review({ movement: [moved(day(0), 0, null), moved(day(3), 0, null)] });
+    expect(built.movement.steps).toEqual({ daysRecorded: 2, recordedTotal: 0 });
+    expect(built.movement.activeEnergyKcal).toEqual({ daysRecorded: 0, recordedTotal: null });
+    expect(text(built, 'movement.steps_recorded')).toBe('Steps were recorded on 2 of 7 days, 0 steps in total on those days; the other 5 days are unknown.');
+    expect(text(built, 'movement.active_energy_not_recorded')).toBe('Active energy was not recorded on any day this week.');
+    const energyOnly = review({ movement: [moved(day(6), null, '0.0')] });
+    expect(energyOnly.movement.activeEnergyKcal).toEqual({ daysRecorded: 1, recordedTotal: 0 });
+    expect(text(energyOnly, 'movement.steps_not_recorded')).toBe('Steps were not recorded on any day this week.');
+    expect(text(energyOnly, 'movement.active_energy_recorded')).toBe('Active energy was recorded on 1 of 7 days, 0 kcal on that day; the other 6 days are unknown.');
+    const sixDays = review({ movement: [0, 1, 2, 3, 4, 5].map((offset) => moved(day(offset), 1, null)) });
+    expect(text(sixDays, 'movement.steps_recorded')).toBe('Steps were recorded on 6 of 7 days, 6 steps in total on those days; the other day is unknown.');
+    const oneStep = review({ movement: [moved(day(0), 1, null)] });
+    expect(text(oneStep, 'movement.steps_recorded')).toBe('Steps were recorded on 1 of 7 days, 1 step on that day; the other 6 days are unknown.');
+  });
+
+  it('uses the stored local dates Monday to Sunday inclusive, and only manual rows', () => {
+    const records = [
+      moved('2026-11-01', 111, '1.0'), // the Sunday before
+      moved(day(0), 1, null),
+      moved(day(6), 2, null),
+      moved('2026-11-09', 999, '9.0'), // the Monday after
+      { ...moved(day(3), 50_000, '5000.0'), source: 'apple_health' as unknown as 'manual' }, // never counted
+    ];
+    const movement = movementOf(records, WEEK);
+    expect(movement.days.map((entry) => entry.localDate)).toEqual(['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08']);
+    expect(movement.daysWithRecord).toBe(2);
+    expect(movement.steps).toEqual({ daysRecorded: 2, recordedTotal: 3 });
+    expect(movement.activeEnergyKcal).toEqual({ daysRecorded: 0, recordedTotal: null });
+  });
+
+  it('explains days saved in other zones without moving the week the activities and GPS runs are read in', () => {
+    const checkIns = [checkIn(day(0), { mood: 3 })];
+    // 00:30 on Monday 2026-11-09 in Warsaw (outside the week), 18:30 on Sunday in New York (inside it, if read there).
+    const activities = [activity('2026-11-08T23:30:00Z')];
+    const without = review({ activities, checkIns });
+    const built = review({ activities, checkIns, movement: [moved(day(6), 5000, null, 'America/New_York'), moved(day(5), 10, null)] });
+    expect(built.week).toEqual(without.week);
+    expect(built.coverage.manualActivities.count).toBe(0);
+    expect(text(built, 'movement.time_zones')).toBe(
+      "Movement days were saved in 2 time zones (America/New_York, Europe/Warsaw); each counts on the calendar date it was saved for, and the week's activities and GPS runs are still read in Europe/Warsaw.",
+    );
+    const single = review({ checkIns, movement: [moved(day(1), 5000, null, 'Asia/Tokyo')] });
+    expect(text(single, 'movement.time_zones')).toBe(
+      "Movement days were saved in Asia/Tokyo; each counts on the calendar date it was saved for, and the week's activities and GPS runs are still read in Europe/Warsaw.",
+    );
+    // The week read in the device zone (no check-ins): movement in that zone needs no explanation.
+    expect(codes(review({ movement: [moved(day(1), 5000, null, 'Europe/Warsaw')] }))).not.toContain('movement.time_zones');
+    const long = review({
+      checkIns,
+      movement: [0, 1, 2, 3, 4, 5, 6].map((offset) => moved(day(offset), 1, null, `America/Argentina/ComodRivadavia${'x'.repeat(offset)}`)),
+    });
+    expect(text(long, 'movement.time_zones')).toMatch(/^Movement days were saved in 7 time zones; each counts/u);
+  });
+
+  it('keeps the in-progress notice first, and movement statements after every other statement', () => {
+    const built = review({ checkIns: [checkIn(day(0), { mood: 3 })], movement: [moved(day(0), 10, '1.5', 'UTC')], today: day(2) });
+    expect(codes(built)[0]).toBe('week.in_progress');
+    expect(codes(built).slice(-4)).toEqual(['movement.steps_recorded', 'movement.active_energy_recorded', 'movement.manual_source', 'movement.time_zones']);
   });
 });

@@ -1,5 +1,5 @@
 import type { WeeklyReview, WeeklyReviewQuery } from '@running-tracker/contracts';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 
 import type { StoredSession } from '../auth/session-store.js';
 import type { Clock } from '../clock.js';
@@ -7,27 +7,81 @@ import { withAuthenticatedTenantTransaction } from '../database/authenticated-te
 import { ApiError } from '../http/errors.js';
 import { localDateOf } from '../runs/run-search-period.js';
 import { canonicalTimeZone, computeWeek } from './weekly-insight-service.js';
-import { buildWeeklyReview, reviewDetailOf } from './weekly-review.js';
+import { buildWeeklyReview, kcalTenthsOf, reviewDetailOf, type MovementDayRecord } from './weekly-review.js';
 
 // The deterministic weekly review: computed on every read, never stored, never queued, and independent of AI
 // generation. It does not know the weekly insight service or any model provider, so it cannot call a model.
 //
-// One REPEATABLE READ READ ONLY transaction: the membership check and the week's sources (one statement: check-ins,
-// manual activities and the person's own finished GPS runs with current summaries) share one snapshot. Every
-// statement names the organization and the owner, and runs with row-level security in force; GPS runs are filtered by
-// owner explicitly, so a run another person shared with this one is never part of their review.
+// One REPEATABLE READ READ ONLY transaction: the membership check, the week's AI-shared sources (one statement:
+// check-ins, manual activities and the person's own finished GPS runs with current summaries) and the week's manual
+// movement (a second statement, ADR-0079) share one snapshot: the transaction's snapshot is taken by its first statement
+// and every later statement reads it, so a movement write committed in between is not seen. Nothing is read after the
+// transaction ends. Every statement names the organization and the owner, and runs with row-level security in force;
+// GPS runs are filtered by owner explicitly, so a run another person shared with this one is never part of their review.
+//
+// Movement has its own statement on purpose: the source statement is the AI input (weekSourcesSql), and movement must
+// not become part of it.
+
+/** Barriers for deterministic snapshot tests. Never set in production. */
+export interface WeeklyReviewTestHooks {
+  /** Inside the read transaction, after the AI-shared sources were read and before movement is read. */
+  afterSourcesRead?: () => Promise<void>;
+}
 
 export interface WeeklyReviewServiceOptions {
   clock: Clock;
+  hooks?: WeeklyReviewTestHooks;
   pool: Pick<Pool, 'connect'>;
+}
+
+interface MovementRow {
+  active_energy_kcal: string | null;
+  local_date: string;
+  source: 'manual';
+  steps: number | null;
+  time_zone: string;
+}
+
+// $1 organization, $2 owner, $3 Monday. The stored local dates of the week, Monday to Sunday inclusive: a daily total
+// belongs to the calendar date it was entered for, whatever zone the week's activities are read in. Manual rows only
+// (no other source exists; a later importer's rows must not be added to them). The owner/date/source unique index
+// serves the range.
+export const weekMovementSql = `/* weekly-review:movement */
+SELECT to_char(movement.local_date, 'YYYY-MM-DD') AS local_date,
+       movement.source,
+       movement.time_zone,
+       movement.steps,
+       movement.active_energy_kcal::text AS active_energy_kcal
+  FROM daily_movement AS movement
+ WHERE movement.org_id = $1
+   AND movement.user_id = $2
+   AND movement.source = 'manual'
+   AND movement.local_date BETWEEN $3::date AND $3::date + 6
+ ORDER BY movement.local_date`;
+
+export async function readWeekMovement(
+  client: PoolClient,
+  owner: { orgId: string; userId: string },
+  weekStart: string,
+): Promise<MovementDayRecord[]> {
+  const result = await client.query<MovementRow>(weekMovementSql, [owner.orgId, owner.userId, weekStart]);
+  return result.rows.map((row) => ({
+    activeEnergyTenths: row.active_energy_kcal === null ? null : kcalTenthsOf(row.active_energy_kcal),
+    localDate: row.local_date,
+    source: row.source,
+    steps: row.steps,
+    timeZone: row.time_zone,
+  }));
 }
 
 export class WeeklyReviewService {
   readonly #clock: Clock;
+  readonly #hooks: WeeklyReviewTestHooks | undefined;
   readonly #pool: Pick<Pool, 'connect'>;
 
   public constructor(options: WeeklyReviewServiceOptions) {
     this.#clock = options.clock;
+    this.#hooks = options.hooks;
     this.#pool = options.pool;
   }
 
@@ -42,14 +96,18 @@ export class WeeklyReviewService {
       });
     }
     const owner = { orgId, userId: session.userId };
-    const week = await withAuthenticatedTenantTransaction(
+    const { movement, week } = await withAuthenticatedTenantTransaction(
       this.#pool,
       session,
       orgId,
-      (client) => computeWeek(client, owner, query.weekStart, requestTimeZone, nowMs),
+      async (client) => {
+        const computed = await computeWeek(client, owner, query.weekStart, requestTimeZone, nowMs);
+        await this.#hooks?.afterSourcesRead?.();
+        return { movement: await readWeekMovement(client, owner, query.weekStart), week: computed };
+      },
       { snapshot: 'read-only snapshot' },
     );
     const detail = reviewDetailOf({ activities: week.sources.activities, checkIns: week.sources.checkIns, window: week.window });
-    return buildWeeklyReview({ aggregate: week.aggregate, computedAt: now.toISOString(), detail });
+    return buildWeeklyReview({ aggregate: week.aggregate, computedAt: now.toISOString(), detail, movement });
   }
 }

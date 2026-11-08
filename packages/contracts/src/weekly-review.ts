@@ -1,19 +1,29 @@
 import { z } from 'zod';
 
+import { addLocalDays } from './daily-metrics.js';
+import {
+  DAILY_MOVEMENT_ACTIVE_ENERGY_MAX_KCAL,
+  DAILY_MOVEMENT_STEPS_MAX,
+  dailyActiveEnergyKcalSchema,
+  dailyMovementSources,
+  dailyStepsSchema,
+} from './daily-movement.js';
 import { localDateSchema, timestampSchema, ianaTimeZoneSchema } from './primitives.js';
 import { weeklyInsightDataGapSchema, weeklyInsightFactSchema, weeklyInsightWeekStartSchema } from './weekly-insights.js';
 
 // Weekly review of the signed-in person (the deterministic slice after ADR-0076). Computed by the server, on request,
-// from the person's own check-ins, manual activities and GPS runs, read in one database snapshot. Every number and
-// every sentence is written by code: no language model is involved, nothing is queued, and nothing is stored. It is
-// therefore always available, whether AI generation is on or off and whether or not an AI insight exists for the week.
-// Owner-only like the data it is derived from: no request carries an owner.
+// from the person's own check-ins, manual activities, GPS runs and manual daily movement, read in one database snapshot.
+// Every number and every sentence is written by code: no language model is involved, nothing is queued, and nothing is
+// stored. It is therefore always available, whether AI generation is on or off and whether or not an AI insight exists
+// for the week. Owner-only like the data it is derived from: no request carries an owner.
 
 /**
  * The version of the review's statement and coverage rules. Change it when a statement's meaning or a denominator
  * changes. The facts and data gaps follow the aggregation policy named in `provenance.policyVersion`.
+ * - `weekly-review-1`: ADR-0077.
+ * - `weekly-review-2`: adds `movement` and the `movement.*` statements (ADR-0079). Nothing else changed meaning.
  */
-export const WEEKLY_REVIEW_VERSION = 'weekly-review-1';
+export const WEEKLY_REVIEW_VERSION = 'weekly-review-2';
 
 export const WEEKLY_REVIEW_STATEMENTS_MAX = 40;
 export const WEEKLY_REVIEW_FACTS_MAX = 64;
@@ -28,6 +38,8 @@ export const WEEKLY_REVIEW_STATEMENT_MAX_LENGTH = 240;
  * - `manual.*`: manual activities, in total and per type.
  * - `gps.*`: GPS runs, with a distance only from current summaries, and which runs it covers.
  * - `sources.*`: limits of combining sources.
+ * - `movement.*`: manual daily movement (steps, active energy), each metric against the 7 calendar days, recorded
+ *   totals with their coverage, the manual source, and days saved in other zones. Never added to activity figures.
  */
 export const weeklyReviewStatementCodes = [
   'week.in_progress',
@@ -63,6 +75,13 @@ export const weeklyReviewStatementCodes = [
   'gps.partial_distance',
   'gps.no_distance',
   'sources.manual_and_gps_runs_separate',
+  'movement.none',
+  'movement.steps_recorded',
+  'movement.steps_not_recorded',
+  'movement.active_energy_recorded',
+  'movement.active_energy_not_recorded',
+  'movement.manual_source',
+  'movement.time_zones',
 ] as const;
 export const weeklyReviewStatementCodeSchema = z.enum(weeklyReviewStatementCodes);
 
@@ -167,17 +186,97 @@ export const weeklyReviewProvenanceSchema = z.strictObject({
   source: z.literal('computed_by_app'),
 });
 
-export const weeklyReviewSchema = z.strictObject({
-  coverage: weeklyReviewCoverageSchema,
-  /** Code-written data gaps and source limitations. */
-  dataGaps: z.array(weeklyInsightDataGapSchema).max(10),
-  /** Every number of the week that has a value; a value that was not recorded has no fact (never a zero). */
-  facts: z.array(weeklyInsightFactSchema).max(WEEKLY_REVIEW_FACTS_MAX),
-  provenance: weeklyReviewProvenanceSchema,
-  /** Code-written descriptive sentences, in a stable order. */
-  statements: z.array(weeklyReviewStatementSchema).max(WEEKLY_REVIEW_STATEMENTS_MAX),
-  week: weeklyReviewWeekSchema,
-});
+/** Integer tenths of a kcal of a value with at most one decimal (exact for every value the contract accepts). */
+const kcalTenths = (kcal: number) => Math.round(kcal * 10);
+
+/**
+ * One calendar day of the week as manual movement saw it. A day without a record says so (`recorded: false`) and has
+ * no values: it is unknown, never zero. A recorded day keeps each value as stored, so a recorded 0 stays 0 and a value
+ * left empty stays null; `source` and `timeZone` are the stored provenance and the zone of the day's first write.
+ */
+export const weeklyReviewMovementDaySchema = z.discriminatedUnion('recorded', [
+  z.strictObject({ localDate: localDateSchema, recorded: z.literal(false) }),
+  z
+    .strictObject({
+      activeEnergyKcal: dailyActiveEnergyKcalSchema.nullable(),
+      localDate: localDateSchema,
+      recorded: z.literal(true),
+      source: z.enum(dailyMovementSources),
+      steps: dailyStepsSchema.nullable(),
+      timeZone: z.string().min(1).max(64),
+    })
+    .refine((day) => day.steps !== null || day.activeEnergyKcal !== null, 'A recorded day has at least one value'),
+]);
+
+/**
+ * Manual daily movement of the week (ADR-0079). Days are the stored local dates from Monday to Sunday inclusive, each
+ * day as it was entered: a daily total is never moved by a zone, and movement never moves the week's GPS or activity
+ * boundaries. Each metric has its own coverage against the 7 calendar days, independent of check-ins and of the other
+ * metric. A `recordedTotal` adds up the recorded days only (null when none: unknown, not zero; 0 when only zeros were
+ * recorded); it is never added to manual activity or GPS figures, and nothing is derived from it. Energy totals are
+ * added as integer tenths of a kcal, so 0.1 + 0.2 is 0.3 exactly.
+ */
+export const weeklyReviewMovementSchema = z
+  .strictObject({
+    /** Every value counted here was entered manually; no other source exists yet. */
+    source: z.literal('manual'),
+    daysInWeek: z.literal(7),
+    /** Days with a movement record, whichever values it holds. */
+    daysWithRecord: dayCount,
+    steps: z.strictObject({
+      daysRecorded: dayCount,
+      recordedTotal: z.int().min(0).max(7 * DAILY_MOVEMENT_STEPS_MAX).nullable(),
+    }),
+    activeEnergyKcal: z.strictObject({
+      daysRecorded: dayCount,
+      recordedTotal: z
+        .number()
+        .finite()
+        .min(0)
+        .max(7 * DAILY_MOVEMENT_ACTIVE_ENERGY_MAX_KCAL)
+        .refine((value) => kcalTenths(value) / 10 === value, 'A total has at most one decimal')
+        .nullable(),
+    }),
+    /** Monday to Sunday, in order. */
+    days: z.array(weeklyReviewMovementDaySchema).length(7),
+  })
+  .superRefine((movement, context) => {
+    const recorded = movement.days.flatMap((day) => (day.recorded ? [day] : []));
+    const steps = recorded.flatMap((day) => (day.steps === null ? [] : [day.steps]));
+    const energy = recorded.flatMap((day) => (day.activeEnergyKcal === null ? [] : [kcalTenths(day.activeEnergyKcal)]));
+    const issue = (message: string, path: (string | number)[]) => context.addIssue({ code: 'custom', message, path });
+    if (movement.daysWithRecord !== recorded.length) issue('days with a record must match the recorded days', ['daysWithRecord']);
+    if (movement.steps.daysRecorded !== steps.length) issue('days with steps must match the days', ['steps', 'daysRecorded']);
+    if (movement.activeEnergyKcal.daysRecorded !== energy.length) {
+      issue('days with active energy must match the days', ['activeEnergyKcal', 'daysRecorded']);
+    }
+    const stepsTotal = steps.length === 0 ? null : steps.reduce((sum, value) => sum + value, 0);
+    if (movement.steps.recordedTotal !== stepsTotal) issue('the steps total is the sum of the recorded days', ['steps', 'recordedTotal']);
+    const energyTenths = energy.length === 0 ? null : energy.reduce((sum, value) => sum + value, 0);
+    const total = movement.activeEnergyKcal.recordedTotal;
+    if ((total === null ? null : kcalTenths(total)) !== energyTenths) {
+      issue('the active energy total is the sum of the recorded days', ['activeEnergyKcal', 'recordedTotal']);
+    }
+  });
+
+export const weeklyReviewSchema = z
+  .strictObject({
+    coverage: weeklyReviewCoverageSchema,
+    /** Code-written data gaps and source limitations. */
+    dataGaps: z.array(weeklyInsightDataGapSchema).max(10),
+    /** Every number of the week that has a value; a value that was not recorded has no fact (never a zero). */
+    facts: z.array(weeklyInsightFactSchema).max(WEEKLY_REVIEW_FACTS_MAX),
+    /** Manual daily movement, review-only: not part of `facts`, `coverage` or `dataGaps`, which AI insights share. */
+    movement: weeklyReviewMovementSchema,
+    provenance: weeklyReviewProvenanceSchema,
+    /** Code-written descriptive sentences, in a stable order. */
+    statements: z.array(weeklyReviewStatementSchema).max(WEEKLY_REVIEW_STATEMENTS_MAX),
+    week: weeklyReviewWeekSchema,
+  })
+  .refine((review) => review.movement.days.every((day, index) => day.localDate === addLocalDays(review.week.start, index)), {
+    message: 'movement days are the week from Monday to Sunday, in order',
+    path: ['movement', 'days'],
+  });
 
 /**
  * `timeZone` is used only when the person has no check-in in the week: otherwise the zone stored on their check-ins
@@ -193,5 +292,7 @@ export type WeeklyReviewStatement = z.infer<typeof weeklyReviewStatementSchema>;
 export type WeeklyReviewCoverage = z.infer<typeof weeklyReviewCoverageSchema>;
 export type WeeklyReviewWeek = z.infer<typeof weeklyReviewWeekSchema>;
 export type WeeklyReviewProvenance = z.infer<typeof weeklyReviewProvenanceSchema>;
+export type WeeklyReviewMovementDay = z.infer<typeof weeklyReviewMovementDaySchema>;
+export type WeeklyReviewMovement = z.infer<typeof weeklyReviewMovementSchema>;
 export type WeeklyReview = z.infer<typeof weeklyReviewSchema>;
 export type WeeklyReviewQuery = z.infer<typeof weeklyReviewQuerySchema>;

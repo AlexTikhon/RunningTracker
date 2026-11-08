@@ -45,7 +45,7 @@ import type { LlmProvider } from './insights/llm-provider.js';
 import { createWeeklyInsightService } from './insights/weekly-insight-factory.js';
 import type { WeeklyInsightService } from './insights/weekly-insight-service.js';
 import { createWeeklyInsightRouter } from './insights/weekly-insight.routes.js';
-import { WeeklyReviewService } from './insights/weekly-review-service.js';
+import { WeeklyReviewService, type WeeklyReviewTestHooks } from './insights/weekly-review-service.js';
 import { createWeeklyReviewRouter } from './insights/weekly-review.routes.js';
 import type { TestOnlyFaultInjector } from './testing/fault-injection.js';
 
@@ -65,6 +65,8 @@ export interface AppDependencies {
   testOnlyRunSearchInterpreter?: RunSearchInterpreter;
   /** Replaces the configured weekly insight model in tests, so that no test can reach Ollama. */
   testOnlyWeeklyInsightProvider?: LlmProvider;
+  /** Barriers inside the weekly review's read transaction, for snapshot tests. */
+  testOnlyWeeklyReviewHooks?: WeeklyReviewTestHooks;
   testOnlyRouter?: Router;
   /** The weekly insight service; built from the configuration when omitted. The caller stops its queue at shutdown. */
   weeklyInsights?: WeeklyInsightService;
@@ -84,11 +86,16 @@ export function createApp({
   testOnlyFaultInjector,
   testOnlyRunSearchInterpreter,
   testOnlyWeeklyInsightProvider,
+  testOnlyWeeklyReviewHooks,
   testOnlyRouter,
   weeklyInsights,
 }: AppDependencies): Express {
   if (
-    (testOnlyFaultInjector || testOnlyRouter || testOnlyRunSearchInterpreter || testOnlyWeeklyInsightProvider) &&
+    (testOnlyFaultInjector ||
+      testOnlyRouter ||
+      testOnlyRunSearchInterpreter ||
+      testOnlyWeeklyInsightProvider ||
+      testOnlyWeeklyReviewHooks) &&
     config.APP_ENV !== 'test'
   ) {
     throw new Error('test-only app dependencies require APP_ENV=test');
@@ -232,7 +239,11 @@ export function createApp({
   app.use(
     '/api/orgs/:orgId/weekly-review',
     createWeeklyReviewRouter({
-      review: new WeeklyReviewService({ clock, pool: pool as Pick<Pool, 'connect'> }),
+      review: new WeeklyReviewService({
+        clock,
+        pool: pool as Pick<Pool, 'connect'>,
+        ...(testOnlyWeeklyReviewHooks ? { hooks: testOnlyWeeklyReviewHooks } : {}),
+      }),
       sessionManager: sessions,
     }),
   );

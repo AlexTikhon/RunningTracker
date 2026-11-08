@@ -4810,6 +4810,169 @@
               "additionalProperties": false
             }
           },
+          "movement": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "manual"
+              },
+              "daysInWeek": {
+                "type": "number",
+                "const": 7
+              },
+              "daysWithRecord": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7
+              },
+              "steps": {
+                "type": "object",
+                "properties": {
+                  "daysRecorded": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 7
+                  },
+                  "recordedTotal": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1400000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "daysRecorded",
+                  "recordedTotal"
+                ],
+                "additionalProperties": false
+              },
+              "activeEnergyKcal": {
+                "type": "object",
+                "properties": {
+                  "daysRecorded": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 7
+                  },
+                  "recordedTotal": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 140000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "daysRecorded",
+                  "recordedTotal"
+                ],
+                "additionalProperties": false
+              },
+              "days": {
+                "minItems": 7,
+                "maxItems": 7,
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "localDate": {
+                          "type": "string"
+                        },
+                        "recorded": {
+                          "type": "boolean",
+                          "const": false
+                        }
+                      },
+                      "required": [
+                        "localDate",
+                        "recorded"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "activeEnergyKcal": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 20000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "localDate": {
+                          "type": "string"
+                        },
+                        "recorded": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "manual"
+                          ]
+                        },
+                        "steps": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 200000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timeZone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        }
+                      },
+                      "required": [
+                        "activeEnergyKcal",
+                        "localDate",
+                        "recorded",
+                        "source",
+                        "steps",
+                        "timeZone"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "source",
+              "daysInWeek",
+              "daysWithRecord",
+              "steps",
+              "activeEnergyKcal",
+              "days"
+            ],
+            "additionalProperties": false
+          },
           "provenance": {
             "type": "object",
             "properties": {
@@ -4892,7 +5055,14 @@
                     "gps.totals",
                     "gps.partial_distance",
                     "gps.no_distance",
-                    "sources.manual_and_gps_runs_separate"
+                    "sources.manual_and_gps_runs_separate",
+                    "movement.none",
+                    "movement.steps_recorded",
+                    "movement.steps_not_recorded",
+                    "movement.active_energy_recorded",
+                    "movement.active_energy_not_recorded",
+                    "movement.manual_source",
+                    "movement.time_zones"
                   ]
                 },
                 "text": {
@@ -4957,6 +5127,7 @@
           "coverage",
           "dataGaps",
           "facts",
+          "movement",
           "provenance",
           "statements",
           "week"

@@ -7,7 +7,9 @@ import {
   dailyMetricsViewSchema,
   dailyMovementListResponseSchema,
   dailyMovementViewSchema,
+  weeklyReviewSchema,
   type DailyMovementView,
+  type WeeklyReview,
 } from '@running-tracker/contracts';
 import { Pool } from 'pg';
 import request from 'supertest';
@@ -534,14 +536,24 @@ describe('ADR-0078 daily movement HTTP API', () => {
             .expect(201)
         ).body,
       );
+      // ADR-0079: the weekly review now shows movement in its own `movement` part and `movement.*` statements; every
+      // part it shares with AI insights (coverage, facts, data gaps, week) and every other statement stays as it was.
       const review = () =>
         request(app)
           .get(`/api/orgs/${ids.orgA}/weekly-review`)
           .query({ timeZone: 'UTC', weekStart: '2026-10-05' })
           .set('Cookie', owner.cookie)
           .expect(200)
-          .then((response) => response.body as unknown);
+          .then((response) => weeklyReviewSchema.parse(response.body));
+      const shared = (built: WeeklyReview) => ({
+        coverage: built.coverage,
+        dataGaps: built.dataGaps,
+        facts: built.facts,
+        statements: built.statements.filter((item) => !item.code.startsWith('movement.')),
+        week: built.week,
+      });
       const reviewBefore = await review();
+      expect(reviewBefore.movement.daysWithRecord).toBe(0);
       const insightState = async () =>
         (
           await ownerPool.query<{ gates: string; insights: string }>(
@@ -559,7 +571,9 @@ describe('ADR-0078 daily movement HTTP API', () => {
       const stillThere = await request(app).get(`/api/orgs/${ids.orgA}/daily-metrics/2026-10-05`).set('Cookie', owner.cookie).expect(200);
       expect(stillThere.body).toEqual(day);
       expect(stillThere.body).not.toHaveProperty('steps');
-      expect(await review()).toEqual(reviewBefore);
+      const reviewAfter = await review();
+      expect(shared(reviewAfter)).toEqual(shared(reviewBefore));
+      expect(reviewAfter.movement).toMatchObject({ daysWithRecord: 1, steps: { daysRecorded: 1, recordedTotal: 1 } });
       expect(await insightState()).toEqual(insightsBefore);
 
       // Deleting the check-in leaves the movement of that day.

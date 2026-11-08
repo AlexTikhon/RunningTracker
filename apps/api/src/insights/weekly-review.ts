@@ -1,10 +1,15 @@
 import {
   ACTIVITY_TYPES,
+  WEEKLY_REVIEW_STATEMENT_MAX_LENGTH,
   WEEKLY_REVIEW_VERSION,
+  addLocalDays,
   weeklyReviewSchema,
   type ActivityType,
+  type DailyMovementSource,
   type WeeklyReview,
   type WeeklyReviewCoverage,
+  type WeeklyReviewMovement,
+  type WeeklyReviewMovementDay,
   type WeeklyReviewStatement,
   type WeeklyReviewStatementCode,
 } from '@running-tracker/contracts';
@@ -19,7 +24,8 @@ import {
 } from './weekly-aggregate.js';
 
 // The deterministic weekly review: descriptive sentences written by code from the week's aggregate (the same object an
-// AI insight is generated from) and a few counts the aggregate does not carry. Pure: no clock, no database.
+// AI insight is generated from), a few counts the aggregate does not carry, and the week's manual daily movement, which
+// is review-only (ADR-0079). Pure: no clock, no database.
 //
 // Rules every statement follows:
 // - Denominators are explicit: days in the week (7), days with numeric check-in values, days with the metric. A
@@ -271,6 +277,139 @@ export function describeWeek(aggregate: WeeklyAggregate, detail: ReviewDetail): 
   return statements;
 }
 
+// --- Manual daily movement (ADR-0079) --------------------------------------------------------------------------------
+//
+// Review-only: movement is not part of the aggregate, the facts, the coverage or the data gaps that AI insights share,
+// so it cannot change an insight's input hash. Days are the stored local dates of the week (a daily total is never
+// re-read as an instant in some zone), only manual rows count, and each metric is described against the 7 calendar
+// days on its own. Totals add recorded values only; energy is added as integer tenths of a kcal.
+
+/** One stored manual movement day, as the review query reads it. */
+export interface MovementDayRecord {
+  /** Integer tenths of a kcal (412.5 kcal is 4125), or null when not recorded. */
+  activeEnergyTenths: number | null;
+  localDate: string;
+  source: DailyMovementSource;
+  steps: number | null;
+  timeZone: string;
+}
+
+/**
+ * Exact integer tenths of a kcal from PostgreSQL's text form of a stored value ("412.5", "0.0", "250", "412.50").
+ * The database refuses a meaningful second decimal (migration 0035); anything else here is a defect and throws rather
+ * than being rounded.
+ */
+export function kcalTenthsOf(text: string): number {
+  const matched = /^(\d{1,5})(?:\.(\d)0*)?$/u.exec(text);
+  if (!matched) throw new Error('PostgreSQL returned active energy with more than one meaningful decimal');
+  return Number(matched[1]) * 10 + Number(matched[2] ?? '0');
+}
+
+/** "662.5", "250", "0": the shortest exact spelling of integer tenths, written from integers. */
+export function formatKcalTenths(tenths: number): string {
+  const whole = Math.trunc(tenths / 10);
+  const tenth = tenths % 10;
+  return `${groupThousands(whole)}${tenth === 0 ? '' : `.${tenth}`}`;
+}
+
+/** "8,042": digit groups without a locale, so the text is the same on every server. */
+export function groupThousands(value: number): string {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/gu, ',');
+}
+
+/** The week's movement payload: seven days from Monday, recorded days as stored, totals in exact integers. */
+export function movementOf(records: readonly MovementDayRecord[], weekStart: string): WeeklyReviewMovement {
+  const weekEnd = addLocalDays(weekStart, 6);
+  const byDate = new Map(
+    records
+      .filter((record) => record.source === 'manual' && record.localDate >= weekStart && record.localDate <= weekEnd)
+      .map((record) => [record.localDate, record]),
+  );
+  const days: WeeklyReviewMovementDay[] = [];
+  let stepsDays = 0;
+  let stepsTotal = 0;
+  let energyDays = 0;
+  let energyTenths = 0;
+  for (let index = 0; index < 7; index += 1) {
+    const localDate = addLocalDays(weekStart, index);
+    const record = byDate.get(localDate);
+    if (!record) {
+      days.push({ localDate, recorded: false });
+      continue;
+    }
+    if (record.steps !== null) {
+      stepsDays += 1;
+      stepsTotal += record.steps;
+    }
+    if (record.activeEnergyTenths !== null) {
+      energyDays += 1;
+      energyTenths += record.activeEnergyTenths;
+    }
+    days.push({
+      activeEnergyKcal: record.activeEnergyTenths === null ? null : record.activeEnergyTenths / 10,
+      localDate,
+      recorded: true,
+      source: record.source,
+      steps: record.steps,
+      timeZone: record.timeZone,
+    });
+  }
+  return {
+    activeEnergyKcal: { daysRecorded: energyDays, recordedTotal: energyDays === 0 ? null : energyTenths / 10 },
+    days,
+    daysInWeek: 7,
+    daysWithRecord: byDate.size,
+    source: 'manual',
+    steps: { daysRecorded: stepsDays, recordedTotal: stepsDays === 0 ? null : stepsTotal },
+  };
+}
+
+/** "on all 7 days, 56,000 steps in total" / "on 2 of 7 days, 8,042 steps in total on those days; the other 5 days are unknown". */
+function recordedOn(daysRecorded: number, total: string): string {
+  if (daysRecorded === 7) return `on all 7 days, ${total} in total`;
+  const rest = 7 - daysRecorded;
+  const unknown = rest === 1 ? 'the other day is unknown' : `the other ${rest} days are unknown`;
+  return daysRecorded === 1
+    ? `on 1 of 7 days, ${total} on that day; ${unknown}`
+    : `on ${daysRecorded} of 7 days, ${total} in total on those days; ${unknown}`;
+}
+
+/** The movement statements, in a stable order: none, or steps, active energy, source and zones. */
+export function describeMovement(movement: WeeklyReviewMovement, weekTimeZone: string): WeeklyReviewStatement[] {
+  const statements: WeeklyReviewStatement[] = [];
+  const say = (code: WeeklyReviewStatementCode, text: string) => statements.push({ code, text });
+  if (movement.daysWithRecord === 0) {
+    say('movement.none', 'No daily movement was recorded this week.');
+    return statements;
+  }
+  const { activeEnergyKcal, steps } = movement;
+  if (steps.recordedTotal === null) {
+    say('movement.steps_not_recorded', 'Steps were not recorded on any day this week.');
+  } else {
+    const total = `${groupThousands(steps.recordedTotal)} ${steps.recordedTotal === 1 ? 'step' : 'steps'}`;
+    say('movement.steps_recorded', `Steps were recorded ${recordedOn(steps.daysRecorded, total)}.`);
+  }
+  if (activeEnergyKcal.recordedTotal === null) {
+    say('movement.active_energy_not_recorded', 'Active energy was not recorded on any day this week.');
+  } else {
+    const total = `${formatKcalTenths(Math.round(activeEnergyKcal.recordedTotal * 10))} kcal`;
+    say('movement.active_energy_recorded', `Active energy was recorded ${recordedOn(activeEnergyKcal.daysRecorded, total)}.`);
+  }
+  say(
+    'movement.manual_source',
+    'Steps and active energy were entered manually; they are shown on their own and not added to the activity or GPS run figures.',
+  );
+  const zones = [...new Set(movement.days.flatMap((day) => (day.recorded ? [day.timeZone] : [])))].sort();
+  if (zones.some((zone) => zone !== weekTimeZone)) {
+    const rest = `each counts on the calendar date it was saved for, and the week's activities and GPS runs are still read in ${weekTimeZone}.`;
+    const named =
+      zones.length === 1 ? `Movement days were saved in ${zones[0]}; ${rest}` : `Movement days were saved in ${zones.length} time zones (${zones.join(', ')}); ${rest}`;
+    const unnamed = `Movement days were saved in ${zones.length === 1 ? 'another time zone' : `${zones.length} time zones`}; ${rest}`;
+    say('movement.time_zones', named.length <= WEEKLY_REVIEW_STATEMENT_MAX_LENGTH ? named : unnamed);
+  }
+  return statements;
+}
+
 /** Coverage with explicit denominators (see the contract). */
 export function coverageOf(aggregate: WeeklyAggregate, detail: ReviewDetail): WeeklyReviewCoverage {
   const withDistance = Object.values(detail.manualWithDistance).reduce((sum, value) => sum + (value ?? 0), 0);
@@ -296,13 +435,23 @@ export function coverageOf(aggregate: WeeklyAggregate, detail: ReviewDetail): We
   };
 }
 
-/** The whole review, validated against the contract. `computedAt` is an ISO instant. */
-export function buildWeeklyReview(input: { aggregate: WeeklyAggregate; computedAt: string; detail: ReviewDetail }): WeeklyReview {
+/**
+ * The whole review, validated against the contract. `computedAt` is an ISO instant. `movement` are the week's stored
+ * manual movement days, read in the same snapshot as the aggregate's sources.
+ */
+export function buildWeeklyReview(input: {
+  aggregate: WeeklyAggregate;
+  computedAt: string;
+  detail: ReviewDetail;
+  movement: readonly MovementDayRecord[];
+}): WeeklyReview {
   const { aggregate, detail } = input;
+  const movement = movementOf(input.movement, aggregate.week.start);
   return weeklyReviewSchema.parse({
     coverage: coverageOf(aggregate, detail),
     dataGaps: dataGapsOf(aggregate),
     facts: buildFacts(aggregate),
+    movement,
     provenance: {
       computedAt: input.computedAt,
       persisted: false,
@@ -311,7 +460,7 @@ export function buildWeeklyReview(input: { aggregate: WeeklyAggregate; computedA
       snapshot: 'single_read_only_transaction',
       source: 'computed_by_app',
     },
-    statements: describeWeek(aggregate, detail),
+    statements: [...describeWeek(aggregate, detail), ...describeMovement(movement, aggregate.week.timeZone)],
     week: {
       end: aggregate.week.end,
       inProgress: aggregate.week.inProgress,

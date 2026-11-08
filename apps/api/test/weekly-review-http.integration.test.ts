@@ -103,6 +103,7 @@ describe('weekly review HTTP API (deterministic, no model)', () => {
     await ownerPool?.query('DELETE FROM weekly_insights').catch(() => undefined);
     await ownerPool?.query('DELETE FROM activities').catch(() => undefined);
     await ownerPool?.query('DELETE FROM daily_metrics').catch(() => undefined);
+    await ownerPool?.query('DELETE FROM daily_movement').catch(() => undefined);
     await ownerPool?.query('DELETE FROM erasure_ledger').catch(() => undefined);
     await runtimePool?.end();
     await ownerPool?.end();
@@ -340,6 +341,258 @@ describe('weekly review HTTP API (deterministic, no model)', () => {
     const review = weeklyReviewSchema.parse((await get(owner, undefined, { target: withAi }).expect(200)).body);
     expect(statement(review, 'sleep_duration.values')).toBe('Recorded sleep duration: 7 h 30 min (Tuesday).');
     expect(provider.calls).toHaveLength(calls);
+  });
+
+  describe('manual daily movement (ADR-0079)', () => {
+    const movementPath = (localDate: string, orgId: string = ids.orgA) => `/api/orgs/${orgId}/daily-movement/${localDate}`;
+    const putMovement = (
+      auth: Authentication,
+      localDate: string,
+      body: { activeEnergyKcal?: number | null; steps?: number | null; timeZone?: string },
+      orgId: string = ids.orgA,
+    ) =>
+      request(app)
+        .put(movementPath(localDate, orgId))
+        .set('Cookie', auth.cookie)
+        .set('Origin', allowedOrigin)
+        .set(csrfHeaderName, auth.csrfToken)
+        .type('application/json')
+        .send({ timeZone: ZONE, ...body });
+    const deleteMovement = (auth: Authentication, localDate: string) =>
+      request(app).delete(movementPath(localDate)).set('Cookie', auth.cookie).set('Origin', allowedOrigin).set(csrfHeaderName, auth.csrfToken).expect(204);
+    const insertMovement = (localDate: string, values: { energy?: string | null; steps?: number | null; timeZone?: string; userId?: string; orgId?: string }) =>
+      ownerPool.query(
+        `INSERT INTO daily_movement (org_id, user_id, local_date, time_zone, steps, active_energy_kcal) VALUES ($1, $2, $3::date, $4, $5, $6::numeric)`,
+        [values.orgId ?? ids.orgA, values.userId ?? ids.userOrgA, localDate, values.timeZone ?? ZONE, values.steps ?? null, values.energy ?? null],
+      );
+
+    it('describes the required regression written through the movement API: 3 record days, steps 2 of 7 (8042), energy 2 of 7 (662.5 kcal)', async () => {
+      await putMovement(owner, '2026-11-02', { steps: 0 }).expect(201);
+      await putMovement(owner, '2026-11-03', { activeEnergyKcal: 412.5, steps: 8042 }).expect(201);
+      await putMovement(owner, '2026-11-04', { activeEnergyKcal: 250, steps: null }).expect(201);
+      const review = await readReview();
+      expect(review.provenance.reviewVersion).toBe('weekly-review-2');
+      expect(review.movement).toMatchObject({
+        activeEnergyKcal: { daysRecorded: 2, recordedTotal: 662.5 },
+        daysInWeek: 7,
+        daysWithRecord: 3,
+        source: 'manual',
+        steps: { daysRecorded: 2, recordedTotal: 8042 },
+      });
+      expect(review.movement.days.slice(0, 4)).toEqual([
+        { activeEnergyKcal: null, localDate: '2026-11-02', recorded: true, source: 'manual', steps: 0, timeZone: ZONE },
+        { activeEnergyKcal: 412.5, localDate: '2026-11-03', recorded: true, source: 'manual', steps: 8042, timeZone: ZONE },
+        { activeEnergyKcal: 250, localDate: '2026-11-04', recorded: true, source: 'manual', steps: null, timeZone: ZONE },
+        { localDate: '2026-11-05', recorded: false },
+      ]);
+      expect(statement(review, 'movement.steps_recorded')).toBe('Steps were recorded on 2 of 7 days, 8,042 steps in total on those days; the other 5 days are unknown.');
+      expect(statement(review, 'movement.active_energy_recorded')).toBe(
+        'Active energy was recorded on 2 of 7 days, 662.5 kcal in total on those days; the other 5 days are unknown.',
+      );
+      // A week without check-ins: check-in denominators are untouched, and the week is not empty.
+      expect(review.coverage).toMatchObject({ daysWithCheckInRecord: 0, daysWithCheckInValues: 0, noteOnlyDays: 0 });
+      expect(statement(review, 'check_ins.none')).toBe('No check-ins were recorded this week.');
+      expect(codes(review)).not.toContain('movement.none');
+      // Nothing is added to activity figures or derived from movement.
+      expect(review.coverage.manualActivities.count).toBe(0);
+      expect(JSON.stringify(review.facts)).not.toMatch(/step|kcal|energy/iu);
+    });
+
+    it('adds energy stored by PostgreSQL exactly: 0.1 + 0.2 kcal is 0.3 kcal', async () => {
+      await putMovement(owner, '2026-11-05', { activeEnergyKcal: 0.1 }).expect(201);
+      await putMovement(owner, '2026-11-06', { activeEnergyKcal: 0.2 }).expect(201);
+      const response = await get(owner).expect(200);
+      expect(response.text).toContain('"activeEnergyKcal":{"daysRecorded":2,"recordedTotal":0.3}');
+      expect(statement(weeklyReviewSchema.parse(response.body), 'movement.active_energy_recorded')).toMatch(/, 0\.3 kcal in total on those days;/u);
+    });
+
+    it('uses the stored local dates Monday to Sunday, never moves the GPS/activity week, and explains other zones', async () => {
+      await checkIn('2026-11-03', { mood: 3 }); // the week is read in Europe/Warsaw
+      await insertMovement('2026-11-01', { steps: 111 }); // Sunday before
+      await insertMovement('2026-11-02', { steps: 1, timeZone: 'Pacific/Kiritimati' }); // UTC+14
+      await insertMovement('2026-11-08', { steps: 2, timeZone: 'Pacific/Pago_Pago' }); // UTC-11
+      await insertMovement('2026-11-09', { steps: 999 }); // Monday after
+      // 00:30 on Monday 2026-11-09 in Warsaw: outside the Warsaw week, inside it for a zone west of UTC.
+      await activity(randomUUID(), '2026-11-08T23:30:00Z');
+      const review = await readReview(owner, WEEK, 'America/New_York');
+      expect(review.week).toMatchObject({ timeZone: ZONE, timeZoneSource: 'check_ins', zonesOnCheckIns: [ZONE] });
+      expect(review.coverage.manualActivities.count).toBe(0);
+      expect(review.movement.steps).toEqual({ daysRecorded: 2, recordedTotal: 3 });
+      expect(review.movement.days.filter((day) => day.recorded).map((day) => [day.localDate, day.recorded && day.timeZone])).toEqual([
+        ['2026-11-02', 'Pacific/Kiritimati'],
+        ['2026-11-08', 'Pacific/Pago_Pago'],
+      ]);
+      expect(statement(review, 'movement.time_zones')).toBe(
+        "Movement days were saved in 2 time zones (Pacific/Kiritimati, Pacific/Pago_Pago); each counts on the calendar date it was saved for, and the week's activities and GPS runs are still read in Europe/Warsaw.",
+      );
+      // A week without check-ins keeps the zone rule of ADR-0077 (the requested zone), whatever zone movement has.
+      await ownerPool.query('DELETE FROM daily_metrics');
+      const noCheckIns = await readReview(owner, WEEK, 'America/New_York');
+      expect(noCheckIns.week).toMatchObject({ timeZone: 'America/New_York', timeZoneSource: 'request' });
+      expect(noCheckIns.coverage.manualActivities.count).toBe(1); // 18:30 on Sunday in New York
+      expect(noCheckIns.movement.steps).toEqual({ daysRecorded: 2, recordedTotal: 3 });
+    });
+
+    it("isolates movement: another member, a run-sharing grantee and another organization never see or add to the owner's", async () => {
+      await insertMovement('2026-11-03', { energy: '412.5', steps: 8042 });
+      await insertMovement('2026-11-03', { steps: 5, userId: ids.userStranger });
+      await insertMovement('2026-11-04', { steps: 7, userId: ids.userDual });
+      await insertMovement('2026-11-03', { orgId: ids.orgB, steps: 12_000, userId: ids.userOrgB });
+      expect((await readReview(owner)).movement.steps).toEqual({ daysRecorded: 1, recordedTotal: 8042 });
+      expect((await readReview(stranger)).movement.steps).toEqual({ daysRecorded: 1, recordedTotal: 5 });
+      const granteeReview = await readReview(grantee);
+      expect(granteeReview.movement.steps).toEqual({ daysRecorded: 1, recordedTotal: 7 });
+      expect(granteeReview.movement.activeEnergyKcal).toEqual({ daysRecorded: 0, recordedTotal: null });
+      expect(errorCode(await get(outsider, undefined, { orgId: ids.orgA }).expect(403))).toBe('ORG_ACCESS_DENIED');
+      expect(errorCode(await get(owner, undefined, { orgId: ids.orgB }).expect(403))).toBe('ORG_ACCESS_DENIED');
+      const outsiderOwn = weeklyReviewSchema.parse((await get(outsider, { timeZone: ZONE, weekStart: WEEK }, { orgId: ids.orgB }).expect(200)).body);
+      expect(outsiderOwn.movement.steps).toEqual({ daysRecorded: 1, recordedTotal: 12_000 });
+      expect(JSON.stringify(outsiderOwn)).not.toContain('8,042');
+    });
+
+    it('reads movement in the same snapshot as the other sources, even when a write commits between the two reads', async () => {
+      await checkIn('2026-11-03', { mood: 3 });
+      await insertMovement('2026-11-03', { steps: 1000 });
+      let interleave: (() => Promise<void>) | null = null;
+      const reached: string[] = [];
+      const hooked = createApp({
+        clock,
+        config,
+        logger: silent,
+        pool: runtimePool,
+        sessionManager: sessions,
+        testOnlyWeeklyReviewHooks: {
+          afterSourcesRead: async () => {
+            reached.push('after sources');
+            await interleave?.();
+          },
+        },
+      });
+      interleave = async () => {
+        // Committed on another connection after the review's sources were read and before its movement is read.
+        await insertMovement('2026-11-04', { energy: '300.0', steps: 2000 });
+        await ownerPool.query(`DELETE FROM daily_movement WHERE local_date = '2026-11-03'`);
+        await ownerPool.query(`DELETE FROM daily_metrics WHERE local_date = '2026-11-03'`);
+      };
+      const during = weeklyReviewSchema.parse((await get(owner, undefined, { target: hooked }).expect(200)).body);
+      expect(reached).toEqual(['after sources']);
+      expect(during.movement.days.filter((day) => day.recorded).map((day) => day.localDate)).toEqual(['2026-11-03']);
+      expect(during.movement.steps).toEqual({ daysRecorded: 1, recordedTotal: 1000 });
+      expect(during.coverage.daysWithCheckInValues).toBe(1);
+
+      interleave = null;
+      const next = weeklyReviewSchema.parse((await get(owner, undefined, { target: hooked }).expect(200)).body);
+      expect(next.movement.days.filter((day) => day.recorded).map((day) => day.localDate)).toEqual(['2026-11-04']);
+      expect(next.movement).toMatchObject({ activeEnergyKcal: { daysRecorded: 1, recordedTotal: 300 }, steps: { daysRecorded: 1, recordedTotal: 2000 } });
+      expect(next.coverage.daysWithCheckInValues).toBe(0);
+    });
+
+    it('excludes a movement day on the next read after its deletion commits over HTTP', async () => {
+      await putMovement(owner, '2026-11-03', { activeEnergyKcal: 412.5, steps: 8042 }).expect(201);
+      await putMovement(owner, '2026-11-05', { steps: 0 }).expect(201);
+      expect((await readReview()).movement.daysWithRecord).toBe(2);
+      await deleteMovement(owner, '2026-11-03');
+      const after = await readReview();
+      expect(after.movement).toMatchObject({
+        activeEnergyKcal: { daysRecorded: 0, recordedTotal: null },
+        daysWithRecord: 1,
+        steps: { daysRecorded: 1, recordedTotal: 0 },
+      });
+      expect(after.movement.days[1]).toEqual({ localDate: '2026-11-03', recorded: false });
+      expect(JSON.stringify(after)).not.toMatch(/8042|8,042|412\.5/u);
+      await deleteMovement(owner, '2026-11-05');
+      expect(codes(await readReview())).toContain('movement.none');
+    });
+
+    it('changes no AI input identity, insight row, freshness or gate revision on movement writes, deletes and replay', async () => {
+      const provider = new FakeProvider();
+      const insights = new WeeklyInsightService({
+        clock,
+        logger: silent,
+        pool: runtimePool,
+        provider,
+        settings: { attemptTimeoutMs: 1_000, maxAttempts: 1, maxOutputTokens: 800, maxPerPerson: 2, maxQueue: 16, totalBudgetMs: 3_000 },
+      });
+      services.push(insights);
+      const withAi = createApp({ clock, config, logger: silent, pool: runtimePool, sessionManager: sessions, weeklyInsights: insights });
+      await checkIn('2026-11-02', { mood: 4, sleepMinutes: 450, soreness: 2 });
+      await checkIn('2026-11-04', { mood: 3, sleepMinutes: 420, soreness: 3 });
+      weeklyInsightAcceptedSchema.parse(
+        (
+          await request(withAi)
+            .post(`/api/orgs/${ids.orgA}/insights/weekly`)
+            .set('Cookie', owner.cookie)
+            .set('Origin', allowedOrigin)
+            .set(csrfHeaderName, owner.csrfToken)
+            .type('application/json')
+            .send({ timeZone: ZONE, weekStart: WEEK })
+            .expect(202)
+        ).body,
+      );
+      await insights.whenIdle();
+      const view = async () =>
+        weeklyInsightViewSchema.parse(
+          (await request(withAi).get(`/api/orgs/${ids.orgA}/insights/weekly`).query({ weekStart: WEEK }).set('Cookie', owner.cookie).expect(200)).body,
+        );
+      const state = async () =>
+        (
+          await ownerPool.query<{ gate: string | null; rows: string | null }>(
+            `SELECT (SELECT revision::text FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2) AS gate,
+                    (SELECT string_agg(concat_ws('|', id, input_hash, source_revision, status, attempts, updated_at, md5(output::text)), ',' ORDER BY id)
+                       FROM weekly_insights WHERE org_id = $1 AND user_id = $2) AS rows`,
+            [ids.orgA, ids.userOrgA],
+          )
+        ).rows[0]!;
+      const readyView = await view();
+      expect(readyView).toMatchObject({ freshness: 'current', status: 'ready' });
+      const before = await state();
+      expect(before.rows).not.toBeNull();
+      const calls = provider.calls.length;
+      const unchanged = async (step: string) => {
+        expect(await state(), step).toEqual(before);
+        expect(await view(), step).toEqual(readyView);
+      };
+
+      await putMovement(owner, '2026-11-02', { activeEnergyKcal: 412.5, steps: 8042 }).expect(201);
+      await unchanged('first write');
+      await putMovement(owner, '2026-11-02', { steps: 9000 }).expect(200);
+      await unchanged('replacement');
+      await putMovement(owner, '2026-11-03', { steps: 0 }).expect(201);
+      await deleteMovement(owner, '2026-11-03');
+      await unchanged('deletion');
+      // Replay the exported deletion after a simulated restore that brought the day back.
+      const entry = (
+        await ownerPool.query<{ record_created_at: string; record_id: string }>(
+          // As text: a JavaScript Date would drop the microseconds of the version identity.
+          `SELECT record_id, record_created_at::text AS record_created_at FROM erasure_ledger
+           WHERE entity_type = 'daily_movement' AND owner_user_id = $1`,
+          [ids.userOrgA],
+        )
+      ).rows[0]!;
+      await ownerPool.query(
+        `INSERT INTO daily_movement (org_id, id, user_id, local_date, time_zone, steps, created_at) VALUES ($1, $2, $3, '2026-11-03', $4, 0, $5)`,
+        [ids.orgA, entry.record_id, ids.userOrgA, ZONE, entry.record_created_at],
+      );
+      await unchanged('restored day');
+      for (const expected of ['erased', 'absent']) {
+        const outcome = await ownerPool.query<{ outcome: string }>(`SELECT app_private.reapply_erasure('daily_movement', $1, $2, $3, $4) AS outcome`, [
+          ids.orgA,
+          entry.record_id,
+          ids.userOrgA,
+          entry.record_created_at,
+        ]);
+        expect(outcome.rows[0]?.outcome).toBe(expected);
+        await unchanged(`replay ${expected}`);
+      }
+      expect(provider.calls).toHaveLength(calls);
+      // The review saw every step; the insight saw none.
+      const review = weeklyReviewSchema.parse((await get(owner, undefined, { target: withAi }).expect(200)).body);
+      expect(review.movement).toMatchObject({ daysWithRecord: 1, steps: { daysRecorded: 1, recordedTotal: 9000 } });
+
+      // The pin is sensitive: a check-in change makes the same insight stale.
+      await checkIn('2026-11-06', { mood: 5 });
+      expect((await view()).freshness).toBe('stale');
+    });
   });
 
   it('refuses an invalid query with 400 and no-store', async () => {
