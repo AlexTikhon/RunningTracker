@@ -4,7 +4,8 @@
   and a real API process restart, Chromium end-to-end). Hosted CI: see the final report of the change.
 - Date: 2026-11-08
 - Amended by: ADR-0081. Pending OIDC logins are now in PostgreSQL as well, so the first bullet of "Explicit
-  boundaries" below no longer holds; `restore:clear-sessions` also clears them.
+  boundaries" below no longer holds; `restore:clear-sessions` also clears them. Migration 0038 makes both session
+  cleanup batches plan-independent bounds (Decision 2, "Amendment").
 - Supersedes: the in-memory session store of ADR-0007 for the API process. Keeps ADR-0075's capacity policy (expired
   first, then refuse; never evict a live session) and ADR-0054's client rules (only a 401 ends a confirmed session).
 - Relates to: ADR-0046 (OIDC sign-in, which ends in the same session record), ADR-0023 (live stream authorization
@@ -62,6 +63,32 @@ free slots admit exactly 8 (a mutation without the lock admitted 11-12, three ru
 stays bounded by the capacity (expired rows are removed at least as fast as new ones are added). A maintenance task
 (`SESSION_PURGE_INTERVAL_MS`, default 15 minutes, 500 rows per cycle) removes expired rows in between; sign-in does not
 depend on it.
+
+**Amendment (migration 0038): the cleanup bounds are plan-independent.** Migration 0036 wrote both cleanups as
+`DELETE ... WHERE token_digest IN (SELECT ... ORDER BY expires_at LIMIT n [FOR UPDATE SKIP LOCKED])`. That LIMIT is
+not a bound. Under a nested-loop semi join PostgreSQL re-runs the subquery once per outer row. In the purge, LockRows
+skips rows the statement has already deleted, so each rescan returns new ones. With the rescanning planner settings
+of the ADR-0081 regression, `purge_expired_auth_sessions(…, 100)` deleted all 700 tied expired rows, and the same
+happened at 500. `runSessionPurgeOnce` then reported the cycle as failed after the rows were already gone. Only expired
+rows were ever affected. The sign-in sweep has no row lock, so a rescan re-reads the same snapshot and stayed at 100.
+That bound rested on an executor detail and on ties coming back in the same order, not on the statement. Both now
+choose their batch once in a `MATERIALIZED` CTE, ordered by `(expires_at, token_digest)`, and delete by join, as
+ADR-0081 does for pending logins. Nothing else changed: signatures, return types, grants, `SECURITY DEFINER`, fixed
+`search_path`, argument checks, the advisory lock, the outcomes and capacity counting.
+
+Guarantees:
+
+- One purge call removes at most `batch_limit` rows, the earliest by expiry and then digest among the rows no other
+  transaction holds. Held rows are skipped, not waited for.
+- Concurrent purges take disjoint batches, and each stays within its own limit.
+- One sign-in removes at most 100 expired rows. It can remove fewer when a concurrent purge already holds some of
+  them: it waits for that statement and does not delete those rows again.
+- Repeated cycles drain any backlog and then report `idle`. No live row is touched.
+
+Tested in `postgres-session-store.integration.test.ts` under those planner settings, on dedicated connections only.
+The tests check exact counts and exactly which rows remain. They cover tied expiries, locked candidates, three
+overlapping purges in open transactions, an eight-way race, a full store and an unknown user over a backlog, and racing
+sign-ins. With 0036's purge body put back, four of the tests fail.
 
 A local sign-in for an unprovisioned user is now refused (`403 LOCAL_IDENTITY_DENIED`), because a session row needs its
 user; the OIDC path only ever creates sessions for resolved users.

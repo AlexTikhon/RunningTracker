@@ -229,10 +229,11 @@ Scenario: runs A (owner-deleted after the backup), B (annual-retention-deleted a
 one narrowed through the share API's own functions, and one member deactivated by SQL; two more people
 are left untouched. The report states who could read C on the lost source, in the restored backup and
 after recovery, as the runtime role under row-level security. Sessions and pending sign-ins (ADR-0080, ADR-0081):
-the owner is signed in on the source when the backup is taken, and with `--current-schema` a sign-in is also pending
-at the provider; the drill checks that the restored database holds neither and that `restore:clear-sessions` leaves
-neither (recovery step `sessions_cleared`, reported separately). The default source is one migration behind (0036):
-it has sessions but predates the pending-login table, which the catch-up migration creates empty.
+the owner is signed in on the source when the backup is taken and a sign-in is pending at the provider; the drill
+checks that the restored database holds neither and that `restore:clear-sessions` leaves neither (recovery step
+`sessions_cleared`, reported separately). The default source is one migration behind (0037): it has both tables, and
+the catch-up migration (0038, bounded session cleanup) only replaces two functions. A source older than a table
+reports that table's source count as absent.
 It exits 0 only if every check passes; otherwise it exits 1, keeps both databases, and the report says
 which step failed. Flags: `--current-schema` (source at the repository's latest migration), `--keep`
 (keep the databases after success), `--suffix`, `--work-dir`. `npm run restore:drill -- --cleanup`

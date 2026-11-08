@@ -3667,7 +3667,7 @@ Found while testing: one full integration run failed in the purge test with "ret
 reproduced directly: a plan that re-runs a `LIMIT ... FOR UPDATE SKIP LOCKED` subquery inside `IN (...)` skips rows the
 statement already deleted, so the limit is not a bound. Migration 0037 now chooses each batch in a `MATERIALIZED` CTE;
 the plan of the failed run itself was not captured. Migration 0036's session functions have the same pattern (only
-expired sessions are affected) and are left for a follow-up. PostgreSQL rejects regex repetition bounds above 255, so
+expired sessions are affected) and are left for a follow-up (done: migration 0038, next section). PostgreSQL rejects regex repetition bounds above 255, so
 the material constraint is 1 to 255 characters.
 
 **Not established.** General multi-replica deployment: login and run-search admission, the weekly insight queue, the
@@ -3676,3 +3676,65 @@ provider or host was exercised; the protocol scenarios use a local oidc-provider
 its own (commit 1 in a detached worktree: typecheck, lint, 1,577 unit tests; the first of two unit runs there reported
 one failure whose name was not captured, and the second run passed; commit 2 by a repository-wide typecheck at that
 commit). Hosted CI is reported with the change.
+
+## Bounded authenticated-session cleanup (migration 0038) (2026-11-08)
+
+Branch `fix/bounded-session-purge` from `main` at d0200a1 (ADR-0081). A maintenance fix with no behaviour change for
+signed-in people.
+
+**Reproduction.** A probe against the real migration 0036 functions ran in a transaction that was rolled back. It
+used 700 expired sessions sharing one expiry and the rescanning planner settings of the pending-login regression
+(hash join, merge join, hash aggregate, material and sort off).
+
+- `purge_expired_auth_sessions(…, 100)` deleted 700, and so did a limit of 500. With the default planner it deleted
+  100.
+- EXPLAIN ANALYZE showed a nested-loop semi join with the `LIMIT … FOR UPDATE SKIP LOCKED` subquery re-run 700 times.
+  LockRows skips rows the statement has already deleted, so each rescan returned new ones.
+- `create_auth_session`'s sweep (`IN (SELECT … LIMIT 100)`, no row lock) was rescanned the same way, yet removed
+  exactly 100. Each rescan re-reads the same snapshot and returns the same rows. That bound rested on an executor
+  detail and on tie order, not on the statement, and its tie order was not deterministic.
+
+**Change.** Forward-only migration `0038_bounded_session_cleanup.sql`: `CREATE OR REPLACE` of both functions. Each
+chooses its batch once in a `MATERIALIZED` CTE ordered by `(expires_at, token_digest)` and deletes by join; the purge
+keeps `FOR UPDATE SKIP LOCKED`. Unchanged: signatures, return types, STRICT/VOLATILE, `SECURITY DEFINER`,
+`search_path = pg_catalog`, grants (restated), argument checks, the capacity advisory lock, `unknown_user` before any
+sweep, `duplicate`, live counting, and the refusal to evict a live session. No TypeScript, configuration, TTL, cookie,
+OIDC or restore change.
+
+**Tests.** `postgres-session-store.integration.test.ts` has 9 new tests (20 to 29). The rescanning settings apply only
+to dedicated pools, and one test checks that the shared pools still have the default settings. Assertions check
+returned counts and the exact remaining rows:
+
+- the settings still produce the rescanning plan (EXPLAIN of the 0036 statement shape);
+- limits 1, 100 and 250 on 700 rows across three tied expiries, earliest first, ties broken by digest;
+- a 700-row backlog drains in seven cycles of 100, then 0, and `runSessionPurgeOnce` goes 500/500/200/idle on 1,200
+  rows, with live rows byte-identical and still resolving;
+- each sign-in removes exactly the next 100 in order;
+- a full store refuses after sweeping 100 and evicts nothing, and an unknown user sweeps nothing;
+- 50 rows held by another transaction are skipped with exactly 100 removed;
+- three overlapping purges in open transactions take disjoint batches of 100, and eight racing purges each stay
+  within their own limit, with nothing removed twice;
+- 24 racing sign-ins over an expired backlog admit exactly the 8 free slots;
+- catalog flags and every argument check are unchanged.
+
+`backup-restore.integration.test.ts` changed because its previous-schema source is now 0037: the source holds one
+pending login at backup time and the backup carries none. The runbook's drill paragraph says the same.
+
+**Mutation check.** Against unfixed 0037, 5 of the new tests failed. The purge removed 233 rows for a limit of 1, 700
+for 100, and 250 for 100 with 50 rows locked; the first of three overlapping purges removed all 700. The sweep removed
+100, but not the earliest 100 by `(expires_at, token_digest)`. After 0038 was applied, 0036's purge body was put back
+in the test database only: 4 purge tests failed. Re-applying 0038 restored 29/29.
+
+**Executed checks.**
+
+| Command | Before (d0200a1) | After |
+|---|---|---|
+| `npm run verify` | 2,952 | 2,952: scripts 90, API 1,578, web 1,062, contracts 205, fixtures 14, simulator 3 (no unit change). The first run had one timeout in `run-search-evaluation-cli.spec.ts` (a 5 s limit on a cold dynamic import; 27/27 when run alone); the full rerun passed. |
+| `npm run test:integration` | 847 in 65 files | 856 in 65 files, 272 s, none skipped. Includes session store, session runtime and restart, OIDC login and OIDC restart, pending-login store and the restore drill. |
+| Focused | | Session store 29/29 three times; pending-login store 26/26 twice; backup-restore 11/11 |
+
+E2E was not rerun: no browser-visible code changed.
+
+**Not established.** The plan of the original failed run behind ADR-0081 was never captured; the rescanning plan is
+forced with planner settings. Purge counts are still read from `ROW_COUNT`. A sweep can remove fewer than 100 rows
+while a concurrent purge holds candidates (by design). Hosted CI is reported with the change.

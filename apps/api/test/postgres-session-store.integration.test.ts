@@ -186,14 +186,342 @@ describe('PostgreSQL session store (ADR-0080)', () => {
   });
 
   describe('bounded cleanup', () => {
-    async function insertExpired(count: number, expiredAt: number): Promise<void> {
+    // These settings make PostgreSQL run `DELETE ... WHERE digest IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` as a
+    // nested-loop semi join that re-runs the subquery once per outer row; LockRows skips the rows the statement already
+    // deleted, so every rescan returns new ones and migration 0036's purge removed all 700 rows for a limit of 100.
+    // They are the settings of the pending-login rescan regression (ADR-0081) and are applied only to the dedicated
+    // connections of withRescanningPools, never to the shared pools of this file.
+    const rescanning = [
+      'SET enable_hashjoin = off',
+      'SET enable_mergejoin = off',
+      'SET enable_hashagg = off',
+      'SET enable_material = off',
+      'SET enable_sort = off',
+    ];
+
+    type StoredRow = { csrf_token: string; expires_at: Date; issued_at: Date; token_digest: string; user_id: string };
+
+    async function insertExpiredAt(expiries: readonly number[], label = 'expired'): Promise<void> {
       await ownerPool.query(
         `INSERT INTO app_private.auth_sessions (token_digest, user_id, csrf_token, issued_at, expires_at)
-         SELECT digest, $1, digest, to_timestamp($2::double precision / 1000) - interval '1 hour', to_timestamp($2::double precision / 1000)
-         FROM unnest($3::text[]) AS digest`,
-        [ids.userOrgB, expiredAt, Array.from({ length: count }, (_, index) => opaqueValue(`expired-${index}`))],
+         SELECT entry.digest, $1, entry.digest, to_timestamp(entry.ms / 1000) - interval '1 hour', to_timestamp(entry.ms / 1000)
+         FROM unnest($2::text[], $3::double precision[]) AS entry (digest, ms)`,
+        [ids.userOrgB, expiries.map((_, index) => opaqueValue(`${label}-${index}`)), expiries],
       );
+      await ownerPool.query('ANALYZE app_private.auth_sessions');
     }
+
+    async function insertExpired(count: number, expiredAt: number): Promise<void> {
+      await insertExpiredAt(Array.from({ length: count }, () => expiredAt));
+    }
+
+    /** Three expiry instants, each shared by about a third of the rows, so a batch boundary falls inside a tie. */
+    function tiedExpiries(count: number, latest: number): number[] {
+      return Array.from({ length: count }, (_, index) => latest - 1_000 * (index % 3));
+    }
+
+    /** Expired digests in the order a batch must take them: expiry, then digest (under the column's collation). */
+    async function expiredInOrder(now: number): Promise<string[]> {
+      const result = await ownerPool.query<{ token_digest: string }>(
+        `SELECT token_digest FROM app_private.auth_sessions
+         WHERE expires_at <= to_timestamp($1::double precision / 1000)
+         ORDER BY expires_at, token_digest`,
+        [now],
+      );
+      return result.rows.map((row) => row.token_digest);
+    }
+
+    async function liveRows(now: number): Promise<StoredRow[]> {
+      const result = await ownerPool.query<StoredRow>(
+        `SELECT token_digest, user_id, csrf_token, issued_at, expires_at FROM app_private.auth_sessions
+         WHERE expires_at > to_timestamp($1::double precision / 1000)
+         ORDER BY token_digest`,
+        [now],
+      );
+      return result.rows;
+    }
+
+    async function purge(pool: Pick<Pool, 'query'>, now: number, batchLimit: number): Promise<number> {
+      const result = await pool.query<{ purged: number }>(
+        'SELECT app_private.purge_expired_auth_sessions(to_timestamp($1::double precision / 1000), $2) AS purged',
+        [now, batchLimit],
+      );
+      return result.rows[0]!.purged;
+    }
+
+    /** Runtime and maintenance pools whose every connection uses the rescanning settings; ended afterwards. */
+    async function withRescanningPools<T>(
+      work: (pools: { maintenance: Pool; runtime: Pool }) => Promise<T>,
+      max = 1,
+    ): Promise<T> {
+      const runtime = new Pool({ application_name: 'running-tracker-session-rescan-runtime', connectionString: integration.runtime.connectionString, max });
+      const maintenance = new Pool({ application_name: 'running-tracker-session-rescan-maintenance', connectionString: integration.maintenance.connectionString, max });
+      for (const pool of [runtime, maintenance]) {
+        pool.on('connect', (client) => {
+          for (const setting of rescanning) void client.query(setting);
+        });
+      }
+      try {
+        return await work({ maintenance, runtime });
+      } finally {
+        await Promise.allSettled([runtime.end(), maintenance.end()]);
+      }
+    }
+
+    it('uses settings that really produce a rescanning plan, only on its own connections', async () => {
+      const clock = new ControlledClock();
+      await insertExpired(700, clock.now);
+      const owner = await ownerPool.connect();
+      try {
+        await owner.query('BEGIN');
+        for (const setting of rescanning) await owner.query(setting.replace('SET ', 'SET LOCAL '));
+        const plan = await owner.query<{ 'QUERY PLAN': string }>(
+          `EXPLAIN (COSTS OFF)
+           DELETE FROM app_private.auth_sessions AS stored WHERE stored.token_digest IN (
+             SELECT expired.token_digest FROM app_private.auth_sessions AS expired
+             WHERE expired.expires_at <= now() ORDER BY expired.expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)`,
+        );
+        const text = plan.rows.map((row) => row['QUERY PLAN']).join('\n');
+        expect(text).toContain('Nested Loop Semi Join');
+        expect(text).toContain('LockRows');
+      } finally {
+        await owner.query('ROLLBACK');
+        owner.release();
+      }
+
+      await withRescanningPools(async ({ maintenance, runtime }) => {
+        for (const pool of [maintenance, runtime]) {
+          expect((await pool.query<{ enable_hashjoin: string }>('SHOW enable_hashjoin')).rows[0]?.enable_hashjoin).toBe('off');
+        }
+      });
+      expect((await maintenancePool.query<{ enable_hashjoin: string }>('SHOW enable_hashjoin')).rows[0]?.enable_hashjoin).toBe('on');
+      expect((await ownerPool.query<{ enable_hashjoin: string }>('SHOW enable_hashjoin')).rows[0]?.enable_hashjoin).toBe('on');
+    });
+
+    it('purges exactly the requested number under a rescanning plan, earliest expiry first and ties broken by digest', async () => {
+      const clock = new ControlledClock();
+      await insertExpiredAt(tiedExpiries(700, clock.now));
+      const order = await expiredInOrder(clock.now);
+      expect(order).toHaveLength(700);
+
+      await withRescanningPools(async ({ maintenance }) => {
+        let removed = 0;
+        for (const batchLimit of [1, 100, 250]) {
+          expect(await purge(maintenance, clock.now, batchLimit)).toBe(batchLimit);
+          removed += batchLimit;
+          expect(await expiredInOrder(clock.now)).toEqual(order.slice(removed));
+        }
+      });
+      expect(await storedCount()).toBe(700 - 351);
+    });
+
+    it('drains a backlog over several bounded cycles under a rescanning plan, then reports idle, leaving live sessions unchanged', async () => {
+      const clock = new ControlledClock();
+      await withRescanningPools(async ({ maintenance, runtime }) => {
+        const manager = managerOn(runtime, clock, 1_000);
+        const live = [await manager.create(ids.userDual), await manager.create(ids.userOrgB)];
+        const liveBefore = await liveRows(clock.now);
+        expect(liveBefore).toHaveLength(2);
+        // Expired exactly at the purge instant: the boundary counts as expired.
+        await insertExpired(700, clock.now);
+
+        const cycles: number[] = [];
+        for (let purged = -1; purged !== 0; ) {
+          purged = await purge(maintenance, clock.now, 100);
+          cycles.push(purged);
+        }
+        expect(cycles).toEqual([100, 100, 100, 100, 100, 100, 100, 0]);
+        expect(await storedCount()).toBe(2);
+
+        await insertExpiredAt(Array.from({ length: 1_200 }, () => clock.now - 1), 'backlog');
+        expect(await runSessionPurgeOnce(maintenance, clock)).toEqual({ purgedCount: 500, status: 'purged' });
+        expect(await runSessionPurgeOnce(maintenance, clock)).toEqual({ purgedCount: 500, status: 'purged' });
+        expect(await runSessionPurgeOnce(maintenance, clock)).toEqual({ purgedCount: 200, status: 'purged' });
+        expect(await runSessionPurgeOnce(maintenance, clock)).toEqual({ status: 'idle' });
+
+        expect(await liveRows(clock.now)).toEqual(liveBefore);
+        for (const session of live) {
+          expect(await manager.resolve(session.sessionToken)).toEqual(session.record);
+        }
+      });
+    });
+
+    it('removes at most 100 expired rows per sign-in under a rescanning plan, earliest first', async () => {
+      const clock = new ControlledClock();
+      await insertExpiredAt(tiedExpiries(700, clock.now));
+      const order = await expiredInOrder(clock.now);
+
+      await withRescanningPools(async ({ runtime }) => {
+        const manager = managerOn(runtime, clock, 1_000);
+        const first = await manager.create(ids.userDual);
+        expect(await expiredInOrder(clock.now)).toEqual(order.slice(100));
+        expect(await storedCount()).toBe(700 - 100 + 1);
+
+        const second = await manager.create(ids.userOrgB);
+        expect(await expiredInOrder(clock.now)).toEqual(order.slice(200));
+        expect(await storedCount()).toBe(700 - 200 + 2);
+        expect(await manager.resolve(first.sessionToken)).toEqual(first.record);
+        expect(await manager.resolve(second.sessionToken)).toEqual(second.record);
+      });
+    });
+
+    it('still refuses a full store after a bounded sweep, evicting no live session, and sweeps nothing for an unknown user', async () => {
+      const clock = new ControlledClock();
+      await withRescanningPools(async ({ runtime }) => {
+        const manager = managerOn(runtime, clock, 2);
+        const live = [await manager.create(ids.userDual), await manager.create(ids.userOrgB)];
+        const liveBefore = await liveRows(clock.now);
+        await insertExpired(250, clock.now);
+
+        await expect(manager.create(ids.userDual)).rejects.toBeInstanceOf(SessionStoreCapacityError);
+        expect(await expiredInOrder(clock.now)).toHaveLength(150);
+
+        await expect(manager.create('99999999-9999-4999-8999-999999999999')).rejects.toBeInstanceOf(SessionUserUnknownError);
+        expect(await expiredInOrder(clock.now)).toHaveLength(150);
+
+        expect(await liveRows(clock.now)).toEqual(liveBefore);
+        for (const session of live) {
+          expect(await manager.resolve(session.sessionToken)).toEqual(session.record);
+        }
+      });
+    });
+
+    it('skips expired rows another transaction holds, without going past its batch', async () => {
+      const clock = new ControlledClock();
+      await insertExpired(300, clock.now - 1);
+      const order = await expiredInOrder(clock.now);
+      const held = order.slice(0, 50);
+      const locker = await ownerPool.connect();
+      try {
+        await locker.query('BEGIN');
+        await locker.query('SELECT 1 FROM app_private.auth_sessions WHERE token_digest = ANY($1) FOR UPDATE', [held]);
+
+        await withRescanningPools(async ({ maintenance }) => {
+          expect(await purge(maintenance, clock.now, 100)).toBe(100);
+        });
+        expect(await expiredInOrder(clock.now)).toEqual([...held, ...order.slice(150)]);
+      } finally {
+        await locker.query('ROLLBACK');
+        locker.release();
+      }
+
+      await withRescanningPools(async ({ maintenance }) => {
+        expect(await purge(maintenance, clock.now, 100)).toBe(100);
+      });
+      expect(await expiredInOrder(clock.now)).toEqual(order.slice(200));
+    });
+
+    it('keeps every concurrent purge within its own batch and never removes a row twice', async () => {
+      const clock = new ControlledClock();
+      await insertExpired(700, clock.now - 1);
+      const order = await expiredInOrder(clock.now);
+
+      // Overlapping on purpose: three purges in open transactions, each skipping the batches the others hold.
+      await withRescanningPools(async ({ maintenance }) => {
+        const clients = [await maintenance.connect(), await maintenance.connect(), await maintenance.connect()];
+        try {
+          for (const client of clients) await client.query('BEGIN');
+          const counts: number[] = [];
+          for (const client of clients) counts.push(await purge(client, clock.now, 100));
+          expect(counts).toEqual([100, 100, 100]);
+          for (const client of clients) await client.query('COMMIT');
+        } finally {
+          for (const client of clients) client.release();
+        }
+      }, 3);
+      expect(await expiredInOrder(clock.now)).toEqual(order.slice(300));
+
+      // Unsynchronized: eight purges with different limits race on eight connections.
+      const limits = [10, 20, 30, 40, 50, 60, 70, 80];
+      const counts = await withRescanningPools(
+        ({ maintenance }) => Promise.all(limits.map((batchLimit) => purge(maintenance, clock.now, batchLimit))),
+        limits.length,
+      );
+      counts.forEach((count, index) => {
+        expect(count).toBeGreaterThanOrEqual(0);
+        expect(count).toBeLessThanOrEqual(limits[index]!);
+      });
+      const raced = counts.reduce((sum, count) => sum + count, 0);
+      expect(await storedCount()).toBe(400 - raced);
+
+      let drained = 0;
+      for (let purged = await purge(maintenancePool, clock.now, 1_000); purged > 0; purged = await purge(maintenancePool, clock.now, 1_000)) {
+        drained += purged;
+      }
+      expect(raced + drained).toBe(400);
+      expect(await storedCount()).toBe(0);
+    });
+
+    it('admits exactly the free slots to racing sign-ins over an expired backlog under a rescanning plan', async () => {
+      const clock = new ControlledClock();
+      const capacity = 10;
+      await withRescanningPools(async ({ runtime }) => {
+        const existing = managerOn(runtime, clock, capacity);
+        const before = [await existing.create(ids.userDual), await existing.create(ids.userOrgB)];
+        await insertExpired(250, clock.now);
+        const instances = [0, 1, 2].map(() => managerOn(runtime, clock, capacity));
+
+        const attempts = await Promise.allSettled(
+          Array.from({ length: 24 }, (_, index) => instances[index % instances.length]!.create(index % 2 ? ids.userDual : ids.userOrgB)),
+        );
+
+        const refused = attempts.filter((attempt): attempt is PromiseRejectedResult => attempt.status === 'rejected');
+        expect(attempts.filter((attempt) => attempt.status === 'fulfilled')).toHaveLength(capacity - before.length);
+        expect(refused).toHaveLength(24 - (capacity - before.length));
+        for (const attempt of refused) {
+          expect(attempt.reason).toBeInstanceOf(SessionStoreCapacityError);
+        }
+        expect(await liveRows(clock.now)).toHaveLength(capacity);
+        expect(await expiredInOrder(clock.now)).toEqual([]);
+        for (const session of before) {
+          expect(await existing.resolve(session.sessionToken)).toEqual(session.record);
+        }
+      }, 6);
+    });
+
+    it('keeps the signatures, SECURITY DEFINER, fixed search_path and argument checks of both functions', async () => {
+      const result = await ownerPool.query<{ args: string; config: string[]; definer: boolean; name: string; returns: string; strict: boolean; volatility: string }>(
+        `SELECT proc.proname AS name, pg_get_function_identity_arguments(proc.oid) AS args, proc.prorettype::regtype::text AS returns,
+                proc.prosecdef AS definer, proc.proconfig AS config, proc.proisstrict AS strict, proc.provolatile::text AS volatility
+         FROM pg_proc AS proc JOIN pg_namespace AS namespace ON namespace.oid = proc.pronamespace
+         WHERE namespace.nspname = 'app_private' AND proc.proname IN ('create_auth_session', 'purge_expired_auth_sessions')
+         ORDER BY proc.proname`,
+      );
+      expect(result.rows).toEqual([
+        {
+          args: 'session_token_digest text, session_user_id uuid, session_csrf_token text, session_issued_at timestamp with time zone, session_expires_at timestamp with time zone, store_capacity integer',
+          config: ['search_path=pg_catalog'],
+          definer: true,
+          name: 'create_auth_session',
+          returns: 'text',
+          strict: true,
+          volatility: 'v',
+        },
+        {
+          args: 'effective_now timestamp with time zone, batch_limit integer',
+          config: ['search_path=pg_catalog'],
+          definer: true,
+          name: 'purge_expired_auth_sessions',
+          returns: 'integer',
+          strict: true,
+          volatility: 'v',
+        },
+      ]);
+
+      const invalidPurges = ['SELECT app_private.purge_expired_auth_sessions(now(), 0)', 'SELECT app_private.purge_expired_auth_sessions(now(), 1001)', "SELECT app_private.purge_expired_auth_sessions('infinity', 10)"];
+      for (const statement of invalidPurges) {
+        await expect(maintenancePool.query(statement), statement).rejects.toSatisfy((error) => sqlState(error) === '22023');
+      }
+      expect((await maintenancePool.query<{ purged: number | null }>('SELECT app_private.purge_expired_auth_sessions(NULL, 10) AS purged')).rows[0]?.purged).toBeNull();
+
+      const runtime = runtimePool(1);
+      const create = (capacity: number, issuedAt: string) =>
+        runtime.query('SELECT app_private.create_auth_session($1, $2, $1, $3, $4, $5)', [opaqueValue('arguments'), ids.userDual, issuedAt, '2026-11-08T10:00:00Z', capacity]);
+      for (const [capacity, issuedAt] of [[0, '2026-11-08T09:00:00Z'], [10_001, '2026-11-08T09:00:00Z'], [10, '-infinity']] as const) {
+        await expect(create(capacity, issuedAt), `${capacity} ${issuedAt}`).rejects.toSatisfy((error) => sqlState(error) === '22023');
+      }
+      expect(await storedCount()).toBe(0);
+    });
 
     it('removes at most 100 expired rows per sign-in, then the purge removes the rest in bounded batches, never a live row', async () => {
       const clock = new ControlledClock();

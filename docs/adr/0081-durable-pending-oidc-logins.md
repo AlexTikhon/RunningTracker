@@ -104,7 +104,8 @@ UPDATE SKIP LOCKED)`, the pattern of migration 0036: one full integration run fa
 than its limit. The mechanism was then reproduced directly: under a nested-loop semi join that re-runs the subquery
 per outer row, `LockRows` skips rows the statement already deleted and each rescan returns new ones, so 700 tied rows
 were all deleted with a limit of 500. The exact plan of the failed run was not captured. A regression test forces
-that plan through session planner settings and requires exactly 100 and 500.
+that plan through session planner settings and requires exactly 100 and 500. Migration 0038 applies the same
+convention to the session functions of migration 0036 (ADR-0080, Decision 2, "Amendment").
 
 ## Decision 5: asynchronous boundary, no cache, no fallback, outages are not expiry
 
@@ -152,7 +153,9 @@ stable external origin (the reverse proxy), not an instance.
 - Proven in `test/backup-restore.integration.test.ts`: a sign-in at the provider when a dump that kept the rows was
   taken; after restoring that dump its row is back until `restore:clear-sessions` removes it; on the reopened database
   the pre-restore callback answers `login_expired` without a token request, and a new sign-in through the same
-  provider completes. The previous-schema drill restores from 0036 (no pending-login table, created empty by 0037).
+  provider completes. The previous-schema drill restored from 0036 when this was written (no pending-login table,
+  created empty by 0037). Since migration 0038 it restores from 0037: the source holds one pending login at backup
+  time, and the backup carries none.
 
 ## Explicit boundaries
 
@@ -165,10 +168,9 @@ stable external origin (the reverse proxy), not an instance.
 - At most once: a crash or an uncertain consume makes the person sign in again (Decision 3).
 - The provider still sees one authorization request per attempt; nothing here changes provider-side sessions.
 - Expiry is judged by each instance's clock; instances need synchronized clocks.
-- Migration 0036's `create_auth_session` sweep and `purge_expired_auth_sessions` still use the unbounded
-  `IN (SELECT ... LIMIT)` pattern (Decision 4). They delete only expired sessions, so no live session is affected, but
-  a purge can exceed its batch and then be reported as failed by `runSessionPurgeOnce`. Not changed here (it is session
-  storage, outside this slice); a small follow-up migration should apply the same materialized batch.
+- Resolved by migration 0038: migration 0036's `create_auth_session` sweep and `purge_expired_auth_sessions` used
+  the unbounded `IN (SELECT ... LIMIT)` pattern (Decision 4). A purge could exceed its batch and then be reported as
+  failed by `runSessionPurgeOnce`. Only expired sessions were affected. Both now use the materialized batch.
 
 ## Options considered
 

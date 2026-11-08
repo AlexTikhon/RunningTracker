@@ -145,13 +145,13 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         skipped_unknown_organization: 0,
       });
       // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G.
-      // ADR-0078: and movement day M (the backup is one migration behind, at 0036, which has daily_movement). The
+      // ADR-0078: and movement day M (the backup is one migration behind, at 0037, which has daily_movement). The
       // restored backup brought all three back, the ledger replay removed them again, and a second replay changed nothing.
-      // ADR-0080: the older schema has the session table, so the source held one session at backup time and the backup
-      // carried none. The one migration applied after the restore is 0037 (durable pending OIDC logins, ADR-0081): it
-      // creates the empty pending-login table, so the older backup held no pending login at all.
+      // ADR-0080 / ADR-0081: the older schema has the session and pending-login tables, so the source held one of each
+      // at backup time and the backup carried neither. The one migration applied after the restore is 0038 (bounded
+      // session cleanup), which replaces two functions and touches no rows.
       expect(report.sessions).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
-      expect(report.pendingLogins).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null });
+      expect(report.pendingLogins).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
       expect(report.erasures.exportedEntries).toBe(3);
       expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 3, skipped_different_record: 0 });
       expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 3, erased: 0, skipped_different_record: 0 });
