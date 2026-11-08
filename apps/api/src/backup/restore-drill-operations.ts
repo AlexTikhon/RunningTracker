@@ -963,11 +963,13 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
                   ($1, $2, $4, 'Europe/Warsaw', NULL, 400, 3, NULL)`,
           [ids.org, ids.ownerUser, ids.dailyMetrics.G, ids.dailyMetrics.H],
         );
-        // ADR-0078: two of the owner's manual movement days, both in the backup (a zero is a recorded value).
+        // ADR-0078: two of the owner's manual movement days, both in the backup (a zero is a recorded value). N survives
+        // with a one-decimal energy: its row digest, taken before the backup and after recovery, proves that the
+        // restored value (and its scale) is unchanged by migrations the backup is behind (0035 widened the column type).
         await client.query(
           `INSERT INTO daily_movement (org_id, user_id, local_date, time_zone, steps, active_energy_kcal)
            VALUES ($1, $2, $3, 'Europe/Warsaw', 9120, 388.5),
-                  ($1, $2, $4, 'Europe/Warsaw', 0, NULL)`,
+                  ($1, $2, $4, 'Europe/Warsaw', 0, 120.5)`,
           [ids.org, ids.ownerUser, ids.dailyMovement.M, ids.dailyMovement.N],
         );
         // ADR-0076: weekly insights in the backup, ready ones so that a resurrected insight would carry text: the

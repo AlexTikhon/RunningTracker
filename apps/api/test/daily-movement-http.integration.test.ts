@@ -240,7 +240,8 @@ describe('ADR-0078 daily movement HTTP API', () => {
       const stored = await ownerPool.query<{ active_energy_kcal: string | null; steps: number | null }>(
         `SELECT steps, active_energy_kcal::text FROM daily_movement WHERE local_date = '2026-10-05'`,
       );
-      expect(stored.rows).toEqual([{ active_energy_kcal: '0.0', steps: null }]);
+      // A recorded zero, stored as written (migration 0035 removed the type modifier that added a scale: '0', not '0.0').
+      expect(stored.rows).toEqual([{ active_energy_kcal: '0', steps: null }]);
       const listed = dailyMovementListResponseSchema.parse((await list(owner, { from: '2026-10-05', to: '2026-10-05' }).expect(200)).body);
       expect(listed.items[0]).toMatchObject({ activeEnergyKcal: 0, steps: null });
     });

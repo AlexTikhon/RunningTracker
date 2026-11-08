@@ -77,7 +77,8 @@ export const dailyMovementRangeSql = `SELECT ${projection}
 
 function mapDailyMovement(row: DailyMovementRow): DailyMovementView {
   return dailyMovementViewSchema.parse({
-    // numeric(6,1) as text, e.g. "412.5" or "0.0"; the number it denotes has at most one decimal.
+    // numeric as text, e.g. "412.5", "0.0" or "250"; the database refuses a value with a meaningful second decimal
+    // (migration 0035), so the number it denotes has at most one decimal.
     activeEnergyKcal: row.active_energy_kcal === null ? null : Number(row.active_energy_kcal),
     createdAt: transportTimestamp(row.created_at),
     localDate: row.local_date,

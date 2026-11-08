@@ -133,8 +133,9 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         skipped_unknown_organization: 0,
       });
       // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G.
-      // ADR-0078: and movement day M (the backup is one migration behind, at 0033, which has daily_movement). The
+      // ADR-0078: and movement day M (the backup is one migration behind, at 0034, which has daily_movement). The
       // restored backup brought all three back, the ledger replay removed them again, and a second replay changed nothing.
+      // The one migration applied after the restore is 0035 (active energy precision): surviving day N keeps its digest.
       expect(report.erasures.exportedEntries).toBe(3);
       expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 3, skipped_different_record: 0 });
       expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 3, erased: 0, skipped_different_record: 0 });

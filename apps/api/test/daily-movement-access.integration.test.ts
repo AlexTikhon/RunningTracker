@@ -1,3 +1,4 @@
+import { dailyActiveEnergyKcalSchema } from '@running-tracker/contracts';
 import { Pool, type PoolClient } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
@@ -434,6 +435,10 @@ describe('ADR-0078 daily_movement ACL (migration 0033)', () => {
       ['daily_movement_active_energy_range', { active_energy_kcal: -0.1 }, days.other],
       ['daily_movement_active_energy_range', { active_energy_kcal: 20_000.1 }, days.other],
       ['daily_movement_active_energy_range', { active_energy_kcal: 'NaN' }, days.other],
+      // Migration 0035: no type modifier any more, so an infinity reaches the range check instead of overflowing.
+      ['daily_movement_active_energy_range', { active_energy_kcal: 'Infinity' }, days.other],
+      ['daily_movement_active_energy_range', { active_energy_kcal: '-Infinity' }, days.other],
+      ['daily_movement_active_energy_precision', { active_energy_kcal: 412.55 }, days.other],
       ['daily_movement_some_value', { steps: null }, days.other],
       ['daily_movement_some_value', { active_energy_kcal: null, steps: null }, days.other],
       ['daily_movement_times_finite', { created_at: 'infinity' }, days.other],
@@ -441,12 +446,7 @@ describe('ADR-0078 daily_movement ACL (migration 0033)', () => {
       await expect(insertRow(values, localDate)).rejects.toEqual(violates(constraint));
     });
 
-    it('refuses infinite active energy whatever the cause (typmod overflow or the range check)', async () => {
-      await expect(insertRow({ active_energy_kcal: 'Infinity' })).rejects.toBeDefined();
-      expect(await storedDays()).toEqual(seeded());
-    });
-
-    it('accepts the inclusive bounds, zero as a value, and either value alone, stored exactly', async () => {
+    it('accepts the inclusive bounds, zero as a value, and either value alone, stored exactly as written', async () => {
       await insertRow({ active_energy_kcal: 0, steps: 0 }, '2000-01-01');
       await insertRow({ active_energy_kcal: 20_000, steps: 200_000 }, '2026-10-07');
       await insertRow({ active_energy_kcal: 412.5, steps: null }, '2026-10-08');
@@ -455,9 +455,10 @@ describe('ADR-0078 daily_movement ACL (migration 0033)', () => {
          FROM daily_movement WHERE user_id = $1 AND local_date IN ('2000-01-01', '2026-10-07', '2026-10-08') ORDER BY local_date`,
         [ids.userOrgA],
       );
+      // Unconstrained numeric since migration 0035: the value keeps the scale it was written with (0, not 0.0).
       expect(stored.rows).toEqual([
-        { active_energy_kcal: '0.0', local_date: '2000-01-01', steps: 0 },
-        { active_energy_kcal: '20000.0', local_date: '2026-10-07', steps: 200_000 },
+        { active_energy_kcal: '0', local_date: '2000-01-01', steps: 0 },
+        { active_energy_kcal: '20000', local_date: '2026-10-07', steps: 200_000 },
         { active_energy_kcal: '412.5', local_date: '2026-10-08', steps: null },
       ]);
     });
@@ -480,6 +481,111 @@ describe('ADR-0078 daily_movement ACL (migration 0033)', () => {
       await expect(
         ownerPool.query('DELETE FROM memberships WHERE org_id = $1 AND user_id = $2', [ids.orgA, ids.userStranger]),
       ).rejects.toEqual(expect.objectContaining({ code: '23503', constraint: 'daily_movement_owner_membership_fk' }));
+    });
+  });
+
+  describe('active energy precision through the runtime role (migration 0035)', () => {
+    // Before 0035 the column was numeric(6,1): PostgreSQL rounded 412.55 to 412.6 and -0.01 to 0.0 before the CHECK
+    // constraints ran, so a direct write stored a value the API refuses. Every write here is the real runtime role, with
+    // the owner's tenant context, through the privileges the application has.
+    const energyOf = async (localDate: string) =>
+      (
+        await ownerPool.query<{ active_energy_kcal: string | null }>(
+          `SELECT active_energy_kcal::text FROM daily_movement WHERE org_id = $1 AND user_id = $2 AND local_date = $3::date`,
+          [ids.orgA, ids.userOrgA, localDate],
+        )
+      ).rows.map((row) => row.active_energy_kcal);
+    const insertEnergy = (value: string, localDate: string = days.other) =>
+      asRuntime(ids.orgA, ids.userOrgA, (client) =>
+        client.query(
+          `INSERT INTO daily_movement (org_id, user_id, local_date, time_zone, active_energy_kcal) VALUES ($1, $2, $3, 'UTC', $4::numeric)`,
+          [ids.orgA, ids.userOrgA, localDate, value],
+        ),
+      );
+    const updateEnergy = (value: string, localDate: string = days.ownerFirst) =>
+      asRuntime(ids.orgA, ids.userOrgA, (client) =>
+        client.query(`UPDATE daily_movement SET active_energy_kcal = $2::numeric WHERE local_date = $1`, [localDate, value]),
+      );
+    const refusedBy = (constraints: readonly string[]): unknown => {
+      const constraint: unknown = expect.stringMatching(new RegExp(`^(${constraints.join('|')})$`, 'u'));
+      return expect.objectContaining({ code: '23514', constraint });
+    };
+    const range = ['daily_movement_active_energy_range'];
+    const precision = ['daily_movement_active_energy_precision'];
+
+    it('stores the bounds, zero and one decimal exactly, on insert and on update', async () => {
+      for (const [index, value] of ['0', '0.0', '0.1', '412.5', '19999.9', '20000', '20000.0'].entries()) {
+        const localDate = `2026-09-${String(index + 10)}`;
+        await insertEnergy(value, localDate);
+        expect(await energyOf(localDate)).toEqual([value]);
+      }
+      await updateEnergy('412.5');
+      expect(await energyOf(days.ownerFirst)).toEqual(['412.5']);
+      await updateEnergy('0');
+      expect(await energyOf(days.ownerFirst)).toEqual(['0']);
+    });
+
+    it.each([
+      ['412.55', precision],
+      ['0.05', precision],
+      ['19999.99', precision],
+      ['412.5000001', precision],
+      // Both rules fail: whichever PostgreSQL evaluates first is reported, and either refuses the row.
+      ['-0.01', [...range, ...precision]],
+      ['20000.01', [...range, ...precision]],
+      ['-0.1', range],
+      ['20000.1', range],
+      ['NaN', range],
+      ['Infinity', range],
+      ['-Infinity', range],
+    ] as const)('refuses %s on insert and on update, and stores nothing rounded', async (value, constraints) => {
+      await expect(insertEnergy(value)).rejects.toEqual(refusedBy(constraints));
+      expect(await energyOf(days.other)).toEqual([]);
+      await expect(updateEnergy(value)).rejects.toEqual(refusedBy(constraints));
+      expect(await energyOf(days.ownerFirst)).toEqual(['412.5']);
+    });
+
+    it('accepts exactly the values the API contract accepts', async () => {
+      // JSON numbers as the API receives them; the service sends String(value) (numbers the contract refuses never
+      // reach it, but the database must refuse them on its own).
+      const candidates = [0, -0, 0.1, 0.2, 0.3, 1.1, 250, 412.5, 412.55, 412.49, 0.05, 1e-7, -0.01, -0.1, 19_999.9, 20_000, 20_000.1, 20_000.01];
+      for (const [index, value] of candidates.entries()) {
+        const localDate = `2026-08-${String(index + 10)}`;
+        const api = dailyActiveEnergyKcalSchema.safeParse(value).success;
+        const database = await insertEnergy(String(value), localDate).then(
+          () => true,
+          (error: unknown) => {
+            expect(error).toEqual(expect.objectContaining({ code: '23514' }));
+            return false;
+          },
+        );
+        expect([value, database]).toEqual([value, api]);
+        if (database) expect(Number((await energyOf(localDate))[0])).toBe(value === 0 ? 0 : value);
+      }
+    });
+
+    it('kept the stored values, the column privileges and the constraint definitions', async () => {
+      // The seeded rows were written before this test and read back unchanged; the definitions are the 0035 ones.
+      expect(await energyOf(days.ownerFirst)).toEqual(['412.5']);
+      const column = await ownerPool.query<{ type: string }>(
+        `SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute
+         WHERE attrelid = 'public.daily_movement'::regclass AND attname = 'active_energy_kcal'`,
+      );
+      expect(column.rows).toEqual([{ type: 'numeric' }]);
+      const checks = await ownerPool.query<{ conname: string; definition: string }>(
+        `SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+         WHERE conrelid = 'public.daily_movement'::regclass AND conname LIKE 'daily_movement_active_energy_%' ORDER BY conname`,
+      );
+      expect(checks.rows).toEqual([
+        {
+          conname: 'daily_movement_active_energy_precision',
+          definition: 'CHECK (((active_energy_kcal IS NULL) OR (active_energy_kcal = round(active_energy_kcal, 1))))',
+        },
+        {
+          conname: 'daily_movement_active_energy_range',
+          definition: "CHECK (((active_energy_kcal IS NULL) OR ((active_energy_kcal >= (0)::numeric) AND (active_energy_kcal <= (20000)::numeric))))",
+        },
+      ]);
     });
   });
 

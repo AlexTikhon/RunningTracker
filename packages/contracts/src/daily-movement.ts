@@ -21,8 +21,9 @@ export const DAILY_MOVEMENT_RANGE_MAX_DAYS = DAILY_METRICS_RANGE_MAX_DAYS;
 // numbers are CHECK constraints of daily_movement (migration 0033).
 export const DAILY_MOVEMENT_STEPS_MAX = 200_000;
 export const DAILY_MOVEMENT_ACTIVE_ENERGY_MAX_KCAL = 20_000;
-// numeric(6,1): active energy is kept to 0.1 kcal. A value with more decimals is refused, never rounded, so what is
-// stored is exactly what was sent.
+// Active energy is kept to 0.1 kcal. A value with more decimals is refused, never rounded, so what is stored is exactly
+// what was sent. The database states the same rule (migration 0035: an unconstrained numeric with range and precision
+// CHECK constraints, because a numeric(6,1) column rounded a value before its CHECK constraints ran).
 export const DAILY_MOVEMENT_ACTIVE_ENERGY_DECIMALS = 1;
 export const DAILY_MOVEMENT_NOT_FOUND = 'DAILY_MOVEMENT_NOT_FOUND';
 
