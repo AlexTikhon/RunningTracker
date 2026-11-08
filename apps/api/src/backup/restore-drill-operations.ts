@@ -52,7 +52,7 @@ import {
   type RoleFacts,
   type RunLabel,
   type RunLabelState,
-  type SessionClearRun,
+  type AuthenticationClearRun,
 } from './restore-drill.js';
 import {
   assertDatabaseMayBeDropped,
@@ -143,18 +143,32 @@ export const DRILL_SCRIPT_TIMEOUT_MS = 180_000;
 /** Closing the drill's pools may take this long before it is reported as a failure. */
 export const DRILL_POOL_CLOSE_TIMEOUT_MS = 10_000;
 
-async function hasSessionTable(client: Client): Promise<boolean> {
-  const result = await client.query<{ present: boolean }>(
-    "SELECT to_regclass('app_private.auth_sessions') IS NOT NULL AS present",
-  );
+type AuthenticationTable = 'app_private.auth_sessions' | 'app_private.oidc_pending_logins';
+
+async function hasTable(client: Client, table: AuthenticationTable): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>('SELECT to_regclass($1) IS NOT NULL AS present', [table]);
   return result.rows[0]?.present === true;
+}
+
+async function hasSessionTable(client: Client): Promise<boolean> {
+  return hasTable(client, 'app_private.auth_sessions');
+}
+
+/** Rows of one authentication table, or null when the schema predates it (migration 0036 or 0037). */
+async function countRows(client: Client, table: AuthenticationTable): Promise<number | null> {
+  if (!(await hasTable(client, table))) return null;
+  const result = await client.query<{ count: string }>(`SELECT count(*)::text AS count FROM ${table}`);
+  return Number(result.rows[0]!.count);
 }
 
 /** Stored sessions, or null when the schema predates the session table (migration 0036). */
 async function countSessions(client: Client): Promise<number | null> {
-  if (!(await hasSessionTable(client))) return null;
-  const result = await client.query<{ count: string }>('SELECT count(*)::text AS count FROM app_private.auth_sessions');
-  return Number(result.rows[0]!.count);
+  return countRows(client, 'app_private.auth_sessions');
+}
+
+/** Pending OIDC logins, or null when the schema predates their table (migration 0037). */
+async function countPendingLogins(client: Client): Promise<number | null> {
+  return countRows(client, 'app_private.oidc_pending_logins');
 }
 
 async function withClient<T>(url: string, work: (client: Client) => Promise<T>): Promise<T> {
@@ -249,6 +263,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
   let sourceMaintenancePool: Pool | undefined;
   let sourceRuntimePool: Pool | undefined;
   let sourceSessionRowsAtBackup: number | null = null;
+  let sourcePendingLoginRowsAtBackup: number | null = null;
 
   function requireKey(): Buffer {
     if (!key) throw new Error('The backup encryption key is not loaded');
@@ -449,24 +464,35 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
 
     async clearSessions() {
       const restoredRows = await withClient(target.ownerUrl, countSessions);
-      if (restoredRows === null) {
-        throw new Error('The restored and migrated database has no session table');
+      const restoredLogins = await withClient(target.ownerUrl, countPendingLogins);
+      if (restoredRows === null || restoredLogins === null) {
+        throw new Error('The restored and migrated database has no session or pending-login table');
       }
       onCommand(`restore:clear-sessions  (RESTORE_DATABASE_URL = owner of ${target.database})`);
       const lines: string[] = [];
       await runClearSessionsCli({ argv: [], env: { RESTORE_DATABASE_URL: target.ownerUrl }, log: (line) => lines.push(line) });
       const value = (name: string): number => {
         const line = lines.find((entry) => entry.startsWith(`${name}: `));
-        if (!line) throw new Error('The session clearing report is incomplete');
+        if (!line) throw new Error('The authentication clearing report is incomplete');
         return Number(line.slice(name.length + 2));
       };
+      // Counted again independently of what the command reported.
       const remaining = await withClient(target.ownerUrl, countSessions);
+      const remainingLogins = await withClient(target.ownerUrl, countPendingLogins);
       return {
-        cleared: value('sessions cleared'),
-        remaining: remaining ?? 0,
-        restoredRows,
-        sourceRowsAtBackup: sourceSessionRowsAtBackup,
-      } satisfies SessionClearRun;
+        pendingLogins: {
+          cleared: value('pending logins cleared'),
+          remaining: remainingLogins ?? 0,
+          restoredRows: restoredLogins,
+          sourceRowsAtBackup: sourcePendingLoginRowsAtBackup,
+        },
+        sessions: {
+          cleared: value('sessions cleared'),
+          remaining: remaining ?? 0,
+          restoredRows,
+          sourceRowsAtBackup: sourceSessionRowsAtBackup,
+        },
+      } satisfies AuthenticationClearRun;
     },
     async bootstrapTarget() {
       await runScript('bootstrap-database.mjs', target);
@@ -1049,6 +1075,15 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
               createHash('sha256').update('drill-csrf', 'utf8').digest('base64url')],
           );
         }
+        // ADR-0081: likewise, a sign-in is pending (sent to the provider, not back yet) when the backup is taken.
+        if (await hasTable(client, 'app_private.oidc_pending_logins')) {
+          const drillValue = (label: string) => createHash('sha256').update(label, 'utf8').digest('base64url');
+          await client.query(
+            `INSERT INTO app_private.oidc_pending_logins (login_digest, created_at, expires_at, code_verifier, oidc_state, oidc_nonce)
+             VALUES ($1, now(), now() + interval '10 minutes', $2, $3, $4)`,
+            [drillValue('drill-login'), drillValue('drill-verifier'), drillValue('drill-state'), drillValue('drill-nonce')],
+          );
+        }
       });
     },
 
@@ -1066,6 +1101,7 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
 
     async takeBackup() {
       sourceSessionRowsAtBackup = await withClient(source.ownerUrl, countSessions);
+      sourcePendingLoginRowsAtBackup = await withClient(source.ownerUrl, countPendingLogins);
       const created = await createBackup({
         clock,
         connection: parsePgConnection(source.adminUrl),
@@ -1177,6 +1213,15 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
            FROM unnest(ARRAY['running_tracker_runtime', 'running_tracker_maintenance']) AS role`,
         );
         add('session-store-denied-to-application', 'The runtime and maintenance roles cannot read, list or change the session table directly, nor clear it (ADR-0080)', sessionStore.rows[0]!.table === false && sessionStore.rows[0]!.clear === false);
+        const loginStore = await client.query<{ clear: boolean; table: boolean }>(
+          `SELECT bool_or(has_table_privilege(role, 'app_private.oidc_pending_logins', 'SELECT')
+                          OR has_table_privilege(role, 'app_private.oidc_pending_logins', 'INSERT')
+                          OR has_table_privilege(role, 'app_private.oidc_pending_logins', 'UPDATE')
+                          OR has_table_privilege(role, 'app_private.oidc_pending_logins', 'DELETE')) AS table,
+                  bool_or(has_function_privilege(role, 'app_private.clear_oidc_pending_logins()', 'EXECUTE')) AS clear
+           FROM unnest(ARRAY['running_tracker_runtime', 'running_tracker_maintenance']) AS role`,
+        );
+        add('pending-login-store-denied-to-application', 'The runtime and maintenance roles cannot read, list or change the pending-login table directly, nor clear it (ADR-0081)', loginStore.rows[0]!.table === false && loginStore.rows[0]!.clear === false);
         add('application-cannot-connect', 'The runtime and maintenance roles cannot connect to the restored database: the drill leaves it closed, and opening it is an explicit operator step', privileges.rows[0]!.connect === false);
         const sessions = await client.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM pg_stat_activity

@@ -1,6 +1,7 @@
-import type { Pool, PoolClient, QueryResultRow } from 'pg';
+import type { Pool, QueryResultRow } from 'pg';
 
 import type { Clock } from '../clock.js';
+import { runBoundedStatement } from '../database/bounded-statement.js';
 import {
   SessionDigestConflictError,
   SessionStoreCapacityError,
@@ -123,58 +124,17 @@ export class PostgresSessionStore implements SessionStore {
     }
   }
 
-  /**
-   * One autocommit statement on a pooled connection, bounded as a whole. On the deadline the call fails at once and
-   * the connection is destroyed rather than returned (its statement may still be running); a checkout that finishes
-   * after the deadline is returned unused.
-   */
   #execute<Row extends QueryResultRow>(text: string, values: unknown[]): Promise<Row[]> {
-    return new Promise<Row[]>((resolve, reject) => {
-      let settled = false;
-      let client: PoolClient | undefined;
-      let released = false;
-      const release = (destroy: boolean): void => {
-        if (client === undefined || released) return;
-        released = true;
-        client.release(destroy ? new Error('Session store connection discarded') : undefined);
-      };
-      const timer = this.#clock.setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        release(true);
-        reject(new SessionStoreUnavailableError(`no answer within ${this.#operationTimeoutMs} ms`));
-      }, this.#operationTimeoutMs);
-      const settle = (outcome: () => void): void => {
-        if (settled) return;
-        settled = true;
-        this.#clock.clearTimeout(timer);
-        outcome();
-      };
-
-      this.#pool.connect().then(
-        (acquired) => {
-          client = acquired;
-          if (settled) {
-            release(false);
-            return;
-          }
-          acquired.query<Row>(text, values).then(
-            (result) => {
-              if (settled) return;
-              release(false);
-              settle(() => resolve(result.rows));
-            },
-            (error: unknown) => {
-              if (settled) return;
-              release(true);
-              settle(() => reject(new SessionStoreUnavailableError('query failed', { cause: error })));
-            },
-          );
-        },
-        (error: unknown) => {
-          settle(() => reject(new SessionStoreUnavailableError('no connection', { cause: error })));
-        },
-      );
-    });
+    return runBoundedStatement<Row>(
+      {
+        clock: this.#clock,
+        discardedConnectionMessage: 'Session store connection discarded',
+        pool: this.#pool,
+        timeoutMs: this.#operationTimeoutMs,
+        unavailable: (reason, options) => new SessionStoreUnavailableError(reason, options),
+      },
+      text,
+      values,
+    );
   }
 }

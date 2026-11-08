@@ -235,6 +235,29 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '',
   );
 
+  const logins = report.pendingLogins;
+  out.push('## Pending sign-ins (ADR-0081)', '');
+  out.push(
+    table([
+      [
+        'pending logins in the source at backup time',
+        logins === null
+          ? 'not reached'
+          : logins.sourceRowsAtBackup === null
+            ? 'no pending-login table (older schema)'
+            : String(logins.sourceRowsAtBackup),
+      ],
+      ['pending logins in the restored database', logins === null ? 'not reached' : String(logins.restoredRows)],
+      ['removed by restore:clear-sessions', logins === null ? 'not reached' : String(logins.cleared)],
+      ['remaining before reopening', logins === null ? 'not reached' : String(logins.remaining)],
+    ]),
+    '',
+  );
+  out.push(
+    'Backups keep the pending-login table\'s schema but never its rows, and the same restore step clears it again, so no OpenID Connect sign-in started before the restore can complete afterwards: people start a new sign-in.',
+    '',
+  );
+
   out.push('## Roles and security', '');
   if (report.roles.length === 0) {
     out.push('Not reached.', '');
@@ -271,7 +294,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
       '- A second reapplication was idempotent: only marker_present outcomes, and an identical database state.',
       '- Access that was revoked after the backup (a share revoked, a share narrowed, a member deactivated) was still present in the restored backup, and was removed again by `restore:reapply-access` from the exported journal: the recovered permissions equal those of the lost source, and the people concerned can no longer read the surviving run as the runtime role under row-level security. Nobody gained access, the second pass changed nothing, and the changes were journaled again on the recovered node.',
       '- Activity E and check-in day G, deleted by their owner after the backup, were back in the restored backup and were removed again by `restore:reapply-erasures` from the exported erasure ledger; activity F and day H were unchanged, the replayed erasures were journaled again, and a second replay reported only absent outcomes and changed nothing.',
-      '- The restored database held no stored session, and `restore:clear-sessions` left none before the database could be reopened (ADR-0080).',
+      '- The restored database held no stored session and no pending OpenID Connect login, and `restore:clear-sessions` left none of either before the database could be reopened (ADR-0080, ADR-0081).',
       '- The three application roles are not superuser and have no BYPASSRLS, CREATEDB or CREATEROLE.',
       '- Failure paths fail closed: wrong key, corrupted or truncated backup, malformed journal, migration checksum mismatch, and an out-of-order recovery step are covered by automated tests.',
       '',
@@ -286,7 +309,7 @@ export function renderDrillReportMarkdown(report: DrillReport): string {
     '- Encryption key custody. The key was a local file. Storing it separately from the backups, backing it up, rotating it and recovering it are operator decisions that this repository does not solve.',
     '- Access restrictions that were committed but not yet exported when a node is lost (the same recovery point as the deletion journal): a revoked share or deactivated membership in that window comes back with an old backup, and the exporter\'s health decides how large the window is.',
     '- Access granted after the backup, and shares that were revoked and granted again: by design these are not reconstructed from the journal, so they have to be granted again.',
-    '- Credentials and sign-in. The drill restores no credential and signs nobody in; that a pre-restore cookie is refused and a new sign-in works on a restored database is shown by the opt-in integration test (ADR-0080), not by this drill, and no production identity provider was exercised (production sign-in, P12.1).',
+    '- Credentials and sign-in. The drill restores no credential and signs nobody in; that a pre-restore cookie is refused, that a pre-restore OpenID Connect sign-in cannot complete, and that a new sign-in works on a restored database is shown by the opt-in integration test (ADR-0080, ADR-0081, against a local test identity provider), not by this drill, and no production identity provider was exercised (production sign-in, P12.1).',
     '- Deletions that were committed but not yet exported when a node is lost (journal recovery point, ADR-0037), and a mount that accepts writes but is not durable.',
     '- Activity erasures that were committed but not yet exported when a node is lost (the same recovery point, ADR-0073): such an activity comes back with an old backup.',
     '- Daily scheduling and 7-day retention running unattended on a host: the commands exist and are tested; nothing here ran on a schedule.',

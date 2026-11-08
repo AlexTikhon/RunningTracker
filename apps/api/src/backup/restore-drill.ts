@@ -164,6 +164,37 @@ export function evaluateSessionRecovery(run: SessionClearRun): Check[] {
   ];
 }
 
+/**
+ * What the same step found and did for pending OIDC logins (ADR-0081). Same counts; sourceRowsAtBackup is null when
+ * the source schema had no pending-login table yet (before migration 0037).
+ */
+export type PendingLoginClearRun = SessionClearRun;
+
+/** restore:clear-sessions clears both kinds of temporary authentication state; each is reported separately. */
+export interface AuthenticationClearRun {
+  pendingLogins: PendingLoginClearRun;
+  sessions: SessionClearRun;
+}
+
+/** No sign-in started before the restore may complete afterwards, including one a dump brought back. */
+export function evaluatePendingLoginRecovery(run: PendingLoginClearRun): Check[] {
+  return [
+    {
+      description:
+        run.sourceRowsAtBackup === null
+          ? 'The backup predates the pending-login table, so the restored database held no pending login'
+          : `The backup carried no pending login although the source held ${run.sourceRowsAtBackup} at backup time (pg_dump --exclude-table-data)`,
+      id: 'pending-logins-not-in-backup',
+      passed: run.restoredRows === 0 && (run.sourceRowsAtBackup === null || run.sourceRowsAtBackup > 0),
+    },
+    {
+      description: 'restore:clear-sessions left no pending login: no sign-in started before the restore can complete, and people sign in again',
+      id: 'pending-logins-cleared-before-reopening',
+      passed: run.remaining === 0,
+    },
+  ];
+}
+
 export interface ErasureEvaluationInput {
   afterFirst: ActivityState;
   afterSecond: ActivityState;
@@ -613,8 +644,11 @@ export interface DrillOperations {
   assertApplicationOffline(): Promise<void>;
   bootstrapTarget(): Promise<void>;
   cleanup(): Promise<void>;
-  /** Clears every stored session in the restored database with restore:clear-sessions (ADR-0080). */
-  clearSessions(): Promise<SessionClearRun>;
+  /**
+   * Clears every stored session (ADR-0080) and every pending OIDC login (ADR-0081) in the restored database with
+   * restore:clear-sessions.
+   */
+  clearSessions(): Promise<AuthenticationClearRun>;
   /** PostgreSQL sessions and locks on the drill databases, read after a failure. */
   diagnose?(): Promise<DrillDiagnostics>;
   copyJournalReadOnly(): Promise<JournalFacts & { readOnlyEnforced: boolean }>;
@@ -679,6 +713,8 @@ export interface DrillReport {
   roles: RoleFacts[];
   rpo: { backupRecoveryPointMs: number; targetMs: number; withinTarget: boolean };
   rto: { measuredMs: number; targetMs: number; withinTarget: boolean };
+  /** Pending OIDC logins found and removed by the same step as sessions (ADR-0081); null when not reached. */
+  pendingLogins: PendingLoginClearRun | null;
   schemaVersion: 1;
   sessions: SessionClearRun | null;
   status: 'failed' | 'passed';
@@ -754,6 +790,7 @@ export async function runRestoreDrill(input: {
   let firstErasurePass: ReapplyErasureRun | null = null;
   let secondErasurePass: ReapplyErasureRun | null = null;
   let sessions: SessionClearRun | null = null;
+  let pendingLogins: PendingLoginClearRun | null = null;
   let effectiveAccess: DrillReport['access']['effectiveAccess'] = null;
   let roles: RoleFacts[] = [];
   let checks: Check[] = [];
@@ -987,14 +1024,17 @@ export async function runRestoreDrill(input: {
     }
     tracker.complete('erasure_outcomes_verified');
 
-    // ADR-0080: no session from before the restore may authenticate once the database is reopened.
+    // ADR-0080: no session from before the restore may authenticate once the database is reopened. ADR-0081: and no
+    // sign-in started before it may complete. One step clears both; each is checked separately.
     step = 'clear-sessions';
-    sessions = await operations.clearSessions();
-    const sessionChecks = evaluateSessionRecovery(sessions);
+    const authentication = await operations.clearSessions();
+    sessions = authentication.sessions;
+    pendingLogins = authentication.pendingLogins;
+    const sessionChecks = [...evaluateSessionRecovery(sessions), ...evaluatePendingLoginRecovery(pendingLogins)];
     checks = [...checks, ...sessionChecks];
     const sessionsFailed = sessionChecks.filter((check) => !check.passed);
     if (sessionsFailed.length > 0) {
-      throw new Error(`Session clearing verification failed: ${sessionsFailed.map((check) => check.id).join(', ')}`);
+      throw new Error(`Authentication state clearing verification failed: ${sessionsFailed.map((check) => check.id).join(', ')}`);
     }
     tracker.complete('sessions_cleared');
 
@@ -1114,6 +1154,7 @@ export async function runRestoreDrill(input: {
       targetMs: rtoTargetMs,
       withinTarget: totalRecoveryMs > 0 && totalRecoveryMs <= rtoTargetMs,
     },
+    pendingLogins,
     schemaVersion: 1,
     sessions,
     status: failure ? 'failed' : 'passed',

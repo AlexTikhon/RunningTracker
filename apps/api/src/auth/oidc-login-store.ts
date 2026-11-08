@@ -1,22 +1,13 @@
-import { createHash, randomBytes } from 'node:crypto';
-
 import type { Clock } from '../clock.js';
+import {
+  OidcLoginStoreCapacityError,
+  loginIdPattern,
+  pendingLoginDigest as digest,
+  createLoginId,
+  type PendingLogin,
+} from './pending-login-store.js';
 
-const loginIdPattern = /^[A-Za-z0-9_-]{43}$/u;
-
-/** What the callback needs to complete one authorization-code login. Never leaves the process. */
-export interface PendingLogin {
-  codeVerifier: string;
-  nonce: string;
-  state: string;
-}
-
-export class OidcLoginStoreCapacityError extends Error {
-  public constructor() {
-    super('The pending login store is at capacity');
-    this.name = 'OidcLoginStoreCapacityError';
-  }
-}
+export { OidcLoginStoreCapacityError, type PendingLogin };
 
 export interface OidcLoginStoreOptions {
   clock: Clock;
@@ -27,10 +18,6 @@ export interface OidcLoginStoreOptions {
 interface StoredLogin {
   expiresAt: number;
   login?: PendingLogin;
-}
-
-function digest(loginId: string): string {
-  return createHash('sha256').update(loginId, 'utf8').digest('base64url');
 }
 
 /**
@@ -72,7 +59,7 @@ export class OidcLoginStore {
     if (this.#entries.size >= this.#maxEntries) {
       throw new OidcLoginStoreCapacityError();
     }
-    const loginId = randomBytes(32).toString('base64url');
+    const loginId = createLoginId();
     this.#entries.set(digest(loginId), { expiresAt: now + this.#ttlMs });
     return loginId;
   }

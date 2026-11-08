@@ -47,11 +47,12 @@ export function formatPgConnection(connection: PgConnection): string {
 export type PgTool = 'pg_dump' | 'pg_restore';
 
 /**
- * Tables whose schema is backed up without their rows (ADR-0080). Authenticated sessions are only meaningful for the
- * running database: a restore must make everyone sign in again, and a backup must not carry live bearer-token digests
- * or CSRF tokens. A name that does not exist yet (a database older than migration 0036) matches nothing.
+ * Tables whose schema is backed up without their rows. Authenticated sessions (ADR-0080) and pending OIDC logins
+ * (ADR-0081) are temporary authentication state, only meaningful for the running database: a restore must make
+ * everyone sign in again, and a backup must not carry bearer-token digests, CSRF tokens, PKCE verifiers, states or
+ * nonces. A name that does not exist yet (a database older than migration 0036 or 0037) matches nothing.
  */
-export const BACKUP_EXCLUDED_TABLE_DATA = ['app_private.auth_sessions'] as const;
+export const BACKUP_EXCLUDED_TABLE_DATA = ['app_private.auth_sessions', 'app_private.oidc_pending_logins'] as const;
 
 export interface PgToolRunner {
   /**

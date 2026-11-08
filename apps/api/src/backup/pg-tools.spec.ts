@@ -106,8 +106,9 @@ describe('PostgreSQL tool runner', () => {
     expect(calls[0]!.command).toBe('pg_dump');
     expect(calls[0]!.args).toEqual([
       '--format=custom',
-      // ADR-0080: the session table's schema is kept, its rows never are.
+      // ADR-0080, ADR-0081: the schema of the session and pending-login tables is kept, their rows never are.
       '--exclude-table-data=app_private.auth_sessions',
+      '--exclude-table-data=app_private.oidc_pending_logins',
       '--no-password',
       '--host',
       '127.0.0.1',

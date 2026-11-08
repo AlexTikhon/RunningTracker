@@ -142,11 +142,13 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         skipped_unknown_organization: 0,
       });
       // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G.
-      // ADR-0078: and movement day M (the backup is one migration behind, at 0035, which has daily_movement). The
+      // ADR-0078: and movement day M (the backup is one migration behind, at 0036, which has daily_movement). The
       // restored backup brought all three back, the ledger replay removed them again, and a second replay changed nothing.
-      // The one migration applied after the restore is 0036 (durable sessions, ADR-0080): it creates the empty session
-      // table, so the older backup held no session at all, and restore:clear-sessions found nothing to remove.
-      expect(report.sessions).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null });
+      // ADR-0080: the older schema has the session table, so the source held one session at backup time and the backup
+      // carried none. The one migration applied after the restore is 0037 (durable pending OIDC logins, ADR-0081): it
+      // creates the empty pending-login table, so the older backup held no pending login at all.
+      expect(report.sessions).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
+      expect(report.pendingLogins).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null });
       expect(report.erasures.exportedEntries).toBe(3);
       expect(report.erasures.firstPass?.outcomes).toEqual({ absent: 0, erased: 3, skipped_different_record: 0 });
       expect(report.erasures.secondPass?.outcomes).toEqual({ absent: 3, erased: 0, skipped_different_record: 0 });
@@ -207,12 +209,20 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       expect(report.failure).toBeUndefined();
       expect(exitCode).toBe(0);
       expect(report.migration.firstRun?.applied).toBe(0);
-      // ADR-0080: the source held one session at backup time; the backup carried none.
+      // ADR-0080, ADR-0081: the source held one session and one pending login at backup time; the backup carried neither.
       expect(report.sessions).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
-      expect(report.checks.filter((check) => check.id.startsWith('session')).map((check) => [check.id, check.passed])).toEqual([
+      expect(report.pendingLogins).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
+      expect(
+        report.checks
+          .filter((check) => check.id.startsWith('session') || check.id.startsWith('pending-login'))
+          .map((check) => [check.id, check.passed]),
+      ).toEqual([
         ['sessions-not-in-backup', true],
         ['sessions-cleared-before-reopening', true],
+        ['pending-logins-not-in-backup', true],
+        ['pending-logins-cleared-before-reopening', true],
         ['session-store-denied-to-application', true],
+        ['pending-login-store-denied-to-application', true],
       ]);
     },
     drillTimeout,
@@ -556,7 +566,10 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       await operations.restoreBackup();
       await operations.migrate();
       const fromApplicationBackup = await operations.clearSessions();
-      expect(fromApplicationBackup).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 2 });
+      expect(fromApplicationBackup).toEqual({
+        pendingLogins: { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 },
+        sessions: { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 2 },
+      });
       await openAndProve();
 
       // 2. The dump that carried session rows: the revoked session's row is back until restore:clear-sessions runs.
@@ -572,7 +585,10 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       expect(await digestStored(databases.target.ownerUrl, revoked.sessionToken)).toBe(true);
       expect(await digestStored(databases.target.ownerUrl, valid.sessionToken)).toBe(true);
       const fromCarryingDump = await operations.clearSessions();
-      expect(fromCarryingDump).toMatchObject({ cleared: 3, remaining: 0, restoredRows: 3 });
+      expect(fromCarryingDump).toMatchObject({
+        pendingLogins: { cleared: 1, remaining: 0, restoredRows: 1 },
+        sessions: { cleared: 3, remaining: 0, restoredRows: 3 },
+      });
       expect(await digestStored(databases.target.ownerUrl, revoked.sessionToken)).toBe(false);
       await openAndProve();
     },

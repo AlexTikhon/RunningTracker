@@ -81,6 +81,7 @@ function passedReport(): DrillReport {
     ],
     rpo: { backupRecoveryPointMs: 300_000, targetMs: 86_400_000, withinTarget: true },
     rto: { measuredMs: 9100, targetMs: 14_400_000, withinTarget: true },
+    pendingLogins: { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null },
     schemaVersion: 1,
     sessions: { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null },
     status: 'passed',

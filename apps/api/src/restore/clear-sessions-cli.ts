@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 
-import { clearRestoredSessions } from './clear-sessions.js';
+import { clearRestoredAuthentication } from './clear-sessions.js';
 
 const usage =
   'Usage: RESTORE_DATABASE_URL=postgres://running_tracker_owner:...@host/db npm run restore:clear-sessions';
@@ -13,9 +13,12 @@ export interface ClearSessionsCliDependencies {
 }
 
 /**
- * Restore-time entry point (ADR-0080), the last step before a restored database is reopened. Same contract as the
- * restore:reapply-* commands: the RESTORED database, as the object owner, with the application offline. It prints only
- * the database name and counts, never a digest, user or token, and returns a process exit code.
+ * Restore-time entry point, the last step before a restored database is reopened. It clears all temporary
+ * authentication state: stored sessions (ADR-0080) and pending OIDC logins (ADR-0081). The command keeps its ADR-0080
+ * name and its first three output lines, so existing runbooks and scripts keep working; the pending-login counts are
+ * added as separate lines after them (ADR-0081 compatibility decision). Same contract as the restore:reapply-*
+ * commands: the RESTORED database, as the object owner, with the application offline. It prints only the database
+ * name and counts, never a digest, user, token or login material, and returns a process exit code.
  */
 export async function runClearSessionsCli(dependencies: ClearSessionsCliDependencies): Promise<number> {
   const log = dependencies.log ?? ((line: string) => console.info(line));
@@ -36,10 +39,12 @@ export async function runClearSessionsCli(dependencies: ClearSessionsCliDependen
     if (identity.rows[0]?.role_name !== 'running_tracker_owner') {
       throw new Error('RESTORE_DATABASE_URL must authenticate as running_tracker_owner');
     }
-    const report = await clearRestoredSessions(pool);
+    const report = await clearRestoredAuthentication(pool);
     log(`database: ${identity.rows[0].database_name}`);
-    log(`sessions cleared: ${report.cleared}`);
-    log(`sessions remaining: ${report.remaining}`);
+    log(`sessions cleared: ${report.sessions.cleared}`);
+    log(`sessions remaining: ${report.sessions.remaining}`);
+    log(`pending logins cleared: ${report.pendingLogins.cleared}`);
+    log(`pending logins remaining: ${report.pendingLogins.remaining}`);
     return 0;
   } finally {
     await pool.end();

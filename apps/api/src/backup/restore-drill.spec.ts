@@ -376,7 +376,10 @@ function harness(fail?: { at: keyof DrillOperations; error?: Error }): Harness {
     assertApplicationOffline: step('assertApplicationOffline', undefined),
     bootstrapTarget: step('bootstrapTarget', undefined),
     cleanup: step('cleanup', undefined),
-    clearSessions: step('clearSessions', { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null }),
+    clearSessions: step('clearSessions', {
+      pendingLogins: { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null },
+      sessions: { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: null },
+    }),
     copyJournalReadOnly: step('copyJournalReadOnly', {
       accessEntries: 5,
       entries: 3,
@@ -811,6 +814,27 @@ describe('restore drill orchestration', () => {
       firstRun: { applied: 1, skipped: 19 },
       secondRun: { applied: 0, skipped: 20 },
     });
+  });
+
+  it('never reaches readiness while a pending login or a session survived the clearing step, or a backup carried one (ADR-0081)', async () => {
+    const clean = { cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 };
+    for (const [authentication, failedCheck] of [
+      [{ pendingLogins: { ...clean, remaining: 1 }, sessions: clean }, 'pending-logins-cleared-before-reopening'],
+      [{ pendingLogins: { ...clean, cleared: 1, restoredRows: 1 }, sessions: clean }, 'pending-logins-not-in-backup'],
+      [{ pendingLogins: clean, sessions: { ...clean, remaining: 1 } }, 'sessions-cleared-before-reopening'],
+    ] as const) {
+      const { calls, operations } = harness();
+      operations.clearSessions = () => Promise.resolve(authentication);
+
+      const result = await runRestoreDrill({ clock: fakeClock(), operations, options });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.report.failure?.step).toBe('clear-sessions');
+      expect(result.report.failure?.message).toContain(failedCheck);
+      expect(result.report.pendingLogins).toEqual(authentication.pendingLogins);
+      expect(result.report.recovery.completedSteps).not.toContain('sessions_cleared');
+      expect(calls).not.toContain('verifyReadiness');
+    }
   });
 
   it('aborts when the recovery copy of the journal differs from what was exported', async () => {
