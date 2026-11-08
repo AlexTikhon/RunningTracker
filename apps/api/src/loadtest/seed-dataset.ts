@@ -19,6 +19,7 @@ const seededTables = [
   'weekly_insight_source_gates',
   'activities',
   'daily_metrics',
+  'daily_movement',
   'erasure_ledger',
   'access_restriction_journal',
   'run_deletion_journal',

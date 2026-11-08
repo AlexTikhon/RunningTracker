@@ -943,8 +943,8 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
         );
         // ADR-0076: weekly insights in the backup, ready ones so that a resurrected insight would carry text: the
         // owner's for the weeks of E and G, and the keeper's for a week without erased records (a replay invalidates
-        // the owner's insights conservatively, migration 0032, but never another person's). At the older schema
-        // (0031) the table has its first shape; at the current one an insert must carry the current source revision.
+        // the owner's insights conservatively, migration 0032, but never another person's). Both source schemas (one
+        // migration behind, and current) are after 0032, so an insert carries the current source revision.
         const insightRows = [
           { userId: ids.ownerUser, week: ids.insightWeeks.activityWeek },
           { userId: ids.ownerUser, week: ids.insightWeeks.checkInWeek },
@@ -952,22 +952,15 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
         ];
         for (const row of insightRows) {
           await client.query(
-            (options.sourceSchema ?? 'previous') === 'current'
-              ? `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash,
-                                            source_revision, model, prompt_version, policy_version, status, output)
-                 SELECT $1, $2, $3::date, 'Europe/Warsaw', $3::date::timestamp AT TIME ZONE 'Europe/Warsaw',
-                        ($3::date + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('d', 64),
-                        coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
-                        'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'ready',
-                        jsonb_build_object('summary', 'Drill fixture.', 'observations', jsonb_build_array(),
-                          'suggestion', jsonb_build_object('id', 'rest_and_recovery', 'source', 'approved', 'text', 'Rest.'),
-                          'dataGaps', jsonb_build_array())`
-              : `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash, model,
-                                            prompt_version, status, output)
-                 SELECT $1, $2, $3::date, 'Europe/Warsaw', $3::date::timestamp AT TIME ZONE 'Europe/Warsaw',
-                        ($3::date + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('d', 64), 'fake', 'weekly-insight-v1', 'ready',
-                        jsonb_build_object('summary', 'Drill fixture.', 'observations', jsonb_build_array(), 'suggestion', 'Rest.',
-                                           'dataGaps', jsonb_build_array())`,
+            `INSERT INTO weekly_insights (org_id, user_id, week_start, time_zone, range_start, range_end, input_hash,
+                                         source_revision, model, prompt_version, policy_version, status, output)
+              SELECT $1, $2, $3::date, 'Europe/Warsaw', $3::date::timestamp AT TIME ZONE 'Europe/Warsaw',
+                     ($3::date + 7)::timestamp AT TIME ZONE 'Europe/Warsaw', repeat('d', 64),
+                     coalesce((SELECT revision FROM weekly_insight_source_gates WHERE org_id = $1 AND user_id = $2), 0),
+                     'fake', 'weekly-insight-v2', 'weekly-insight-policy-2', 'ready',
+                     jsonb_build_object('summary', 'Drill fixture.', 'observations', jsonb_build_array(),
+                       'suggestion', jsonb_build_object('id', 'rest_and_recovery', 'source', 'approved', 'text', 'Rest.'),
+                       'dataGaps', jsonb_build_array())`,
             [ids.org, row.userId, row.week],
           );
         }
