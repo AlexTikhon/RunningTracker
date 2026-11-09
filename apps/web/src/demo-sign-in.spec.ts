@@ -49,6 +49,16 @@ describe('localDemoEnabled', () => {
     expect(localDemoEnabled({ DEV: true, VITE_LOCAL_DEMO_ENABLED: 'TRUE' })).toBe(false);
     // A production build never offers it, whatever the flag says.
     expect(localDemoEnabled({ DEV: false, VITE_LOCAL_DEMO_ENABLED: 'true' })).toBe(false);
+    expect(localDemoEnabled({ DEV: false, MODE: 'production', VITE_LOCAL_DEMO_ENABLED: 'true' })).toBe(false);
+  });
+
+  it('opens for the LAN pilot build mode only with the explicit flag, and for no other mode', () => {
+    expect(localDemoEnabled({ DEV: false, MODE: 'lan-pilot', VITE_LOCAL_DEMO_ENABLED: 'true' })).toBe(true);
+    expect(localDemoEnabled({ DEV: false, MODE: 'lan-pilot' })).toBe(false);
+    expect(localDemoEnabled({ DEV: false, MODE: 'lan-pilot', VITE_LOCAL_DEMO_ENABLED: 'TRUE' })).toBe(false);
+    for (const mode of ['LAN-PILOT', 'lan-pilot ', 'pilot', 'staging', 'test']) {
+      expect(localDemoEnabled({ DEV: false, MODE: mode, VITE_LOCAL_DEMO_ENABLED: 'true' })).toBe(false);
+    }
   });
 });
 

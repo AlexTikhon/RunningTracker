@@ -16,10 +16,19 @@ export const demoIdentities: Readonly<Record<DemoRole, string>> = {
 
 export const demoRoleLabels: Readonly<Record<DemoRole, string>> = { coach: 'Demo coach', runner: 'Demo runner' };
 
-// `npm run demo:up` sets the flag for its own Vite process; nothing else does. A production build has DEV false, so it
-// never offers the buttons whatever the flag says.
-export function localDemoEnabled(env: { readonly DEV: boolean; readonly VITE_LOCAL_DEMO_ENABLED?: string }): boolean {
-  return env.DEV && env.VITE_LOCAL_DEMO_ENABLED === 'true';
+// The Vite build mode of the iPhone LAN pilot's proxy image (infra/proxy/Dockerfile, docs/runbooks/iphone-lan-pilot.md):
+// a production bundle served over the pilot's HTTPS proxy, for synthetic demo data only.
+export const lanPilotMode = 'lan-pilot';
+
+// `npm run demo:up` sets the flag for its own Vite process, and the LAN pilot image for its own `vite build --mode
+// lan-pilot`; nothing else does. An ordinary production build has DEV false and MODE "production", so it never offers
+// the buttons whatever the flag says.
+export function localDemoEnabled(env: {
+  readonly DEV: boolean;
+  readonly MODE?: string;
+  readonly VITE_LOCAL_DEMO_ENABLED?: string;
+}): boolean {
+  return (env.DEV || env.MODE === lanPilotMode) && env.VITE_LOCAL_DEMO_ENABLED === 'true';
 }
 
 export interface DemoSignInSnapshot {

@@ -69,9 +69,11 @@ type HealthState = HealthSnapshot | { api: 'checking'; database: 'checking' };
 
 const initialHealth: HealthState = { api: 'checking', database: 'checking' };
 
-// The local demo's sign-in buttons, only on a dev server started by `npm run demo:up`. DEV is also tested here, where
-// a production build replaces it with false, so the bundler drops the demo code and its identities altogether.
-const localDemo = import.meta.env.DEV && localDemoEnabled(import.meta.env);
+// The local demo's sign-in buttons, only on a dev server started by `npm run demo:up` or in the LAN pilot's own build
+// (`vite build --mode lan-pilot`). DEV and MODE are also tested here, where an ordinary production build replaces them
+// with false and "production", so the bundler drops the demo code and its identities altogether. The literal must stay
+// in sync with lanPilotMode: a constant imported from another module would not be folded before tree shaking.
+const localDemo = (import.meta.env.DEV || import.meta.env.MODE === 'lan-pilot') && localDemoEnabled(import.meta.env);
 
 // The Simulator choice: in the local demo a two-minute loop, so the offline step has time; everywhere else the
 // six-point seeded scenario. Both are stored as 'simulator' and go through the same capture controller.

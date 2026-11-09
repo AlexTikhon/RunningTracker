@@ -209,7 +209,11 @@ const errorLogTargets = (config) => [...config.matchAll(/^\s*error_log\s+([^;]+)
 test('ADR-0062 proxy: both profiles send the error log only to the boundary FIFO', () => {
   assert.deepEqual(errorLogTargets(read('infra/proxy/nginx.production.conf')), ['stderr warn']);
   assert.deepEqual(errorLogTargets(read('infra/proxy/nginx.conf')), ['stderr warn']);
-  for (const path of ['infra/proxy/production-site.conf.template', 'infra/proxy/security-headers.conf']) {
+  for (const path of [
+    'infra/proxy/production-site.conf.template',
+    'infra/proxy/lan-pilot-site.conf.template',
+    'infra/proxy/security-headers.conf',
+  ]) {
     assert.deepEqual(errorLogTargets(read(path)), [], `${path} must not set an error log`);
   }
 });
@@ -229,7 +233,7 @@ test('ADR-0062 image: both proxy targets start nginx through the error-log bound
   assert.match(base, /^ENTRYPOINT \["\/usr\/local\/sbin\/nginx-error-log-boundary"\]$/mu);
   assert.match(base, /^CMD \[\]$/mu);
   assert.match(base, /^STOPSIGNAL SIGQUIT$/mu);
-  for (const name of ['production', 'transport']) {
+  for (const name of ['production', 'lan-pilot', 'transport']) {
     assert.match(stage(name), new RegExp(`^FROM proxy-base AS ${name}$`, 'mu'));
     assert.doesNotMatch(stage(name), /^(?:ENTRYPOINT|CMD)\b/mu, `${name} must not bypass the boundary`);
   }

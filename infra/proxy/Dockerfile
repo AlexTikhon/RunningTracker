@@ -43,6 +43,26 @@ COPY --from=web-build /app/apps/web/dist /usr/share/nginx/html
 
 EXPOSE 80 443
 
+# iPhone LAN pilot (docs/runbooks/iphone-lan-pilot.md): the same web app as a production bundle, built in its own Vite
+# mode with the demo sign-in buttons turned on. Only the lan-pilot image below copies it; the production and transport
+# images keep the ordinary build, which never contains the buttons. No Mapbox token: the pilot shows the map notices.
+FROM web-build AS web-build-lan-pilot
+WORKDIR /app/apps/web
+RUN VITE_LOCAL_DEMO_ENABLED=true npx vite build --mode lan-pilot --outDir dist-lan-pilot
+
+# The pilot proxy: the deployment profile's nginx configuration (access log without query strings, error-log boundary,
+# security headers) with a site for one configured private address or name, and an operator-trusted local certificate.
+FROM proxy-base AS lan-pilot
+
+# OpenSSL is present only to issue the pilot's own local certificates (scripts/lan-pilot-tls.mjs, --network none).
+RUN apk add --no-cache openssl && rm -f /etc/nginx/conf.d/default.conf
+COPY infra/proxy/nginx.production.conf /etc/nginx/nginx.conf
+COPY infra/proxy/security-headers.conf /etc/nginx/snippets/security-headers.conf
+COPY infra/proxy/lan-pilot-site.conf.template /etc/nginx/templates/site.conf.template
+COPY --from=web-build-lan-pilot /app/apps/web/dist-lan-pilot /usr/share/nginx/html
+
+EXPOSE 443
+
 # Local transport profile (P08.5). Keep it the LAST stage: it is the default build target.
 FROM proxy-base AS transport
 

@@ -65,6 +65,7 @@
     "transport:down": "docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.transport.yml rm --stop --force proxy api",
     "transport:verify": "node scripts/verify-transport-profile.mjs",
     "pilot:configure": "node scripts/lan-pilot.mjs configure",
+    "pilot:tls": "node scripts/lan-pilot.mjs tls",
     "pilot:up": "node scripts/lan-pilot.mjs up",
     "pilot:status": "node scripts/lan-pilot.mjs status",
     "pilot:down": "node scripts/lan-pilot.mjs down",

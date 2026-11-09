@@ -68,8 +68,9 @@ describe('App simulator choice', () => {
 
   // The choice is made when the module loads, from the same guard as the demo sign-in buttons, so each case loads a
   // fresh copy of App under its own environment.
-  async function markupWith(env: { DEV: boolean; VITE_LOCAL_DEMO_ENABLED?: string }): Promise<string> {
+  async function markupWith(env: { DEV: boolean; MODE?: string; VITE_LOCAL_DEMO_ENABLED?: string }): Promise<string> {
     vi.stubEnv('DEV', env.DEV);
+    if (env.MODE !== undefined) vi.stubEnv('MODE', env.MODE);
     if (env.VITE_LOCAL_DEMO_ENABLED !== undefined) vi.stubEnv('VITE_LOCAL_DEMO_ENABLED', env.VITE_LOCAL_DEMO_ENABLED);
     vi.resetModules();
     const { App: FreshApp } = await import('./App.js');
@@ -83,11 +84,19 @@ describe('App simulator choice', () => {
     expect(markup).not.toContain('Simulator · normal · seed 1');
   });
 
+  it('offers it in the LAN pilot build (mode lan-pilot, production bundle) with the flag', async () => {
+    const markup = await markupWith({ DEV: false, MODE: 'lan-pilot', VITE_LOCAL_DEMO_ENABLED: 'true' });
+
+    expect(markup).toContain('<option value="simulator">Simulator · local demo · about 2 min</option>');
+  });
+
   it.each([
     { DEV: true },
     { DEV: true, VITE_LOCAL_DEMO_ENABLED: 'false' },
     { DEV: true, VITE_LOCAL_DEMO_ENABLED: 'TRUE' },
     { DEV: false, VITE_LOCAL_DEMO_ENABLED: 'true' },
+    { DEV: false, MODE: 'production', VITE_LOCAL_DEMO_ENABLED: 'true' },
+    { DEV: false, MODE: 'lan-pilot' },
   ])('keeps the six-point seeded simulator otherwise (%o)', async (env) => {
     const markup = await markupWith(env);
 

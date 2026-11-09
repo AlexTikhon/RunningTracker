@@ -5,8 +5,9 @@
 #
 # Isolation: its own project name, network, PostgreSQL server, database name and volume. Nothing here can reach the
 # development or test database (they are in another project's container, on another network). PostgreSQL and the API
-# publish no port. The sign-in is the development session for the two demo people: not identity verification, and not
-# for real personal health data.
+# publish no port; only the proxy publishes HTTPS, on the one configured private address, with a certificate from the
+# pilot's own local authority (npm run pilot:tls). The sign-in is the development session for the two demo people: not
+# identity verification, and not for real personal health data.
 name: running-tracker-lan-pilot
 
 x-logging: &bounded-logging
@@ -118,7 +119,7 @@ services:
       timeout: 3s
       retries: 30
       start_period: 5s
-    networks: [data]
+    networks: [data, app]
     secrets: [runtime_database_url, maintenance_database_url, cursor_signing_key]
     restart: unless-stopped
     init: true
@@ -129,10 +130,56 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
+  # The only published container: HTTPS on the one configured private address (never 0.0.0.0), with the pilot's server
+  # certificate. The certificate authority's directory is never mounted here.
+  proxy:
+    image: running-tracker-proxy:lan-pilot
+    build:
+      context: ../..
+      dockerfile: infra/proxy/Dockerfile
+      target: lan-pilot
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PILOT_HOST: ${PILOT_HOST:?PILOT_HOST is required; run npm run pilot:configure}
+    ports:
+      - "${PILOT_BIND_ADDRESS:?PILOT_BIND_ADDRESS is required; run npm run pilot:configure}:${PILOT_PORT:?PILOT_PORT is required}:443"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:80/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    networks: [app, edge]
+    volumes:
+      - type: bind
+        source: ${PILOT_TLS_DIR:?PILOT_TLS_DIR is required; run npm run pilot:tls}
+        target: /etc/nginx/tls
+        read_only: true
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/cache/nginx
+      - /etc/nginx/conf.d
+    logging: *bounded-logging
+    mem_limit: 128m
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+
 networks:
   # No route out of the host and no published port: only the API reaches PostgreSQL.
   data:
     internal: true
+  # The proxy reaches the API here; neither can dial out through it.
+  app:
+    internal: true
+  # Only for publishing the proxy's one HTTPS port.
+  edge: {}
 
 secrets:
   postgres_password:
