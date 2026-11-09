@@ -32,6 +32,7 @@ describe('App', () => {
     const navigation = /<nav class="view-switcher" aria-label="Application view">(.*?)<\/nav>/u.exec(markup)?.[1] ?? '';
     expect([...navigation.matchAll(/<button[^>]*>([^<]+)<\/button>/gu)].map((match) => match[1])).toEqual([
       'Today',
+      'Trends',
       'Runner',
       'Coach',
       'Archive',

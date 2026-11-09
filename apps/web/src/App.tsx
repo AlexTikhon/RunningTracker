@@ -18,8 +18,10 @@ import {
   type AppView,
   type EditorIntent,
   type KeptDate,
+  type KeptMetric,
 } from './navigation-intent.js';
 import { TodayScreen } from './TodayScreen.js';
+import { TrendsScreen } from './TrendsScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { localDemoEnabled } from './demo-sign-in.js';
 import { DemoSignIn } from './DemoSignIn.js';
@@ -129,6 +131,9 @@ export function App() {
   // tied to the scope they were made in (navigation-intent.ts) and forgotten on sign-out.
   const [todayDate, setTodayDate] = useState<KeptDate | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
+  // The Trends range (its end date) and series, kept like Today's date (ADR-0084).
+  const [trendsEnd, setTrendsEnd] = useState<KeptDate | null>(null);
+  const [trendsMetric, setTrendsMetric] = useState<KeptMetric | null>(null);
   const [runnerResult, setRunnerResult] = useState<{ orgId: string; runId: string; signal: AbortSignal; userId: string } | null>(null);
   const resultTimeZone = useMemo(() => defaultTimeZone(), []);
   const captureController = useRef<CaptureController | null>(null);
@@ -170,6 +175,8 @@ export function App() {
     setWriter({ status: 'unclaimed' });
     setTodayDate(null);
     setEditorIntent(null);
+    setTrendsEnd(null);
+    setTrendsMetric(null);
   }, []);
   const { session, refreshSession, signOut, signOutState, verification } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
   const { choose: chooseOrganization, discovery, prefer: preferOrganization, reload: reloadOrganizations, selectedOrgId } =
@@ -816,10 +823,12 @@ export function App() {
     const next = navigationFor(action, viewScope);
     setRunnerResult(null);
     setEditorIntent(next.editor);
+    if (next.trendsEnd) setTrendsEnd(next.trendsEnd);
     setActiveView(next.view);
   };
   const navigation: Array<{ label: string; view: AppView }> = [
     { label: 'Today', view: 'today' },
+    { label: 'Trends', view: 'trends' },
     { label: 'Runner', view: 'runner' },
     { label: 'Coach', view: 'coach' },
     { label: 'Archive', view: 'archive' },
@@ -829,7 +838,8 @@ export function App() {
   ];
   const scopedIntent = inScope(editorIntent, viewScope);
   const checkInIntent = checkInIntentOf(scopedIntent);
-  // Back from the Meal log to Today, on the date the Meal log shows; Today reads it again when it opens.
+  // Back from the Meal log to Today on the date the Meal log shows, or from a date of the Trends range to Today on that
+  // date (Trends keeps its range for the way back); Today reads it again when it opens.
   const backToToday = (localDate: string) => {
     if (viewScope === null) return;
     setTodayDate({ localDate, scope: viewScope });
@@ -985,6 +995,27 @@ export function App() {
           />
         ) : (
           <section className="coach-prerequisite" role="status">{viewPrerequisite('daily overview')}</section>
+        )
+      )}
+
+      {activeView === 'trends' && (
+        session.status === 'ready' && selectedOrgId !== null && viewScope !== null ? (
+          // Owner-only 28-day trends (ADR-0084), mounted only while open and keyed like Today, so every opening reads the
+          // range again (after an edit or a deletion elsewhere too) and nothing crosses a change of scope. Its end date and
+          // series are kept here, for this scope only.
+          <TrendsScreen
+            key={viewScope}
+            initialMetric={inScope(trendsMetric, viewScope)?.metric ?? 'weightKg'}
+            onChooseMetric={(metric) => setTrendsMetric({ metric, scope: viewScope })}
+            onOpenDay={backToToday}
+            onSelectEndDate={(localDate) => setTrendsEnd({ localDate, scope: viewScope })}
+            orgId={selectedOrgId}
+            selectedEndDate={inScope(trendsEnd, viewScope)?.localDate ?? null}
+            signal={session.signal}
+            timeZone={resultTimeZone}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('trends')}</section>
         )
       )}
 

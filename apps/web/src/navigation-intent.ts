@@ -1,3 +1,5 @@
+import type { DailyTrendsMetric } from '@running-tracker/contracts';
+
 import type { TodayAction } from './daily-overview.js';
 
 // Which view the application shows, and the two small pieces of navigation state Today needs (ADR-0082). No routing
@@ -5,7 +7,7 @@ import type { TodayAction } from './daily-overview.js';
 // organization) they were made in and are ignored under any other scope, so a date chosen or an editor intent made by
 // one person or organization never opens for another, and nothing survives a sign-out.
 
-export type AppView = 'activity' | 'archive' | 'checkin' | 'coach' | 'meals' | 'runner' | 'today';
+export type AppView = 'activity' | 'archive' | 'checkin' | 'coach' | 'meals' | 'runner' | 'today' | 'trends';
 
 /** Opens an existing editor on one date: one of the Check-in tab's two editors, or the Meal log (ADR-0083). */
 export interface EditorIntent {
@@ -14,14 +16,23 @@ export interface EditorIntent {
   section: 'check-in' | 'meals' | 'movement';
 }
 
-/** The date Today shows, kept while the person navigates elsewhere and back. */
+/** The date Today shows, or the end date of the Trends range (ADR-0084), kept while the person navigates elsewhere and back. */
 export interface KeptDate {
   localDate: string;
   scope: string;
 }
 
-/** The view a Today action opens and, for the editors, the intent that carries the selected date. */
-export function navigationFor(action: TodayAction, scope: string): { editor: EditorIntent | null; view: AppView } {
+/** The series Trends shows, kept like its range. */
+export interface KeptMetric {
+  metric: DailyTrendsMetric;
+  scope: string;
+}
+
+/**
+ * The view a Today action opens and, for the editors, the intent that carries the selected date. The Trends action
+ * carries the selected date as the end of its range instead (`trendsEnd`); it opens no editor.
+ */
+export function navigationFor(action: TodayAction, scope: string): { editor: EditorIntent | null; trendsEnd?: KeptDate; view: AppView } {
   switch (action.kind) {
     case 'check-in':
       return { editor: { localDate: action.localDate, scope, section: 'check-in' }, view: 'checkin' };
@@ -33,6 +44,8 @@ export function navigationFor(action: TodayAction, scope: string): { editor: Edi
       return { editor: null, view: 'activity' };
     case 'runner':
       return { editor: null, view: 'runner' };
+    case 'trends':
+      return { editor: null, trendsEnd: { localDate: action.localDate, scope }, view: 'trends' };
   }
 }
 

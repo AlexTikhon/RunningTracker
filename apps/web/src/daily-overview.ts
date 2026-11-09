@@ -15,7 +15,9 @@ export type TodayAction =
   | { kind: 'meals'; localDate: string }
   | { kind: 'movement'; localDate: string }
   | { kind: 'activities' }
-  | { kind: 'runner' };
+  | { kind: 'runner' }
+  /** The 28-day trends ending on the selected date (ADR-0084). */
+  | { kind: 'trends'; localDate: string };
 
 export interface LabelledValue {
   label: string;

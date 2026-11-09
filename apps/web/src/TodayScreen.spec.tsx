@@ -185,6 +185,33 @@ describe('Today screen', () => {
     ]);
   });
 
+  it('opens the 28-day trends ending on the selected date, and not for an invalid date (ADR-0084)', () => {
+    const pressed = (dateInput: string) => {
+      const actions: TodayAction[] = [];
+      const element = TodayView({
+        dateInput,
+        onAction: (action) => actions.push(action),
+        onChooseDate: noop,
+        onRefresh: noop,
+        snapshot: { ...loadingOverview(DAY) },
+        timeZone: 'Europe/Warsaw',
+        today: TODAY,
+      });
+      const visit = (node: unknown): void => {
+        if (Array.isArray(node)) return node.forEach(visit);
+        if (node === null || typeof node !== 'object' || !('props' in node)) return;
+        const { props, type } = node as { props: { 'aria-label'?: string; children?: unknown; disabled?: boolean; onClick?: () => void }; type: unknown };
+        if (type === 'button' && props['aria-label']?.startsWith('Open 28-day trends') && !props.disabled) props.onClick?.();
+        visit(props.children);
+      };
+      visit(element);
+      return actions;
+    };
+    expect(pressed(DAY)).toEqual([{ kind: 'trends', localDate: DAY }]);
+    expect(pressed('2026-11-09')).toEqual([]);
+    expect(render()).toContain('aria-label="Open 28-day trends ending on Thu, 5 Nov 2026" type="button">28-day trends</button>');
+  });
+
   it('shows the meal card: no entry, and an action that opens the Meal log on the date (ADR-0083)', () => {
     const html = ready(overviewFixture());
     expect(html).toContain('<h2 id="today-meals-title">Meals</h2>');

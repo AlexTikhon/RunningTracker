@@ -28,6 +28,14 @@ describe('Today navigation', () => {
     expect(mealIntentDateOf(null)).toBeNull();
   });
 
+  it('opens Trends with the selected date as the end of its range, scoped, and without an editor intent (ADR-0084)', () => {
+    const next = navigationFor({ kind: 'trends', localDate: '2026-11-02' }, SCOPE);
+    expect(next).toEqual({ editor: null, trendsEnd: { localDate: '2026-11-02', scope: SCOPE }, view: 'trends' });
+    expect(inScope(next.trendsEnd ?? null, SCOPE)).toEqual({ localDate: '2026-11-02', scope: SCOPE });
+    expect(inScope(next.trendsEnd ?? null, '0|user-b|org-a')).toBeNull();
+    expect(inScope({ metric: 'steps' as const, scope: SCOPE }, '0|user-a|org-b')).toBeNull();
+  });
+
   it('opens Activities and Runner without any intent', () => {
     expect(navigationFor({ kind: 'activities' }, SCOPE)).toEqual({ editor: null, view: 'activity' });
     expect(navigationFor({ kind: 'runner' }, SCOPE)).toEqual({ editor: null, view: 'runner' });

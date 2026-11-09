@@ -178,6 +178,14 @@ export function TodayView({ dateInput, onAction, onChooseDate, onRefresh, snapsh
           Go to today
         </button>
         <button disabled={busy} onClick={onRefresh} type="button">{busy ? 'Updating…' : 'Refresh'}</button>
+        <button
+          aria-label={`Open 28-day trends ending on ${dateLabel}`}
+          disabled={dateProblem !== null}
+          onClick={() => onAction({ kind: 'trends', localDate: snapshot.localDate })}
+          type="button"
+        >
+          28-day trends
+        </button>
       </div>
       {dateProblem !== null && <p className="activity-form__failure" role="alert">{dateProblem}</p>}
       <p className="today-day">
