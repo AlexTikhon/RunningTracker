@@ -76,6 +76,7 @@ async function deleteOrganizations(client: pg.Client, orgIds: readonly string[])
   await client.query('DELETE FROM activities WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM daily_metrics WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM daily_movement WHERE org_id = ANY($1::uuid[])', ids);
+  await client.query('DELETE FROM meals WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM erasure_ledger WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM run_commands WHERE org_id = ANY($1::uuid[])', ids);
   await client.query('DELETE FROM run_shares WHERE org_id = ANY($1::uuid[])', ids);

@@ -63,6 +63,7 @@ export async function prepareTenantIsolationFixtures(
     await client.query('DELETE FROM activities');
     await client.query('DELETE FROM daily_metrics');
     await client.query('DELETE FROM daily_movement');
+    await client.query('DELETE FROM meals');
     await client.query('DELETE FROM erasure_ledger');
     await client.query('DELETE FROM run_commands');
     await client.query('DELETE FROM run_summaries');

@@ -145,11 +145,12 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
         skipped_unknown_organization: 0,
       });
       // ADR-0073: activity E was created before the backup and deleted after it. ADR-0074: so was check-in day G.
-      // ADR-0078: and movement day M (the backup is one migration behind, at 0037, which has daily_movement). The
+      // ADR-0078: and movement day M (the backup is one migration behind, at 0038, which has daily_movement). The
       // restored backup brought all three back, the ledger replay removed them again, and a second replay changed nothing.
       // ADR-0080 / ADR-0081: the older schema has the session and pending-login tables, so the source held one of each
-      // at backup time and the backup carried neither. The one migration applied after the restore is 0038 (bounded
-      // session cleanup), which replaces two functions and touches no rows.
+      // at backup time and the backup carried neither. The one migration applied after the restore is 0039 (the meal
+      // log, ADR-0083), which adds an empty table and replaces the erasure functions; meals are proven by their own
+      // current-schema restore test, because no older schema has the table and no artificial migration is added.
       expect(report.sessions).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
       expect(report.pendingLogins).toEqual({ cleared: 0, remaining: 0, restoredRows: 0, sourceRowsAtBackup: 1 });
       expect(report.erasures.exportedEntries).toBe(3);

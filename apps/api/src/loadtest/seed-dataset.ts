@@ -20,6 +20,7 @@ const seededTables = [
   'activities',
   'daily_metrics',
   'daily_movement',
+  'meals',
   'erasure_ledger',
   'access_restriction_journal',
   'run_deletion_journal',
