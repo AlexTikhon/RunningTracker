@@ -11,6 +11,7 @@ import {
   dailyMovementListResponseSchema,
   dailyMovementViewSchema,
   dailyOverviewSchema,
+  dailyTrendsSchema,
   ingestPointsResponseSchema,
   mealListResponseSchema,
   mealViewSchema,
@@ -39,6 +40,7 @@ import {
   type DailyMovementView,
   type PutDailyMovementRequest,
   type DailyOverview,
+  type DailyTrends,
   type CreateMealRequest,
   type MealListResponse,
   type MealView,
@@ -827,4 +829,20 @@ export async function readDailyOverview(target: DailyOverviewTarget, signal: Abo
   const overview = dailyOverviewSchema.parse(requireSuccess(response));
   if (overview.day.localDate !== target.localDate) throw new Error('The server returned a different date');
   return overview;
+}
+
+export interface DailyTrendsTarget {
+  endDate: string;
+  orgId: string;
+  timeZone: string;
+}
+
+/** The 28-day trends ending on `endDate` (ADR-0084). The zone decides "today" only; no record moves. */
+export async function readDailyTrends(target: DailyTrendsTarget, signal: AbortSignal): Promise<DailyTrends> {
+  const query = new URLSearchParams({ endDate: target.endDate, timeZone: target.timeZone });
+  const path = `/api/orgs/${encodeURIComponent(target.orgId)}/daily-trends?${query.toString()}`;
+  const response = await requestJson(path, { cache: 'no-store', credentials: 'same-origin', signal });
+  const trends = dailyTrendsSchema.parse(requireSuccess(response));
+  if (trends.range.endDate !== target.endDate) throw new Error('The server returned a different range');
+  return trends;
 }

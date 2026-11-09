@@ -478,3 +478,33 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .today-meal-totals dd { margin: 0; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
 .today-meal-totals .today-meal-totals__coverage { grid-column: 1 / -1; color: #8b968e; font-size: 0.78rem; font-weight: 500; text-align: left; }
 .today-meal-totals__missing dd:not(.today-meal-totals__coverage) { color: #8b968e; font-weight: 500; }
+
+/* Trends (ADR-0084): one series at a time, a simple SVG chart with gaps, and a table of every date. */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.trends-content { display: grid; gap: 1rem; min-width: 0; }
+.trends-content > p { margin: 0; }
+.trends-card { justify-items: stretch; }
+.trends-metrics { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; min-width: 0; margin: 0; padding: 0.5rem 0.8rem; border: 1px solid #2e3831; border-radius: 0.8rem; }
+.trends-metrics legend { padding: 0 0.3rem; color: #a9b5ad; font-size: 0.86rem; }
+.trends-metrics label { display: inline-flex; align-items: center; gap: 0.45rem; min-height: 2.75rem; cursor: pointer; }
+.trends-metrics input { width: 1.1rem; height: 1.1rem; margin: 0; accent-color: #b8f264; }
+.trends-coverage { color: #dfe8e1; }
+.trends-summary { display: grid; gap: 0.3rem; margin: 0; padding-left: 1.1rem; line-height: 1.45; overflow-wrap: anywhere; }
+.trends-chart { display: grid; gap: 0.4rem; min-width: 0; margin: 0; }
+.trends-chart svg { display: block; width: 100%; height: auto; }
+.trends-chart__grid { stroke: #2e3831; stroke-width: 1; stroke-dasharray: 4 4; }
+.trends-chart__axis { stroke: #4a554d; stroke-width: 1; }
+.trends-chart__tick { fill: #8b968e; font-size: 16px; font-variant-numeric: tabular-nums; }
+.trends-chart__gap { stroke: #6d786f; stroke-width: 2; stroke-linecap: round; }
+.trends-chart__line { stroke: #b8f264; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.trends-chart__point { fill: #b8f264; stroke: #151c17; stroke-width: 2; }
+.trends-chart__key { color: #8b968e; font-size: 0.78rem; line-height: 1.4; }
+.trends-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.trends-table th, .trends-table td { padding: 0.45rem 0.35rem; border-top: 1px solid #2a332d; text-align: left; vertical-align: middle; overflow-wrap: anywhere; }
+.trends-table thead th { border-top: 0; color: #8b968e; font-size: 0.76rem; font-weight: 600; }
+.trends-table tbody th { font-weight: 600; }
+.trends-table td:last-child { width: 1%; text-align: right; }
+.trends-table button { padding: 0.5rem 0.8rem; }
+.trends-table__value { display: block; font-weight: 700; font-variant-numeric: tabular-nums; }
+.trends-table__detail { display: block; color: #8b968e; font-size: 0.76rem; }
+.trends-table__missing .trends-table__value { color: #8b968e; font-weight: 500; }
