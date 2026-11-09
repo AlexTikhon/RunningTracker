@@ -24,6 +24,8 @@ import { createPgToolRunner, parsePgConnection } from '../src/backup/pg-tools.js
 import { parseDrillConfiguration } from '../src/backup/restore-safety.js';
 import { systemClock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
+import { withAuthenticatedTenantTransaction } from '../src/database/authenticated-tenant-transaction.js';
+import { createMeal, deleteMeal } from '../src/meals/meal-service.js';
 import { startTestProvider } from './oidc-test-provider.js';
 
 // These tests create, restore into, and drop throwaway *_restore_drill_* databases on the local
@@ -726,6 +728,104 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       const session = await request(recovered).get('/api/session').set('Cookie', sessionCookie).expect(200);
       expect(session.body).toMatchObject({ identity: { userId } });
       expect(provider.tokenRequestCount()).toBe(exchangesBefore + 1);
+    },
+    drillTimeout,
+  );
+
+  // ADR-0083: a meal deletion stays deleted through a real pg_dump/pg_restore. Current schema on purpose: the
+  // previous-schema drill predates the meals table (it is the newest migration), and no artificial migration is added to
+  // change that. The drill's own operations run every step; the meal entries are written and deleted by the application's
+  // service as the runtime role.
+  it(
+    'reapplies an exported meal deletion after a real backup and restore, twice without change, keeping a recreated and a surviving entry',
+    async () => {
+      const { databases, operations } = await harness('current');
+      await operations.prepare();
+      await operations.createSourceDatabase();
+      await operations.seedScenario();
+
+      const owner = await withAdmin(databases.source.ownerUrl, async (client) => {
+        const result = await client.query<{ org_id: string; user_id: string }>(
+          `SELECT org_id, user_id FROM memberships WHERE role = 'runner' AND active ORDER BY user_id LIMIT 1`,
+        );
+        return result.rows[0]!;
+      });
+      const runtime = new Pool({ connectionString: databases.source.runtimeUrl, max: 1 });
+      runtime.on('error', () => undefined);
+      cleanups.push(() => runtime.end());
+      const session = { userId: owner.user_id };
+      const asOwner = <Result>(work: Parameters<typeof withAuthenticatedTenantTransaction<Result>>[3]) =>
+        withAuthenticatedTenantTransaction(runtime, session, owner.org_id, work);
+      const entry = (idempotencyKey: string, title: string) => ({
+        energyKcal: 410.5,
+        idempotencyKey,
+        localDate: '2020-01-20',
+        mealType: 'dinner' as const,
+        proteinG: 0,
+        timeZone: 'Europe/Warsaw',
+        title,
+      });
+      const keys = {
+        deleted: 'e1000000-0000-4000-8000-000000000001',
+        recreated: 'e1000000-0000-4000-8000-000000000002',
+        survivor: 'e1000000-0000-4000-8000-000000000003',
+      };
+
+      // Before the backup: K (deleted after it), L (survives), and R deleted and logged again from the same form session,
+      // so the backup holds R's new version and the ledger holds the erasure of its old one.
+      const deletedAfterBackup = await asOwner((client) => createMeal(client, session, owner.org_id, entry(keys.deleted, 'Deleted after backup'), systemClock));
+      await asOwner((client) => createMeal(client, session, owner.org_id, entry(keys.survivor, 'Survivor'), systemClock));
+      const replaced = await asOwner((client) => createMeal(client, session, owner.org_id, entry(keys.recreated, 'Recreated'), systemClock));
+      await asOwner((client) => deleteMeal(client, session, owner.org_id, replaced.view.mealId));
+      const recreated = await asOwner((client) => createMeal(client, session, owner.org_id, entry(keys.recreated, 'Recreated'), systemClock));
+      expect(recreated.created).toBe(true);
+      expect(recreated.view.mealId).not.toBe(replaced.view.mealId);
+
+      const meals = (url: string) =>
+        withAdmin(url, async (client) => {
+          const result = await client.query<{ digest: string; id: string; title: string }>(
+            'SELECT id, title, md5(meal::text) AS digest FROM meals AS meal ORDER BY title',
+          );
+          return result.rows;
+        });
+      const atBackup = await meals(databases.source.ownerUrl);
+      expect(atBackup.map((row) => row.title)).toEqual(['Deleted after backup', 'Recreated', 'Survivor']);
+      await operations.takeBackup();
+
+      // After the backup: the drill's own deletions (they open the maintenance connection the export uses), then K.
+      await operations.deleteAfterBackup();
+      await asOwner((client) => deleteMeal(client, session, owner.org_id, deletedAfterBackup.view.mealId));
+      const exported = await operations.exportJournal();
+      // The drill's activity, check-in and movement erasures, R's older version and K.
+      expect(exported.erasureEntries).toBe(5);
+      await operations.copyJournalReadOnly();
+      await runtime.end();
+      cleanups.pop();
+
+      await operations.createTargetDatabase();
+      await operations.bootstrapTarget();
+      await operations.restoreBackup();
+      expect((await operations.migrate()).applied).toBe(0);
+      // The restored backup brought K back, exactly as it was.
+      expect(await meals(databases.target.ownerUrl)).toEqual(atBackup);
+
+      const first = await operations.reapplyErasures();
+      // Erased: the drill's three and K. Absent: R's older version (its id is not in the backup), so R stays.
+      expect(first.outcomes).toEqual({ absent: 1, erased: 4, skipped_different_record: 0 });
+      const afterFirst = await meals(databases.target.ownerUrl);
+      expect(afterFirst).toEqual(atBackup.filter((row) => row.title !== 'Deleted after backup'));
+      // The replayed deletion was journaled again on the recovered node, identifiers only.
+      const journaledAgain = await withAdmin(databases.target.ownerUrl, async (client) => {
+        const result = await client.query<{ record_id: string }>(`SELECT record_id FROM erasure_ledger WHERE entity_type = 'meal' AND record_id = $1`, [
+          deletedAfterBackup.view.mealId,
+        ]);
+        return result.rowCount;
+      });
+      expect(journaledAgain).toBeGreaterThanOrEqual(1);
+
+      const second = await operations.reapplyErasures();
+      expect(second.outcomes).toEqual({ absent: 5, erased: 0, skipped_different_record: 0 });
+      expect(await meals(databases.target.ownerUrl)).toEqual(afterFirst);
     },
     drillTimeout,
   );

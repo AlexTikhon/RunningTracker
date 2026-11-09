@@ -6,6 +6,7 @@ import { createDailyMetricsRouter } from './daily-metrics/daily-metrics.routes.j
 import { createDailyMovementRouter, dailyMovementNoStore } from './daily-movement/daily-movement.routes.js';
 import { DailyOverviewService, type DailyOverviewTestHooks } from './daily-overview/daily-overview-service.js';
 import { createDailyOverviewRouter, dailyOverviewNoStore } from './daily-overview/daily-overview.routes.js';
+import { createMealRouter, mealsNoStore } from './meals/meal.routes.js';
 import { createArchiveRouter } from './archive/archive.routes.js';
 import {
   ArchiveTileCache,
@@ -164,6 +165,7 @@ export function createApp({
   // Before the body parser, so that a malformed or oversized body's error answer is not cacheable either (ADR-0078).
   app.use('/api/orgs/:orgId/daily-movement', dailyMovementNoStore);
   app.use('/api/orgs/:orgId/daily-overview', dailyOverviewNoStore);
+  app.use('/api/orgs/:orgId/meals', mealsNoStore);
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
   if (config.OIDC && oidcLoginStore) {
@@ -234,6 +236,16 @@ export function createApp({
   app.use(
     '/api/orgs/:orgId/daily-movement',
     createDailyMovementRouter({
+      clock,
+      config,
+      pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+    }),
+  );
+  // The manual meal log (ADR-0083): owner-only, not an insight or weekly review source.
+  app.use(
+    '/api/orgs/:orgId/meals',
+    createMealRouter({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,

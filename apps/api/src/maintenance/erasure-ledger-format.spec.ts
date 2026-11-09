@@ -26,11 +26,12 @@ describe('erasure ledger format', () => {
     expect(parseErasureLedgerFile('f', text)).toEqual([entry, { ...entry, seq: '8' }]);
   });
 
-  it('knows activities, daily check-ins (ADR-0074) and daily movement (ADR-0078), and nothing else', () => {
+  it('knows activities, daily check-ins (ADR-0074), daily movement (ADR-0078) and meals (ADR-0083), and nothing else', () => {
     const daily = { ...entry, entityType: 'daily_metric' as const, seq: '9' };
     const movement = { ...entry, entityType: 'daily_movement' as const, seq: '10' };
-    expect(parseErasureLedgerFile('f', serializeErasureLedgerEntries([entry, daily, movement]))).toEqual([entry, daily, movement]);
-    for (const unknown of ['daily_steps', 'movement', 'daily_movement_import']) {
+    const meal = { ...entry, entityType: 'meal' as const, seq: '11' };
+    expect(parseErasureLedgerFile('f', serializeErasureLedgerEntries([entry, daily, movement, meal]))).toEqual([entry, daily, movement, meal]);
+    for (const unknown of ['daily_steps', 'movement', 'daily_movement_import', 'meals', 'meal_import', 'food']) {
       expect(() => parseErasureLedgerFile('f', `${JSON.stringify({ ...entry, entityType: unknown })}\n`)).toThrow('line 1 is not a valid entry');
     }
   });
@@ -58,8 +59,9 @@ describe('erasure ledger format', () => {
     expect(() => parseErasureLedgerFile('f', `${good}{not json}\n`)).toThrow('line 2 is not valid JSON');
     expect(() => parseErasureLedgerFile('f', `${good}\n`)).toThrow('line 2');
     for (const bad of [
-      { ...entry, entityType: 'meal' },
+      { ...entry, entityType: 'water_intake' },
       { ...entry, notes: 'content must never be here' },
+      { ...entry, entityType: 'meal', title: 'a meal title must never be here', energyKcal: 500 },
       { ...entry, recordId: entry.recordId.toUpperCase() },
       { ...entry, erasedAt: '2026-11-06T12:00:00.123Z' },
       { ...entry, recordCreatedAt: '2026-02-30T08:00:00.000000Z' },

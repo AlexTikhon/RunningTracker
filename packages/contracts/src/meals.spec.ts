@@ -21,6 +21,7 @@ import {
   mealListResponseSchema,
   mealPathSchema,
   mealViewSchema,
+  openApiDocument,
   putDailyMovementRequestSchema,
   updateMealRequestSchema,
 } from './index.js';
@@ -224,5 +225,35 @@ describe('meal path, list and view', () => {
     expect(mealAlreadySavedDetailsSchema.parse({ mealId: view.mealId })).toEqual({ mealId: view.mealId });
     expect(MEAL_NOT_FOUND).toBe('MEAL_NOT_FOUND');
     expect(MEAL_ALREADY_SAVED).toBe('MEAL_ALREADY_SAVED');
+  });
+});
+
+describe('meal OpenAPI operations', () => {
+  it('documents the date list, the idempotent create and the three entry operations, with CSRF on mutations', () => {
+    const list = openApiDocument.paths['/api/orgs/{orgId}/meals'];
+    const item = openApiDocument.paths['/api/orgs/{orgId}/meals/{mealId}'];
+    expect(Object.keys(list).sort()).toEqual(['get', 'post']);
+    expect(Object.keys(item).sort()).toEqual(['delete', 'get', 'put']);
+    expect(list.get.parameters).toEqual([
+      { $ref: '#/components/parameters/OrgId' },
+      { $ref: '#/components/parameters/MealLocalDate' },
+      { $ref: '#/components/parameters/Limit50' },
+      { $ref: '#/components/parameters/Cursor' },
+    ]);
+    for (const operation of [list.post, item.put, item.delete]) {
+      expect(operation.parameters).toContainEqual({ $ref: '#/components/parameters/CsrfToken' });
+      expect(operation.parameters).toContainEqual({ $ref: '#/components/parameters/Origin' });
+    }
+    expect(Object.keys(list.post.responses).sort()).toEqual(['200', '201', 'default']);
+    expect(Object.keys(item.put.responses).sort()).toEqual(['200', 'default']);
+    expect(Object.keys(item.delete.responses).sort()).toEqual(['204', 'default']);
+    const schemas = openApiDocument.components.schemas;
+    for (const name of ['CreateMealRequest', 'UpdateMealRequest', 'MealView', 'MealListResponse'] as const) expect(schemas[name]).toBeDefined();
+    // A request cannot carry a source, an owner or an id; the view names the only source.
+    for (const request of [schemas.CreateMealRequest, schemas.UpdateMealRequest]) {
+      expect(JSON.stringify(request)).not.toMatch(/"(source|userId|orgId|mealId)"/u);
+    }
+    expect(JSON.stringify(schemas.UpdateMealRequest)).not.toMatch(/"(localDate|timeZone|idempotencyKey)"/u);
+    expect(JSON.stringify(schemas.MealView)).toContain('manual');
   });
 });
