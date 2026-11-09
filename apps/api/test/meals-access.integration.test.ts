@@ -267,22 +267,40 @@ describe('ADR-0083 meals ACL, constraints and erasure (migration 0039)', () => {
   });
 
   it('takes created_at and updated_at from the database clock and moves only updated_at on an edit', async () => {
-    const before = await ownerPool.query<{ now: Date }>('SELECT clock_timestamp() AS now');
-    await insertAs(ids.orgA, ids.userOrgA, { orgId: ids.orgA, userId: ids.userOrgA, title: 'Timed' });
+    // Instants as full-precision (microsecond) text, compared by PostgreSQL: a JavaScript Date keeps only milliseconds.
+    const clock = async () => (await ownerPool.query<{ now: string }>(`SELECT ${utcMicroseconds('clock_timestamp()')} AS now`)).rows[0]!.now;
+    const ordered = async (...instants: string[]) =>
+      (
+        await ownerPool.query<{ ordered: boolean }>(
+          `SELECT ${instants
+            .slice(1)
+            .map((_, index) => `$${index + 1}::timestamptz <= $${index + 2}::timestamptz`)
+            .join(' AND ')} AS ordered`,
+          instants,
+        )
+      ).rows[0]!.ordered;
     const read = async () =>
       (
-        await ownerPool.query<{ created_at: Date; id: string; updated_at: Date }>(
-          `SELECT id, created_at, updated_at FROM meals WHERE title IN ('Timed', 'Retimed')`,
+        await ownerPool.query<{ created_at: string; id: string; updated_at: string }>(
+          `SELECT id, ${utcMicroseconds('created_at')} AS created_at, ${utcMicroseconds('updated_at')} AS updated_at
+           FROM meals WHERE title IN ('Timed', 'Retimed')`,
         )
       ).rows[0]!;
+    const beforeInsert = await clock();
+    await insertAs(ids.orgA, ids.userOrgA, { orgId: ids.orgA, userId: ids.userOrgA, title: 'Timed' });
+    const afterInsert = await clock();
     const inserted = await read();
-    expect(inserted.created_at.getTime()).toBeGreaterThanOrEqual(before.rows[0]!.now.getTime());
-    expect(inserted.updated_at).toEqual(inserted.created_at);
+    // Two independent clock_timestamp() defaults: each falls within the insert, but they may differ by microseconds and
+    // are not compared with each other.
+    expect(await ordered(beforeInsert, inserted.created_at, afterInsert)).toBe(true);
+    expect(await ordered(beforeInsert, inserted.updated_at, afterInsert)).toBe(true);
     await asRuntime(ids.orgA, ids.userOrgA, (client) => client.query(`UPDATE meals SET title = 'Retimed' WHERE title = 'Timed'`));
+    const afterEdit = await clock();
     const edited = await read();
     expect(edited.id).toBe(inserted.id);
-    expect(edited.created_at).toEqual(inserted.created_at);
-    expect(edited.updated_at.getTime()).toBeGreaterThan(inserted.updated_at.getTime());
+    expect(edited.created_at).toBe(inserted.created_at);
+    expect(await ordered(afterInsert, edited.updated_at, afterEdit)).toBe(true);
+    expect(edited.updated_at).not.toBe(inserted.updated_at);
   });
 
   it('exposes nothing through joins from runs, run_shares or memberships', async () => {

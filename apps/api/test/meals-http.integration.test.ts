@@ -80,6 +80,8 @@ const lunch = {
 };
 const titleOnly = { idempotencyKey: keys.b, localDate: '2026-10-05', mealType: 'snack', timeZone: 'Europe/Warsaw', title: 'Apple' };
 
+const utcMicroseconds = (column: string) => `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
 function cookiePair(response: request.Response): string {
   const header: unknown = response.headers['set-cookie'];
   const value: unknown = typeof header === 'string' ? header : Array.isArray(header) ? header[0] : undefined;
@@ -202,12 +204,29 @@ describe('ADR-0083 meal log HTTP API', () => {
   const storedVersion = async (mealId: string) =>
     (
       await ownerPool.query<{ created_at: string; id: string; updated_at: string }>(
-        `SELECT id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
-                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at
+        `SELECT id, ${utcMicroseconds('created_at')} AS created_at, ${utcMicroseconds('updated_at')} AS updated_at
          FROM meals WHERE id = $1`,
         [mealId],
       )
     ).rows[0];
+
+  // Each returned instant against its own stored column, compared by PostgreSQL at full (microsecond) precision. On
+  // creation created_at and updated_at are two independent clock_timestamp() defaults (migration 0039): they may differ
+  // by microseconds, and nothing promises they are equal, so a new entry's two instants are not expected to be equal.
+  const expectStoredInstants = async (view: MealView) => {
+    const stored = await ownerPool.query<{ created_at: string; created_matches: boolean; updated_at: string; updated_matches: boolean }>(
+      `SELECT ${utcMicroseconds('created_at')} AS created_at, created_at = $2::timestamptz AS created_matches,
+              ${utcMicroseconds('updated_at')} AS updated_at, updated_at = $3::timestamptz AS updated_matches
+       FROM meals WHERE id = $1`,
+      [view.mealId, view.createdAt, view.updatedAt],
+    );
+    expect(stored.rows).toHaveLength(1);
+    expect(stored.rows[0]).toMatchObject({ created_matches: true, updated_matches: true });
+  };
+
+  // True when the first instant is strictly before the second, compared by PostgreSQL at full precision.
+  const isBefore = async (earlier: string, later: string) =>
+    (await ownerPool.query<{ before: boolean }>('SELECT $1::timestamptz < $2::timestamptz AS before', [earlier, later])).rows[0]!.before;
 
   describe('create', () => {
     it('creates a title-only entry with 201: a database id and timestamps, manual provenance, every value unknown, no-store', async () => {
@@ -224,11 +243,36 @@ describe('ADR-0083 meal log HTTP API', () => {
         source: 'manual',
         timeZone: 'Europe/Warsaw',
         title: 'Apple',
-        updatedAt: view.createdAt,
+        updatedAt: view.updatedAt,
       });
+      await expectStoredInstants(view);
+      // The database clock, not the application's injected clock (fixed at defaultNow).
       const database = await ownerPool.query<{ now: Date }>('SELECT clock_timestamp() AS now');
-      expect(Math.abs(Date.parse(view.createdAt) - database.rows[0]!.now.getTime())).toBeLessThan(60_000);
+      for (const instant of [view.createdAt, view.updatedAt]) {
+        expect(Math.abs(Date.parse(instant) - database.rows[0]!.now.getTime())).toBeLessThan(60_000);
+      }
       expect(parseView(await read(owner, view.mealId).expect(200))).toEqual(view);
+    });
+
+    it('returns created_at and updated_at each from its own column at microsecond precision, even within one millisecond', async () => {
+      // Deterministic: two valid, distinct instants one microsecond apart inside the same millisecond, seeded through the
+      // owner connection (the BEFORE UPDATE trigger does not touch an INSERT). A view mapping updatedAt from created_at,
+      // or rounding either instant to milliseconds, cannot return both exactly.
+      const createdAt = '2026-10-05T08:00:00.123456Z';
+      const updatedAt = '2026-10-05T08:00:00.123457Z';
+      const seeded = await ownerPool.query<{ id: string }>(
+        `INSERT INTO meals (org_id, user_id, local_date, time_zone, meal_type, title, idempotency_key, creation_digest, created_at, updated_at)
+         VALUES ($1, $2, '2026-10-05', 'Europe/Warsaw', 'snack', 'Seeded', $3, sha256('seeded'::bytea), $4::timestamptz, $5::timestamptz)
+         RETURNING id`,
+        [ids.orgA, ids.userOrgA, keys.c, createdAt, updatedAt],
+      );
+      const mealId = seeded.rows[0]!.id;
+      const view = parseView(await read(owner, mealId).expect(200));
+      expect(view).toMatchObject({ createdAt, mealId, updatedAt });
+      await expectStoredInstants(view);
+      expect(await isBefore(view.createdAt, view.updatedAt)).toBe(true);
+      const listed = mealListResponseSchema.parse((await list(owner, { localDate: '2026-10-05' }).expect(200)).body);
+      expect(listed.items.find((item) => item.mealId === mealId)).toEqual(view);
     });
 
     it('stores the four values as sent and keeps a recorded zero apart from an unknown value', async () => {
@@ -423,14 +467,17 @@ describe('ADR-0083 meal log HTTP API', () => {
         title: 'Rice only',
         updatedAt: replaced.updatedAt,
       });
-      expect(Date.parse(replaced.updatedAt)).toBeGreaterThan(Date.parse(created.updatedAt));
-      expect((await storedVersion(created.mealId))!.created_at.slice(0, 23)).toBe(created.createdAt.slice(0, 23).padEnd(23, '0'));
+      // createdAt (equal to the creation's, above) is still the stored created_at, and updatedAt is the stored updated_at
+      // the edit's trigger wrote, later than the creation's at full precision.
+      await expectStoredInstants(replaced);
+      expect(await isBefore(created.updatedAt, replaced.updatedAt)).toBe(true);
     });
 
     it('answers an exact retry with 200 and changes nothing, not even updatedAt', async () => {
       const created = parseView(await create(owner, lunch).expect(201));
       const body = { carbohydrateG: 10, energyKcal: 99.9, mealType: 'snack', title: 'Bar' };
       const first = parseView(await replace(owner, created.mealId, body).expect(200));
+      await expectStoredInstants(first);
       const before = await storedVersion(created.mealId);
       expect(parseView(await replace(owner, created.mealId, body).expect(200))).toEqual(first);
       // 99.90 is 99.9; omitted and null are the same.

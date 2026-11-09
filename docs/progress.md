@@ -3931,3 +3931,24 @@ junctioned `node_modules` (contracts are identical across the commits); web unit
 opens; the zone is the client's word. Fixed 28-day window; no activities, GPS, active energy or macronutrients; no
 source-precedence read model for future imports. Chart tooltips are native titles (pointer only); the table is the
 accessible equivalent. No import. Hosted CI is reported with the change.
+
+## Meal timestamp test correction (2026-11-09)
+
+Test-only fix; no schema, default, migration or production change. Hosted run 42598072493 (attempt 2) failed
+`meals-http` "creates a title-only entry with 201": it expected `updatedAt` to equal `createdAt`, but migration 0039
+gives `created_at` and `updated_at` two independent `clock_timestamp()` defaults, which may differ by microseconds, and
+the API returns each at microsecond precision. Nothing in the schema or the contract promises equality on creation.
+
+Corrected: every returned instant is now checked against its own stored column by PostgreSQL at full precision
+(`created_at = $1::timestamptz`, `updated_at = $2::timestamptz`) on creation, after an edit and after an exact-retry PUT;
+"updatedAt moves" is compared in PostgreSQL instead of by millisecond `Date.parse`, and the millisecond `slice(0, 23)`
+check of `createdAt` is gone. `meals-access` "takes created_at and updated_at from the database clock" made the same
+assumption with millisecond `Date`s; it now checks each instant lies between database-clock readings taken before and
+after the insert (and the edit), at microsecond precision. New deterministic regression: a meal seeded through the owner
+connection with `created_at` .123456 and `updated_at` .123457 (one microsecond apart, same millisecond) is read by id and
+by list over HTTP and returns both exactly. **Mutation check** (red, then restored): mapping `updatedAt` from
+`created_at`, and rounding both instants to milliseconds, each fail the regression (and the edit/retry checks).
+
+Verified: focused meal integration files 85 passed; `npm run verify` 3,147 (scripts 90 / API 1611 / web 1174 /
+contracts 255 / fixtures 14 / simulator 3, unchanged); `npm run test:integration` 980 in 69 files (+1), 330 s. E2E not
+run (no runtime or web change).
