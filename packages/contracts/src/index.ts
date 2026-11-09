@@ -2,6 +2,7 @@ export * from './activities.js';
 export * from './daily-metrics.js';
 export * from './daily-movement.js';
 export * from './daily-overview.js';
+export * from './daily-trends.js';
 export * from './http.js';
 export * from './meals.js';
 export * from './models.js';

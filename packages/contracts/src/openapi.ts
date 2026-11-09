@@ -17,6 +17,7 @@ import {
   putDailyMovementRequestSchema,
 } from './daily-movement.js';
 import { dailyOverviewSchema } from './daily-overview.js';
+import { dailyTrendsSchema } from './daily-trends.js';
 import {
   createMealRequestSchema,
   mealListResponseSchema,
@@ -116,6 +117,7 @@ export const openApiDocument = {
     { name: 'Daily movement' },
     { name: 'Meals' },
     { name: 'Daily overview' },
+    { name: 'Daily trends' },
     { name: 'Insights' },
     { name: 'Shares' },
     { name: 'Live reads' },
@@ -497,6 +499,16 @@ export const openApiDocument = {
         responses: { '200': jsonResponse('The overview of the date.', 'DailyOverview'), ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/daily-trends': {
+      get: {
+        tags: ['Daily trends'],
+        summary: "Compute the signed-in person's 28-day trends of four daily series",
+        description:
+          "Owner-only derived health data (ADR-0084), computed by the app on every read and never stored; no language model is called, nothing is queued and nothing is written. Every source is read in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, by a fixed set of range statements; run sharing never adds another person's data. The range is the 28 calendar dates ending on `endDate` inclusive; when 2000-01-01 cuts it short, the response gives the actual first date and number of dates (`range.days`, the denominator of every coverage figure) and `shortenedByLowerBound: true`. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST); `timeZone` decides only that, never a record's date. Every record belongs to the calendar date it was stored for, whatever zone it was saved in. Four series, one entry per date: recorded weight (kg) and sleep duration (minutes) from the check-in, manually entered steps from the movement record, and food energy from the logged meal entries (entries logged, entries with energy, and the exact sum over those entries, or null when none records energy). A value that was not recorded is null, never zero, and adds nothing to any total or average; a recorded 0 is a value. The summary is defined by `summarizeDailyTrendDays`: weight's first, last and change only with at least two recorded dates; the sleep average over recorded dates only, rounded to the nearest minute with halves up; the recorded step total with its day count; the recorded food-energy total with both its day and its entry coverage. Food energy is never described as a complete diary: unlogged food is unknown. No note text, meal titles, other free text, balance, target, prediction or advice. Answers `Cache-Control: no-store`, errors included.",
+        parameters: [parameterRef('OrgId'), parameterRef('TrendsEndDate'), parameterRef('TrendsTimeZone')],
+        responses: { '200': jsonResponse('The trends of the range.', 'DailyTrends'), ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/weekly-review': {
       get: {
         tags: ['Insights'],
@@ -771,6 +783,20 @@ export const openApiDocument = {
           'IANA time zone name, for example Europe/Warsaw. Decides "today" and the interval in which manual activities and GPS runs started; check-ins and movement keep their stored date.',
         schema: { type: 'string', minLength: 1, maxLength: 64 },
       },
+      TrendsEndDate: {
+        name: 'endDate',
+        in: 'query',
+        required: true,
+        description: 'The last local calendar date of the range (YYYY-MM-DD), inclusive; not before 2000-01-01 nor after today in `timeZone`.',
+        schema: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+      },
+      TrendsTimeZone: {
+        name: 'timeZone',
+        in: 'query',
+        required: true,
+        description: 'IANA time zone name, for example Europe/Warsaw. Decides "today" (the latest allowed end date) only; every record keeps its stored date.',
+        schema: { type: 'string', minLength: 1, maxLength: 64 },
+      },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
       CsrfToken: { name: 'x-csrf-token', in: 'header', required: true, schema: { type: 'string' } },
@@ -900,6 +926,7 @@ export const openApiDocument = {
       WeeklyInsightView: jsonSchema(weeklyInsightViewSchema),
       WeeklyReview: jsonSchema(weeklyReviewSchema),
       DailyOverview: jsonSchema(dailyOverviewSchema),
+      DailyTrends: jsonSchema(dailyTrendsSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
       RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),
       RunSearchInterpretationResponse: jsonSchema(runSearchInterpretationResponseSchema),

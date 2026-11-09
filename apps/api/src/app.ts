@@ -6,6 +6,8 @@ import { createDailyMetricsRouter } from './daily-metrics/daily-metrics.routes.j
 import { createDailyMovementRouter, dailyMovementNoStore } from './daily-movement/daily-movement.routes.js';
 import { DailyOverviewService, type DailyOverviewTestHooks } from './daily-overview/daily-overview-service.js';
 import { createDailyOverviewRouter, dailyOverviewNoStore } from './daily-overview/daily-overview.routes.js';
+import { DailyTrendsService, type DailyTrendsTestHooks } from './daily-trends/daily-trends-service.js';
+import { createDailyTrendsRouter, dailyTrendsNoStore } from './daily-trends/daily-trends.routes.js';
 import { createMealRouter, mealsNoStore } from './meals/meal.routes.js';
 import { createArchiveRouter } from './archive/archive.routes.js';
 import {
@@ -70,6 +72,7 @@ export interface AppDependencies {
   archiveTileScheduler?: ArchiveTileGenerationScheduler;
   /** Barriers inside the daily overview's read transaction, for snapshot tests. */
   testOnlyDailyOverviewHooks?: DailyOverviewTestHooks;
+  testOnlyDailyTrendsHooks?: DailyTrendsTestHooks;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
   /** Replaces the configured interpreter in tests, so that no test can reach a provider. */
   testOnlyRunSearchInterpreter?: RunSearchInterpreter;
@@ -95,6 +98,7 @@ export function createApp({
   archiveTilePipeline,
   archiveTileScheduler,
   testOnlyDailyOverviewHooks,
+  testOnlyDailyTrendsHooks,
   testOnlyFaultInjector,
   testOnlyRunSearchInterpreter,
   testOnlyWeeklyInsightProvider,
@@ -104,6 +108,7 @@ export function createApp({
 }: AppDependencies): Express {
   if (
     (testOnlyDailyOverviewHooks ||
+      testOnlyDailyTrendsHooks ||
       testOnlyFaultInjector ||
       testOnlyRouter ||
       testOnlyRunSearchInterpreter ||
@@ -165,6 +170,7 @@ export function createApp({
   // Before the body parser, so that a malformed or oversized body's error answer is not cacheable either (ADR-0078).
   app.use('/api/orgs/:orgId/daily-movement', dailyMovementNoStore);
   app.use('/api/orgs/:orgId/daily-overview', dailyOverviewNoStore);
+  app.use('/api/orgs/:orgId/daily-trends', dailyTrendsNoStore);
   app.use('/api/orgs/:orgId/meals', mealsNoStore);
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', createSessionRouter(config, sessions));
@@ -262,6 +268,18 @@ export function createApp({
         ...(testOnlyDailyOverviewHooks ? { hooks: testOnlyDailyOverviewHooks } : {}),
       }),
       sessionManager: sessions,
+    }),
+  );
+  // 28-day trends (ADR-0084): read-only, derived on every read from the person's own daily records.
+  app.use(
+    '/api/orgs/:orgId/daily-trends',
+    createDailyTrendsRouter({
+      sessionManager: sessions,
+      trends: new DailyTrendsService({
+        clock,
+        pool: pool as Pick<Pool, 'connect'>,
+        ...(testOnlyDailyTrendsHooks ? { hooks: testOnlyDailyTrendsHooks } : {}),
+      }),
     }),
   );
   app.use('/api/orgs/:orgId/insights', createWeeklyInsightRouter({ config, insights, sessionManager: sessions }));
