@@ -64,8 +64,8 @@ Weekly insights (AI layer, [ADR-0076](adr/0076-weekly-insights.md)) exist but st
 model met the target. The first deterministic analytics item is the **weekly review**
 ([ADR-0077](adr/0077-deterministic-weekly-review.md)): one week's coverage, values, GPS distance gaps and limitations,
 described in sentences written by code from the same aggregate, computed on every read, never stored, and independent of
-any model. It is the primary weekly view; AI text is an optional, separately labelled section. Multi-week trends,
-baselines and a unified manual/GPS read model remain to be decided.
+any model. It is the primary weekly view; AI text is an optional, separately labelled section. A first multi-week view
+exists since ADR-0084 (below); baselines, comparisons and a unified manual/GPS read model remain to be decided.
 
 Daily movement is [ADR-0078](adr/0078-manual-daily-movement.md): `daily_movement` (steps, user-reported active
 energy), one manual record per person per local date, owner-only, replaced by PUT, with server-owned `source:
@@ -92,6 +92,15 @@ erasures in the ledger (proven through a real backup and restore at the current 
 Today (`daily-overview-2`) shows the number of entries and each recorded total with its own coverage, computed exactly in
 the same snapshot; food energy is never combined with active energy, and there are no targets, balances or advice. Food
 text parsing (AI layer) would propose entries into this table for the person to confirm; it is not built.
+
+**Trends** is [ADR-0084](adr/0084-daily-trends.md): a read-only view of the 28 calendar dates ending on a chosen date,
+with four daily series (recorded weight, sleep duration, manually entered steps, food energy recorded), computed on every
+read from three range statements in one snapshot and never stored. Every record keeps its stored date (the zone only
+decides "today"); a missing value is null and never counts as zero; each series states its coverage against the actual
+range; food energy keeps day and entry coverage apart and is never called a complete diary. The summary is modest and
+defined once (weight change only with two recorded dates, sleep average over recorded dates, recorded totals with their
+coverage). The chart never joins values across a missing date. No predictions, correlations, targets or advice; no
+activities, GPS, active energy or macronutrients yet.
 
 The next planned phase is an iPhone/HealthKit integration spike, which must first establish access to macOS/Xcode and a
 physical iPhone; it is not started (the current setup is Windows and an iPhone, without a Mac).

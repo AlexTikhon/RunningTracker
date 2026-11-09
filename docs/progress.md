@@ -3873,3 +3873,61 @@ differ between the commits): contracts, API and web typecheck at both; unit suit
 assumes at most 10,000 entries a day). Last write wins between devices. The zone is the client's word and "today" is
 fixed when the screen opens. Meals are not in the weekly review, trends or AI input. No import. Hosted CI is reported
 with the change.
+
+## 28-day Trends over stored daily records (ADR-0084) (2026-11-09)
+
+Branch `feat/daily-trends` from `main` at 3f81515 (manual meal log, ADR-0083). One bounded slice: a read-only Trends view
+of four daily series over the 28 calendar dates ending on a chosen date. No migration, table, persisted aggregate, job,
+model call, chart library, dependency or infrastructure; Today, the weekly review, AI insights (inputs, hashes, policies,
+source gates), erasure and the Runner are unchanged. Windows and an iPhone without a Mac: nothing native or HealthKit.
+
+- **API.** `GET /api/orgs/:orgId/daily-trends?endDate=&timeZone=`: owner-only, strict query (repeated or unknown
+  parameters refused), `no-store` before the body parser, end date not after today in the zone by the injected clock.
+  One REPEATABLE READ READ ONLY transaction with three range statements (check-ins: weight and sleep; manual movement:
+  steps; manual meals grouped by date: entries, entries with energy, `numeric` sum), RLS plus organization and owner
+  predicates. Range by calendar arithmetic, shortened only by 2000-01-01 with the actual day count. Contract
+  `daily-trends-1`; the summary is `summarizeDailyTrendDays` (weight first/last/change only with two recorded dates, in
+  hundredths; sleep average over recorded dates, nearest minute, halves up; recorded step total; food energy with day and
+  entry coverage, integer tenths). OpenAPI updated.
+- **Web.** A **Trends** view (second navigation button): end date with "End today", Refresh, range label, series radio
+  group, coverage and summary sentences, a plain SVG line chart (dots for recorded values, lines only between consecutive
+  recorded dates, a mark under the axis for a missing date, zero on the baseline), the missing-data explanation and a table
+  of every date with "Open" (Today on that date). `DailyTrendsController` on the Today controller's rules. Today gains
+  "28-day trends" (opens Trends ending on its date). End date and series kept per scope; sign-out forgets them.
+
+**Executed checks.**
+
+| Command | Before (3f81515) | After |
+|---|---|---|
+| `npm run verify` | 3,082: scripts 90, API 1,600, web 1,138, contracts 237, fixtures 14, simulator 3 | 3,147, first run green: scripts 90, API 1,611 (+11: statements, day mapping, clock and zone edges, statement count), web 1,174 (+36: presentation, chart geometry, controller, screen, API client, navigation, Today action), contracts 255 (+18); others unchanged |
+| `npm run test:integration` | 964 in 68 files | 979 in 69 files (+15, `daily-trends-http`), 341 s, none skipped |
+| Full `npm run test:e2e` | 143 | 146 passed in 16.3 min (`chromium` and `chromium-oidc`; +3, below; the harness spec's deliberately failing test is expected to fail) |
+
+`daily-trends-http` (15): empty range; recorded zeros and averages over recorded dates only (a mood-only check-in and an
+energy-only movement day are no values); title-only and partial meal coverage with no titles returned; exact energy
+(10 x 0.1 = 1; 40,001.1 across dates); single versus several weights (-17.7 exact); both range ends and nothing outside;
+lower-bound shortening (10, 1 and 28 days); stored-date attribution from five zones across 2026-10-25; "today" at UTC+14
+and the refusal in Warsaw; isolation (owner, coach member, run-sharing grantee, other organization 403, anonymous 401);
+one snapshot under interleaved writes; next read after edits and deletions through the existing APIs; no writes; validation
+(dates, zones, missing, extra, repeated parameters, bad organization, malformed body), all `no-store`.
+
+New Chromium file `trends.spec.ts` (3): values saved through the check-in, movement and meal editors; Trends opened from
+Today; steps with a recorded zero and no line across the gap, weight difference -0.3 kg, sleep average over one date,
+food energy "1 of 2 logged entries" with no titles; a date opened on Today, the soup deleted and the weight edited there;
+Trends reopened from the navigation on the same range and series with the changed values and coverage (-0.5 kg, "0 of 1
+logged entry"); another end date kept across navigation; sign-out forgets it. At 375 px with a wide font: no horizontal
+scroll, controls, radios, chart and row actions inside the viewport, and a held answer for an abandoned end date never
+shown. A simulated run keeps capturing and uploading (6 points) while Trends is open.
+
+**Mutation check** (red, then restored): the trends read without the REPEATABLE READ snapshot fails the snapshot test
+(14 of 15 pass). **Looked at, and fixed:** a 375 px screenshot showed the chart's top axis label ("123,456") clipped by
+a fixed left margin; the margin now follows the longest label (unit-tested), and the food-energy axis shows its value in
+one-decimal precision instead of rounding 350.5 to 351.
+
+**Commits compile on their own.** Commits 1 and 2 were typechecked (contracts, API, web) in a detached worktree with
+junctioned `node_modules` (contracts are identical across the commits); web unit tests at commit 2: 1,172 passed.
+
+**Not established.** No iPhone, Safari or WebKit evidence (Chromium viewport only). "Today" is fixed when the screen
+opens; the zone is the client's word. Fixed 28-day window; no activities, GPS, active energy or macronutrients; no
+source-precedence read model for future imports. Chart tooltips are native titles (pointer only); the table is the
+accessible equivalent. No import. Hosted CI is reported with the change.
