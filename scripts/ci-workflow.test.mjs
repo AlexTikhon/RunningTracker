@@ -93,5 +93,5 @@ test('CI: the Chromium suite runs sharded, and a failure uploads one merged HTML
 });
 
 test('CI: the README shows this workflow\'s status badge', () => {
-  assert.match(read('README.md'), /\n\[!\[CI\]\(https:\/\/github\.com\/AlexTikhon\/RunningTracker\/actions\/workflows\/ci\.yml\/badge\.svg\?branch=main\)\]/u);
+  assert.match(read('README.md'), /\n\[!\[CI\]\(https:\/\/github\.com\/AlexTikhon\/SomaLane\/actions\/workflows\/ci\.yml\/badge\.svg\?branch=main\)\]/u);
 });

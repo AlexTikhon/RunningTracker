@@ -1,0 +1,630 @@
+# SomaLane technical reference
+
+The detailed, per-feature reference that used to be the README: setup details, API behaviour, data rules, operations
+and verification notes for every slice up to ADR-0085, kept as written. The project overview and quick start are in
+the [README](../README.md); decisions are in [adr/](adr/), evidence in [progress.md](progress.md). Package, database
+and environment names keep the original Running Tracker identifiers (see [product-direction.md](product-direction.md)).
+
+A learning project: record a run in the browser (or from a simulator), let a coach with explicit permission watch it live, and keep an archive of finished runs drawn on a map. A React web app and an Express 5 API sit on PostgreSQL/PostGIS, with row-level security as the tenant and sharing boundary.
+
+**Status (2026-11-06): resumed with a new product direction.** Running Tracker is becoming a broader activity, health and nutrition tracker with an AI coach on a local Ollama model, built one vertical slice at a time; the roadmap and the principles every slice follows (SQL computes numbers, the model only proposes and the person confirms, health data is owner-only) are in [docs/product-direction.md](product-direction.md). Step 1 (ADR-0072) adds owner-only manual activities and an **Activity** tab; runs are unchanged. Before resuming, the project was paused after the four-commit map lifecycle closeout, as a local demo/portfolio project. Finished-run review includes the published archive-track API (ADR-0066), owner details (ADR-0067) and View result after a confirmed Finish (ADR-0068), with device synchronization and publication tracked separately. Maintenance has independent server-side SQL limits (ADR-0069), bounded per-task failure backoff and retry/recovery visibility (ADR-0070). ADR-0071 gives maps exclusive DOM hosts and shared allocation cleanup, with installed-runtime browser checks. Returning? Start with [docs/pause-handoff.md](pause-handoff.md). Current evidence is in [the freeze report](reports/freeze-verification-2026-11-06.md); remaining architectural priorities are in [the review](reports/architecture-review-2026-11-06.md).
+
+What exists, stage by stage (the evidence for each is in [docs/progress.md](progress.md), the design in [docs/SDD.md](SDD.md) and the ADRs in [docs/adr/](adr/)):
+
+- P00–P02: the reproducible workspace and the complete database schema and ACL boundary.
+- P03–P08: the session/API lifecycle, durable runner capture with an offline buffer, versioned summaries, revision-fixed live-track reads, authorized SSE with coach recovery, and a verified HTTPS/HTTP/2 transport profile.
+- P09: the revisioned archive HTTP boundary, RLS-filtered PostGIS vector tiles, a bounded cache with atomic invalidation, and the archive map source lifecycle.
+- P10: raw-point retention, owner and annual run deletion with tombstones, and the off-host deletion journal.
+- P11: metrics and logs, reproducible load datasets, a concurrent load scenario, plan and size measurements, and one confirmed optimization.
+- P12: OpenID Connect sign-in with invite-only identities, a single-host production profile, encrypted backups with an executed restore drill, and recovery of current permissions.
+- After P12, a first search stage (ADR-0056): **My runs** under the archive map lists the signed-in person's own finished runs by period, distance and sort, from published summaries only. The search itself is deterministic and has no language model; its strict contract is what the next item feeds.
+- After ADR-0056 (ADR-0057): an **optional, off-by-default** box above the filters turns a sentence in English or Russian into a proposal for the form, through one OpenAI Responses API request on an explicit click. The proposal only fills the editable filters; the person applies them through the existing search. Bounded per-process admission limits, a hard deadline, no stored text, and a deterministic fake for every test. **OpenAI has never been called and no live evaluation has been executed.** A second, local provider (Ollama, development only) was tried on 2026-10-14 with `qwen3:8b` on this workstation's CPU: every search case missed the 10 s deadline, and of the few answers that arrived most were wrong, so no accuracy is claimed for any model (`docs/progress.md`, the two Ollama entries); see `docs/runbooks/run-search-ai.md`.
+- After P12: a Chromium browser suite and reload recovery (ADR-0047), recovery from session expiry, rejected uploads and login flooding (ADR-0048), and the application shell a person actually uses: the organization comes from the memberships instead of a pasted UUID, and Sign out is a button (ADR-0049).
+- Later: runner → coach sharing from the Runner tab and from My runs (ADR-0063, ADR-0064), the coach's live map (ADR-0065), a bounded Firefox gate for the core workflows, a one-command local demo (`demo:doctor`, `demo:up`) with **Demo runner** and **Demo coach** sign-in buttons and a two-minute demo simulator, owner deletion of a finished run from My runs, and a pre-demo browser smoke.
+- Resumed direction, step 1 (ADR-0072): a generic `activities` table (run, walk, ride, hike, swim, strength, other) entered by hand in a new **Activity** tab, visible only to the person who recorded it; ADR-0073 adds an erasure ledger so a deleted activity stays deleted after a backup restore, and a per-form idempotency key against duplicates. See "Manual activities" below.
+- Step 2 (ADR-0074): a daily **Check-in** tab (weight, sleep, sleep quality, mood, soreness, a note) with one record per person per local date, owner-only, replaced as a whole by PUT; deletions use the same erasure ledger. See "Daily check-in" below.
+- Step 3 (ADR-0076): a **weekly insight** on the Check-in tab. Code computes every number as a fact; an optional local Ollama model writes number-free prose and cites facts that must match exactly; erasure of a source can never leave an insight behind. Off by default. See "Weekly insights" below.
+- Deterministic weekly review (ADR-0077): the primary weekly view on the Check-in tab, computed and worded by code on every read (coverage with explicit denominators, values, GPS distance gaps, limitations), never stored and independent of any model; the AI insight is an optional section below it. See "Weekly review" below.
+- Daily movement (ADR-0078): a **Movement** section on the Check-in tab for steps and active energy entered by hand, one manual record per person per local date, owner-only, with server-owned "manual" provenance and erasures in the same ledger. No phone or watch import yet, no calorie estimate, and not an input of AI insights; the weekly review shows it (ADR-0079). See "Daily movement" below. The working product direction is called SomaLane (`docs/product-direction.md`); no package, identifier or repository was renamed.
+- Today (ADR-0082): a read-only **Today** view, first in the navigation, showing one day of the person's own check-in, manually entered movement, manual activities and GPS runs, computed on every read and never stored; its actions open the existing check-in and movement editors on the selected date. The visible application name is now **SomaLane** (header and browser title only). See "Today" below.
+- Meal log (ADR-0083): a **Meal log** view for meals and snacks logged by hand per local date, each with a meal type, a title and optional user-reported totals for the whole entry (food energy, protein, carbohydrate, fat); owner-only, idempotent creation per form session, edit and delete, erasures in the same ledger. Today shows the number of entries and each recorded total with its own coverage ("recorded for 2 of 3 logged entries"). Nothing is estimated, looked up or judged, and meals are not an input of AI insights. See "Meal log" below.
+- Trends (ADR-0084): a read-only **Trends** view of the 28 calendar dates ending on a chosen date: recorded weight, sleep duration, manually entered steps and food energy, each with its coverage against the actual range, a simple chart that leaves gaps for missing dates, and a table of every date. Computed on every read in one snapshot and never stored; a missing value is unknown and never counts as zero; food energy keeps day and entry coverage apart and is never called a complete food diary. Opened from Today on its date, and a date opens Today. See "Trends" below.
+
+**What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider, and the OpenID Connect flow only in Chromium), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. The full browser suite runs in Chromium; desktop Firefox, on Windows, runs the 18-test core gate (runner, coach and sharing workflows) and the 24-test pre-demo smoke, but not OpenID Connect sign-in or the real map runtime; no real Mapbox basemap was rendered in any browser; nothing ran in Safari, a mobile browser or on a phone with real GPS (an iPhone web pilot over LAN HTTPS is prepared and verified on the workstation, ADR-0085; its phone checks have not been run). No production RPO or RTO is claimed. Two read endpoints named in the SDD (`/archive/runs`, `/live/nearby`) remain unimplemented; `/runs/{runId}/track?mode=archive` now reads published finished-run geometry and metrics (ADR-0066). To see it working locally, run `npm run demo:up` and press **Demo runner** or **Demo coach** in the browser; the walk-through and its recorded rehearsal are in [docs/runbooks/demo.md](runbooks/demo.md), and interview notes in [docs/interview.md](interview.md).
+
+## Prerequisites
+
+- Node.js 24 LTS (`>=24.11.0 <25`) with ICU
+- npm 11 (`>=11.6.0 <12`)
+- Docker Engine/Desktop with Compose v2
+- free local ports: API `3000`, web `5173`, PostGIS `5433`
+
+The database uses `5433` because `5432` was already occupied on the initial Windows workstation. The Compose service is bound to `127.0.0.1` only.
+
+## Start from a clean checkout
+
+```powershell
+Copy-Item .env.example .env
+npm ci
+npm run db:up
+npm run db:bootstrap
+npm run db:bootstrap:test
+npm run db:migrate
+npm run db:migrate:test
+npm run dev
+```
+
+On POSIX systems, replace the first command with `cp .env.example .env`.
+
+For the local demo only, `npm run demo:doctor` (read-only) and `npm run demo:up` do the database steps above, seed
+the demo people and start the API and web app on loopback with local sign-in for those people (a **Demo runner** and
+a **Demo coach** button on the signed-out page), without editing `.env`; Ctrl+C stops what it started. See
+[docs/runbooks/demo.md](runbooks/demo.md), section 0.
+
+The example `LIVE_TRACK_CURSOR_SIGNING_KEY` is a fixed local-only HMAC key. Every
+deployment must supply independent canonical base64url key material of at least
+32 bytes; production startup rejects the example value.
+
+- Web: http://127.0.0.1:5173
+- API liveness: http://127.0.0.1:3000/api/health/live
+- API readiness: http://127.0.0.1:3000/api/health/ready
+
+The Vite server proxies `/api` to the API, so browser requests remain same-origin in development. Liveness describes the HTTP process only; readiness returns `503` when PostgreSQL cannot be reached.
+
+The archive view loads without an external provider during tests and local API work. To render the interactive base map, set the public `VITE_MAPBOX_ACCESS_TOKEN` value before starting Vite. The token is exposed to browser code by design; do not place a secret server credential in this variable.
+
+## Local session fixture
+
+Local login is opt-in. In `.env`, set `LOCAL_AUTH_ENABLED=true` and list only fixture identities in `LOCAL_AUTH_USER_IDS`. The example keeps it disabled. The API refuses local auth in `APP_ENV=production` before constructing the database pool or opening a listener.
+
+The bootstrap flow is:
+
+1. `POST /api/session` with exact configured `Origin`, `Content-Type: application/json`, and `{ "userId": "<allowlisted UUID>" }`.
+2. Retain the opaque `HttpOnly`, `SameSite=Strict`, `Path=/` cookie and the returned `csrf.token` in memory.
+3. Send the token in `x-csrf-token` plus the exact configured `Origin` on authenticated mutations.
+4. `GET /api/session` refreshes identity/expiry/CSRF data; `DELETE /api/session` revokes the server record and clears the cookie (the web app's Sign out button calls it, ADR-0049).
+5. `GET /api/organizations` lists the organizations in which the session's identity has an active membership: identifiers only, ordered, at most 100, no parameters, an empty list for a person with none. The web app uses it instead of asking for a UUID.
+
+`SESSION_COOKIE_SECURE=false` is an explicit local HTTP exception allowed only in development/test. Deployed HTTPS uses `Secure`. Sessions are stored in PostgreSQL ([ADR-0080](adr/0080-durable-postgresql-sessions.md)): an API restart keeps them until their original expiry, and a sign-out on one API instance is refused by every instance on the same database from the next request. The table holds only the token's SHA-256 digest, the user, the CSRF token and the issue/expiry instants, and the runtime role reaches it only through create/read/revoke-by-digest functions (it cannot list sessions). When the store cannot answer (`SESSION_STORE_TIMEOUT_MS`, default 2 s) the API answers `503 SESSION_STORE_UNAVAILABLE` with `Retry-After`, never 401, and leaves the cookie alone; a sign-out whose delete did not commit is a 503 that keeps the cookie. There is no in-memory fallback and no cache. `SESSION_STORE_MAX_ENTRIES` caps the shared store (give every instance the same value): sign-in first removes expired sessions; if the store is still full it refuses the new sign-in (`503 SESSION_STORE_UNAVAILABLE`, or `sign_in_error=unavailable` after OIDC) and never signs out a live session ([ADR-0075](adr/0075-session-store-capacity-ci-shape-checkin-delete.md)). Maintenance purges expired rows every `SESSION_PURGE_INTERVAL_MS` (default 15 minutes). A database restore signs everyone out (backups exclude session rows and the restore runs `restore:clear-sessions`). Pending OIDC sign-ins are stored in PostgreSQL too ([ADR-0081](adr/0081-durable-pending-oidc-logins.md)): a sign-in that is at the identity provider during an API restart completes afterwards, and one started on one API instance can complete on another with the same database and OIDC configuration. Each attempt is single use across instances (consumed before the code is exchanged; at most once, so a crash at the wrong moment means signing in again), backups exclude it and `restore:clear-sessions` clears it. Production sign-in is OpenID Connect, below.
+
+## Runner control screen
+
+After a local session exists, the web app discovers it through same-origin `GET /api/session`. The app then lists the organizations the person belongs to (`GET /api/organizations`): the only one is selected on its own, several are offered in a selector, and none shows a plain explanation. Nothing asks for an identifier. Start a run in the selected organization, then use the revision-aware pause, resume, and finish controls. Each mutation carries the session CSRF token, validates the shared response contract, and disables concurrent controls until the server confirms the result.
+
+The Runner tab can share the run with a coach (ADR-0063). `GET /api/orgs/:orgId/coaches` lists the organization's other active coaches as identifiers only. It answers members only, through a narrow `SECURITY DEFINER` function from migration 0024. `GET /api/orgs/:orgId/runs/:runId/shares` gives the run's owner, and nobody else, both permission flags of each share. **Share** grants live and history access together and says so, **Revoke** removes it, and a partial grant made through the API is shown as it is. Sharing does not go through the lifecycle queue or the writer lease, and nothing is queued offline. After every change the panel reads the shares again, and a new session, organization or run discards any answer still on its way.
+
+**Sign out** (ADR-0049) calls `DELETE /api/session` and waits for the server; if that fails the person stays signed in and is told so. Signing out stops capture and upload and clears what the page shows, and deletes nothing durable: the buffered points, the exact unresolved requests, the run pointer and a rejected queue stay in IndexedDB under the user, so the same person recovers them on the next sign-in (ADR-0048) and a different person on the same browser sees none of it. A run that was recording stays recording on the server until it is finished or the existing auto-finish rule ends it. The provider session is not ended (no provider-side logout). The organization of a run is fixed when it starts, so choosing another organization to look at cannot redirect it.
+
+The screen exposes recording, network, upload, and server/error state separately. Before a start or lifecycle mutation reaches the network, P05.2 stores its exact idempotency identity and payload in IndexedDB under the authenticated user. It removes that request only in the local transaction that records the server-confirmed run snapshot. Offline requests and unknown transport outcomes therefore survive reload and can use “Retry same request” after reconnection.
+
+The same user/organization/run-scoped database atomically allocates a positive bigint `seq` and stores the canonical point. IndexedDB uses a zero-padded sequence index so bounded reads retain numeric bigint order without converting `seq` to JavaScript `number`.
+
+P05.3 uploads at most 100 ordered points at a time and deletes only the exact sequence set after a validated acknowledgement accounts for every sent point. Network/5xx/408/425/429 outcomes retain the batch and use capped exponential full-jitter backoff; `Retry-After` is honoured for rate limiting. Other 4xx responses and incomplete success acknowledgements stop that run's worker, preserve its points, and trigger a best-effort authoritative run read. A stale lifecycle command is cleared only when a `CONTROL_REVISION_CONFLICT` can be reconciled to a successfully read and durably stored server run.
+
+P05.4 adds a user-scoped IndexedDB lease with a per-tab UUID and monotonically increasing fencing token. One tab atomically acquires and renews the 15-second lease; stale owners cannot renew or release a successor's token. Non-owner tabs keep controls and upload work read-only and expose explicit ownership retry. A reload recovers ownership on its own within about a quarter of a second: every tab holds a Web Lock for its owner id, and a claimant replaces a live lease only when it has proven its holder gone, with a higher fencing token (ADR-0047). The chosen capture source is stored with the user profile and restored with the run. This is a same-origin tab guarantee, not a distributed offline device lock; cross-device races still fail through the server's one-active-run constraint, command revisions, and canonical point conflicts.
+
+P05.5 connects device Geolocation and the seeded `normal` simulator through one capture-source interface. Capture runs only while the server-confirmed run is recording and this tab owns the lease. Each start/resume/recovery session atomically allocates a durable `segmentId`; every source callback is serialized, rechecks ownership, and verifies the fencing token again inside the IndexedDB point transaction. Stopped generations cannot persist late callbacks, and a 100-measurement queue limit fails visibly instead of growing without bound. Offline capture remains buffered and wakes the existing uploader after every durable append. Recording and tests remain independent of the optional public Mapbox token introduced by P09.5; actual device permission/background behavior still requires browser/device QA.
+
+## Shared API contracts
+
+`packages/contracts` is transport-only and has no Express or PostgreSQL dependency. It exports strict Zod schemas and inferred types for session/error responses, runs, commands, shares, points, track pages, archive/nearby reads, and the `live.state` SSE payload. PostgreSQL `bigint` revisions and point sequences cross HTTP as bounded decimal strings; URL numeric query inputs are parsed and range-checked by their query schemas.
+
+The generated OpenAPI 3.1 artifact is `packages/contracts/openapi/openapi.json`. `npm run build --workspace=@running-tracker/contracts` regenerates it from the runtime schemas and ordinary-HTTP route metadata. It documents the browser sign-in routes `GET /api/auth/login` and `GET /api/auth/callback` as redirects (they exist only when OpenID Connect is configured), and flags two operations that remain unimplemented (`/archive/runs`, `/live/nearby`) with `x-implemented: false`. `apps/api/test/openapi-routes.spec.ts` requests every documented operation from the real app and fails if one is missing or a flagged one has appeared. `/live` is intentionally documented separately in `packages/contracts/sse.md`, including connection-local `streamId`/`sequence`, session-expiry disconnects, and reconnect recovery. P08.1 implements framing, polling, heartbeat, and bounded transport; P08.2 adds open-stream authorization revalidation; P08.3 consumes the strict events in the coach screen; P08.4 binds selected runs to atomic snapshot/change synchronization; ADR-0065 draws the authorized positions and the selected, committed tracks on an optional Mapbox map, with lines only where the server's edge annotations connect points.
+
+## Search my runs
+
+`GET /api/orgs/:orgId/runs/search` (ADR-0056) answers "my finished runs", not "runs I can read": the owner is the session's identity and never a parameter, the SQL states `run.user_id = session.userId` and `status = 'finished'` even though row-level security would also expose shared runs, and the generic `GET /runs` list is unchanged. It is registered before `/runs/:runId`.
+
+| Query field | Meaning |
+|---|---|
+| `timeZone` (required) | IANA name such as `Europe/Warsaw`; offsets and abbreviations are refused. |
+| `preset` | `this-month` or `previous-month`: whole calendar months in `timeZone`, relative to the server's injected clock. |
+| `fromDate`, `toDate` | Instead of `preset`: inclusive local calendar dates, at most 366 days. The server converts them to `[start of fromDate, start of the day after toDate)` over `started_at`; a local day is not 24 hours around a clock change, so days are located from the zone's offset history, not by adding hours. |
+| `minDistance`, `maxDistance`, `distanceUnit` | Decimals with up to three fraction digits in `km` or `mi` (1609.344 m); the unit is required with a bound and refused without one. Converted exactly to metres and compared inclusively with stored metres, so display rounding never decides. |
+| `sort` | `newest` (default), `longest`, `shortest`; ties end in the run id. |
+| `limit`, `cursor` | At most 50 per page, keyset paging; a cursor from another person, organization, period, bound or sort is `400 INVALID_CURSOR`. |
+
+An item needs a published summary whose source revision equals the run's data revision, and nothing is recalculated from GPS points. Finished runs of the person in the period without one are not items; `pendingSummaryCount` counts them before any distance filter, and the screen says they are still being processed. Unknown fields (an owner among them) are a 400. In the web app the Archive tab shows the filters (editable draft), the applied filters (separately), pending runs, an error with Retry, and a next-page button; the browser's time zone is used and displayed. `npm run demo:seed:search` adds deterministic synthetic data (see [docs/runbooks/demo.md](runbooks/demo.md), "Search my runs").
+
+## Manual activities
+
+Step 1 of the [product direction](product-direction.md), decided in [ADR-0072](adr/0072-owner-only-manual-activities.md). Migration `0025_activities.sql` adds an `activities` table with database-enforced ranges and row-level security that lets only the owner select, insert and delete their own rows, in their current organization, with an active membership. Coaches and other members see nothing, whatever run sharing grants they hold; there is no UPDATE and nothing for the maintenance role.
+
+| Request | Answer |
+|---|---|
+| `PUT /api/orgs/:orgId/activities/:activityId` | Idempotent create with a client-generated UUID and a per-form-session `idempotencyKey` (ADR-0073): `201` created, `200` for an equal retry (also under a new id with the same key), `409 ACTIVITY_CONFLICT` for a different payload under the same id, `409 ACTIVITY_ALREADY_SAVED` (with `details.activityId`) when the key already saved different details, `404` for an id that belongs to another member. |
+| `GET /api/orgs/:orgId/activities` | The person's own activities, newest first, `limit` up to 50 (default 20), keyset `cursor` bound to the person and organization. |
+| `GET /api/orgs/:orgId/activities/:activityId` | One of the person's activities, otherwise `404 ACTIVITY_NOT_FOUND`. |
+| `DELETE /api/orgs/:orgId/activities/:activityId` | Hard delete recorded in the erasure ledger in the same statement, `204` in every case (deleted, already gone, never existed, someone else's). If the ledger cannot be written, nothing is deleted and the answer is `500`. |
+
+A body has `type`, `startedAt` (UTC, not before 2000-01-01 and not more than 24 hours after server time), `durationS` (1 s to 48 h), `idempotencyKey` (UUID, unique per owner and organization), and optional `distanceM` (0 to 1000 km), `rpe` (1 to 10) and `notes` (1 to 1000 characters). Unknown fields are refused, the source is always `manual`, and every answer is `Cache-Control: no-store`. Mutations need the session, an allowed Origin and the CSRF token, like every other mutation.
+
+**Deletion survives a restore (ADR-0073).** Migration `0026_erasure_ledger.sql` records every activity deletion (identifiers and timestamps, no content) in an outbox that the maintenance process exports to `DELETION_JOURNAL_DIR` beside the run deletion journal. After restoring a backup, `npm run restore:reapply-erasures -- --journal-dir <copy>` deletes the activities again, idempotently; the restore drill proves it. If an edited save meets an earlier save that went through, the form says so and offers to open the saved activity instead of creating a duplicate.
+
+**Limits.** An erasure committed but not yet exported when the node is lost (one export interval while the exporter is healthy) can still come back with an old backup. A manual activity of type `run` is not linked to, or deduplicated with, the GPS runs in `runs`; a unified read model belongs to the analytics phase. There is no edit endpoint, no import, no per-person row cap and no chart yet. Since ADR-0074 an activity's `createdAt` comes from the database clock (migration `0029`), not the application clock.
+
+## Daily check-in
+
+Step 2, decided in [ADR-0074](adr/0074-daily-check-in-local-date-and-put-replace.md). Migration `0028_daily_metrics.sql` adds `daily_metrics`: one row per person, organization and **local calendar date**, with nullable `weight_kg` (20 to 400, two decimals), `sleep_minutes` (0 to 1440), `sleep_quality` and `mood` (1 to 5), `soreness` (0 to 10) and `note` (1 to 500 characters), at least one of them present. Row-level security is the activities template plus an owner-only UPDATE; the runtime role may write only the value columns, and `created_at`/`updated_at` come from the database clock.
+
+| Request | Answer |
+|---|---|
+| `PUT /api/orgs/:orgId/daily-metrics/:localDate` | Creates (`201`) or fully replaces (`200`) the day; omitted fields are cleared. Naturally idempotent: an exact retry changes nothing, not even `updatedAt`. The body carries `timeZone` (IANA): the date must not be after today in that zone by server time, nor before 2000-01-01. The zone of the first write is stored and never rewritten. |
+| `GET /api/orgs/:orgId/daily-metrics?from=&to=` | The person's days with a record in an inclusive range of at most 92 days, ascending. |
+| `GET /api/orgs/:orgId/daily-metrics/:localDate` | The day, otherwise `404 DAILY_METRICS_NOT_FOUND`. |
+| `DELETE /api/orgs/:orgId/daily-metrics/:localDate` | Hard delete recorded in the erasure ledger (`daily_metric`), `204` in every case; replayed by `restore:reapply-erasures` after a restore. |
+
+The web tab defaults to today in the browser's zone, can pick an earlier date (and shows what is stored for it), and lists the last 14 days with the empty days visible. There is no stored profile time zone: the browser's zone is sent with each write, as for run search. A day with a record can be deleted from the form after an inline confirmation ([ADR-0075](adr/0075-session-store-capacity-ci-shape-checkin-delete.md)); while a save or a deletion is pending the other waits, and so does a change of date. No charts, and no protection against two devices overwriting each other's edit of the same day (last write wins).
+
+## Daily movement
+
+Decided in [ADR-0078](adr/0078-manual-daily-movement.md). Migration `0033_daily_movement.sql` adds `daily_movement`: one row per person, organization, **local calendar date** and source, with nullable `steps` (0 to 200,000) and `active_energy_kcal` (0 to 20,000, one decimal; the active energy the person reports, not resting energy, total expenditure or food), at least one of them present; a recorded 0 is a value, a missing value is unknown. `source` is `'manual'`, set by the database default: the runtime role cannot write it, so a client cannot claim an import. A later phone/watch importer stores its own rows under its own source value and never overwrites the manual one; a read model then picks one source per day and never adds them. Access is the check-in template (owner-only RLS, value-column UPDATE only, database clocks); run sharing never grants it. Migration `0034` keeps the erasure replay of a movement day from touching weekly insights, which do not read movement. Migration `0035` (ADR-0079) makes `active_energy_kcal` an unconstrained `numeric` with range and precision CHECKs, so the database refuses (rather than rounds) a value such as 412.55 or -0.01, exactly as the API does.
+
+| Request | Answer |
+|---|---|
+| `PUT /api/orgs/:orgId/daily-movement/:localDate` | Creates (`201`) or fully replaces (`200`) the day's `steps` and `activeEnergyKcal`; omitted fields are cleared. An exact retry changes nothing, not even `updatedAt`. The body carries `timeZone` (IANA) and no owner, organization or source: the date must not be after today in that zone by server time, nor before 2000-01-01; the zone of the first write is kept. |
+| `GET /api/orgs/:orgId/daily-movement?from=&to=` | The person's manual days in an inclusive range of at most 92 days, ascending. |
+| `GET /api/orgs/:orgId/daily-movement/:localDate` | The day with `source: "manual"`, otherwise `404 DAILY_MOVEMENT_NOT_FOUND`. |
+| `DELETE /api/orgs/:orgId/daily-movement/:localDate` | Hard delete recorded in the erasure ledger (`daily_movement`), `204` in every case; replayed by `restore:reapply-erasures` after a restore. |
+
+Every response is `Cache-Control: no-store`, errors included (also a malformed JSON body's). Example:
+
+```http
+PUT /api/orgs/7b1e…/daily-movement/2026-11-07
+Content-Type: application/json
+X-CSRF-Token: …
+
+{"steps": 8042, "activeEnergyKcal": 412.5, "timeZone": "Europe/Warsaw"}
+
+201 Created
+Cache-Control: no-store
+
+{"activeEnergyKcal": 412.5, "createdAt": "2026-11-07T18:02:11.204Z", "localDate": "2026-11-07", "source": "manual",
+ "steps": 8042, "timeZone": "Europe/Warsaw", "updatedAt": "2026-11-07T18:02:11.204Z"}
+```
+
+The Check-in tab's **Movement** section (below the check-in history) has its own date, "Steps (optional)" and "Active energy (kcal)" fields, the source line "Manually entered", Save, Delete after confirmation and a 14-day history; it says that phone and watch synchronization is not connected yet. A confirmed save or deletion of movement refreshes the weekly review (in the week it shows) and never the AI insight.
+
+## Today
+
+Decided in [ADR-0082](adr/0082-today-daily-overview.md). `GET /api/orgs/:orgId/daily-overview/:localDate?timeZone=<IANA>` returns one day of the signed-in person's own records, read in one `REPEATABLE READ READ ONLY` transaction and never stored (`Cache-Control: no-store`, errors included). The date must not be before 2000-01-01 nor after today in `timeZone` by server time.
+
+| Part | What it holds | Which records |
+|---|---|---|
+| `day` | The date, the requested zone, the half-open UTC interval of the date in that zone (23 or 25 hours around a daylight saving change), `inProgress` | |
+| `checkIn` | `recorded`; sleep, sleep quality, mood, soreness, weight (`null` when not recorded); `hasNote` (never the note text); the stored zone | The check-in **stored for the date**, whatever zone it was saved in |
+| `movement` | `recorded`; steps and active energy as entered; `source: "manual"`; the stored zone | The manual movement **stored for the date** |
+| `manualActivities` | `count` and `enteredDurationS` (the full entered duration), in total and by type | Activities that **started** on the date in `timeZone`, also one that continued past midnight |
+| `gpsRuns` | `count`, `withCurrentDistance`, `withoutCurrentDistance`, and `currentDistanceM` (the sum over the runs with a current summary only; `null` when none) | The person's own finished runs that **started** on the date; never a run shared with them |
+| `meals` | `count`, `source: "manual"`, and for each of `energyKcal`, `proteinG`, `carbohydrateG`, `fatG`: `recordedEntries` (entries with that value) and `total` (exact sum over exactly those entries; `null` when none, `0` for recorded zeros). No title | The meal entries **logged for the date** (ADR-0083) |
+| `provenance` | `computed_by_app`, `persisted: false`, `single_read_only_transaction`, `daily-overview-2`, the computation time | |
+
+Manual activities and GPS runs are never added together, movement is never added to either, nothing is estimated, and a missing value is unknown, never 0. The web **Today** view (first in the navigation; the page still opens on Runner, whose run recovery is unchanged) defaults to today in the browser's zone, can pick an earlier date, has a manual Refresh and no polling, and keeps its date while you look at other views. "Add/Edit check-in" and "Add/Edit movement" open the existing editors on the Check-in tab for the selected date; "Add a meal"/"Open meal log" opens the Meal log on that date; "Open Activities" and "Open Runner" open those views. Opening Today again reads the day again, so edits and deletions show at once.
+
+## Meal log
+
+Decided in [ADR-0083](adr/0083-manual-meal-log.md). Migration `0039_meals.sql` adds `meals`: one row per logged meal or snack, with a database-generated id, the owner and organization from the session context, the **local date** and IANA zone of its first write, a meal type (`breakfast`, `lunch`, `dinner`, `snack`, `other`), a required title (1 to 120 characters, no NUL, not blank) and four optional values that are the person's **totals for the whole entry**, not per 100 g: `energyKcal` (0 to 20,000), `proteinG`, `carbohydrateG` and `fatG` (0 to 2,000 g each), at most one decimal. A title-only entry is valid; a missing value is unknown, a recorded 0 is a value. The columns are unconstrained `numeric` with range and precision CHECKs, so the database refuses (never rounds) what the contract refuses. `source` is `'manual'`, set by the database. Owner-only RLS; only type, title and values are updatable; run sharing never grants access.
+
+| Request | Answer |
+|---|---|
+| `POST /api/orgs/:orgId/meals` | Creates an entry (`201`). The body carries `idempotencyKey` (one UUID per form session), `localDate`, `timeZone`, `mealType`, `title` and the optional values; the date must not be before 2000-01-01 nor after today in that zone by server time. The same key with the same request answers `200` with the entry (also after it was edited); the same key with a different request is `409 MEAL_ALREADY_SAVED` with `details.mealId`, and nothing is stored. |
+| `GET /api/orgs/:orgId/meals?localDate=YYYY-MM-DD` | The date's entries in the order they were logged; `limit` 1 to 50 (default 20) and a keyset `cursor` bound to the person, organization and date. |
+| `GET /api/orgs/:orgId/meals/:mealId` | The entry with `source: "manual"`, otherwise `404 MEAL_NOT_FOUND`. |
+| `PUT /api/orgs/:orgId/meals/:mealId` | Replaces type, title and the values (omitted are cleared). The date and zone cannot change. An exact retry changes nothing, not even `updatedAt`. |
+| `DELETE /api/orgs/:orgId/meals/:mealId` | Hard delete recorded in the erasure ledger (`meal`, identifiers and version only), `204` in every case; replayed by `restore:reapply-erasures` after a restore. |
+
+Every response is `Cache-Control: no-store`, errors included. Example:
+
+```http
+POST /api/orgs/7b1e…/meals
+Content-Type: application/json
+X-CSRF-Token: …
+
+{"idempotencyKey": "0b5e2f9e-9c1b-4f6e-8a3d-2b7c9d1e4f60", "localDate": "2026-11-08", "timeZone": "Europe/Warsaw",
+ "mealType": "lunch", "title": "Lentil soup", "energyKcal": 410.5, "proteinG": null}
+
+201 Created
+Cache-Control: no-store
+
+{"carbohydrateG": null, "createdAt": "2026-11-08T11:42:03.117Z", "energyKcal": 410.5, "fatG": null, "localDate": "2026-11-08",
+ "mealId": "5f0c…", "mealType": "lunch", "proteinG": null, "source": "manual", "timeZone": "Europe/Warsaw", "title": "Lentil soup",
+ "updatedAt": "2026-11-08T11:42:03.117Z"}
+```
+
+The **Meal log** view (navigation entry after Check-in) has a date picker, the form (meal type, title, "Food energy (kcal)", "Protein (g)", "Carbohydrate (g)", "Fat (g)", the source line "Manually entered"), edit in the same form, delete after confirmation, and the date's entries with Load more. After an unconfirmed save, saving again reuses the same idempotency key, so no duplicate is created; a new entry gets a new key. Opened from Today it starts on Today's date, and "Back to Today" returns there. Meals are not an input of AI insights, are not shown in the weekly review, and food energy is never combined with active energy.
+
+## Trends
+
+Decided in [ADR-0084](adr/0084-daily-trends.md). `GET /api/orgs/:orgId/daily-trends?endDate=YYYY-MM-DD&timeZone=Europe/Warsaw` is owner-only, read-only and `Cache-Control: no-store` (errors included). It reads the person's own check-ins, manual movement and manual meal entries with three range statements in one REPEATABLE READ READ ONLY transaction and stores nothing. `endDate` must not be before 2000-01-01 nor after today in `timeZone` by server time; the zone decides only that, and every record counts on the calendar date it was stored for.
+
+| Part | Holds |
+|---|---|
+| `range` | `startDate`, `endDate`, `days` (28, or fewer when 2000-01-01 cuts the range; the denominator of every coverage figure), `requestedDays: 28`, `shortenedByLowerBound`, `timeZone`, `today`, `includesToday` |
+| `days` | Every date of the range, oldest first: `weightKg`, `sleepMinutes`, `steps` (each `null` when not recorded; a recorded 0 stays 0) and `foodEnergy` (`loggedEntries`, `entriesWithEnergy`, and `recordedKcal`: the exact sum over those entries, `null` when none has energy) |
+| `summary` | Weight: `daysRecorded`, and `first`, `last`, `changeKg` only with at least two recorded dates. Sleep: `daysRecorded`, `recordedTotalMinutes`, `averageMinutes` over recorded dates only (nearest minute, halves up). Steps: `daysRecorded`, `recordedTotal`. Food energy: `daysWithEntries`, `daysWithEnergy`, `loggedEntries`, `entriesWithEnergy`, `recordedTotalKcal` |
+| `provenance` | `computed_by_app`, `persisted: false`, `single_read_only_transaction`, `daily-trends-1`, the computation time |
+
+No note text, titles, active energy, macronutrients, GPS or activity figures, targets, balances, predictions or advice. The web **Trends** view (second in the navigation) has an end-date picker ("End today"), a manual Refresh (no polling), a series selector, the coverage and summary sentences, an SVG line chart that joins only neighbouring recorded dates (a short mark under the axis is a date without a value), and a table of every date with "Open" to see it on Today. Today's "28-day trends" opens Trends ending on Today's date. The end date and series are kept while you look at other views; opening Trends again reads the range again, so edits and deletions show at once.
+
+## Weekly review
+
+Decided in [ADR-0077](adr/0077-deterministic-weekly-review.md). `GET /api/orgs/:orgId/weekly-review?weekStart=YYYY-MM-DD&timeZone=<IANA>` returns one week (Monday to Sunday, in the zone of the person's check-ins that week, otherwise `timeZone`) computed from the person's own check-ins, manual activities and GPS runs in one read-only snapshot: coverage with explicit denominators (days in the week, days with numeric check-in values, days with each metric; a note-only check-in is not a day with values; a sleep-quality rating never counts as a sleep duration), the facts, sentences written by code with stable codes (for example `sleep_duration.coverage`: "Sleep duration was recorded on 3 of 4 days with check-in values."), data gaps, and provenance (`source: computed_by_app`, `persisted: false`). No model call, nothing queued or stored, `Cache-Control: no-store`; it works with `WEEKLY_INSIGHTS_PROVIDER=off`. The Check-in tab shows it first and re-reads it after a check-in is saved or deleted and on Refresh; the AI insight below it is optional and separate.
+
+Since [ADR-0079](adr/0079-weekly-review-movement.md) (`weekly-review-2`) the review also has a review-only `movement` part, read as a second statement in the same snapshot: the stored local dates Monday to Sunday, manual rows only; days with a record; steps and active energy each counted against the 7 calendar days; recorded totals (`null` when nothing was recorded, `0` when only zeros were; energy added as integer tenths, so 0.1 + 0.2 is 0.3); and the seven days with missing values, recorded zeros, source and stored zone. Statements such as `movement.steps_recorded` ("Steps were recorded on 2 of 7 days, 8,042 steps in total on those days; the other 5 days are unknown.") name the coverage; movement is never added to activity or GPS figures, never moves the week's zone, and is not part of the facts, coverage or data gaps that AI insights share. The Check-in tab shows it as "Steps and active energy" inside the review and refreshes the review (only) after a movement save or deletion.
+
+## Weekly insights
+
+Decided in [ADR-0076](adr/0076-weekly-insights.md), operated with [docs/runbooks/weekly-insights.md](runbooks/weekly-insights.md). `POST /api/orgs/:orgId/insights/weekly` asks for one week (Monday to Sunday); `GET ...?weekStart=` reads it with its status (`queued`, `running`, `ready`, `generation_failed`, `failed_grounding`, `failed_safety`, `interrupted`) and its freshness (`current`, `stale`, `outdated_policy`), recomputed from the current data on every read. Owner-only, like the data.
+
+- **Numbers come from code.** The server builds a fact catalogue (value, unit, direction, weekday) from check-ins, manual activities and GPS runs (a GPS distance only from a summary that is current for the run's data; manual and GPS runs never summed). The model writes prose with no numbers, days or dates and cites facts as claims; a claim that differs from its fact in value, unit, direction or day discards the answer. The prose is shown labelled as AI-generated, next to the facts rendered by code. The prose's meaning is not verified.
+- **Safety.** In a week with extreme soreness or sleep, code chooses the suggestion from a fixed non-medical set; elsewhere a heuristic screen refuses medical content and advice to ignore symptoms or avoid help. Its measured misses are in the ADR.
+- **Erasure.** Migration `0032` orders every source change against every insight write through a per-person gate row, so an insight can never be stored for data deleted after it was read; deleting or changing a source deletes the week's insight in the same transaction, and restore replays invalidate conservatively.
+- **Bounded work.** One generation at a time per server, a total time and attempt budget, leases so that lost work shows as `interrupted`, at most 3 attempts per input. Generation is off unless `WEEKLY_INSIGHTS_PROVIDER=ollama` names a local model; the optional compose profile `ollama` provides one. `npm run eval:weekly-insights` measures installed models (never in CI).
+
+## Archive tiles
+
+`GET /api/orgs/:orgId/archive/metadata?from=...&to=...` returns the current archive revision, the validated half-open filter, zoom 8–16, source layer `runs`, and a concrete revision-bound tile URL template. Periods are capped at 366 days. Tile requests require canonical XYZ coordinates with `x,y < 2^z`, re-check active membership and archive revision inside a runtime-role tenant transaction, and pass that same RLS-bound client to the tile pipeline. A stale URL returns `409 ARCHIVE_REVISION_CHANGED`; responses are `private, no-store`.
+
+P09.2 generates source layer `runs` in one PostGIS statement over RLS-visible finished summaries in the requested half-open period. Candidate branches retain GiST-compatible `display_geom && envelope` predicates, then clip to the valid Web Mercator latitude range, project to EPSG:3857, and call `ST_AsMVTGeom` with extent 4096, buffer 64, and clipping enabled. Edge tiles select and shift the opposite antimeridian world copy after projection. The only feature property is string `run_id`; empty result sets return a valid empty MVT.
+
+P09.3 adds a process-local 32 MiB binary LRU with a five-minute monotonic TTL and single-flight generation. Its key includes format version, organization, authenticated user, canonical archive revision, a SHA-256 hash of the canonical period, and XYZ. Empty tiles are cached; errors and over-capacity values are not. P09.4 serializes every cache hit behind active-membership/current-revision validation and advances the organization epoch atomically with archive-visible summary, history-grant, and membership changes.
+
+P09.5 pins Mapbox GL JS 3.31.0 and adds an archive view with a bounded UTC period. A controller validates metadata through the shared contract, polls every 30 seconds, refreshes immediately on focus and stale-revision tile responses, and coalesces overlapping reads. A new revision calls `VectorTileSource.setTiles`; 401/403 removes the archive layer before its source and clears metadata, while transient network/5xx failures retain the last authorized source with an explicit error. Scope changes and unmount abort in-flight reads and destroy map state.
+
+P09.6 bounds each process to two active tile generations and sixteen queued distinct keys. Queue waiting happens after the initial authorization/cache probe and before reopening a tenant transaction, so waiters retain neither pool clients nor organization locks. The admitted transaction revalidates membership/revision and cache state, applies PostgreSQL-local `statement_timeout=2000ms`, and accepts complete raw MVT buffers up to and including 1 MiB. Overflow is explicit (`TILE_BUSY`, `TILE_TIMEOUT`, or `TILE_TOO_COMPLEX`); failures and oversized buffers are not cached, and SQL never truncates to a first-N feature subset.
+
+P04.1 resolves D01 with one strict `PointInput`: required `seq`, `segmentId`, `recordedAt`, `longitude`, `latitude`, and `accuracyM`, with no nullable/extra fields. Parsing canonicalizes `seq` through PostgreSQL-bigint decimal form, every `-0` to `0`, and UTC `recordedAt` to millisecond precision using the same nearest-millisecond rounding as `timestamptz(3)`. The canonical values are used for validation, retry comparison, persistence, and the shared public type.
+
+## Point ingestion
+
+`POST /api/orgs/:orgId/runs/:runId/points` accepts `{ "points": PointInput[] }` under the existing session, Origin/CSRF, membership, tenant transaction, and RLS boundary. A request contains 1–100 entries and remains subject to the 64 KiB JSON limit; a run may contain at most 50,000 unique points. `seq` defines deterministic track order, so request order, equal timestamps, late lower sequences, and device timestamps outside the live-freshness window are accepted as raw history.
+
+The service locks the owned run, compares every repeated `seq` with its canonical stored payload, increments `data_revision` once only when at least one unique point is new, and inserts all new rows set-wise with that `ingested_revision`. Exact retries return `200` without a revision change; conflicting payloads return `409 POINT_CONFLICT`. Recording and paused runs accept points. Finished runs accept new points through `finished_at + 24 hours`; after that, only exact retries are acknowledged (`409 UPLOAD_WINDOW_CLOSED` for new points). `purging`/`purged` raw state returns `410 RAW_HISTORY_UNAVAILABLE`. The response is `{ dataRevision, insertedCount, duplicateCount }`, and HTTP acknowledgement occurs only after the surrounding PostgreSQL transaction commits.
+
+## Raw point history
+
+`GET /api/orgs/:orgId/runs/:runId/points?limit=1000&cursor=...` returns canonical raw points in ascending bigint `seq` order. The default and maximum page size is 1,000. The opaque cursor is bound to the organization, run, last sequence, and `data_revision`; if that revision changes between pages, the API returns `409 HISTORY_REVISION_CHANGED` and the client restarts from the first page.
+
+The run revision/raw state and `limit + 1` keyset page are read in one PostgreSQL statement snapshot, so a page cannot combine different committed revisions. Owners can read active or finished raw history; a non-owner needs `can_read_history` on a finished run. `can_read_live` alone is intentionally insufficient. Authorized `purging`/`purged` history returns `410 RAW_HISTORY_UNAVAILABLE`; inaccessible and missing runs return the same `404 RUN_NOT_FOUND`.
+
+## Run deletion and annual retention
+
+`DELETE /api/orgs/:orgId/runs/:runId` uses the existing session, Origin/CSRF, membership, and tenant transaction boundary. Only the actual run owner may delete; a coach role or a live/history share grant confers no deletion right, and both cases return the same `404 RUN_NOT_FOUND` a non-owner already gets for a run that never existed, so a tombstone's existence is never revealed to an unauthorized caller. A successful delete and a repeated delete by the same owner while its tombstone is retained both return `204`; two concurrent duplicate deletes are also safe.
+
+Owner deletion and the maintenance annual-retention worker (finished runs at least one year past `finished_at`, oldest first, bounded per-cycle work like the existing raw-purge/summary workers) share one database primitive, `app_private.execute_run_deletion`, reached only through two separately authorized `SECURITY DEFINER` capabilities: `delete_run_as_owner` (runtime-only) and `delete_run_for_retention` (maintenance-only). Neither role has direct `DELETE` on `runs`, `run_points`, `run_summaries`, `run_commands`, or `run_tombstones`. Both paths take the shared per-run advisory lock used by raw purge and summary publication, then `organizations FOR UPDATE`, then the run row, so deletion serializes safely with ingestion, commands, raw purge, summary publication, and archive tile/ACL reads without deadlocking.
+
+Deletion inserts the `run_tombstones` row (real owner, injected UTC `deleted_at`, `expires_at` one year later per the SDD's documented tombstone period) in the same transaction that removes `run_summaries`, `run_shares`, and the run itself (cascading `run_points`/`run_commands`). `run_summaries` is deleted before `run_shares` so the existing migration-`0013` summary-delete archive-revision trigger fires the one required increment and the history-share trigger sees no summary left to react to; a run without a summary gets one explicit increment instead. Either way the organization's archive epoch advances exactly once per deleted run, invalidating cached tiles/metadata through the existing revisioned-key mechanism (ADR-0030) with no separate cache-purge step. `PUT` of the same run ID still returns `410 RUN_DELETED` while the tombstone is retained (unchanged from ADR-0006/P03.3). ADR-0035 records the full design.
+
+### Tombstone lifetime and late retries (P10.4)
+
+A tombstone is authoritative for as long as its row exists; the request path never compares `expires_at`. For one year after deletion (`expires_at = deleted_at + 1 year`) a deleted run ID is protected: the owner's `PUT` and `GET` return `410 RUN_DELETED`, and a repeated owner `DELETE` returns `204`. Other members keep getting `404 RUN_NOT_FOUND` and never learn that a marker exists.
+
+`expires_at` only says when the maintenance-only `app_private.reclaim_expired_run_tombstones` **may** remove the row. Until it actually does, protection continues (a delayed cleanup only lengthens it). After removal the ID is unknown: `DELETE` returns `404 RUN_NOT_FOUND` and `PUT` creates a brand-new run. A creation or deletion retry that arrives after the one-year window (plus any cleanup delay) is therefore outside the idempotency guarantee, and clients must not hold a retry that long. There is no permanent used-ID registry. ADR-0036 records the contract, the row-lock concurrency model, and the marker takeover rule that keeps a later deletion of the same ID from failing.
+
+### Deletion journal and restore (P10.5)
+
+A backup restored after a deletion would bring the deleted run back, and tombstones live in the same database as the runs. Every deletion, owner or annual retention, therefore also writes an identifier-only row (`run_deletion_journal`: organization, run, owner, deletion instant; no coordinates or payload) in the same transaction as the tombstone and the cascade delete. A maintenance runner exports pending rows to files in `DELETION_JOURNAL_DIR` (one JSON object per line) and removes them from the database only after the file is fsynced and renamed, so a failed export keeps every row and a crash re-exports a batch (duplicates are harmless). `DELETION_JOURNAL_DIR` must be storage outside the database host and is required in production; the code cannot verify that the mount really is off-host.
+
+After restoring a backup, and before the application can reach the database, run `npm run restore:reapply-deletions -- --journal-dir <copy of the journal directory>` with `RESTORE_DATABASE_URL` set to the object-owner role. It validates every file first, then reapplies each deletion idempotently in its own transaction; it never touches a run created after the journaled deletion and prints counts only. The ordered procedure, retention rule for journal files, failure modes, and the P12.3 drill checklist are in [docs/runbooks/deletion-journal-and-recovery.md](runbooks/deletion-journal-and-recovery.md); the design is ADR-0037.
+
+While the exporter is healthy a deletion is off-host within about one export interval (default 30 s); deletions not yet exported when a node is lost are lost with it. The P12.3 restore drill (see "Backups and the restore drill (P12.3)" below) has exercised this on a workstation; it does not establish a production RPO or RTO. Access restrictions are recovered by a second journal, described next.
+
+### Access-restriction journal and restoring current permissions (P12.4)
+
+A backup also holds shares and memberships as they were, so an old one would bring back access that was revoked later. Triggers on `memberships` and `run_shares` therefore write an identifier-only row (`access_restriction_journal`: organization, user, run, two booleans for a narrowed share, an instant) in the same transaction as the change, for three kinds only: a membership deactivated, a share revoked, a share narrowed. A grant, a re-activation or a widening is never journaled. The same maintenance machinery exports these rows to `access-journal-*.ndjson` files in `DELETION_JOURNAL_DIR` (same sink, same interval, nothing new to configure) and removes them only after the file is durable.
+
+After `restore:reapply-deletions`, run `npm run restore:reapply-access -- --journal-dir <copy of the journal directory>` with `RESTORE_DATABASE_URL` set to the object-owner role. It validates every file first, then replays each entry in its own transaction, idempotently and in any order. It only deactivates, deletes a share, or intersects a share's booleans with the journaled ones; it never activates a member, creates a share or widens one, and the file format cannot express a grant, so a forged or stale file can at worst remove access. Recovery therefore fails closed: access granted after the backup is not reconstructed and has to be granted again, and a share revoked and then granted again before the loss is removed again. Restrictions not yet exported when a node is lost are lost with it (the same recovery point as deletions). The restored database stays closed to the application until the operator opens it with an explicit `GRANT CONNECT` (step 10 of [docs/runbooks/backup-and-restore.md](runbooks/backup-and-restore.md)); the design is ADR-0045.
+
+## Versioned live-track reads
+
+`GET /api/orgs/:orgId/runs/:runId/live-track` fixes the current `dataRevision` as R in the same PostgreSQL statement that reads the first seq-ordered page. Continuations retain R and exclude later ingestion without holding a transaction or connection between requests.
+
+`GET /api/orgs/:orgId/runs/:runId/live-track/changes?afterRevision=A` similarly fixes target T. It returns the deduplicated, seq-ordered union of points ingested in `(A,T]` and each changed point's immediate successor in the point set visible at T. This lets a later lower-sequence insertion repair both its own edge and the next point's relationship. Every continuation retains A, T, algorithm version, and last seq while rechecking current membership, run authorization, and raw availability.
+
+P07.4 signs strict versioned cursor payloads with HMAC-SHA-256 and binds them to the authenticated user, organization, run, operation, revisions, algorithm version, last sequence, and expiry. A pagination chain keeps one absolute ten-minute deadline; tampered, expired, cross-user, cross-run, or operation-swapped tokens return `400 INVALID_CURSOR`. Cursor integrity never replaces the per-request session, membership, ACL, retention, algorithm, and revision checks.
+
+For both endpoints, P07.3 materializes the complete `ingested_revision <= T` point set, derives each point's immediate seq-ordered predecessor before page filtering, and calls the same versioned PostGIS edge evaluator used by summaries. `predecessorSeq` therefore remains correct on the first row of every continuation page, while `connectFromPrevious` is true only when the shared sequence, segment, accuracy, time, and speed rules accept that edge. Later ingestion cannot alter either annotation in an older fixed-revision page.
+
+P07.5's browser `LiveTrackStore` stages every page in a temporary seq-keyed map and exposes the new point set and revision only after the terminal page succeeds. State and in-flight work are isolated by authenticated user, organization, and run; concurrent revision notifications coalesce to the latest requested target. Repeated upserts are idempotent, while an invalid/expired continuation or algorithm-version change discards staged work and starts a fresh snapshot.
+
+## Live SSE transport
+
+`GET /api/orgs/:orgId/live` requires the session cookie and an explicit `Accept: text/event-stream`. It performs the initial membership/RLS-protected snapshot before opening the stream, rechecks that the same stored session remains active, emits `live.state` sequence 0 immediately, and releases the tenant transaction and database client before the response remains open. Each state contains only authorized `recording`/`paused` runs, their revisions, and the latest usable position. The shared PostGIS edge evaluator marks an accepted latest edge `confirmed`; an isolated point or discontinuity is `unconfirmed`; invalid latest accuracy, time, or speed yields `position=null`.
+
+One process-level scheduler polls every two seconds and groups tabs by user and organization so matching subscriptions share one short database read. Session validity remains per connection: the hub retains a digest reference rather than the raw cookie, closes exactly at expiry, and rechecks store revocation before poll, publish, drain, and heartbeat. Membership loss closes the affected user/organization streams and clears pending data; grant loss yields a complete filtered state that replaces any older blocked state. Per-connection `streamId` and sequence domains remain independent. A 15-second comment heartbeat is transport-only. When `response.write` reports backpressure, the hub retains only the newest not-yet-written state, replaces older pending state, and closes the connection after a bounded blocked-writer timeout. Connection count and poll concurrency are also bounded, and graceful shutdown ends streams before closing the runtime pool.
+
+The Coach view opens one stream for a validated organization and renders only the full authorized run set. Confirmed and unconfirmed describe the server-evaluated latest edge; stale is a separate browser freshness state anchored to `serverTime` plus monotonic elapsed time, initially at 10 seconds. A null current position may retain its prior coordinate only as stale. Selected tracks reuse the P07 atomic store, coalesce SSE revisions to the greatest target per run, and abort/evict work on deselection, authorization removal, identity change, or disconnect. Bounded 1/2/4-second reconnects stop before known session expiry; visible state remains cleared until a new full state reauthorizes any recoverable selection. No external map token is required for this screen.
+
+## HTTPS/HTTP/2 transport verification
+
+P08.5 adds an opt-in Compose overlay with a pinned Nginx reverse proxy. Nginx
+serves the production web build, terminates local TLS/HTTP/2 on
+`https://localhost:8443`, and forwards to the internal Express service over
+HTTP/1.1. The SSE location explicitly disables buffering, caching, compression,
+and upstream retry; its 75-second read timeout is five times the 15-second
+heartbeat. Only the TLS proxy is host-published. ADR-0026 records the security and
+timeout decisions.
+
+Generate a seven-day development-only certificate, prepare the disposable test
+database, and start the profile:
+
+```powershell
+npm run db:up
+node --env-file=.env.example scripts/bootstrap-database.mjs --test
+node --env-file=.env.example scripts/migrate.mjs --test
+npm run transport:tls
+npm run transport:up
+npm run transport:verify
+```
+
+`transport:verify` uses an actual TLS HTTP/2 client; it does not infer HTTP/2
+from configuration text. It checks the normal API, cookie-authenticated SSE
+headers and prompt framing, the 15-second heartbeat, database activity during an
+open stream, backend restart/disconnect, new-stream recovery, and eight local
+commit-to-visible latency samples. It creates and removes one exact fixture in
+`running_tracker_test`. Stop the API/proxy overlay without deleting the database
+volume with `npm run transport:down`; `npm run db:down` retains the named volume.
+
+The certificate and private key are generated under gitignored `.local/tls` and
+must never be reused outside local verification. The overlay deliberately uses
+the existing development identity fixture and tracked local database credentials;
+managed certificates and external secrets are the production profile (P12.2, below) and production sign-in is OpenID Connect (P12.1, below).
+
+## iPhone LAN pilot (synthetic data only)
+
+[ADR-0085](adr/0085-iphone-lan-pilot.md) adds an opt-in, isolated stack for opening the web app in Safari on an iPhone on the same trusted Wi-Fi: its own Compose project, PostgreSQL database and volume, only the two synthetic demo people, both AI providers off, and HTTPS published only on one configured private address with a certificate from its own name-constrained local authority. Sign-in is the existing demo panel (development session), which is **not identity verification**, so the pilot is for synthetic data only. The loopback transport profile above and the production profile are unchanged.
+
+```powershell
+npm run pilot:configure -- --address <this computer's private Wi-Fi IPv4>
+npm run pilot:tls
+npm run pilot:up
+npm run pilot:verify     # real certificate validation through the proxy
+npm run pilot:e2e        # optional: desktop Chromium through the proxy
+npm run pilot:down       # add -- --delete-data to remove the pilot database
+```
+
+Trusting the certificate on the phone, the narrow firewall rule, clean-up and the prerequisites for real data are in [docs/runbooks/iphone-lan-pilot.md](runbooks/iphone-lan-pilot.md); the physical Safari checklist (not run yet) is [docs/reports/iphone-lan-pilot.md](reports/iphone-lan-pilot.md).
+
+## Deterministic GPS simulator
+
+`@running-tracker/fixtures` generates canonical `PointInput` captures and upload attempts from a uint32 seed and UTC start instant. Its explicitly advanced virtual clock provides stable FIFO timer ordering without wall-clock sleeps. The named scenarios are `normal`, `duplicates`, `reordered`, `delayed-batch`, `dropped-response`, `clock-jump`, and `gps-spike`.
+
+The CLI replays the resulting virtual timeline as JSON Lines without network or database I/O:
+
+```powershell
+npm run simulate:gps -- --scenario reordered --seed 42
+npm run simulate:gps -- --list
+```
+
+`dropped-response` marks an upload attempt as `drop-after-commit` and emits an exact retry. The P04.5 API hook is a separately injected test-only dependency: `createApp` rejects it unless `APP_ENV=test`, there is no environment/header/endpoint activation path, and the points route evaluates it only after PostgreSQL confirms `COMMIT` and before sending the HTTP result. The integration proof observes a transport-level `ECONNRESET`, verifies the committed rows and revision through SQL, retries the exact batch, reads raw history, and finishes the run.
+
+## Real GPS traces (D10)
+
+Tooling to replay recorded device traces through the current v1 evaluator without committing anything private. Raw GPX exports stay in `.local/gps-traces/raw/` (gitignored); only sanitized fixtures (relative time and local metric offsets, no coordinates, no dates, no device data) are committed under `apps/api/test/fixtures/gps-traces/`.
+
+```powershell
+npm run gps:sanitize -- .local/gps-traces/raw/<export>.gpx --scenario steady_run --output apps/api/test/fixtures/gps-traces/steady_run_01.trace.json
+npm run gps:analyze -- apps/api/test/fixtures/gps-traces/steady_run_01.trace.json
+npm run gps:report          # all committed fixtures -> docs/reports/d10-real-traces.md (needs the _test database)
+```
+
+Analysis replays the production point contract, insert statement and SQL (`evaluate_track_edge`, `calculate_run_summary`, `simplify_display_geometry`) on the `_test` database inside a rolled-back transaction; it changes no algorithm. Only GPX is read (export FIT to GPX first). The privacy model and its limits (this removes the location and the clock, not the shape of the route), how to record the first traces, and what the numbers can and cannot support are in [docs/runbooks/gps-traces.md](runbooks/gps-traces.md). Status: the tooling exists; **no real-device trace has been analysed yet**, so D10 stays PARTIAL.
+
+## Summary calculation
+
+`app_private.evaluate_track_edge(...)` is the single versioned PostGIS rule used by summary processing and live-track reads. P06.2 builds on it with the maintenance-only `app_private.calculate_run_summary(...)` capability: points are fixed by `ingested_revision <= sourceRevision`, ordered by bigint `seq`, and reduced to accepted-edge distance/duration, exact `QualityStats`, and unsimplified accepted `MultiLineString` chains. Rejected edges terminate a chain, isolated points never become synthetic lines, and `received_at` does not affect continuity.
+
+P06.3 adds the separate pure `app_private.simplify_display_geometry(...)` capability. It partitions each accepted chain by cumulative geodesic length into at-most-20-km pieces with shared boundaries, simplifies each piece at 5 metres in a local azimuthal-equidistant projection, then unwraps and splits crossings at every antimeridian world boundary before returning WGS84. Endpoints and separate chains are preserved; display-degenerate zero-length pieces are omitted. Summary distance remains the pre-simplification accepted-edge total.
+
+P06.4 calculates and simplifies a stale finished run in one materialized statement snapshot without a run mutation lock. Publication then locks organization before run, validates the exact v1 `QualityStats` shape, rejects changed revisions, non-finished/raw-unavailable/deleted runs, tombstones, and duplicate current summaries, and atomically upserts the summary with one organization `archive_revision` increment. P06.5 adds transaction-scoped advisory claims: simultaneous processes skip an already claimed organization/run while publication retains the row-lock correctness fence. The maintenance role can execute only the narrow claim/calculation/publication functions and still cannot write the underlying tables directly.
+
+Stop the local database without deleting its named volume:
+
+```powershell
+npm run db:down
+```
+
+`METRICS_PORT` (unset by default, so no listener) starts a separate scrape endpoint at `http://METRICS_HOST:METRICS_PORT/metrics` in Prometheus text format; `METRICS_HOST` defaults to `127.0.0.1` and `METRICS_PORT` must differ from `PORT`. The endpoint has no authentication and serves only `GET /metrics`, so exposing it beyond a trusted network is a deliberate deployment choice. See "Metrics and logs (P11.1)" below and ADR-0038.
+
+## Metrics and logs (P11.1)
+
+Start the API with `METRICS_PORT=9464` and run `curl http://127.0.0.1:9464/metrics`. The exposed signals are HTTP request count/duration/in-flight, point-ingestion commit latency and inserted/duplicate/rejected counts, live stream count/backpressure/poll-cycle time, archive tile cache result/bytes/generation time/queue depth, per-job maintenance cycle outcome/duration/last success (plus `raw_purge_blocked_total` for a retention overrun), database pool checkout time and state for the runtime and maintenance pools, and process memory/event-loop delay. Alert on the age of `maintenance_last_success_timestamp_seconds` per task to detect a stuck job such as the deletion-journal exporter. Route labels are templates (`/api/orgs/:uuid/runs/:uuid/points`), never concrete identifiers.
+
+Logs are one JSON line per event with an allow-listed set of technical fields (request ID, route template, status, duration, task, error class and short code, and a few counters). Coordinates, request bodies, cookies, tokens, and error messages are dropped by construction, and only failed (5xx) requests are logged. Data age, summary lag, and dead tuples are not exported by the API. Backup age is deliberately not an API metric either: the backup job writes it to a node_exporter textfile (P12.3, `docs/runbooks/backup-and-restore.md`), so the scrape endpoint never touches backups. Metrics are per process and reset on restart.
+
+## Load datasets (P11.2)
+
+`npm run load:seed -- --profile ordinary|stress|smoke [--seed N] [--as-of <UTC instant>] [--reset]` writes one deterministic organization into a dedicated database and prints a JSON manifest (organization and member IDs, counts, per-phase timings, relation sizes, and a reproducibility digest). It is never pointed at `running_tracker` or `running_tracker_test`: the command refuses any database whose name does not end in `_load_test`, and it connects as `running_tracker_owner` because the seeder is a test-data writer, not application code.
+
+```powershell
+# one-time: create the database, then reuse the existing bootstrap/migration scripts with the URLs pointed at it
+docker compose -f infra/compose/docker-compose.yml exec -T postgres psql -U running_tracker -d postgres -c "CREATE DATABASE running_tracker_load_test"
+# set TEST_BOOTSTRAP_/TEST_MIGRATION_/TEST_/TEST_MAINTENANCE_DATABASE_URL to .../running_tracker_load_test, then:
+npm run db:bootstrap:test
+npm run db:migrate:test
+$env:LOAD_DATABASE_URL = 'postgresql://running_tracker_owner:owner_local_only@127.0.0.1:5433/running_tracker_load_test'
+npm run load:seed -- --profile ordinary   # the default instant is today's UTC midnight; keep it for load runs
+```
+
+- `ordinary` is the SDD estimate: 10 members, one finished run per member per day for 365 days (3,650 runs and summaries), and 126,000 raw points (seven days of 1,800-point runs).
+- `stress` keeps the same archive and holds 3,000,000 raw points, split over the same 70 recent runs (42,857–42,858 points, about 23.8 hours each, below the 50,000-point run limit).
+- `smoke` is a five-member, seconds-long profile used by the integration test.
+- Runs older than seven days are `purged` and keep only their summary, matching the retention rules. There are no active runs, so P11.3 creates its live runs through the API.
+- Geography: members are spread over eight anchors (Lisbon, New York, Tokyo, Sydney, Reykjavik, Nairobi, Buenos Aires, and a route centred on the antimeridian near Taveuni, whose display geometry is split into several parts). Routes are loops with a few metres of deterministic GPS noise.
+- ACL: the last two members are coaches with history and live grants from every runner; every other ordered member pair draws a standing policy (40% none, 20% history only, 10% live only, 30% both) applied to all of the owner's runs.
+- The same seed and `--as-of` give the same rows: every value derives from a SHA-256 of the seed and a key, and the manifest `digest` (an MD5 over runs, points, summaries, and shares) is identical after `--reset`. It is stable on one PostgreSQL/PostGIS build; it is not promised across builds with different floating-point formatting.
+- The seeded data does not contain `run_commands`, tombstones, or an active session, so it exercises reads, tiles, live state, summaries, and retention, not idempotent replay of the original create/finish commands.
+
+A run without `--reset` refuses a database that already holds any user, organization, or run. Seeding is one transaction and is followed by `ANALYZE`, so a failure leaves nothing behind and planner statistics match the data.
+
+## Concurrent load scenario (P11.3)
+
+`npm run load:run -- --profile ordinary|stress|smoke [--seed N] [--as-of <UTC instant>] [--results-dir <path>] [--no-cleanup | --cleanup-only]` runs the SDD workload against a **seeded** dedicated database: it starts the real API as a child process on free loopback ports and drives it only over HTTP and SSE. It needs the three role URLs of the load database (the owner URL is the seeder's; the runtime and maintenance URLs are what the API itself connects with):
+
+```powershell
+$env:LOAD_DATABASE_URL = 'postgresql://running_tracker_owner:owner_local_only@127.0.0.1:5433/running_tracker_load_test'
+$env:LOAD_RUNTIME_DATABASE_URL = 'postgresql://running_tracker_runtime:runtime_local_only@127.0.0.1:5433/running_tracker_load_test'
+$env:LOAD_MAINTENANCE_DATABASE_URL = 'postgresql://running_tracker_maintenance:maintenance_local_only@127.0.0.1:5433/running_tracker_load_test'
+npm run load:seed -- --profile ordinary --reset   # the dataset must be freshly seeded and untouched
+npm run load:run -- --profile ordinary
+```
+
+- The runner refuses anything but a loopback database whose name ends in `_load_test`, checks each role's live session (`current_database()`, `current_user`), and verifies that the database holds exactly the planned dataset (runs and start times, points, summaries, members, no active run). It never reseeds. The child API gets a scrubbed environment: no owner or bootstrap credentials, local sessions only for the ten planned members. There is no flag for a URL, a database, or a reseed.
+- Scenario: ten SSE observers (one per member, each with its own session), ten concurrent 100-point offline batches per round (`smoke` 2 rounds, `ordinary` 3, `stress` 10) followed by an exact retry and an overlapping retry, archive pan/zoom tile bursts on two overlapping streams across eight regions (including the antimeridian route), the finish of a run that the existing summary worker publishes, and fresh points every two seconds per member whose latency to each expected observer is measured. The fresh phase lasts until the summary is visible and the archive revision has advanced, so with the default 60 s worker cadence a run takes one to a few minutes.
+- The result is one JSON file in `.local/load-results/` (gitignored) with raw per-request samples, fresh-point latency samples, observer reports, tile samples and bytes, the summary-publication timeline, metrics before/after, and convenience percentiles. It never contains cookies, CSRF tokens, session tokens, or coordinates. A failed run still writes a partial result and exits non-zero.
+- Afterwards the runner deletes exactly the runs it created (deterministic IDs) and verifies the dataset again, so the next run starts from the same rows. `--cleanup-only` does that alone, for a run that was killed. `--no-cleanup` keeps the runs for inspection; the next run then refuses until `--cleanup-only`.
+- The dataset ages with the clock (seven-day raw retention, one-year run retention), so the child API parks the raw-purge, annual-retention, and tombstone jobs at their 24-hour maximum. Set `LOAD_KEEP_RETENTION_JOBS=true` to run them at their normal cadence; they will then rewrite the seeded rows and the next run needs a reseed. The summary worker keeps its normal cadence (`RUN_SUMMARY_INTERVAL_MS`).
+- Ordinary `npm test` and CI never run this: the smoke scenario runs inside the integration suite against `running_tracker_test`, and asserts structure, not performance. The SDD targets are decided from P11.4's analysis of these results, not by the runner. See ADR-0040.
+
+## Measurements and report (P11.4)
+
+Same three `LOAD_*` variables and the same `*_load_test` guards as the runner; the dataset must be the planned, untouched one.
+
+```powershell
+npm run load:explain -- --profile ordinary|stress|smoke [--repetitions 5] [--keep-plans]
+npm run load:run -- --profile ordinary --no-tiles          # baseline without tile bursts, for the starvation comparison
+npm run load:report -- --since <UTC instant> --out <absolute path>   # relative paths resolve from apps/api
+```
+
+- `load:explain` runs a fixed catalogue of the production SQL (the exported statement constants, never copies): 24 archive tiles (8 regions × zoom 9/11/13, including the antimeridian route), the run list, raw history, live-track snapshot and changes pages, the live-state poll, a 100-point insert, the summary claim and publication, and paired count scans as the table owner (no RLS) and as a coach (RLS). Each runs as `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON)` under its real role and tenant context, several times, always inside a transaction that is rolled back. The live-state and insert statements need recording runs, so each member's newest run is switched to `recording` for the duration and restored to its exact `finished_at` afterwards (also on failure or Ctrl-C); the dataset is verified again at the end. It also measures the real service call's response bytes and time, and records relation/index sizes, tuple counts, and the plan-shaping PostgreSQL settings.
+- The result is `.local/load-results/explain-<profile>-<start>.json` (summaries only). `--keep-plans` additionally writes the raw first plan of each statement to a separate `explain-plans-…` file, because plans can quote literal values; it is never included in the summary and never committed.
+- `load:run` now also samples which API and maintenance backends wait for a lock (`pg_locks`, every 250 ms, no statement text) and accepts `--no-tiles`.
+- `load:report` turns the result files into `docs/reports/p11-measurements.md`: environment, goals met / not met / not confirmed under explicit rules, per-profile pooled percentiles, EXPLAIN tables, and sizes. Everything in it is computed from the result files. See ADR-0041.
+
+## Set-based run visibility (P11.5)
+
+The SELECT policies on `runs`, `run_points`, and `run_summaries` no longer call a definer function per row. Migration `0019` adds `app_private.readable_run_keys()` and `app_private.history_readable_run_keys()`, which return the readable `(org_id, run_id)` pairs once per statement; the policies probe that set. The per-row functions remain the specification, and `test/rls-set-policies.integration.test.ts` compares the sets with them for every fixture identity. A caller that reads only a few live rows (the live SSE poll) may declare `visibilityScope: 'live'` on `withTenantTransaction`; it can only narrow the result. The before/after numbers, produced by the same `load:explain`, `load:run`, and `load:report` commands, are in `docs/reports/p11-measurements.md` (before) and `docs/reports/p11-5-measurements-after.md` (after); see ADR-0042. To re-measure, apply the migration to the load database with the existing scripts pointed at it and rerun the commands above.
+
+## Sign-in with OpenID Connect (P12.1)
+
+Production sign-in is the OpenID Connect authorization code flow with PKCE (S256), `state` and `nonce`, through `openid-client`, against any compliant provider you configure. `GET /api/auth/login` sends the browser to the provider; `GET /api/auth/callback` validates the response, finds the person, and creates the same session record, `HttpOnly` cookie, and CSRF token as the development fixture, so `GET`/`DELETE /api/session` and every authorization rule are unchanged. The routes exist only when OIDC is configured; `LOCAL_AUTH_ENABLED` stays forbidden in production, so production has no development login.
+
+| Variable | Meaning |
+|---|---|
+| `OIDC_ISSUER_URL` | The provider's issuer. `https` in production; `http` only for a loopback issuer in development/test |
+| `OIDC_CLIENT_ID` | The client registered for this deployment |
+| `OIDC_CLIENT_SECRET` / `OIDC_CLIENT_SECRET_FILE` | The client secret; production uses the file |
+| `OIDC_REDIRECT_URI` | Exactly `<origin>/api/auth/callback`, on an origin in `ALLOWED_ORIGINS` |
+| `OIDC_SCOPES`, `OIDC_LOGIN_TTL_MS`, `OIDC_POST_LOGIN_PATH`, `OIDC_STORE_MAX_ENTRIES` | Optional: `openid`, 10 minutes, `/`, 100 pending logins |
+
+The first four are all required together, and in production they are required. The service is **invite-only**: a person signs in only if `users.external_identity` already holds `<issuer>|<subject>` (the ID token's `iss` and `sub`); an unknown identity is refused and nothing is created. Registering the client, provisioning and removing people, rotating the secret, and troubleshooting are in [docs/runbooks/identity-provider.md](runbooks/identity-provider.md); the design and its limits are ADR-0046. When sign-in fails the app shows one of four fixed messages (`sign_in_error`).
+
+Tests: the unit suites cover the configuration, the pending-login store and the routes; `npm run test:integration` runs the whole flow against a real in-process OpenID provider (`oidc-provider`, test only) and PostgreSQL, and `npm run deploy:verify` checks the production surface (no development login, a 503 for an unreachable provider, the secret as a file). **This does not establish that sign-in works with any particular real provider, in a browser other than Chromium, or that provider-side account changes end sessions**. Chromium against the test provider is covered by the browser suite (see [Browser end-to-end tests](#browser-end-to-end-tests)): a disabled provider account keeps its application session until it expires (`SESSION_TTL_MS`) or is signed out, and an API restart no longer ends it (ADR-0080), so also deactivate the membership.
+
+## Deployment profile (P12.2)
+
+`infra/compose/docker-compose.production.yml` is a standalone single-host profile: PostgreSQL/PostGIS on an internal-only network, a one-shot `db-init` job (role bootstrap plus migrations), the API, and an nginx edge with an operator-supplied certificate, HTTP-to-HTTPS redirect, security headers, and the verified SSE policy. Secrets are files, not environment values: `npm run deploy:secrets -- --dir <dir>` generates them, and the API reads `DATABASE_URL_FILE`, `MAINTENANCE_DATABASE_URL_FILE`, `LIVE_TRACK_CURSOR_SIGNING_KEY_FILE`, and `OIDC_CLIENT_SECRET_FILE` (the one secret the provider issues, so `deploy:secrets` does not create it). Production startup also requires `ALLOWED_ORIGINS` to be non-empty and HTTPS-only.
+
+`npm run deploy:verify` builds the images, starts the stack on ports 19080/19443 with throwaway secrets and a self-signed certificate, asserts transport, headers, exposure, resource limits, secret handling, database roles, restart, idempotent re-migration, certificate reload, and credential rotation, then removes everything. It also fails if a fake OIDC callback value reaches any proxy log stream: nginx's error log passes an allow-listed sanitizer before Docker stores it (ADR-0062), and `npm run proxy:verify-error-log` checks that boundary's failure modes on the image. It needs Docker and about five minutes. Sign-in is OpenID Connect (P12.1, below) and was verified only against a test provider, so this profile has not been run against a real identity provider. Setup, update, rotation, and the list of what is not done are in `docs/runbooks/deployment.md`; the design is ADR-0043.
+
+## Backups and the restore drill (P12.3)
+
+`npm run backup:create` takes a `pg_dump --format=custom` archive of a database, encrypts it with AES-256-GCM (Node's built-in crypto; key from `BACKUP_ENCRYPTION_KEY_FILE`, 64 hex characters, never stored with the backup), writes it atomically under a unique name (`running-tracker-backup-<UTC>-<random>.rtbak`, never overwriting), and reads it back to authenticate it. `backup:prune` removes only this tool's files strictly older than 7 days and keeps the newest backup unless forced; `backup:verify` authenticates a backup and prints its technical metadata; `backup:decrypt` writes the archive for `pg_restore`; `backup:keygen` creates a key file. Scheduling, off-host copying, key custody and the backup-age alert are the operator's; examples and the full restore order are in [docs/runbooks/backup-and-restore.md](runbooks/backup-and-restore.md), and the design is ADR-0044.
+
+`npm run restore:drill` (Docker, the local database, `RESTORE_DRILL_*` and `BACKUP_ENCRYPTION_KEY_FILE` from `.env.example`) rehearses the SDD recovery order against real PostgreSQL/PostGIS in fresh `running_tracker_restore_drill_*` databases: backup an older-schema database, upgrade the source (a release deployed before the loss), delete runs afterwards through the real owner-deletion and annual-retention paths and revoke a share, narrow a share and deactivate a member, export both journals, simulate loss, restore, migrate, reapply the deletions and then the access restrictions, each twice, and verify that deleted runs stay deleted with tombstones and exactly one archive revision each, that the recovered permissions equal the lost source's (checked as the runtime role under row-level security), and that nobody gained access. It fails closed with exit code 1, never touches the development, test or load-test databases, and leaves the restored database **closed to the application**: opening it is an explicit operator step. The report (`docs/reports/p12-4-restore-drill.md`; the P12.3 report is kept as history) separates what the local drill verified from what needs a real environment. **It does not establish a production RPO or RTO.**
+
+## Browser end-to-end tests
+
+```powershell
+npx playwright install chromium
+npm run test:e2e
+```
+
+`npm run test:e2e` runs only the `chromium` and `chromium-oidc` projects. A bounded Firefox gate runs separately:
+
+```powershell
+cd tests/e2e; npx playwright install firefox; cd ../..
+npm run test:e2e:firefox
+```
+
+The `firefox-core` project runs the existing specs, unchanged, for the core workflows: `record`, `reload-offline`, `second-tab`, `gps-recovery`, `run-sharing`, `archive-sharing` and `coach-map`. That is 18 tests, about four minutes. Its spec allowlist is in `tests/e2e/playwright.config.ts`. It excludes the one test tagged `@real-map-runtime`, the real Mapbox/WebGL smoke, so in Firefox the Coach map is covered only with the fake runtime; Chromium still runs the smoke. Run `npx playwright install` from `tests/e2e` so it installs the browser build that the installed `@playwright/test` pins. A bare `npx playwright test` there includes every project, so pass `--project` on a machine without Firefox.
+
+A pre-demo smoke reuses eight of the suite's specs, unchanged, against a smaller stack (the API on 3100 with the run-search interpreter off and Vite on 5273 and 5276, both without a Mapbox token; no identity provider, OpenID Connect servers or map server):
+
+```powershell
+npm run test:e2e:smoke            # Chromium
+npm run test:e2e:smoke:firefox    # Firefox
+```
+
+Each selects the 24 tests of `demo-sign-in`, `demo-simulator`, `record`, `reload-offline`, `second-tab`, `run-sharing`, `archive-sharing` and `run-deletion` from `tests/e2e/playwright.smoke.config.ts`, with the full suite's timeouts, worker count, retries, database guard and cleanup (the shared settings and servers are in `tests/e2e/support/suite-config.ts`). `tests/e2e/support/smoke-preflight.ts` runs first and stops before anything starts when the browser is missing, one of the three ports is taken (the holder is reported, never reused or stopped) or PostgreSQL does not answer. Failure traces and screenshots go to `tests/e2e/smoke-results/<browser>`. When and why to run it, and the manual rehearsal it supports, are in `docs/runbooks/demo.md`. Recorded on 2026-10-24 (commit `4ee4d94`, 18 tests then): the Chromium smoke passed 18 in 2.8 minutes. On 2026-10-28, with the 24 tests (base `d088ba5` plus the allowlist change), the Chromium smoke passed 24 in 3.1 minutes and the Firefox smoke, run for the first time, passed 24 in 3.3 minutes ([docs/reports/pause-verification.md](reports/pause-verification.md)).
+
+A real Chromium drives the Vite web app against the real API and PostgreSQL/PostGIS: record and finish a simulated run, reload mid-run (the tab regains the writer lease on its own and the Simulator and its sequence continue), offline buffering, a failing upload, a second tab that must stay read-only, a coach seeing a shared run live and losing it when the share is revoked (through the API, from the Runner tab's Share and Revoke buttons, and for a finished run from My runs), organization discovery (one, several, a stale remembered choice, none) and explicit sign-out with what survives it (mid-run points, a pending lifecycle request, a rejected buffer, a different person on the same browser). The suite starts and stops its own API (port 3100) and Vite (port 5273), and a Vite with the local demo sign-in buttons turned on (5276, signing in the fixed demo people created in the test database), a second API with weekly insight generation explicitly off (3102) with its demo-enabled Vite (5277) for the weekly review scenario, and for the sign-in project a provider (9100), an API (3101) and a second Vite (5274); it needs the database from "Start from a clean checkout" (`db:bootstrap:test`, `db:migrate:test`). The latest local full run, on 2026-10-28 (base `d088ba5`), passed all 115 tests (106 `chromium`, 9 `chromium-oidc`) in 10.1 minutes on the workstation, one worker; the earlier supplied report recorded 109 passed in about 12.3 minutes. See [docs/reports/pause-verification.md](reports/pause-verification.md).
+
+It uses the dedicated `running_tracker_test` database, shared with `npm run test:integration`, so the two must not run at the same time. The guard in `tests/e2e/support/environment.ts` refuses to start unless `TEST_DATABASE_URL`, `TEST_MAINTENANCE_DATABASE_URL` and `TEST_MIGRATION_DATABASE_URL` all name the same database and that name ends in `_test`.
+
+**What it does not establish.** The full suite runs only in Chromium. Desktop Firefox runs only the 18 core tests above (two clean runs recorded on 2026-10-22 in [docs/progress.md](progress.md), and a third on 2026-10-28) and the 24 smoke tests (once, on 2026-10-28), on Windows; nothing is verified for Safari, mobile browsers, real devices, OpenID sign-in in Firefox or the real map runtime in Firefox. The Simulator stands in for GPS, so real device location, permission prompts and background behaviour are not covered. Most of the suite signs in with the development session. The `chromium-oidc` project (`tests/e2e/oidc/`) uses the production sign-in route instead: an API with OpenID Connect and no local session endpoint, and a real `oidc-provider` process on `localhost` while the application is on `127.0.0.1` (different sites, so the return from the provider is a genuine cross-site navigation), driven through the provider's own login and consent pages. It covers sign-in, an unprovisioned identity, a replayed callback, a callback opened in another browser, an altered `state`, a cancelled login, the Sign out button (the cookie leaves the real cookie jar) and an expired session; it is not a real identity provider, so provider-specific behaviour is still unverified. The archive map needs a public Mapbox token and is not part of this suite. The Coach map (ADR-0065) is tested on a separate Vite server with a placeholder token: with a fake runtime served in place of `mapbox-gl`, and in one smoke with the real runtime and WebGL against a local empty style; every provider request is answered or aborted inside the browser, so no Mapbox basemap is exercised. It is not part of `npm run verify`. `.github/workflows/ci.yml` runs it in the `e2e` job (ADR-0075): three shards (`--shard=1/3` to `3/3`), each on its own runner with its own PostGIS service, so no shard shares `running_tracker_test` with the `integration` job. Each shard uploads a blob report; when a shard fails, `e2e-report` merges them into one HTML report and uploads `playwright-report-chromium` (the blob reporter is on only when `CI` is set; locally the reporter is `list`). A separate `e2e (firefox-core)` job installs only Firefox and runs `npm run test:e2e:firefox`, uploading `playwright-report-firefox-core` on failure. Neither has run on a hosted runner yet. The suite lists 132 tests (123 in `chromium`, 9 in `chromium-oidc`; `npx playwright test --list`) as of ADR-0075, which added the check-in delete flow to `daily-checkin.spec.ts` (ADR-0074 added the file, after ADR-0072's `activity.spec.ts`); all 131 passed together locally on 2026-11-06 in 13.4 minutes, after the harness raised the e2e API's in-memory session cap (`SESSION_STORE_MAX_ENTRIES=1000`), which the suite had outgrown. After ADR-0075, all 132 passed together locally in 13.8 minutes, and again as three shards (`--shard=n/3`, 47 + 43 + 42 tests). The hosted run below had 87, and none of the local passes since then establishes a hosted result for this version. One GitHub-hosted run on Ubuntu 24.04 of commit `83f804f` ([run 38624437491](https://github.com/AlexTikhon/RunningTracker/actions/runs/38624437491), 2026-10-14) passed both its `verify` and `browser` jobs, and the browser job reported 87 passed. That is one result for that exact commit: the commits after it (a test-only CRLF portability fix and documentation) are covered only by the workstation run in [docs/reports/review-closeout.md](reports/review-closeout.md), and a single run is not a measure of stability. In that hosted run the integration suite skipped 9 restore-drill tests, because the restore-drill admin connection was not configured in CI; the restructured workflow configures it (ADR-0075). The workflow also has a `workflow_dispatch` trigger so a branch without a pull request can be run. Results, mutation checks and the CI history are in [docs/progress.md](progress.md).
+
+## Verification
+
+```powershell
+npm run verify
+npm run db:up
+npm run db:bootstrap:test
+npm run db:migrate:test
+npm run test:integration
+```
+
+`test:integration` validates runtime, migration, and maintenance URLs before creating any pool: each URL must use PostgreSQL, authenticate as its exact role, target a database ending in `_test`, and resolve to the same host, normalized port, and database. Fixture setup then verifies `current_database()` and `current_user` on its dedicated owner client before any mutation. Security assertions execute through `running_tracker_runtime`; runtime privileges are never broadened. CI deliberately points `DATABASE_URL` at a different, absent database while the three test URLs point at the service database.
+
+`db:bootstrap` is the only privileged setup step. It creates PostGIS and three non-superuser roles, restricts database/schema creation, and transfers the existing migration metadata table to the migration owner. Normal API startup never invokes bootstrap or reads bootstrap/migration credentials. The maintenance login has no direct table DML or DDL: it has schema usage plus EXECUTE only on the owner-defined `app_private.auto_finish_runs(timestamptz)` capability.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests, on pushes to `main` and on demand ([ADR-0075](adr/0075-session-store-capacity-ci-shape-checkin-delete.md)). `verify` (`npm ci`, `npm run verify`, npm cache) is the gate; after it passes, `integration` (a PostGIS service with the docker-compose image, database and init script, then bootstrap, migrations and `npm run test:integration` including the restore drill), the three `e2e` Chromium shards and `e2e (firefox-core)` run in parallel. The workflow reads no secret: every credential in it is a fixed test-only value for a database that exists only inside the job. `scripts/ci-workflow.test.mjs` (part of `npm test`) pins that shape.
+
+## Database migrations
+
+`npm run db:migrate` applies sorted SQL files from `db/migrations` with `MIGRATION_DATABASE_URL`; the API uses only `DATABASE_URL`. The runner:
+
+- serializes concurrent runners with a PostgreSQL advisory lock;
+- records file name and SHA-256 in `schema_migrations`;
+- normalizes SQL line endings to LF before hashing, with `*.sql text eol=lf` enforced by Git;
+- preflights the complete applied history before running any pending file: missing/changed files, gaps, out-of-order history, and backfilled file names are rejected;
+- applies each new file atomically.
+
+The privileged bootstrap owns extension/role creation. `running_tracker_owner` owns application objects and runs migrations; `running_tracker_runtime` is the API login; `running_tracker_maintenance` has CONNECT only until a later maintenance use case grants a narrower capability.
+
+## P02A tenant transactions and access
+
+`withTenantTransaction(pool, { userId, orgId }, callback)` validates canonical UUIDs, acquires one client, starts a transaction, and sets `app.user_id`/`app.org_id` with transaction-local `set_config`. The callback must use the supplied client and must finish before an HTTP response or SSE lifetime begins. A callback error is preserved even if rollback also fails; that connection is destroyed. A COMMIT transport error is reported as an unknown outcome and the connection is destroyed without a misleading rollback attempt.
+
+The P02A runtime matrix is intentionally narrow:
+
+| Table | SELECT | INSERT / UPDATE / DELETE |
+|---|---|---|
+| `users` | current user only, with active membership in the current organization | denied |
+| `organizations` | current organization only, with active membership | denied |
+| `memberships` | current user's active membership in the current organization only | denied |
+| `schema_migrations` | denied | denied |
+
+Missing/malformed context, absent membership, and inactive membership expose no rows. Setting these GUCs is not a security boundary against arbitrary SQL run with runtime credentials; the trusted application/session boundary supplies them, while real HTTP authentication remains P03.
+
+P03.1 now resolves that HTTP boundary for local development/test: `userId` is accepted only from a verified server-side session. A route may select `orgId`, but `withAuthenticatedTenantTransaction` validates it, opens `withTenantTransaction` under `running_tracker_runtime`, rechecks active membership inside that same transaction, and runs subsequent SQL on the same client. Production authentication is OpenID Connect (P12.1, "Sign-in with OpenID Connect" below); it ends in the same verified server-side session.
+
+## Configuration
+
+Configuration is loaded and validated before the API app and pools are created. `.env.example` contains clearly labelled fixed local development/test credentials for bootstrap, migration owner, runtime, and maintenance roles. `DATABASE_URL` must authenticate as `running_tracker_runtime`; `MAINTENANCE_DATABASE_URL` must authenticate as `running_tracker_maintenance` and target the same host, normalized port, and database. Use separate managed secrets outside local development.
+
+`RUN_AUTO_FINISH_INTERVAL_MS` is the interval between settled maintenance cycles and defaults to 60 seconds. It is an implementation parameter, not a tighter product guarantee than “the first maintenance cycle after `created_at + 24 hours`.” Each cycle passes one injected UTC timestamp to the database function. The function atomically changes only eligible `recording`/`paused` runs to `finished`, sets `finished_at` to that timestamp, and increments `data_revision`; it does not change `control_revision`, `raw_state`, or `run_commands`. Conditional PostgreSQL updates make concurrent commands and repeated workers idempotent. Startup and signal handling remain in `main.ts`; shutdown stops future maintenance timers before closing HTTP and both pools within the shared deadline.
+
+`RUN_SUMMARY_INTERVAL_MS` independently defaults to 60 seconds. Each settled cycle starts `RUN_SUMMARY_CONCURRENCY` workers (default 2, maximum 8), waits for all of them, and then schedules the next cycle. Each worker owns a transaction-scoped database claim through calculation/publication; commit or rollback releases it. The maintenance pool reserves capacity for the bounded batch plus auto-finish, and shutdown stops both timers before pool closure.
+
+`RUN_RAW_PURGE_INTERVAL_MS` also defaults to 60 seconds. Each settled cycle claims at most one run and deletes at most one 1,000-point batch. A new purge starts only after the seven-day target, after the 24-hour upload window is closed, and with a current valid summary; committed `purging` work is resumed first. An overdue run without a current summary emits an identity-free warning and remains intact. The maintenance pool reserves separate capacity for summary workers, auto-finish, and raw purge.
+
+`RUN_RETENTION_DELETE_INTERVAL_MS` also defaults to 60 seconds. Each settled cycle claims and whole-run-deletes at most one finished run whose `finished_at` is at least one year old, oldest first; a claimed run's eligibility is independently reconfirmed after its locks are acquired. This is the same maintenance-only annual retention path documented in "Run deletion and annual retention" above, sharing the deletion primitive and per-run advisory lock with owner `DELETE`, raw purge, and summary publication.
+
+`RUN_TOMBSTONE_RECLAIM_INTERVAL_MS` defaults to 300000 (five minutes; validated as a positive integer up to 24 hours). Each settled cycle reclaims at most 500 tombstones whose `expires_at` has passed (oldest first, through the maintenance-only `app_private.reclaim_expired_run_tombstones`, hard cap 1,000). Cleanup is restart-safe and skips rows another worker holds; a delayed or stopped cleanup only extends tombstone protection, it can never free a run ID early. See "Tombstone lifetime and late retries (P10.4)" above.
+
+`BACKUP_ENCRYPTION_KEY_FILE`, `BACKUP_DATABASE_URL`, `BACKUP_PG_DOCKER_CONTAINER` and the `RESTORE_DRILL_*` URLs configure the backup commands and the local restore drill (see "Backups and the restore drill (P12.3)"); the API never reads them, and they are intentionally absent from the production secret set.
+
+`DELETION_JOURNAL_DIR` is an absolute directory for exported deletion journal files; it is required when `APP_ENV=production` and optional otherwise (unset keeps deletions in the database outbox and logs a startup warning). When set, startup proves it is writable before the listener binds. `RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS` defaults to 30000 (positive integer up to 24 hours); each settled cycle exports at most 500 rows. See "Deletion journal and restore (P10.5)" above.
+
+`LIVE_SSE_POLL_INTERVAL_MS` defaults to 2 seconds and `LIVE_SSE_HEARTBEAT_INTERVAL_MS` to 15 seconds. `LIVE_SSE_MAX_CONNECTIONS` bounds open and opening streams (default 64), `LIVE_SSE_POLL_CONCURRENCY` bounds simultaneous identity/organization reads (default 2, maximum 8), and `LIVE_SSE_BACKPRESSURE_TIMEOUT_MS` closes a writer that remains blocked for 10 seconds by default.
+
+`DB_CONNECTION_TIMEOUT_MS` bounds pool acquisition/connection. `DB_QUERY_TIMEOUT_MS` separately bounds the readiness query; timeout destroys that client so a hung query cannot occupy the pool. `DB_STATEMENT_TIMEOUT_MS` (default 5000) and `DB_LOCK_TIMEOUT_MS` (default 2000, never above the statement budget) are applied by PostgreSQL itself to every runtime-pool connection as `statement_timeout` and `lock_timeout`, so no ordinary statement, identity lookup or archive authorization lock can run or wait without a bound; each limit is per statement, not per request. The tile render keeps its tighter transaction-local 2 s limit. A cancelled request is rolled back and answered `503 DB_STATEMENT_TIMEOUT` or `503 DB_LOCK_TIMEOUT` (safe to retry; ADR-0050). The maintenance pool has independent `MAINTENANCE_DB_STATEMENT_TIMEOUT_MS` (default 60000) and `MAINTENANCE_DB_LOCK_TIMEOUT_MS` (default 5000, never above its statement budget), applied on every connection; these do not bound a whole job or filesystem I/O (ADR-0069). `SHUTDOWN_TIMEOUT_MS` bounds HTTP drain plus pool closure with monotonic elapsed time before the controlled fallback terminates the process. UTC business-event time remains a separate clock capability.
+
+`createApp({ config, pool, clock })` has no startup side effects. The executable entrypoint calls `main.ts`, which owns configuration loading, dependency construction, port binding, and signal handling.
+
+Application API failures use `{ "error": { "code", "message", "requestId", "details"? } }`; `X-Request-Id` is generated server-side and matches the body. Health remains a separate operational contract with its established `{ status, checks? }` body while still receiving the response request-ID header.
+
+Architecture and execution evidence are in `docs/`, especially `docs/SDD.md`, `docs/implementation-plan.md`, and `docs/progress.md`.
