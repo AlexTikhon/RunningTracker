@@ -78,7 +78,12 @@ npm run test:integration --workspace=@running-tracker/api -- test/gps-trace-anal
     secure context, and it is the exact `ALLOWED_ORIGINS` value. Chrome remote debugging (`chrome://inspect`) gives
     the console that sign-in needs. `adb` is not installed on this machine. The phone stays on a cable, so this
     checks capture and recovery near the desk, not a run outdoors.
-  - On iPhone, there is no route without a trusted HTTPS origin, which this pilot does not set up.
+  - On iPhone, a trusted HTTPS origin is needed. Since ADR-0085 it exists as the **iPhone LAN pilot**
+    (`docs/runbooks/iphone-lan-pilot.md`): an isolated stack on the computer's private Wi-Fi address with its own
+    name-constrained certificate authority that the owner trusts on the phone, and the demo sign-in buttons, so no
+    console is needed. Synthetic data only. Its physical Safari checklist, including foreground GPS and
+    screen-lock observations, is `docs/reports/iphone-lan-pilot.md` (not run yet). This file's steps 1–5 can be run
+    on that pilot; step 3's offline switch then is airplane mode or leaving the Wi-Fi.
 - **Sign-in.** No OpenID Connect provider exists. Sign in with the development session from `docs/runbooks/demo.md`
   step 3 as the demo runner (`…0001`). That snippet needs a console on the phone.
 - **Coach view.** Since ADR-0063 the Runner tab can share the run with a coach: Share grants live and history

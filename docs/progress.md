@@ -3952,3 +3952,49 @@ by list over HTTP and returns both exactly. **Mutation check** (red, then restor
 Verified: focused meal integration files 85 passed; `npm run verify` 3,147 (scripts 90 / API 1611 / web 1174 /
 contracts 255 / fixtures 14 / simulator 3, unchanged); `npm run test:integration` 980 in 69 files (+1), 330 s. E2E not
 run (no runtime or web change).
+
+## iPhone web pilot over trusted LAN HTTPS, synthetic data (ADR-0085) (2026-11-09)
+
+Base `c403715` (hosted CI run 42618556472 green). Branch `feat/iphone-lan-pilot`, four commits: isolated environment and
+bootstrap; TLS/origin and the demo sign-in build; HTTPS and browser verification; docs. No API code, migration,
+contract or production default changed.
+
+**What exists.** `infra/compose/docker-compose.lan-pilot.yml` (project `running-tracker-lan-pilot`): its own PostgreSQL
+(`running_tracker_lan_pilot`, internal network, own volume), a one-shot init job on the tools image (bootstrap,
+migrations, `scripts/lan-pilot-seed.mjs` with the two demo people only), the API on the runtime image (development
+session for the two demo IDs, Secure cookies, `ALLOWED_ORIGINS` = the one pilot origin, both AI providers off), and a
+`lan-pilot` proxy stage (deployment nginx configuration, its own site: 421 for any other Host because Safari sends no
+SNI for an address) published only on the configured private address. `npm run pilot:configure|tls|up|status|down`,
+`npm run pilot:verify`, `npm run pilot:e2e`. The CA is name-constrained to exactly the pilot address/name; only
+`tls/server/` is mounted; only the public CA certificate (DER) is written for the phone. The web demo gate also opens
+for `MODE === 'lan-pilot'`, built only by the `web-build-lan-pilot` stage; the demo-people insert moved to
+`scripts/demo-people.mjs` (shared with `demo:seed`), and the production secret builder takes a database name.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| `npm run verify` | scripts 107 (+17: `lan-pilot` 16, secrets 1), web 1,178 (+4), contracts 255, fixtures 14, simulator 3, lint, typecheck, build: pass. API 1,610 of 1,611 in two of three full runs: `run-search-evaluation-cli.spec.ts` "builds the adapter of the configured provider" hit its 5 s timeout (three dynamic imports inside the test while module transforms took 388 s of tracked time); that file alone then passed 27 of 27 and the API suite alone 1,611 of 1,611. No API file differs from `main`. Hosted CI is the independent run |
+| Production web bundle, before and after the gate change | byte-identical file hashes; no "Demo runner", demo ID or "lan-pilot" string. The `--mode lan-pilot` bundle with the flag contains them |
+| Mutation: gate without the `MODE` clause | `App.spec.tsx` "offers it in the LAN pilot build" fails (1 of 12), restored |
+| Affected Chromium specs (`demo-sign-in`, `demo-simulator`, `smoke`, the OIDC project) | 17 passed, 2.4 min |
+| `pilot:configure` with `0.0.0.0`, then an unassigned 192.168.x address | both refused, nothing written |
+| `pilot:tls`, first attempt | `openssl verify` refused the chain ("permitted subtree violation"): a server CN equal to the address is checked against the DNS constraint. Fixed (descriptive CN); issuance now ends with a strict verify and removes its output on failure (unit-tested, and forced in a scratch run) |
+| `pilot:tls` | issued; strict verify OK; rerun refused to overwrite; host-name mode issued `IP` + `DNS` SANs in a scratch directory |
+| `pilot:up`, twice | healthy; 40 migrations applied, then all skipped; seed idempotent |
+| `pilot:verify` | PASS (exposure, TLS acceptance and refusal, 421, headers, Origin, cookies, owner-only read with CSRF, isolation from `running_tracker` and `running_tracker_test`, SSE over HTTP/2, log canaries, cleanup; details in `docs/reports/iphone-lan-pilot.md`) |
+| `pilot:e2e` | 1 passed (Chromium 390×844 through the proxy); Chromium without the one-key allow-list, or with another key, refused the pilot (`ERR_CERT_AUTHORITY_INVALID`) |
+| Pilot database afterwards | 0 check-ins, 0 movement days, 0 meals, 2 users |
+
+**Official documentation checked (2026-11-09).** Apple support 102400 (installing a downloaded profile: Settings ›
+Profile Downloaded › Install; deleted after 8 minutes; one pending profile; Stolen Device Protection), 102390 (full
+trust: Settings › General › About › Certificate Trust Settings, required for profiles from email or a website), 103769
+(TLS server certificate requirements: RSA ≥ 2048, SHA-2, names in SAN, serverAuth EKU, ≤ 825 days) and 102028 (the
+398-day limit does not apply to user-added roots). The profile-removal path was not confirmed on an Apple page; the
+runbook names the VPN & Device Management screen where installed profiles are listed.
+
+**Not established.** No iPhone step was run: certificate install and trust, Safari rendering, inputs, keyboard,
+session persistence, foreground GPS and screen-lock behaviour are NOT RUN in `docs/reports/iphone-lan-pilot.md`.
+Whether iOS accepts the name-constrained root is unknown (a documented fallback exists). The phone's path through the
+Windows firewall was not exercised (the desktop reaches its own address). IPv4 only. The pilot's sign-in is the
+development session: synthetic data only.

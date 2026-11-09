@@ -94,8 +94,9 @@ Sections 1 and 2 below are the same thing done by hand.
 ## What this demo is not
 
 - **Sign-in is the development session, not OpenID Connect.** No real identity provider exists for this project, so
-  the demo buttons sign in with `POST /api/session` (local auth, development only, rejected in production; a
-  production build of the web app does not contain the buttons at all, whatever its environment says). The OpenID
+  the demo buttons sign in with `POST /api/session` (local auth, development only, rejected in production; an
+  ordinary production build of the web app does not contain the buttons at all, whatever its environment says; the
+  one exception is the iPhone LAN pilot's own `--mode lan-pilot` build, `docs/runbooks/iphone-lan-pilot.md`). The OpenID
   Connect flow is exercised against an in-process test provider by `npm run test:integration` (the
   `oidc-login` suite) and its production surface by `npm run deploy:verify`; neither is a real provider.
 - **The runner is a script, not the browser.** `npm run demo:run` plays the runner over HTTP with a simulated route.
@@ -354,7 +355,8 @@ for its session exactly as after a reload, and shows the one organization this p
   exist here because OpenID Connect is not configured.
 
 The buttons appear only on a development server started with `VITE_LOCAL_DEMO_ENABLED=true`, which `npm run demo:up`
-does. A production build never has them, and the API refuses local sign-in in production regardless.
+does, and in the iPhone LAN pilot's image, which builds the app with `vite build --mode lan-pilot` and the same flag
+(ADR-0085). An ordinary production build never has them, and the API refuses local sign-in in production regardless.
 
 **Console fallback (optional, for diagnosis).** The buttons do exactly what this does from the browser's developer
 console on that page:

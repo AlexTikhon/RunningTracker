@@ -27,7 +27,7 @@ What exists, stage by stage (the evidence for each is in [docs/progress.md](docs
 - Meal log (ADR-0083): a **Meal log** view for meals and snacks logged by hand per local date, each with a meal type, a title and optional user-reported totals for the whole entry (food energy, protein, carbohydrate, fat); owner-only, idempotent creation per form session, edit and delete, erasures in the same ledger. Today shows the number of entries and each recorded total with its own coverage ("recorded for 2 of 3 logged entries"). Nothing is estimated, looked up or judged, and meals are not an input of AI insights. See "Meal log" below.
 - Trends (ADR-0084): a read-only **Trends** view of the 28 calendar dates ending on a chosen date: recorded weight, sleep duration, manually entered steps and food energy, each with its coverage against the actual range, a simple chart that leaves gaps for missing dates, and a table of every date. Computed on every read in one snapshot and never stored; a missing value is unknown and never counts as zero; food energy keeps day and entry coverage apart and is never called a complete food diary. Opened from Today on its date, and a date opens Today. See "Trends" below.
 
-**What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider, and the OpenID Connect flow only in Chromium), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. The full browser suite runs in Chromium; desktop Firefox, on Windows, runs the 18-test core gate (runner, coach and sharing workflows) and the 24-test pre-demo smoke, but not OpenID Connect sign-in or the real map runtime; no real Mapbox basemap was rendered in any browser; nothing ran in Safari, a mobile browser or on a phone with real GPS. No production RPO or RTO is claimed. Two read endpoints named in the SDD (`/archive/runs`, `/live/nearby`) remain unimplemented; `/runs/{runId}/track?mode=archive` now reads published finished-run geometry and metrics (ADR-0066). To see it working locally, run `npm run demo:up` and press **Demo runner** or **Demo coach** in the browser; the walk-through and its recorded rehearsal are in [docs/runbooks/demo.md](docs/runbooks/demo.md), and interview notes in [docs/interview.md](docs/interview.md).
+**What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider, and the OpenID Connect flow only in Chromium), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. The full browser suite runs in Chromium; desktop Firefox, on Windows, runs the 18-test core gate (runner, coach and sharing workflows) and the 24-test pre-demo smoke, but not OpenID Connect sign-in or the real map runtime; no real Mapbox basemap was rendered in any browser; nothing ran in Safari, a mobile browser or on a phone with real GPS (an iPhone web pilot over LAN HTTPS is prepared and verified on the workstation, ADR-0085; its phone checks have not been run). No production RPO or RTO is claimed. Two read endpoints named in the SDD (`/archive/runs`, `/live/nearby`) remain unimplemented; `/runs/{runId}/track?mode=archive` now reads published finished-run geometry and metrics (ADR-0066). To see it working locally, run `npm run demo:up` and press **Demo runner** or **Demo coach** in the browser; the walk-through and its recorded rehearsal are in [docs/runbooks/demo.md](docs/runbooks/demo.md), and interview notes in [docs/interview.md](docs/interview.md).
 
 ## Prerequisites
 
@@ -366,6 +366,21 @@ The certificate and private key are generated under gitignored `.local/tls` and
 must never be reused outside local verification. The overlay deliberately uses
 the existing development identity fixture and tracked local database credentials;
 managed certificates and external secrets are the production profile (P12.2, below) and production sign-in is OpenID Connect (P12.1, below).
+
+## iPhone LAN pilot (synthetic data only)
+
+[ADR-0085](docs/adr/0085-iphone-lan-pilot.md) adds an opt-in, isolated stack for opening the web app in Safari on an iPhone on the same trusted Wi-Fi: its own Compose project, PostgreSQL database and volume, only the two synthetic demo people, both AI providers off, and HTTPS published only on one configured private address with a certificate from its own name-constrained local authority. Sign-in is the existing demo panel (development session), which is **not identity verification**, so the pilot is for synthetic data only. The loopback transport profile above and the production profile are unchanged.
+
+```powershell
+npm run pilot:configure -- --address <this computer's private Wi-Fi IPv4>
+npm run pilot:tls
+npm run pilot:up
+npm run pilot:verify     # real certificate validation through the proxy
+npm run pilot:e2e        # optional: desktop Chromium through the proxy
+npm run pilot:down       # add -- --delete-data to remove the pilot database
+```
+
+Trusting the certificate on the phone, the narrow firewall rule, clean-up and the prerequisites for real data are in [docs/runbooks/iphone-lan-pilot.md](docs/runbooks/iphone-lan-pilot.md); the physical Safari checklist (not run yet) is [docs/reports/iphone-lan-pilot.md](docs/reports/iphone-lan-pilot.md).
 
 ## Deterministic GPS simulator
 

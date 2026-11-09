@@ -102,5 +102,16 @@ defined once (weight change only with two recorded dates, sleep average over rec
 coverage). The chart never joins values across a missing date. No predictions, correlations, targets or advice; no
 activities, GPS, active energy or macronutrients yet.
 
-The next planned phase is an iPhone/HealthKit integration spike, which must first establish access to macOS/Xcode and a
-physical iPhone; it is not started (the current setup is Windows and an iPhone, without a Mac).
+**Immediate next milestone: the iPhone web pilot** ([ADR-0085](adr/0085-iphone-lan-pilot.md)). The setup is a Windows
+computer and an iPhone, without a Mac, so the next step uses the existing web app in Safari rather than a native client.
+An isolated, opt-in stack (its own Compose project, database and volume; synthetic demo people only; both AI providers
+off) is served over HTTPS on the computer's private Wi-Fi address, with a certificate from its own name-constrained
+local authority that the owner trusts on the phone, and the existing demo sign-in. It is verified on the workstation
+(`npm run pilot:verify`, `npm run pilot:e2e`); the milestone is reached when the owner has run the physical Safari
+checklist (`docs/reports/iphone-lan-pilot.md`: trusted HTTPS, Today, editors, Trends, inputs, session, foreground GPS,
+screen-lock observation) and its defects are triaged. The pilot's sign-in is the development session, so it is for
+synthetic data only; real health data needs real sign-in and the deployment profile first.
+
+**HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
+built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the
+data foundation, under their own provenance.
