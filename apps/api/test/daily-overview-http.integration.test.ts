@@ -81,7 +81,7 @@ describe('daily overview HTTP API', () => {
   });
 
   afterAll(async () => {
-    for (const table of ['activities', 'daily_metrics', 'daily_movement', 'erasure_ledger']) {
+    for (const table of ['activities', 'daily_metrics', 'daily_movement', 'meals', 'erasure_ledger']) {
       await ownerPool?.query(`DELETE FROM ${table}`).catch(() => undefined);
     }
     await runtimePool?.end();
@@ -140,6 +140,39 @@ describe('daily overview HTTP API', () => {
       [values.orgId ?? ids.orgA, values.userId ?? ids.userOrgA, localDate, values.timeZone ?? ZONE, values.steps ?? null, values.energy ?? null],
     );
 
+  /** A manual meal entry for a stored calendar date (ADR-0083); values as numeric text, null for not recorded. */
+  const meal = (
+    localDate: string,
+    values: { carbohydrate?: string | null; energy?: string | null; fat?: string | null; orgId?: string; protein?: string | null; timeZone?: string; title?: string; userId?: string } = {},
+  ) =>
+    ownerPool
+      .query<{ id: string }>(
+        `INSERT INTO meals (org_id, user_id, local_date, time_zone, meal_type, title, energy_kcal, protein_g, carbohydrate_g, fat_g, idempotency_key, creation_digest)
+         VALUES ($1, $2, $3::date, $4, 'lunch', $5, $6::numeric, $7::numeric, $8::numeric, $9::numeric, gen_random_uuid(), sha256(gen_random_uuid()::text::bytea))
+         RETURNING id`,
+        [
+          values.orgId ?? ids.orgA,
+          values.userId ?? ids.userOrgA,
+          localDate,
+          values.timeZone ?? ZONE,
+          values.title ?? 'SECRET-MEAL-TITLE',
+          values.energy ?? null,
+          values.protein ?? null,
+          values.carbohydrate ?? null,
+          values.fat ?? null,
+        ],
+      )
+      .then((result) => result.rows[0]!.id);
+
+  const noMeals = {
+    carbohydrateG: { recordedEntries: 0, total: null },
+    count: 0,
+    energyKcal: { recordedEntries: 0, total: null },
+    fatG: { recordedEntries: 0, total: null },
+    proteinG: { recordedEntries: 0, total: null },
+    source: 'manual',
+  };
+
   async function activity(startedAt: string, values: { durationS?: number; id?: string; orgId?: string; type?: string; userId?: string } = {}): Promise<string> {
     const id = values.id ?? randomUUID();
     await ownerPool.query(
@@ -183,6 +216,7 @@ describe('daily overview HTTP API', () => {
         day: { endsAt: '2026-11-05T23:00:00.000Z', inProgress: false, localDate: DAY, startsAt: '2026-11-04T23:00:00.000Z', timeZone: ZONE },
         gpsRuns: { count: 0, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 0 },
         manualActivities: { byType: [], count: 0, enteredDurationS: 0 },
+        meals: noMeals,
         movement: { recorded: false },
         provenance: { computedAt: now, overviewVersion: DAILY_OVERVIEW_VERSION, persisted: false, snapshot: 'single_read_only_transaction', source: 'computed_by_app' },
       });
@@ -215,6 +249,70 @@ describe('daily overview HTTP API', () => {
     it('returns every check-in value as stored', async () => {
       await checkIn(DAY, { mood: 3, sleepMinutes: 450, sleepQuality: 4, soreness: 7, weightKg: 72.35 });
       expect((await read()).checkIn).toEqual({ hasNote: false, mood: 3, recorded: true, sleepMinutes: 450, sleepQuality: 4, soreness: 7, timeZone: ZONE, weightKg: 72.35 });
+    });
+  });
+
+  describe('meals (ADR-0083)', () => {
+    it('counts entries and gives each metric its own coverage and exact total: energy on 2 of 3 entries, the third unknown', async () => {
+      await meal(DAY, { carbohydrate: '60', energy: '650.5', protein: '30.2' });
+      await meal(DAY, { energy: '410.6', protein: '0' });
+      await meal(DAY, { title: 'Title only' });
+      const response = await get(owner).expect(200);
+      const overview = dailyOverviewSchema.parse(response.body);
+      expect(overview.meals).toEqual({
+        carbohydrateG: { recordedEntries: 1, total: 60 },
+        count: 3,
+        energyKcal: { recordedEntries: 2, total: 1061.1 },
+        fatG: { recordedEntries: 0, total: null },
+        proteinG: { recordedEntries: 2, total: 30.2 },
+        source: 'manual',
+      });
+      // No title reaches the overview.
+      expect(response.text).not.toContain('SECRET');
+    });
+
+    it('adds in exact decimal arithmetic: tenths that binary floating point cannot add exactly give the exact total', async () => {
+      // 0.1 + 0.2 is 0.30000000000000004 in binary floating point, and ten times 0.1 is 0.9999999999999999.
+      for (let index = 0; index < 10; index += 1) {
+        await meal(DAY, { energy: '0.1', fat: index === 0 ? '0.2' : index === 1 ? '0.1' : null, protein: index < 3 ? '0.1' : null });
+      }
+      await meal(DAY, { carbohydrate: '1999.9' });
+      await meal(DAY, { carbohydrate: '0.2' });
+      const overview = await read();
+      expect(overview.meals).toMatchObject({
+        carbohydrateG: { recordedEntries: 2, total: 2000.1 },
+        count: 12,
+        energyKcal: { recordedEntries: 10, total: 1 },
+        fatG: { recordedEntries: 2, total: 0.3 },
+        proteinG: { recordedEntries: 3, total: 0.3 },
+      });
+    });
+
+    it('gives recorded zeros a total of 0 and no recording a total of null; a day with meals only is not empty', async () => {
+      await meal(DAY, { energy: '0', fat: '0.0' });
+      await meal(DAY, { fat: '0' });
+      const overview = await read();
+      expect(overview).toMatchObject({ checkIn: { recorded: false }, gpsRuns: { count: 0 }, manualActivities: { count: 0 }, movement: { recorded: false } });
+      expect(overview.meals).toEqual({
+        ...noMeals,
+        count: 2,
+        energyKcal: { recordedEntries: 1, total: 0 },
+        fatG: { recordedEntries: 2, total: 0 },
+      });
+      await ownerPool.query('DELETE FROM meals');
+      await meal(DAY, { title: 'Only a title' });
+      expect((await read()).meals).toEqual({ ...noMeals, count: 1 });
+    });
+
+    it('keeps meals on their stored date whatever zone they were logged in or the view uses; food energy stays apart from active energy', async () => {
+      await meal(DAY, { energy: '500', timeZone: 'Pacific/Kiritimati' });
+      await movement(DAY, { energy: '300' });
+      for (const view of ['America/New_York', 'Pacific/Pago_Pago', 'Asia/Tokyo', ZONE]) {
+        const overview = await read(DAY, view);
+        expect(overview.meals).toMatchObject({ count: 1, energyKcal: { recordedEntries: 1, total: 500 } });
+        expect(overview.movement).toMatchObject({ activeEnergyKcal: 300 });
+        for (const neighbour of ['2026-11-04', '2026-11-06']) expect((await read(neighbour, view)).meals.count, `${neighbour} in ${view}`).toBe(0);
+      }
     });
   });
 
@@ -321,16 +419,23 @@ describe('daily overview HTTP API', () => {
       await activity('2026-09-20T07:00:00Z');
       await checkIn(date, { mood: 1 }, { userId: ids.userStranger });
       await movement(date, { steps: 12_000, orgId: ids.orgB, userId: ids.userOrgB });
+      await meal(date, { energy: '700' });
+      await meal(date, { energy: '50', userId: ids.userStranger });
+      await meal(date, { energy: '900', orgId: ids.orgB, userId: ids.userOrgB });
       const mine = await read(date, 'UTC');
       expect(mine).toMatchObject({ checkIn: { mood: 4, recorded: true }, gpsRuns: { count: 3 }, manualActivities: { count: 1 }, movement: { steps: 8042 } });
+      expect(mine.meals).toMatchObject({ count: 1, energyKcal: { total: 700 } });
 
       const theirs = await read(date, 'UTC', stranger);
       expect(theirs).toMatchObject({ checkIn: { mood: 1, recorded: true }, gpsRuns: { count: 0 }, manualActivities: { count: 0 }, movement: { recorded: false } });
+      expect(theirs.meals).toMatchObject({ count: 1, energyKcal: { total: 50 } });
       const granteeView = await read(date, 'UTC', grantee);
       expect(granteeView).toMatchObject({ checkIn: { recorded: false }, gpsRuns: { count: 0 }, manualActivities: { count: 0 }, movement: { recorded: false } });
+      expect(granteeView.meals).toEqual(noMeals);
 
       const outsiderOwn = dailyOverviewSchema.parse((await get(outsider, date, { timeZone: 'UTC' }, { orgId: ids.orgB }).expect(200)).body);
       expect(outsiderOwn.movement).toMatchObject({ recorded: true, steps: 12_000 });
+      expect(outsiderOwn.meals).toMatchObject({ count: 1, energyKcal: { total: 900 } });
       for (const [auth, orgId] of [
         [outsider, ids.orgA],
         [owner, ids.orgB],
@@ -349,6 +454,7 @@ describe('daily overview HTTP API', () => {
       await checkIn(DAY, { mood: 3 });
       await movement(DAY, { steps: 1000 });
       const kept = await activity('2026-11-05T07:00:00Z');
+      const keptMeal = await meal(DAY, { energy: '400' });
       let interleave: (() => Promise<void>) | null = null;
       const reached: string[] = [];
       const hooked = createApp({
@@ -371,6 +477,10 @@ describe('daily overview HTTP API', () => {
         await gpsRun('2026-11-05T10:00:00Z', { summary: 2 });
         await ownerPool.query('DELETE FROM daily_metrics');
         await ownerPool.query('DELETE FROM daily_movement');
+        // Meals are read by the last statement: a meal deleted and two logged now are still not seen.
+        await ownerPool.query('DELETE FROM meals WHERE id = $1', [keptMeal]);
+        await meal(DAY, { energy: '100' });
+        await meal(DAY, { protein: '20' });
       };
       const during = await read(DAY, ZONE, owner, hooked);
       expect(reached).toEqual(['after day records']);
@@ -380,6 +490,7 @@ describe('daily overview HTTP API', () => {
         manualActivities: { byType: [{ count: 1, type: 'run' }], count: 1 },
         movement: { recorded: true, steps: 1000 },
       });
+      expect(during.meals).toEqual({ ...noMeals, count: 1, energyKcal: { recordedEntries: 1, total: 400 } });
 
       interleave = null;
       const next = await read(DAY, ZONE, owner, hooked);
@@ -389,28 +500,32 @@ describe('daily overview HTTP API', () => {
         manualActivities: { byType: [{ count: 1, type: 'swim' }], count: 1 },
         movement: { recorded: false },
       });
+      expect(next.meals).toEqual({ ...noMeals, count: 2, energyKcal: { recordedEntries: 1, total: 100 }, proteinG: { recordedEntries: 1, total: 20 } });
     });
 
     it('excludes a check-in, a movement day and an activity on the next read after their deletion commits over HTTP', async () => {
       await checkIn(DAY, { mood: 4, sleepMinutes: 420 });
       await movement(DAY, { energy: '412.5', steps: 8042 });
       const activityId = await activity('2026-11-05T07:00:00Z');
-      expect(await read()).toMatchObject({ checkIn: { recorded: true }, manualActivities: { count: 1 }, movement: { recorded: true } });
+      const mealId = await meal(DAY, { energy: '777.7' });
+      expect(await read()).toMatchObject({ checkIn: { recorded: true }, manualActivities: { count: 1 }, meals: { count: 1 }, movement: { recorded: true } });
 
       await mutate('delete', `/api/orgs/${ids.orgA}/daily-metrics/${DAY}`).expect(204);
       await mutate('delete', `/api/orgs/${ids.orgA}/daily-movement/${DAY}`).expect(204);
       await mutate('delete', `/api/orgs/${ids.orgA}/activities/${activityId}`).expect(204);
+      await mutate('delete', `/api/orgs/${ids.orgA}/meals/${mealId}`).expect(204);
       const response = await get(owner).expect(200);
-      expect(dailyOverviewSchema.parse(response.body)).toMatchObject({ checkIn: { recorded: false }, manualActivities: { count: 0 }, movement: { recorded: false } });
-      expect(response.text).not.toMatch(/8042|412\.5|420/u);
+      expect(dailyOverviewSchema.parse(response.body)).toMatchObject({ checkIn: { recorded: false }, manualActivities: { count: 0 }, meals: noMeals, movement: { recorded: false } });
+      expect(response.text).not.toMatch(/8042|412\.5|420|777\.7/u);
     });
 
     it('writes nothing: the row counts of every source and the erasure ledger are unchanged after reads', async () => {
       await checkIn(DAY, { mood: 4 });
+      await meal(DAY, { energy: '1' });
       const counts = async () =>
         (
           await ownerPool.query<{ counts: string }>(
-            `SELECT concat_ws(',', (SELECT count(*) FROM daily_metrics), (SELECT count(*) FROM daily_movement), (SELECT count(*) FROM activities),
+            `SELECT concat_ws(',', (SELECT count(*) FROM daily_metrics), (SELECT count(*) FROM daily_movement), (SELECT count(*) FROM activities), (SELECT count(*) FROM meals),
                                    (SELECT count(*) FROM runs), (SELECT count(*) FROM run_summaries), (SELECT count(*) FROM erasure_ledger),
                                    (SELECT count(*) FROM weekly_insights)) AS counts`,
           )

@@ -37,6 +37,7 @@ describe('App', () => {
       'Archive',
       'Activity',
       'Check-in',
+      'Meal log',
     ]);
     expect(navigation).toContain('<button aria-current="page" type="button">Runner</button>');
     expect(navigation).toContain('<button type="button">Today</button>');

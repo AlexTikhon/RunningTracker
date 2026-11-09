@@ -12,6 +12,7 @@ import { formatDistance } from './run-search.js';
 /** What a Today action asks the application to open. The date travels with the two editor intents only. */
 export type TodayAction =
   | { kind: 'check-in'; localDate: string }
+  | { kind: 'meals'; localDate: string }
   | { kind: 'movement'; localDate: string }
   | { kind: 'activities' }
   | { kind: 'runner' };

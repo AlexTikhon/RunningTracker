@@ -12,6 +12,8 @@ import {
   dailyMovementViewSchema,
   dailyOverviewSchema,
   ingestPointsResponseSchema,
+  mealListResponseSchema,
+  mealViewSchema,
   liveTrackResponseSchema,
   organizationCoachListResponseSchema,
   organizationListResponseSchema,
@@ -37,6 +39,10 @@ import {
   type DailyMovementView,
   type PutDailyMovementRequest,
   type DailyOverview,
+  type CreateMealRequest,
+  type MealListResponse,
+  type MealView,
+  type UpdateMealRequest,
   type ArchiveTrackResponse,
   type IngestPointsResponse,
   type LiveTrackResponse,
@@ -573,6 +579,77 @@ export async function listDailyMovement(
     signal,
   });
   return dailyMovementListResponseSchema.parse(requireSuccess(response));
+}
+
+// The manual meal log (ADR-0083): owner-only entries with a database-generated id, listed one local date at a time.
+export interface MealTarget {
+  mealId: string;
+  orgId: string;
+}
+
+function mealPath(orgId: string, mealId?: string): string {
+  const base = `/api/orgs/${encodeURIComponent(orgId)}/meals`;
+  return mealId === undefined ? base : `${base}/${encodeURIComponent(mealId)}`;
+}
+
+// Idempotent per form session: the same idempotency key with the same request answers 200 with the entry it created,
+// so resending after an unknown outcome is safe; a changed request under the same key is 409 MEAL_ALREADY_SAVED.
+export async function createMeal(
+  orgId: string,
+  request: CreateMealRequest,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<{ created: boolean; view: MealView }> {
+  const response = await requestJson(mealPath(orgId), {
+    body: JSON.stringify(request),
+    credentials: 'same-origin',
+    headers: mutationHeaders(csrf),
+    method: 'POST',
+    signal,
+  });
+  const view = mealViewSchema.parse(requireSuccess(response));
+  if (view.localDate !== request.localDate) throw new Error('The server returned an entry of a different date');
+  return { created: response.response.status === 201, view };
+}
+
+// Naturally idempotent: the body is the whole set of editable fields, so sending it again changes nothing.
+export async function updateMeal(target: MealTarget, request: UpdateMealRequest, csrf: CsrfCredentials, signal: AbortSignal): Promise<MealView> {
+  const response = await requestJson(mealPath(target.orgId, target.mealId), {
+    body: JSON.stringify(request),
+    credentials: 'same-origin',
+    headers: mutationHeaders(csrf),
+    method: 'PUT',
+    signal,
+  });
+  const view = mealViewSchema.parse(requireSuccess(response));
+  if (view.mealId !== target.mealId) throw new Error('The server returned a different entry');
+  return view;
+}
+
+export async function listMeals(
+  input: { cursor: string | null; localDate: string; orgId: string },
+  signal: AbortSignal,
+): Promise<MealListResponse> {
+  const query = new URLSearchParams({ localDate: input.localDate, ...(input.cursor === null ? {} : { cursor: input.cursor }) });
+  const response = await requestJson(`${mealPath(input.orgId)}?${query.toString()}`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  const page = mealListResponseSchema.parse(requireSuccess(response));
+  if (page.items.some((item) => item.localDate !== input.localDate)) throw new Error('The server returned entries of a different date');
+  return page;
+}
+
+// 204 in every case, including an entry that is already gone, so a retry is always safe.
+export async function deleteMeal(target: MealTarget, csrf: CsrfCredentials, signal: AbortSignal): Promise<void> {
+  const response = await requestJson(mealPath(target.orgId, target.mealId), {
+    credentials: 'same-origin',
+    headers: { [csrf.headerName]: csrf.token },
+    method: 'DELETE',
+    signal,
+  });
+  requireSuccess(response);
 }
 
 export async function readRun(orgId: string, runId: string, signal?: AbortSignal): Promise<RunView> {

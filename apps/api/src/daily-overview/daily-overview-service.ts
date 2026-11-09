@@ -24,12 +24,14 @@ import { localDateOf, startOfLocalDate } from '../runs/run-search-period.js';
 // statement names the organization and the owner and runs with row-level security in force; GPS runs are filtered by
 // owner explicitly, so a run another person shared with this one never counts.
 //
-// The two statements are the two attribution rules:
+// The statements follow the two attribution rules:
 // - day records: the check-in and the manual movement stored for the calendar date itself (`local_date`), whatever
 //   zone they were saved in. The requested zone plays no part, so a record is never moved to another date.
 // - timestamped sources: manual activities and finished GPS runs whose start lies in [start of the date, start of the
 //   next date) in the requested zone. The bounds are computed from the zone's own rules (startOfLocalDate), so a day is
 //   23 or 25 hours long around a daylight saving change.
+// - meals (ADR-0083): entries logged for the calendar date itself, like a check-in. Their own statement, read last, in
+//   the same snapshot: a meal written or deleted after the transaction's first statement is not seen.
 
 /** Barriers for deterministic snapshot tests. Never set in production. */
 export interface DailyOverviewTestHooks {
@@ -68,6 +70,20 @@ interface DayRecordsRow {
 interface StartedRow {
   activities: Array<{ count: number; enteredDurationS: number; type: ActivityType }>;
   gps_runs: { count: number; currentDistanceM: number | null; withCurrentDistance: number };
+}
+
+/** One metric's coverage and exact total (numeric as text, or null when no entry records it). */
+interface MealMetricRow {
+  recorded: number;
+  total: string | null;
+}
+
+export interface MealsRow {
+  carbohydrate_g: MealMetricRow;
+  count: number;
+  energy_kcal: MealMetricRow;
+  fat_g: MealMetricRow;
+  protein_g: MealMetricRow;
 }
 
 // $1 organization, $2 owner, $3 local date. The note's text is never selected: only whether one exists, so that a
@@ -118,6 +134,25 @@ SELECT
     WHERE run.org_id = $1 AND run.user_id = $2 AND run.status = 'finished' AND run.finished_at IS NOT NULL
       AND run.started_at >= $3::timestamptz AND run.started_at < $4::timestamptz) AS gps_runs`;
 
+// $1 organization, $2 owner, $3 local date. Manual entries only (a later importer's rows must not be mixed in). count(col)
+// counts the entries that hold a value (a recorded 0 included), so each metric's coverage is independent; sum(col) adds
+// exactly those values in numeric arithmetic (no floating point, no rounding) and is NULL when none holds one. No title,
+// type or single value is selected. The owner/date index serves the lookup.
+export const dailyOverviewMealsSql = `/* daily-overview:meals */
+SELECT count(*)::integer AS count,
+       json_build_object('recorded', count(meal.energy_kcal)::integer, 'total', sum(meal.energy_kcal)::text) AS energy_kcal,
+       json_build_object('recorded', count(meal.protein_g)::integer, 'total', sum(meal.protein_g)::text) AS protein_g,
+       json_build_object('recorded', count(meal.carbohydrate_g)::integer, 'total', sum(meal.carbohydrate_g)::text) AS carbohydrate_g,
+       json_build_object('recorded', count(meal.fat_g)::integer, 'total', sum(meal.fat_g)::text) AS fat_g
+  FROM meals AS meal
+ WHERE meal.org_id = $1 AND meal.user_id = $2 AND meal.local_date = $3::date AND meal.source = 'manual'`;
+
+// A sum of values with at most one decimal has at most one decimal, so the text parses to exactly the number it denotes.
+const mealMetric = (metric: MealMetricRow) => ({
+  recordedEntries: metric.recorded,
+  total: metric.total === null ? null : Number(metric.total),
+});
+
 /** The half-open UTC interval of a local calendar date in a zone: from its start up to the next date's start. */
 export function localDayInterval(localDate: string, timeZone: string): { endsAtMs: number; startsAtMs: number } {
   return { endsAtMs: startOfLocalDate(addLocalDays(localDate, 1), timeZone), startsAtMs: startOfLocalDate(localDate, timeZone) };
@@ -138,6 +173,7 @@ export function buildDailyOverview(input: {
   dayRecords: DayRecordsRow;
   interval: { endsAtMs: number; startsAtMs: number };
   localDate: string;
+  meals: MealsRow;
   started: StartedRow;
   timeZone: string;
   today: string;
@@ -167,6 +203,14 @@ export function buildDailyOverview(input: {
       byType,
       count: byType.reduce((sum, entry) => sum + entry.count, 0),
       enteredDurationS: byType.reduce((sum, entry) => sum + entry.enteredDurationS, 0),
+    },
+    meals: {
+      carbohydrateG: mealMetric(input.meals.carbohydrate_g),
+      count: input.meals.count,
+      energyKcal: mealMetric(input.meals.energy_kcal),
+      fatG: mealMetric(input.meals.fat_g),
+      proteinG: mealMetric(input.meals.protein_g),
+      source: 'manual',
     },
     movement:
       movement === null
@@ -205,7 +249,7 @@ export class DailyOverviewService {
     const now = this.#clock.utcNow();
     const today = assertNotAfterToday(localDate, timeZone, now.getTime());
     const interval = localDayInterval(localDate, timeZone);
-    const { dayRecords, started } = await withAuthenticatedTenantTransaction(
+    const { dayRecords, meals, started } = await withAuthenticatedTenantTransaction(
       this.#pool,
       session,
       orgId,
@@ -222,10 +266,12 @@ export class DailyOverviewService {
           ])
         ).rows[0];
         if (!startedRow) throw new Error('The daily overview timestamped-source statement returned no row');
-        return { dayRecords: records, started: startedRow };
+        const mealsRow = (await client.query<MealsRow>(dailyOverviewMealsSql, [orgId, session.userId, localDate])).rows[0];
+        if (!mealsRow) throw new Error('The daily overview meal statement returned no row');
+        return { dayRecords: records, meals: mealsRow, started: startedRow };
       },
       { snapshot: 'read-only snapshot' },
     );
-    return buildDailyOverview({ computedAt: now.toISOString(), dayRecords, interval, localDate, started, timeZone, today });
+    return buildDailyOverview({ computedAt: now.toISOString(), dayRecords, interval, localDate, meals, started, timeZone, today });
   }
 }

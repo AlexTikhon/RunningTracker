@@ -18,6 +18,7 @@ import {
 } from './daily-overview.js';
 import { DailyOverviewController, loadingOverview, type OverviewReader, type OverviewSnapshot } from './daily-overview-controller.js';
 import { movementSourceLabel } from './daily-movement.js';
+import { mealSourceLabel, mealsSummary, mealTotalRows } from './meal-log.js';
 import { readDailyOverview } from './runner-api.js';
 
 // The Today screen (ADR-0082): a read-only overview of one day of the person's own records, recomputed by the server on
@@ -39,7 +40,8 @@ function Rows({ label, rows }: { label: string; rows: LabelledValue[] }) {
 
 /** A loaded overview: the four sources, each in its own section, with its action. */
 export function OverviewContent({ onAction, overview }: { onAction: (action: TodayAction) => void; overview: DailyOverview }) {
-  const { checkIn, day, gpsRuns, manualActivities, movement } = overview;
+  const { checkIn, day, gpsRuns, manualActivities, meals, movement } = overview;
+  const mealRows = mealTotalRows(meals);
   const dateLabel = formatCheckInDate(day.localDate);
   const lengthNote = dayLengthNote(day);
   const checkInZone = checkIn.recorded ? storedZoneNote(checkIn, day, 'check-in') : null;
@@ -79,6 +81,30 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
         {movementZone !== null && <p className="today-note">{movementZone}</p>}
         <button aria-label={`${movement.recorded ? 'Edit' : 'Add'} movement for ${dateLabel}`} onClick={() => onAction({ kind: 'movement', localDate: day.localDate })} type="button">
           {movement.recorded ? 'Edit movement' : 'Add movement'}
+        </button>
+      </section>
+
+      <section aria-labelledby="today-meals-title" className="today-card">
+        <h2 id="today-meals-title">Meals</h2>
+        <p>
+          <span className="review-badge">{mealSourceLabel(meals.source)}</span> What you logged by hand for this day. Each
+          total adds only the values you recorded and says which entries it covers; food energy is shown on its own and is
+          not combined with active energy.
+        </p>
+        <p className={meals.count === 0 ? 'today-missing' : undefined}>{mealsSummary(meals)}</p>
+        {mealRows.length > 0 && (
+          <dl aria-label="Recorded meal totals" className="today-meal-totals">
+            {mealRows.map((row) => (
+              <div className={row.recorded ? undefined : 'today-meal-totals__missing'} key={row.label}>
+                <dt>{row.label}</dt>
+                <dd>{row.value}</dd>
+                <dd className="today-meal-totals__coverage">{row.coverage}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        <button aria-label={`${meals.count === 0 ? 'Add a meal' : 'Open meal log'} for ${dateLabel}`} onClick={() => onAction({ kind: 'meals', localDate: day.localDate })} type="button">
+          {meals.count === 0 ? 'Add a meal' : 'Open meal log'}
         </button>
       </section>
 
@@ -131,7 +157,7 @@ export function TodayView({ dateInput, onAction, onChooseDate, onRefresh, snapsh
         <p className="eyebrow">Daily overview</p>
         <h1 id="today-title" tabIndex={-1}>Today</h1>
         <p>
-          What your own check-in, movement, manual activities and GPS runs hold for one day, read again each time you open
+          What your own check-in, movement, meals, manual activities and GPS runs hold for one day, read again each time you open
           this view or press Refresh. It describes what was recorded; it sets no targets and gives no advice. Only you can see
           it.
         </p>

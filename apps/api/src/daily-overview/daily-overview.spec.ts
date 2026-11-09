@@ -46,11 +46,14 @@ describe('localDayInterval: the half-open interval of a local date', () => {
 
 const emptyRecords = { check_in: null, movement: null };
 const emptyStarted = { activities: [], gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 } };
+const noMetric = { recorded: 0, total: null };
+const emptyMeals = { carbohydrate_g: noMetric, count: 0, energy_kcal: noMetric, fat_g: noMetric, protein_g: noMetric };
 const base = {
   computedAt: '2026-11-08T10:00:00.000Z',
   dayRecords: emptyRecords,
   interval: localDayInterval('2026-11-08', 'Europe/Warsaw'),
   localDate: '2026-11-08',
+  meals: emptyMeals,
   started: emptyStarted,
   timeZone: 'Europe/Warsaw',
   today: '2026-11-08',
@@ -63,6 +66,14 @@ describe('buildDailyOverview', () => {
       day: { endsAt: '2026-11-08T23:00:00.000Z', inProgress: true, localDate: '2026-11-08', startsAt: '2026-11-07T23:00:00.000Z', timeZone: 'Europe/Warsaw' },
       gpsRuns: { count: 0, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 0 },
       manualActivities: { byType: [], count: 0, enteredDurationS: 0 },
+      meals: {
+        carbohydrateG: { recordedEntries: 0, total: null },
+        count: 0,
+        energyKcal: { recordedEntries: 0, total: null },
+        fatG: { recordedEntries: 0, total: null },
+        proteinG: { recordedEntries: 0, total: null },
+        source: 'manual',
+      },
       movement: { recorded: false },
       provenance: {
         computedAt: '2026-11-08T10:00:00.000Z',
@@ -126,7 +137,30 @@ describe('buildDailyOverview', () => {
     expect(overview.gpsRuns).toEqual({ count: 2, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 2 });
   });
 
+  it('passes each meal metric through with its own coverage and its exact total; no recording is null, recorded zeros are 0', () => {
+    const overview = buildDailyOverview({
+      ...base,
+      meals: {
+        carbohydrate_g: { recorded: 3, total: '0.0' },
+        count: 3,
+        energy_kcal: { recorded: 2, total: '1061.0' },
+        fat_g: noMetric,
+        protein_g: { recorded: 1, total: '30.2' },
+      },
+    });
+    expect(overview.meals).toEqual({
+      carbohydrateG: { recordedEntries: 3, total: 0 },
+      count: 3,
+      energyKcal: { recordedEntries: 2, total: 1061 },
+      fatG: { recordedEntries: 0, total: null },
+      proteinG: { recordedEntries: 1, total: 30.2 },
+      source: 'manual',
+    });
+  });
+
   it('refuses rows the contract does not allow instead of passing them on', () => {
+    expect(() => buildDailyOverview({ ...base, meals: { ...emptyMeals, energy_kcal: { recorded: 1, total: '0.05' }, count: 1 } })).toThrow();
+    expect(() => buildDailyOverview({ ...base, meals: { ...emptyMeals, energy_kcal: { recorded: 2, total: '5' }, count: 1 } })).toThrow();
     expect(() =>
       buildDailyOverview({
         ...base,

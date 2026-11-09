@@ -9,7 +9,16 @@ import { RunDetailScreen } from './RunDetailScreen.js';
 import { defaultTimeZone } from './run-search.js';
 import { CoachScreen } from './CoachScreen.js';
 import type { TodayAction } from './daily-overview.js';
-import { inScope, navigationFor, type AppView, type EditorIntent, type KeptDate } from './navigation-intent.js';
+import { MealLogScreen } from './MealLogScreen.js';
+import {
+  checkInIntentOf,
+  inScope,
+  mealIntentDateOf,
+  navigationFor,
+  type AppView,
+  type EditorIntent,
+  type KeptDate,
+} from './navigation-intent.js';
 import { TodayScreen } from './TodayScreen.js';
 import { CaptureController, type CaptureState } from './capture-controller.js';
 import { localDemoEnabled } from './demo-sign-in.js';
@@ -816,8 +825,16 @@ export function App() {
     { label: 'Archive', view: 'archive' },
     { label: 'Activity', view: 'activity' },
     { label: 'Check-in', view: 'checkin' },
+    { label: 'Meal log', view: 'meals' },
   ];
-  const checkInIntent = inScope(editorIntent, viewScope);
+  const scopedIntent = inScope(editorIntent, viewScope);
+  const checkInIntent = checkInIntentOf(scopedIntent);
+  // Back from the Meal log to Today, on the date the Meal log shows; Today reads it again when it opens.
+  const backToToday = (localDate: string) => {
+    if (viewScope === null) return;
+    setTodayDate({ localDate, scope: viewScope });
+    openView('today');
+  };
 
   return (
     <main>
@@ -1025,12 +1042,30 @@ export function App() {
           <DailyCheckInScreen
             key={`${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`}
             csrf={session.session.csrf}
-            intent={checkInIntent === null ? undefined : { localDate: checkInIntent.localDate, section: checkInIntent.section }}
+            intent={checkInIntent}
             orgId={selectedOrgId}
             signal={session.signal}
           />
         ) : (
           <section className="coach-prerequisite" role="status">{viewPrerequisite('daily check-in')}</section>
+        )
+      )}
+
+      {activeView === 'meals' && (
+        session.status === 'ready' && selectedOrgId !== null && viewScope !== null ? (
+          // Owner-only meal log (ADR-0083), keyed like the other owner-only views: a new session, person or organization
+          // is a new screen with no request carried over. A Today action opens it on Today's selected date.
+          <MealLogScreen
+            key={viewScope}
+            csrf={session.session.csrf}
+            initialDate={mealIntentDateOf(scopedIntent)}
+            onBackToToday={backToToday}
+            orgId={selectedOrgId}
+            signal={session.signal}
+            timeZone={resultTimeZone}
+          />
+        ) : (
+          <section className="coach-prerequisite" role="status">{viewPrerequisite('meal log')}</section>
         )
       )}
     </main>

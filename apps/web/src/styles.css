@@ -461,3 +461,20 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .today-empty { padding: 0.8rem 1rem; border: 1px dashed #344038; border-radius: 0.8rem; color: #dfe8e1; }
 .today-note, .today-meta { color: #8b968e; font-size: 0.8rem; }
 @media (min-width: 60rem) { .today-content { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Meal log (ADR-0083): the form spans the panel; the four optional values wrap two by two, one per row on a phone. */
+.meal-form h2, .meal-form__values, .meal-form .meal-card__source, .meal-form .activity-form__warning { grid-column: 1 / -1; }
+.meal-form h2 { margin: 0; font-size: 1.15rem; overflow-wrap: anywhere; }
+.meal-form__values { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: 0.6rem; min-width: 0; margin: 0; padding: 0; border: 0; }
+.meal-form__values legend { margin-bottom: 0.4rem; padding: 0; color: #dfe6e0; font-size: 0.76rem; font-weight: 800; }
+.meal-form__values label { min-width: 0; }
+.meal-form__hint { grid-column: 1 / -1; margin: 0; color: #8b968e; font-size: 0.8rem; line-height: 1.45; }
+.meal-card__source { margin: 0; color: #a9b5ad; font-size: 0.86rem; }
+.meal-log .run-card h3 { overflow-wrap: anywhere; }
+.meal-log__back { justify-self: start; margin-top: 0.4rem; }
+.today-meal-totals { display: grid; gap: 0.5rem; width: 100%; margin: 0; }
+.today-meal-totals div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.15rem 0.75rem; min-width: 0; }
+.today-meal-totals dt { color: #a9b5ad; font-size: 0.86rem; }
+.today-meal-totals dd { margin: 0; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+.today-meal-totals .today-meal-totals__coverage { grid-column: 1 / -1; color: #8b968e; font-size: 0.78rem; font-weight: 500; text-align: left; }
+.today-meal-totals__missing dd:not(.today-meal-totals__coverage) { color: #8b968e; font-weight: 500; }

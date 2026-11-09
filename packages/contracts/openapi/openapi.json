@@ -6053,6 +6053,139 @@
             ],
             "additionalProperties": false
           },
+          "meals": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "manual"
+                ]
+              },
+              "energyKcal": {
+                "type": "object",
+                "properties": {
+                  "recordedEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "total": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 200000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recordedEntries",
+                  "total"
+                ],
+                "additionalProperties": false
+              },
+              "proteinG": {
+                "type": "object",
+                "properties": {
+                  "recordedEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "total": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 200000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recordedEntries",
+                  "total"
+                ],
+                "additionalProperties": false
+              },
+              "carbohydrateG": {
+                "type": "object",
+                "properties": {
+                  "recordedEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "total": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 200000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recordedEntries",
+                  "total"
+                ],
+                "additionalProperties": false
+              },
+              "fatG": {
+                "type": "object",
+                "properties": {
+                  "recordedEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "total": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 200000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "recordedEntries",
+                  "total"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "count",
+              "source",
+              "energyKcal",
+              "proteinG",
+              "carbohydrateG",
+              "fatG"
+            ],
+            "additionalProperties": false
+          },
           "movement": {
             "oneOf": [
               {
@@ -6163,6 +6296,7 @@
           "day",
           "gpsRuns",
           "manualActivities",
+          "meals",
           "movement",
           "provenance"
         ],

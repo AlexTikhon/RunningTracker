@@ -10,6 +10,7 @@ import {
   dailyWeightKgSchema,
 } from './daily-metrics.js';
 import { dailyActiveEnergyKcalSchema, dailyMovementSources, dailyStepsSchema } from './daily-movement.js';
+import { hasAtMostOneDecimal, MEAL_NUTRITION_FIELDS, MEAL_SOURCES } from './meals.js';
 import { ianaTimeZoneSchema, localDateSchema, timestampSchema, uuidSchema } from './primitives.js';
 
 // The daily overview (Today) of the signed-in person: what their own records hold for one local calendar date, read on
@@ -23,12 +24,15 @@ import { ianaTimeZoneSchema, localDateSchema, timestampSchema, uuidSchema } from
 // - A manual activity and a GPS run belong to the date on which they STARTED in the requested zone: the half-open
 //   interval from that date's local midnight to the next date's local midnight, located from the zone's own rules (23
 //   or 25 hours around a daylight saving change, never assumed to be 24).
+// - A meal entry belongs to the calendar date it was logged for (`local_date`), like a check-in (ADR-0083).
 
 /**
  * The version of the overview's attribution and counting rules. Change it when a field's meaning changes.
  * - `daily-overview-1`: ADR-0082.
+ * - `daily-overview-2`: ADR-0083 adds `meals` (entries logged for the date, recorded nutrition totals and their
+ *   coverage); every other part is unchanged.
  */
-export const DAILY_OVERVIEW_VERSION = 'daily-overview-1';
+export const DAILY_OVERVIEW_VERSION = 'daily-overview-2';
 
 const itemCount = z.number().int().min(0).max(10_000);
 // At most 10,000 activities of at most 48 h each.
@@ -153,6 +157,48 @@ export const dailyOverviewGpsRunsSchema = z
     path: ['currentDistanceM'],
   });
 
+// A sum of one-decimal values computed by PostgreSQL in exact numeric arithmetic: non-negative, finite, at most one
+// decimal. At most 10,000 entries of at most 20,000 kcal (or 2,000 g) each, far below the range where a JSON number
+// could not hold one decimal exactly.
+const recordedTotal = z.number().finite().min(0).max(10_000 * 20_000).refine(hasAtMostOneDecimal, 'A recorded total has at most one decimal');
+
+/**
+ * One nutrition metric over the date's entries, with its own coverage: `recordedEntries` is the number of entries that
+ * hold a value for it (a recorded 0 included), and `total` is the exact sum over exactly those entries. With no
+ * recorded value the total is null (unknown), never 0; recorded zeros give 0. Entries without a value are unknown and
+ * add nothing.
+ */
+export const dailyOverviewMealMetricSchema = z
+  .strictObject({
+    recordedEntries: itemCount,
+    total: recordedTotal.nullable(),
+  })
+  .refine((metric) => (metric.total === null) === (metric.recordedEntries === 0), {
+    message: 'a total exists exactly when at least one entry records the value',
+    path: ['total'],
+  });
+
+/**
+ * The person's manual meal entries logged for the date (its stored calendar date, whatever zone it was logged in). The
+ * nutrition values are user-reported totals per entry; each metric's coverage is independent of the others (energy may
+ * be recorded for 2 of 3 entries and protein for 1). Food energy is what the person ate as they reported it: never
+ * combined with active energy, never compared with a need or a target. No title is part of the overview.
+ */
+export const dailyOverviewMealsSchema = z
+  .strictObject({
+    count: itemCount,
+    /** Server-owned provenance; manual entry is the only source. */
+    source: z.enum(MEAL_SOURCES),
+    energyKcal: dailyOverviewMealMetricSchema,
+    proteinG: dailyOverviewMealMetricSchema,
+    carbohydrateG: dailyOverviewMealMetricSchema,
+    fatG: dailyOverviewMealMetricSchema,
+  })
+  .refine((meals) => MEAL_NUTRITION_FIELDS.every((field) => meals[field].recordedEntries <= meals.count), {
+    message: 'a metric cannot be recorded for more entries than were logged',
+    path: ['count'],
+  });
+
 /** Where the overview comes from: computed by the app on this read, from one snapshot, and never stored. */
 export const dailyOverviewProvenanceSchema = z.strictObject({
   computedAt: timestampSchema,
@@ -168,6 +214,7 @@ export const dailyOverviewSchema = z.strictObject({
   day: dailyOverviewDaySchema,
   gpsRuns: dailyOverviewGpsRunsSchema,
   manualActivities: dailyOverviewManualActivitiesSchema,
+  meals: dailyOverviewMealsSchema,
   movement: dailyOverviewMovementSchema,
   provenance: dailyOverviewProvenanceSchema,
 });
@@ -178,9 +225,18 @@ export const dailyOverviewPathSchema = z.strictObject({ localDate: dailyMetricsL
 /** `timeZone`: the IANA zone the person views the day in; it decides the timestamped sources' interval and "today". */
 export const dailyOverviewQuerySchema = z.strictObject({ timeZone: ianaTimeZoneSchema });
 
-/** True when nothing at all is recorded for the date. A note-only check-in, a movement day and a recorded 0 are records. */
-export function isEmptyDailyOverview(overview: Pick<DailyOverview, 'checkIn' | 'gpsRuns' | 'manualActivities' | 'movement'>): boolean {
-  return !overview.checkIn.recorded && !overview.movement.recorded && overview.manualActivities.count === 0 && overview.gpsRuns.count === 0;
+/**
+ * True when nothing at all is recorded for the date. A note-only check-in, a movement day, a recorded 0 and a meal entry
+ * (also a title-only one) are records.
+ */
+export function isEmptyDailyOverview(overview: Pick<DailyOverview, 'checkIn' | 'gpsRuns' | 'manualActivities' | 'meals' | 'movement'>): boolean {
+  return (
+    !overview.checkIn.recorded &&
+    !overview.movement.recorded &&
+    overview.manualActivities.count === 0 &&
+    overview.gpsRuns.count === 0 &&
+    overview.meals.count === 0
+  );
 }
 
 export type DailyOverview = z.infer<typeof dailyOverviewSchema>;
@@ -189,5 +245,7 @@ export type DailyOverviewCheckIn = z.infer<typeof dailyOverviewCheckInSchema>;
 export type DailyOverviewMovement = z.infer<typeof dailyOverviewMovementSchema>;
 export type DailyOverviewManualActivities = z.infer<typeof dailyOverviewManualActivitiesSchema>;
 export type DailyOverviewGpsRuns = z.infer<typeof dailyOverviewGpsRunsSchema>;
+export type DailyOverviewMeals = z.infer<typeof dailyOverviewMealsSchema>;
+export type DailyOverviewMealMetric = z.infer<typeof dailyOverviewMealMetricSchema>;
 export type DailyOverviewPath = z.infer<typeof dailyOverviewPathSchema>;
 export type DailyOverviewQuery = z.infer<typeof dailyOverviewQuerySchema>;

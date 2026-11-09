@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { TodayAction } from './daily-overview.js';
 import { loadingOverview, type OverviewSnapshot } from './daily-overview-controller.js';
-import { noteOnlyCheckIn, overviewFixture } from './daily-overview-fixtures.js';
+import { noMeals, noteOnlyCheckIn, overviewFixture } from './daily-overview-fixtures.js';
 import { OverviewContent, TodayScreen, TodayView } from './TodayScreen.js';
 
 const DAY = '2026-11-05';
@@ -168,19 +168,64 @@ describe('Today screen', () => {
       overviewFixture({
         checkIn: { ...noteOnlyCheckIn, mood: 1, sleepMinutes: 120, soreness: 10 },
         gpsRuns: { count: 1, currentDistanceM: 42_195, withCurrentDistance: 1, withoutCurrentDistance: 0 },
+        meals: { ...noMeals, count: 4, energyKcal: { recordedEntries: 3, total: 4_200 }, fatG: { recordedEntries: 1, total: 0 } },
         movement: { activeEnergyKcal: 0, recorded: true, source: 'manual', steps: 0, timeZone: 'Europe/Warsaw' },
       }),
     ).replace('it sets no targets and gives no advice', '');
     expect(html).not.toMatch(/\b(goal|target|should|great|well done|too (little|much)|healthy|unhealthy|recommend|consider|try to|trend)\b/iu);
   });
 
-  it('opens the editors with the selected date, and Activities and Runner without one', () => {
+  it('opens the editors and the Meal log with the selected date, and Activities and Runner without one', () => {
     expect(actionsOf(overviewFixture())).toEqual([
       { kind: 'check-in', localDate: DAY },
       { kind: 'movement', localDate: DAY },
+      { kind: 'meals', localDate: DAY },
       { kind: 'activities' },
       { kind: 'runner' },
     ]);
+  });
+
+  it('shows the meal card: no entry, and an action that opens the Meal log on the date (ADR-0083)', () => {
+    const html = ready(overviewFixture());
+    expect(html).toContain('<h2 id="today-meals-title">Meals</h2>');
+    expect(html).toContain('No meal or snack logged for this day.');
+    expect(html).toContain('aria-label="Add a meal for Thu, 5 Nov 2026"');
+    expect(html).not.toContain('Recorded meal totals');
+  });
+
+  it('shows each recorded meal total with its own coverage: energy for 2 of 3 entries, the third unknown, never as zero', () => {
+    const html = ready(
+      overviewFixture({
+        meals: {
+          carbohydrateG: { recordedEntries: 3, total: 0 },
+          count: 3,
+          energyKcal: { recordedEntries: 2, total: 1061.1 },
+          fatG: { recordedEntries: 0, total: null },
+          proteinG: { recordedEntries: 1, total: 30.2 },
+          source: 'manual',
+        },
+      }),
+    );
+    expect(html).not.toContain('Nothing is recorded');
+    expect(html).toContain('3 entries logged for this day.');
+    expect(html).toContain(
+      '<div><dt>Food energy recorded (kcal)</dt><dd>1,061.1</dd><dd class="today-meal-totals__coverage">Recorded for 2 of 3 logged entries; 1 entry is unknown, so the total covers only the recorded entries.</dd></div>',
+    );
+    expect(html).toContain('<dt>Protein recorded (g)</dt><dd>30.2</dd><dd class="today-meal-totals__coverage">Recorded for 1 of 3 logged entries; 2 entries are unknown, so the total covers only the recorded entry.</dd>');
+    expect(html).toContain('<dt>Carbohydrate recorded (g)</dt><dd>0</dd><dd class="today-meal-totals__coverage">Recorded for 3 of 3 logged entries.</dd>');
+    expect(html).toContain(
+      '<div class="today-meal-totals__missing"><dt>Fat recorded (g)</dt><dd>Not recorded</dd><dd class="today-meal-totals__coverage">Not recorded for any of the 3 logged entries.</dd></div>',
+    );
+    expect(html).toContain('aria-label="Open meal log for Thu, 5 Nov 2026"');
+    // Food energy stays apart from active energy: no balance, no comparison.
+    expect(html).not.toMatch(/balance|deficit|surplus|net energy|requirement|allowance|remaining/iu);
+  });
+
+  it('counts a day with title-only meal entries as not empty', () => {
+    const html = ready(overviewFixture({ meals: { ...noMeals, count: 1 } }));
+    expect(html).not.toContain('Nothing is recorded');
+    expect(html).toContain('1 entry logged for this day.');
+    expect(html).toContain('Not recorded for any of the 1 logged entry.');
   });
 
   it('opens on the kept date, or on today when none is kept or the kept date is in the future', () => {

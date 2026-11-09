@@ -28,6 +28,14 @@ const overview: DailyOverview = {
     count: 3,
     enteredDurationS: 7200,
   },
+  meals: {
+    carbohydrateG: { recordedEntries: 1, total: 60 },
+    count: 3,
+    energyKcal: { recordedEntries: 2, total: 1061 },
+    fatG: { recordedEntries: 0, total: null },
+    proteinG: { recordedEntries: 2, total: 0 },
+    source: 'manual',
+  },
   movement: { activeEnergyKcal: null, recorded: true, source: 'manual', steps: 0, timeZone: 'Europe/Warsaw' },
   provenance: {
     computedAt: '2026-11-08T10:00:00.000Z',
@@ -43,6 +51,14 @@ const empty: DailyOverview = {
   checkIn: { recorded: false },
   gpsRuns: { count: 0, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 0 },
   manualActivities: { byType: [], count: 0, enteredDurationS: 0 },
+  meals: {
+    carbohydrateG: { recordedEntries: 0, total: null },
+    count: 0,
+    energyKcal: { recordedEntries: 0, total: null },
+    fatG: { recordedEntries: 0, total: null },
+    proteinG: { recordedEntries: 0, total: null },
+    source: 'manual',
+  },
   movement: { recorded: false },
 };
 
@@ -101,6 +117,25 @@ describe('daily overview contract', () => {
     expect(issues({ ...overview, gpsRuns: { ...overview.gpsRuns, currentDistanceM: 10.5 } })).not.toEqual([]);
   });
 
+  it('gives each meal metric its own coverage: a total exactly when an entry records it, recorded zeros as 0, one decimal', () => {
+    expect(DAILY_OVERVIEW_VERSION).toBe('daily-overview-2');
+    const meals = overview.meals;
+    expect(dailyOverviewSchema.parse(overview).meals).toEqual(meals);
+    expect(dailyOverviewSchema.parse({ ...empty, meals: { ...empty.meals, count: 1 } }).meals.count).toBe(1);
+    const metric = (value: unknown) => issues({ ...overview, meals: { ...meals, energyKcal: value } });
+    expect(metric({ recordedEntries: 1, total: 0 })).toEqual([]);
+    expect(metric({ recordedEntries: 2, total: 1061.5 })).toEqual([]);
+    expect(metric({ recordedEntries: 0, total: 0 })).toContain('a total exists exactly when at least one entry records the value');
+    expect(metric({ recordedEntries: 1, total: null })).toContain('a total exists exactly when at least one entry records the value');
+    expect(metric({ recordedEntries: 4, total: 10 })).toContain('a metric cannot be recorded for more entries than were logged');
+    for (const total of [1061.55, -1, Number.NaN, Number.POSITIVE_INFINITY, '1061']) expect(metric({ recordedEntries: 1, total })).not.toEqual([]);
+    expect(issues({ ...overview, meals: { ...meals, source: 'barcode' } })).not.toEqual([]);
+    expect(issues({ ...overview, meals: { ...meals, titles: ['Soup'] } })).not.toEqual([]);
+    const withoutFat: Record<string, unknown> = { ...meals };
+    delete withoutFat.fatG;
+    expect(issues({ ...overview, meals: withoutFat })).not.toEqual([]);
+  });
+
   it('refuses unknown fields, a day that ends before it starts and provenance that claims to be stored', () => {
     expect(issues({ ...overview, owner: 'x' })).not.toEqual([]);
     expect(issues({ ...overview, day: { ...overview.day, endsAt: '2026-03-28T22:00:00.000Z' } })).toContain('the day cannot end before it starts');
@@ -126,6 +161,8 @@ describe('daily overview contract', () => {
     expect(isEmptyDailyOverview({ ...empty, movement: { activeEnergyKcal: null, recorded: true, source: 'manual', steps: 0, timeZone: 'UTC' } })).toBe(false);
     expect(isEmptyDailyOverview({ ...empty, manualActivities: overview.manualActivities })).toBe(false);
     expect(isEmptyDailyOverview({ ...empty, gpsRuns: { count: 1, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 1 } })).toBe(false);
+    // A day with meals only, even title-only entries without any value, is not empty.
+    expect(isEmptyDailyOverview({ ...empty, meals: { ...empty.meals, count: 1 } })).toBe(false);
   });
 
   it('is documented in OpenAPI with its strict query parameter', () => {
