@@ -5,7 +5,8 @@ import process from 'node:process';
 
 import pg from 'pg';
 
-import { demoExternalIdentities, demoIds, requireDevelopmentDatabase } from './demo-plan.mjs';
+import { seedDemoPeople } from './demo-people.mjs';
+import { demoIds, requireDevelopmentDatabase } from './demo-plan.mjs';
 
 if (existsSync('.env')) {
   process.loadEnvFile('.env');
@@ -20,25 +21,7 @@ if (process.env.APP_ENV === 'production') {
 const client = new pg.Client({ application_name: 'running-tracker-demo-seed', connectionString: databaseUrl });
 await client.connect();
 try {
-  await client.query('BEGIN');
-  await client.query(
-    `INSERT INTO users (id, external_identity) VALUES ($1, $2), ($3, $4)
-     ON CONFLICT (id) DO NOTHING`,
-    [demoIds.runner, demoExternalIdentities.runner, demoIds.coach, demoExternalIdentities.coach],
-  );
-  await client.query('INSERT INTO organizations (id) VALUES ($1) ON CONFLICT (id) DO NOTHING', [
-    demoIds.organization,
-  ]);
-  await client.query(
-    `INSERT INTO memberships (org_id, user_id, role, active)
-     VALUES ($1, $2, 'runner', true), ($1, $3, 'coach', true)
-     ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role, active = true`,
-    [demoIds.organization, demoIds.runner, demoIds.coach],
-  );
-  await client.query('COMMIT');
-} catch (error) {
-  await client.query('ROLLBACK').catch(() => undefined);
-  throw error;
+  await seedDemoPeople(client);
 } finally {
   await client.end();
 }

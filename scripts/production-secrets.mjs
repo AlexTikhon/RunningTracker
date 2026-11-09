@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const database = 'running_tracker';
+const defaultDatabase = 'running_tracker';
 const host = 'postgres';
 
 // The four database logins of the P02A separation. The administrator is the image's
@@ -23,8 +23,10 @@ function randomHex(randomBytes) {
 /**
  * Builds the production secret set as a `{ fileName: content }` map. Passwords are 256 random
  * bits as hex, so they need no URL escaping. `randomBytes` is injected for determinism in tests.
+ * `database` is the one database every URL targets: the deployment keeps the default, and the
+ * iPhone LAN pilot passes its own (scripts/lan-pilot-config.mjs).
  */
-export function buildProductionSecrets({ randomBytes }) {
+export function buildProductionSecrets({ database = defaultDatabase, randomBytes }) {
   const secrets = { 'postgres-password': randomHex(randomBytes) };
 
   for (const { file, reusesPostgresPassword, user } of databaseLogins) {
@@ -45,9 +47,9 @@ export function buildProductionSecrets({ randomBytes }) {
  */
 export function writeProductionSecrets(
   directory,
-  { force = false, randomBytes, rotateRoles = false },
+  { database = defaultDatabase, force = false, randomBytes, rotateRoles = false },
 ) {
-  const secrets = buildProductionSecrets({ randomBytes });
+  const secrets = buildProductionSecrets({ database, randomBytes });
   const names = rotateRoles ? roleRotationFiles : Object.keys(secrets);
 
   if (rotateRoles) {

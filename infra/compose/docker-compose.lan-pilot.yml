@@ -1,0 +1,152 @@
+# iPhone LAN pilot (docs/runbooks/iphone-lan-pilot.md): an opt-in, isolated copy of the stack for SYNTHETIC demo data,
+# opened in Safari on a phone on the same trusted Wi-Fi. Standalone: never layer it on another compose file, and start
+# it only through `npm run pilot:up`, which passes the project name and the env file written by `npm run pilot:configure`
+# (.local/lan-pilot/pilot.env, ignored by git).
+#
+# Isolation: its own project name, network, PostgreSQL server, database name and volume. Nothing here can reach the
+# development or test database (they are in another project's container, on another network). PostgreSQL and the API
+# publish no port. The sign-in is the development session for the two demo people: not identity verification, and not
+# for real personal health data.
+name: running-tracker-lan-pilot
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgis/postgis:17-3.5@sha256:8dfee83d8bd4c2873dc4a233c13ba2799a44f2edb16a0552d58715917fac32ba
+    environment:
+      POSTGRES_DB: running_tracker_lan_pilot
+      POSTGRES_USER: running_tracker_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    command: ["postgres", "-c", "password_encryption=scram-sha-256"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U running_tracker_admin -d running_tracker_lan_pilot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks: [data]
+    secrets: [postgres_password]
+    volumes:
+      - lan_pilot_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    init: true
+    logging: *bounded-logging
+    mem_limit: 1g
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+
+  # One-shot, idempotent: the three application logins and PostGIS, pending migrations, then the two synthetic demo
+  # people (scripts/lan-pilot-seed.mjs refuses any database but running_tracker_lan_pilot on this service).
+  init:
+    image: running-tracker-tools:lan-pilot
+    build:
+      context: ../..
+      dockerfile: infra/api/Dockerfile
+      target: tools
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+    command:
+      - sh
+      - -c
+      - >-
+        export BOOTSTRAP_DATABASE_URL="$$(cat /run/secrets/bootstrap_database_url)"
+        MIGRATION_DATABASE_URL="$$(cat /run/secrets/migration_database_url)"
+        DATABASE_URL="$$(cat /run/secrets/runtime_database_url)"
+        MAINTENANCE_DATABASE_URL="$$(cat /run/secrets/maintenance_database_url)"
+        && node scripts/bootstrap-database.mjs && node scripts/migrate.mjs && node scripts/lan-pilot-seed.mjs
+    networks: [data]
+    secrets: [bootstrap_database_url, migration_database_url, runtime_database_url, maintenance_database_url]
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    logging: *bounded-logging
+    mem_limit: 256m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  api:
+    image: running-tracker-api:lan-pilot
+    build:
+      context: ../..
+      dockerfile: infra/api/Dockerfile
+      target: runtime
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      # Development mode only because the development session is the pilot's sign-in; production refuses it.
+      APP_ENV: development
+      PORT: 3000
+      DATABASE_URL_FILE: /run/secrets/runtime_database_url
+      MAINTENANCE_DATABASE_URL_FILE: /run/secrets/maintenance_database_url
+      LIVE_TRACK_CURSOR_SIGNING_KEY_FILE: /run/secrets/cursor_signing_key
+      # Exactly the one origin the phone uses; every state-changing request is checked against it.
+      ALLOWED_ORIGINS: ${PILOT_ORIGIN:?PILOT_ORIGIN is required; run npm run pilot:configure}
+      LOCAL_AUTH_ENABLED: "true"
+      # The demo runner and the demo coach (scripts/demo-plan.mjs), and nobody else.
+      LOCAL_AUTH_USER_IDS: dddddddd-dddd-4ddd-8ddd-dddddddd0001,dddddddd-dddd-4ddd-8ddd-dddddddd0002
+      SESSION_COOKIE_SECURE: "true"
+      SESSION_TTL_MS: 28800000
+      SESSION_STORE_MAX_ENTRIES: 100
+      # Both AI providers off, whatever the image's defaults become.
+      RUN_SEARCH_AI_ENABLED: "false"
+      WEEKLY_INSIGHTS_PROVIDER: "off"
+      RUN_SUMMARY_INTERVAL_MS: 60000
+      RUN_SUMMARY_CONCURRENCY: 2
+      DB_POOL_MAX: 10
+      DB_STATEMENT_TIMEOUT_MS: 5000
+      DB_LOCK_TIMEOUT_MS: 2000
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    networks: [data]
+    secrets: [runtime_database_url, maintenance_database_url, cursor_signing_key]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    logging: *bounded-logging
+    mem_limit: 512m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  # No route out of the host and no published port: only the API reaches PostgreSQL.
+  data:
+    internal: true
+
+secrets:
+  postgres_password:
+    file: ${PILOT_SECRETS_DIR:?PILOT_SECRETS_DIR is required; run npm run pilot:configure}/postgres-password
+  bootstrap_database_url:
+    file: ${PILOT_SECRETS_DIR:?PILOT_SECRETS_DIR is required}/bootstrap-database-url
+  migration_database_url:
+    file: ${PILOT_SECRETS_DIR:?PILOT_SECRETS_DIR is required}/migration-database-url
+  runtime_database_url:
+    file: ${PILOT_SECRETS_DIR:?PILOT_SECRETS_DIR is required}/runtime-database-url
+  maintenance_database_url:
+    file: ${PILOT_SECRETS_DIR:?PILOT_SECRETS_DIR is required}/maintenance-database-url
+  cursor_signing_key:
+    file: ${PILOT_SECRETS_DIR:?PILOT_SECRETS_DIR is required}/cursor-signing-key
+
+volumes:
+  lan_pilot_postgres:

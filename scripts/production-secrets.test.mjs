@@ -40,6 +40,16 @@ test('P12.2 secrets: every role gets its own URL-safe password and the URLs name
   assert.equal(passwords.size, 4);
 });
 
+test('secrets: a named database (the LAN pilot) changes only the database of every URL', () => {
+  const secrets = buildProductionSecrets({ database: 'running_tracker_lan_pilot', randomBytes });
+  for (const name of ['bootstrap-database-url', 'migration-database-url', 'runtime-database-url', 'maintenance-database-url']) {
+    const url = new URL(secrets[name]);
+    assert.equal(url.pathname, '/running_tracker_lan_pilot', name);
+    assert.equal(url.hostname, 'postgres', name);
+  }
+  assert.equal(new URL(buildProductionSecrets({ randomBytes })['runtime-database-url']).pathname, '/running_tracker');
+});
+
 test('P12.2 secrets: the cursor key is canonical unpadded base64url of at least 32 bytes', () => {
   const { 'cursor-signing-key': key } = buildProductionSecrets({ randomBytes });
 
