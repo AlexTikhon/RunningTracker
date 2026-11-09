@@ -329,6 +329,20 @@ test('LAN pilot proxy: one configured host, 421 for any other, and the SSE and h
   assert.doesNotMatch(site, /Access-Control-Allow-Origin|proxy_ssl_verify off/u);
 });
 
+test('LAN pilot verification: certificate validation stays on, and the pilot browser test stays out of the normal suites', () => {
+  const verifier = read('scripts/verify-lan-pilot.mjs');
+  assert.match(verifier, /rejectUnauthorized: true/u);
+  assert.doesNotMatch(verifier, /rejectUnauthorized: false|NODE_TLS_REJECT_UNAUTHORIZED|checkServerIdentity: \(\) => undefined/u);
+  const browserConfig = read('tests/e2e/playwright.lan-pilot.config.ts');
+  assert.match(browserConfig, /ignoreHTTPSErrors: false/u);
+  // Only the one-key allow-list; never the switch that accepts every certificate.
+  assert.doesNotMatch(browserConfig, /--ignore-certificate-errors['"`\s,]|ignoreHTTPSErrors: true/u);
+  assert.match(browserConfig, /--ignore-certificate-errors-spki-list=\$\{pilot\.serverSpkiSha256\}/u);
+  assert.doesNotMatch(browserConfig, /webServer/u, 'the pilot suite starts nothing; it tests the running pilot');
+  assert.match(read('tests/e2e/playwright.config.ts'), /name: 'chromium', testIgnore: \/\[\\\\\/\]\(\?:oidc\|lan-pilot\)\[\\\\\/\]\//u);
+  assert.match(read('tests/e2e/lan-pilot/pilot-browser.spec.ts'), /expect\(security\?\.issuer\)\.toBe\(pilot\.caCommonName\)/u);
+});
+
 test('LAN pilot image: its own stages, the deployment nginx configuration, and no change to the other images', () => {
   const dockerfile = read('infra/proxy/Dockerfile').replaceAll(/^#.*\n/gmu, '');
   const stage = (name) => {

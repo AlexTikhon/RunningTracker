@@ -25,8 +25,9 @@ export default defineConfig({
   ...suiteSettings(environment),
   outputDir: 'test-results',
   projects: [
-    // The development-session stack (a local session endpoint, no identity provider).
-    { name: 'chromium', testIgnore: /[\\/]oidc[\\/]/, use: { browserName: 'chromium' } },
+    // The development-session stack (a local session endpoint, no identity provider). lan-pilot/ runs only against a
+    // running iPhone LAN pilot, through its own config (`npm run pilot:e2e`).
+    { name: 'chromium', testIgnore: /[\\/](?:oidc|lan-pilot)[\\/]/, use: { browserName: 'chromium' } },
     // The OpenID Connect stack: the same sign-in route production has, against a real provider process.
     {
       name: 'chromium-oidc',

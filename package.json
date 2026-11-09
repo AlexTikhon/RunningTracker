@@ -69,6 +69,8 @@
     "pilot:up": "node scripts/lan-pilot.mjs up",
     "pilot:status": "node scripts/lan-pilot.mjs status",
     "pilot:down": "node scripts/lan-pilot.mjs down",
+    "pilot:verify": "node scripts/verify-lan-pilot.mjs",
+    "pilot:e2e": "npm run e2e:lan-pilot --workspace=@running-tracker/e2e",
     "deploy:secrets": "node scripts/generate-production-secrets.mjs",
     "deploy:verify": "node scripts/verify-production-profile.mjs",
     "proxy:verify-error-log": "node scripts/verify-proxy-error-log.mjs"

@@ -8,5 +8,5 @@
     "target": "ES2023",
     "types": ["node"]
   },
-  "include": ["*.ts", "oidc/**/*.ts", "support/**/*.ts"]
+  "include": ["*.ts", "lan-pilot/**/*.ts", "oidc/**/*.ts", "support/**/*.ts"]
 }
