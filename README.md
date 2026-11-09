@@ -24,6 +24,7 @@ What exists, stage by stage (the evidence for each is in [docs/progress.md](docs
 - Deterministic weekly review (ADR-0077): the primary weekly view on the Check-in tab, computed and worded by code on every read (coverage with explicit denominators, values, GPS distance gaps, limitations), never stored and independent of any model; the AI insight is an optional section below it. See "Weekly review" below.
 - Daily movement (ADR-0078): a **Movement** section on the Check-in tab for steps and active energy entered by hand, one manual record per person per local date, owner-only, with server-owned "manual" provenance and erasures in the same ledger. No phone or watch import yet, no calorie estimate, and not an input of AI insights; the weekly review shows it (ADR-0079). See "Daily movement" below. The working product direction is called SomaLane (`docs/product-direction.md`); no package, identifier or repository was renamed.
 - Today (ADR-0082): a read-only **Today** view, first in the navigation, showing one day of the person's own check-in, manually entered movement, manual activities and GPS runs, computed on every read and never stored; its actions open the existing check-in and movement editors on the selected date. The visible application name is now **SomaLane** (header and browser title only). See "Today" below.
+- Meal log (ADR-0083): a **Meal log** view for meals and snacks logged by hand per local date, each with a meal type, a title and optional user-reported totals for the whole entry (food energy, protein, carbohydrate, fat); owner-only, idempotent creation per form session, edit and delete, erasures in the same ledger. Today shows the number of entries and each recorded total with its own coverage ("recorded for 2 of 3 logged entries"). Nothing is estimated, looked up or judged, and meals are not an input of AI insights. See "Meal log" below.
 
 **What this does not establish.** Everything was verified on one workstation: sign-in only against a test OpenID provider (no real provider, and the OpenID Connect flow only in Chromium), the production profile with throwaway secrets and a self-signed certificate, the restore drill on a tiny database, and the load limits on a local dataset. The full browser suite runs in Chromium; desktop Firefox, on Windows, runs the 18-test core gate (runner, coach and sharing workflows) and the 24-test pre-demo smoke, but not OpenID Connect sign-in or the real map runtime; no real Mapbox basemap was rendered in any browser; nothing ran in Safari, a mobile browser or on a phone with real GPS. No production RPO or RTO is claimed. Two read endpoints named in the SDD (`/archive/runs`, `/live/nearby`) remain unimplemented; `/runs/{runId}/track?mode=archive` now reads published finished-run geometry and metrics (ADR-0066). To see it working locally, run `npm run demo:up` and press **Demo runner** or **Demo coach** in the browser; the walk-through and its recorded rehearsal are in [docs/runbooks/demo.md](docs/runbooks/demo.md), and interview notes in [docs/interview.md](docs/interview.md).
 
@@ -191,9 +192,42 @@ Decided in [ADR-0082](docs/adr/0082-today-daily-overview.md). `GET /api/orgs/:or
 | `movement` | `recorded`; steps and active energy as entered; `source: "manual"`; the stored zone | The manual movement **stored for the date** |
 | `manualActivities` | `count` and `enteredDurationS` (the full entered duration), in total and by type | Activities that **started** on the date in `timeZone`, also one that continued past midnight |
 | `gpsRuns` | `count`, `withCurrentDistance`, `withoutCurrentDistance`, and `currentDistanceM` (the sum over the runs with a current summary only; `null` when none) | The person's own finished runs that **started** on the date; never a run shared with them |
-| `provenance` | `computed_by_app`, `persisted: false`, `single_read_only_transaction`, `daily-overview-1`, the computation time | |
+| `meals` | `count`, `source: "manual"`, and for each of `energyKcal`, `proteinG`, `carbohydrateG`, `fatG`: `recordedEntries` (entries with that value) and `total` (exact sum over exactly those entries; `null` when none, `0` for recorded zeros). No title | The meal entries **logged for the date** (ADR-0083) |
+| `provenance` | `computed_by_app`, `persisted: false`, `single_read_only_transaction`, `daily-overview-2`, the computation time | |
 
-Manual activities and GPS runs are never added together, movement is never added to either, nothing is estimated, and a missing value is unknown, never 0. The web **Today** view (first in the navigation; the page still opens on Runner, whose run recovery is unchanged) defaults to today in the browser's zone, can pick an earlier date, has a manual Refresh and no polling, and keeps its date while you look at other views. "Add/Edit check-in" and "Add/Edit movement" open the existing editors on the Check-in tab for the selected date; "Open Activities" and "Open Runner" open those views. Opening Today again reads the day again, so edits and deletions show at once.
+Manual activities and GPS runs are never added together, movement is never added to either, nothing is estimated, and a missing value is unknown, never 0. The web **Today** view (first in the navigation; the page still opens on Runner, whose run recovery is unchanged) defaults to today in the browser's zone, can pick an earlier date, has a manual Refresh and no polling, and keeps its date while you look at other views. "Add/Edit check-in" and "Add/Edit movement" open the existing editors on the Check-in tab for the selected date; "Add a meal"/"Open meal log" opens the Meal log on that date; "Open Activities" and "Open Runner" open those views. Opening Today again reads the day again, so edits and deletions show at once.
+
+## Meal log
+
+Decided in [ADR-0083](docs/adr/0083-manual-meal-log.md). Migration `0039_meals.sql` adds `meals`: one row per logged meal or snack, with a database-generated id, the owner and organization from the session context, the **local date** and IANA zone of its first write, a meal type (`breakfast`, `lunch`, `dinner`, `snack`, `other`), a required title (1 to 120 characters, no NUL, not blank) and four optional values that are the person's **totals for the whole entry**, not per 100 g: `energyKcal` (0 to 20,000), `proteinG`, `carbohydrateG` and `fatG` (0 to 2,000 g each), at most one decimal. A title-only entry is valid; a missing value is unknown, a recorded 0 is a value. The columns are unconstrained `numeric` with range and precision CHECKs, so the database refuses (never rounds) what the contract refuses. `source` is `'manual'`, set by the database. Owner-only RLS; only type, title and values are updatable; run sharing never grants access.
+
+| Request | Answer |
+|---|---|
+| `POST /api/orgs/:orgId/meals` | Creates an entry (`201`). The body carries `idempotencyKey` (one UUID per form session), `localDate`, `timeZone`, `mealType`, `title` and the optional values; the date must not be before 2000-01-01 nor after today in that zone by server time. The same key with the same request answers `200` with the entry (also after it was edited); the same key with a different request is `409 MEAL_ALREADY_SAVED` with `details.mealId`, and nothing is stored. |
+| `GET /api/orgs/:orgId/meals?localDate=YYYY-MM-DD` | The date's entries in the order they were logged; `limit` 1 to 50 (default 20) and a keyset `cursor` bound to the person, organization and date. |
+| `GET /api/orgs/:orgId/meals/:mealId` | The entry with `source: "manual"`, otherwise `404 MEAL_NOT_FOUND`. |
+| `PUT /api/orgs/:orgId/meals/:mealId` | Replaces type, title and the values (omitted are cleared). The date and zone cannot change. An exact retry changes nothing, not even `updatedAt`. |
+| `DELETE /api/orgs/:orgId/meals/:mealId` | Hard delete recorded in the erasure ledger (`meal`, identifiers and version only), `204` in every case; replayed by `restore:reapply-erasures` after a restore. |
+
+Every response is `Cache-Control: no-store`, errors included. Example:
+
+```http
+POST /api/orgs/7b1e…/meals
+Content-Type: application/json
+X-CSRF-Token: …
+
+{"idempotencyKey": "0b5e2f9e-9c1b-4f6e-8a3d-2b7c9d1e4f60", "localDate": "2026-11-08", "timeZone": "Europe/Warsaw",
+ "mealType": "lunch", "title": "Lentil soup", "energyKcal": 410.5, "proteinG": null}
+
+201 Created
+Cache-Control: no-store
+
+{"carbohydrateG": null, "createdAt": "2026-11-08T11:42:03.117Z", "energyKcal": 410.5, "fatG": null, "localDate": "2026-11-08",
+ "mealId": "5f0c…", "mealType": "lunch", "proteinG": null, "source": "manual", "timeZone": "Europe/Warsaw", "title": "Lentil soup",
+ "updatedAt": "2026-11-08T11:42:03.117Z"}
+```
+
+The **Meal log** view (navigation entry after Check-in) has a date picker, the form (meal type, title, "Food energy (kcal)", "Protein (g)", "Carbohydrate (g)", "Fat (g)", the source line "Manually entered"), edit in the same form, delete after confirmation, and the date's entries with Load more. After an unconfirmed save, saving again reuses the same idempotency key, so no duplicate is created; a new entry gets a new key. Opened from Today it starts on Today's date, and "Back to Today" returns there. Meals are not an input of AI insights, are not shown in the weekly review, and food energy is never combined with active energy.
 
 ## Weekly review
 

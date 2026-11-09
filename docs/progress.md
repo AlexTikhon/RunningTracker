@@ -3802,3 +3802,74 @@ fixed when the screen opens. The zone is the client's word. Overlap between manu
 resolved. Today is not the start view. No HealthKit or other import; the next planned phase is an iPhone/HealthKit
 integration spike that must first establish access to macOS/Xcode and a physical iPhone. Hosted CI is reported with the
 change.
+
+## Manual meal log and recorded nutrition totals in Today (ADR-0083) (2026-11-09)
+
+Branch `feat/manual-meal-log` from `main` at aec43b0 (Today overview, ADR-0082, already on `main`). One bounded slice:
+manual meal and snack entries with optional user-reported nutrition totals, and their recorded totals in Today. No
+model call, parser, food database, photo, barcode, import, recommendation, dependency or infrastructure; weekly review,
+AI insights (inputs, policies, gates) and the Runner are unchanged. The working setup is Windows and an iPhone without a
+Mac, so nothing native or HealthKit-related was started.
+
+- **Data.** Migration 0039 `meals`: database id and clocks, owner and organization from the tenant context, local date
+  and first-write IANA zone (immutable), meal type (five values), required title (1..120 code points, no NUL, not
+  blank), optional `energy_kcal` (0..20,000), `protein_g`, `carbohydrate_g`, `fat_g` (0..2,000 g) as unconstrained
+  `numeric` with range and one-decimal precision CHECKs (refused, never rounded), server-owned `source = 'manual'`,
+  `idempotency_key` unique per owner and organization, and `creation_digest` (SHA-256 of the canonical creation
+  request). Owner-only RLS, column-scoped INSERT and UPDATE (type, title, values only), nothing for maintenance.
+- **Erasure.** Entity type `meal` in the ledger CHECK, an AFTER DELETE trigger (identifiers and version only), a replay
+  branch, `meal` in the strict file reader; the replay wrapper skips the insight step for meals as for movement.
+- **API.** `POST/GET /api/orgs/:orgId/meals` (create; one date's entries in logged order, keyset cursor bound to person,
+  organization and date) and `GET/PUT/DELETE /api/orgs/:orgId/meals/:mealId`. Same key + same creation request = `200`
+  with the entry (also after an edit); same key + different request = `409 MEAL_ALREADY_SAVED` naming it. Exact PUT
+  retries leave `updatedAt` alone. ADR-0074 date rules; `no-store` before the body parser. OpenAPI updated.
+- **Web.** A **Meal log** view (date, type, title, four optional values with units, manual provenance, add, edit, confirmed
+  delete, Load more, loading/empty/validation/saving/failure states); controllers with the latest-request rule, one
+  mutation at a time, one key per form session reused after an uncertain outcome. "Back to Today" returns to Today on
+  the Meal log's date.
+- **Today** (`daily-overview-2`): a third statement in the same snapshot counts the date's entries and, per metric, the
+  entries with a value and their exact `numeric` sum (`null` with no recording, `0` for recorded zeros); a meals-only day
+  is not empty. The Meals card labels "Food energy recorded (kcal)", keeps it apart from active energy, and opens the
+  Meal log on the selected date.
+
+**Executed checks.**
+
+| Command | Before (aec43b0) | After |
+|---|---|---|
+| `npm run verify` | 3,013: scripts 90, API 1,589, web 1,103, contracts 214, fixtures 14, simulator 3 | 3,082: scripts 90, API 1,600 (+11: creation digest and cursor, meal mapping in the overview, five OpenAPI routes), web 1,138 (+35: presentation, controllers, screen, API client, navigation, Today card), contracts 237 (+23); others unchanged. In the full `verify` the one known cold-import test (`run-search-evaluation-cli.spec.ts`, 5 s limit) timed out twice; it passed 27/27 alone and the API suite passed 1,600/1,600 on its own (see the final report for the run at the final SHA) |
+| `npm run test:integration` | 875 in 66 files | 964 in 68 files (+89), 302 s, none skipped, restore drill included. A first run failed one ADR-0073 test that used `'meal'` as its example of an unknown entity type; it now uses `'water_intake'` (folded into the migration commit) |
+| Full `npm run test:e2e` | 141 | 143 passed in 15.0 min (`chromium` and `chromium-oidc`; +2, below; the harness spec's deliberately failing test is expected to fail) |
+
+New integration files: `meals-access` (52: RLS for owner, coach, run-sharing grantee, inactive member, other
+organization, missing/malformed context, joins; column privileges; every CHECK; inclusive bounds and exact storage;
+contract/SQL parity for each value on insert and update and for titles; key uniqueness and membership FK; ledger
+atomicity, exact-version replay, recreated entries, identifiers-only ledger, insight isolation) and `meals-http` (32:
+title-only, zero vs unknown, canonical zone, validation, malformed body, retries in other spellings, conflicts, retry
+after an edit, new key, freed key, interleaved and concurrent creation, PUT replacement and exact retries, immutable date
+and zone, 404s, dates at UTC+14/UTC-11 and the Warsaw spring-forward, pagination and cursor binding, isolation, CSRF and
+Origin, weekly review and insights unchanged, ledger atomicity, export without content, replay with recreated and
+surviving entries). `daily-overview-http` +4 (coverage and exact totals, exact decimal sums, zeros and nulls, stored-date
+attribution) and meals added to the snapshot, freshness, access and no-writes tests. `backup-restore` +1: a current-schema
+case driving the drill's own operations proves a meal deletion through a real `pg_dump`/`pg_restore`, replayed twice (5
+then 5 `absent`), with a surviving and a recreated entry unchanged; the previous-schema drill passes with 0039 as its
+catch-up migration.
+
+New Chromium file `meal-log.spec.ts` (2): from Today on yesterday to the Meal log on that date; validation; a complete
+entry; a POST whose answer is lost after the server stored it, then a retry that creates no duplicate (two POSTs, one
+entry); a title-only entry sent by a double click (one entry); reload; edit; delete while editing (the form returns to an
+empty Add form); Back to Today shows 3 entries, "Food energy recorded (kcal)" 760.9 "Recorded for 2 of 3 logged
+entries", protein, carbohydrate and a recorded-zero fat each with its own coverage, movement untouched; the Meal log
+button opens on today while Today keeps its date. At 375 px with a wide font: no horizontal scroll, every field and
+button inside the viewport, a long unbroken title wraps, the Today card fits.
+
+**Mutation check** (red, then restored): the replay wrapper without `'meal'` in its exclusion list fails the meal
+insight-isolation test (insights deleted, gate advanced); restored, 52/52. Earlier in the change the overview without the
+`REPEATABLE READ` snapshot failed the snapshot test.
+
+**Commits compile on their own.** Commits 1 and 2 were checked in a detached worktree with its own `npm ci` (contracts
+differ between the commits): contracts, API and web typecheck at both; unit suites at commit 2: API 1,599, web 1,103, contracts 236; at commit 1: web 1,103, contracts 235, API 1,588 of 1,589 with the same cold-import timeout, 27/27 when that file ran alone. Commit 3 is the verified code head.
+
+**Not established.** No iPhone, Safari or WebKit evidence (Chromium viewport only). No per-day entry cap (the overview
+assumes at most 10,000 entries a day). Last write wins between devices. The zone is the client's word and "today" is
+fixed when the screen opens. Meals are not in the weekly review, trends or AI input. No import. Hosted CI is reported
+with the change.

@@ -21,7 +21,7 @@ commitment to dates or to every item below.
    - Daily check-in: weight, sleep, mood (and soreness).
    - Daily movement: steps and active energy, manual entry first ([ADR-0078](adr/0078-manual-daily-movement.md));
      phone/watch import later, under its own provenance.
-   - Meal log.
+   - Meal log: manual entries with optional user-reported nutrition totals ([ADR-0083](adr/0083-manual-meal-log.md)).
 2. **Deterministic analytics.** SQL, with versioned snapshots: weekly volume, pace trends, training load, personal
    bests. A unified read model over `runs` and `activities` (a view or a union) belongs here.
 3. **AI layer.**
@@ -58,7 +58,7 @@ Step 2, the daily check-in, is [ADR-0074](adr/0074-daily-check-in-local-date-and
 (weight, sleep, sleep quality, mood, soreness, note), one record per person per local date, replaced as a whole by
 PUT, owner-only, with erasures in the ledger. It records two rules later slices should keep: a day is a local
 calendar date with the zone of its first write, and "today" is computed by the server's clock in the zone the client
-sends. Remaining items of the data foundation: GPX/TCX/FIT import and the meal log.
+sends. Remaining item of the data foundation: GPX/TCX/FIT import (the meal log is ADR-0083, below).
 
 Weekly insights (AI layer, [ADR-0076](adr/0076-weekly-insights.md)) exist but stay off by default: no installed local
 model met the target. The first deterministic analytics item is the **weekly review**
@@ -82,5 +82,16 @@ read-only overview of one day of the person's own records, computed on every rea
 Check-in and movement belong to their stored calendar date; manual activities and GPS runs to the date they started in
 the viewer's zone (23 or 25 hours around a daylight saving change). Manual activities and GPS runs stay separate,
 movement is never added to either, a missing value is unknown, and there are no targets, trends or advice. Its actions
-open the existing editors for the selected date. The next planned phase is an iPhone/HealthKit integration spike, which
-must first establish access to macOS/Xcode and a physical iPhone; it is not started.
+open the existing editors for the selected date.
+
+The **meal log** is [ADR-0083](adr/0083-manual-meal-log.md): `meals`, one owner-only entry per logged meal or snack and
+local date, with a meal type, a required title and optional user-reported totals for the whole entry (food energy,
+protein, carbohydrate, fat; at most one decimal, refused rather than rounded), server-owned `source: manual`, idempotent
+creation per form session (a retry is compared with the original request), edits of type, title and values only, and
+erasures in the ledger (proven through a real backup and restore at the current schema). It is not an AI insight source.
+Today (`daily-overview-2`) shows the number of entries and each recorded total with its own coverage, computed exactly in
+the same snapshot; food energy is never combined with active energy, and there are no targets, balances or advice. Food
+text parsing (AI layer) would propose entries into this table for the person to confirm; it is not built.
+
+The next planned phase is an iPhone/HealthKit integration spike, which must first establish access to macOS/Xcode and a
+physical iPhone; it is not started (the current setup is Windows and an iPhone, without a Mac).
