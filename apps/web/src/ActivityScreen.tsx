@@ -13,12 +13,15 @@ import {
   type ActivitySubmissionSnapshot,
 } from './activity-controller.js';
 import {
+  activityDurationLabels,
+  activitySourceLabels,
   activityTypeLabels,
   defaultActivityDraft,
   validateActivityDraft,
   type ActivityDraft,
 } from './activity-form.js';
 import { ActivityAlreadySaved, type SavedActivityView } from './ActivityAlreadySaved.js';
+import { GpxImportPanel } from './GpxImportPanel.js';
 import { defaultTimeZone, formatDistance, formatDuration, formatStartedAt } from './run-search.js';
 import {
   createActivity,
@@ -45,9 +48,9 @@ function describeActivity(activity: ActivityView, timeZone: string): string {
   return `${activityTypeLabels[activity.type].toLowerCase()} of ${formatStartedAt(activity.startedAt, timeZone)}`;
 }
 
-// Manual activities of the signed-in person (ADR-0072). The parent keys it by session, person and organization, so a
-// change of any of them starts from a clean form and list with no request carried over. Owner-only: nothing here is
-// visible to a coach or another member.
+// Activities of the signed-in person: entered by hand (ADR-0072) or imported from a GPX file (ADR-0086). The parent keys
+// it by session, person and organization, so a change of any of them starts from a clean form, import and list with no
+// request carried over. Owner-only: nothing here is visible to a coach or another member.
 export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
   const timeZone = useMemo(() => defaultTimeZone(), []);
   const csrfRef = useRef(csrf);
@@ -206,8 +209,8 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
         <p className="eyebrow">Activity log</p>
         <h1 id="activity-title" ref={heading} tabIndex={-1}>Activity</h1>
         <p>
-          Log a ride, a swim, a strength session or any other activity by hand. Only you can see your activities: coaches
-          and other members cannot, even for runs you share with them.
+          Log a ride, a swim, a strength session or any other activity by hand, or import one from a GPX file. Only you can
+          see your activities: coaches and other members cannot, even for runs you share with them.
         </p>
       </div>
 
@@ -294,9 +297,24 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
         </div>
       </form>
 
+      <GpxImportPanel
+        csrf={csrf}
+        onImported={() => {
+          setNotice(null);
+          lister.current?.refresh();
+        }}
+        orgId={orgId}
+        signal={signal}
+        timeZone={timeZone}
+        unit={draft.unit}
+      />
+
       <section aria-labelledby="activity-list-title" className="search-results">
         <h2 id="activity-list-title">Your activities</h2>
-        <p className="search-results__note">Times are shown in {timeZone}. Distances in {draft.unit === 'km' ? 'kilometres' : 'miles'}.</p>
+        <p className="search-results__note">
+          Times are shown in {timeZone}. Distances in {draft.unit === 'km' ? 'kilometres' : 'miles'}. A GPX import shows its
+          elapsed time (pauses included), not moving time.
+        </p>
         <p className="search-panel__notice" role="status">{notice ?? ''}</p>
         {list.status === 'loading' && <p className="search-results__loading">Loading your activities…</p>}
         {(list.status === 'error' || list.status === 'access-denied') && (
@@ -318,9 +336,10 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
                   <h3>{activityTypeLabels[activity.type]}</h3>
                   <time dateTime={activity.startedAt}>{formatStartedAt(activity.startedAt, timeZone)}</time>
                   <dl>
-                    <div><dt>Duration</dt><dd>{formatDuration(activity.durationS)}</dd></div>
+                    <div><dt>{activityDurationLabels[activity.source]}</dt><dd>{formatDuration(activity.durationS)}</dd></div>
                     <div><dt>Distance</dt><dd>{activity.distanceM === null ? '—' : formatDistance(activity.distanceM, draft.unit)}</dd></div>
                     <div><dt>Effort</dt><dd>{activity.rpe === null ? '—' : `${activity.rpe}/10`}</dd></div>
+                    <div><dt>Source</dt><dd>{activitySourceLabels[activity.source]}</dd></div>
                   </dl>
                   {activity.notes !== null && <p className="activity-card__notes">{activity.notes}</p>}
                   {!confirming && (

@@ -79,6 +79,20 @@ export function manualActivityRows(overview: Pick<DailyOverview, 'manualActiviti
   }));
 }
 
+/** GPX imports (ADR-0086): their own summary, with elapsed time, never "entered". */
+export function importedActivitiesSummary(overview: Pick<DailyOverview, 'importedActivities'>): string {
+  const { count, elapsedDurationS } = overview.importedActivities;
+  if (count === 0) return 'No GPX import started on this day.';
+  return `${plural(count, 'activity', 'activities')} imported from GPX started on this day, ${formatEnteredDuration(elapsedDurationS)} elapsed in total.`;
+}
+
+export function importedActivityRows(overview: Pick<DailyOverview, 'importedActivities'>): LabelledValue[] {
+  return overview.importedActivities.byType.map((entry) => ({
+    label: activityTypeLabels[entry.type],
+    value: `${entry.count} · ${formatEnteredDuration(entry.elapsedDurationS)} elapsed`,
+  }));
+}
+
 export function gpsRunsSummary(gpsRuns: DailyOverviewGpsRuns): string {
   if (gpsRuns.count === 0) return 'No finished GPS run started on this day.';
   return `${plural(gpsRuns.count, 'finished GPS run', 'finished GPS runs')} started on this day.`;

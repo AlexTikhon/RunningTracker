@@ -445,6 +445,24 @@ export async function countScenarioRows(
   });
 }
 
+/** The organization's activities by source, and its runs: what a GPX import may and may not have written (ADR-0086). */
+export async function countActivityRows(
+  environment: E2eEnvironment,
+  orgId: string,
+): Promise<{ gpx: number; manual: number; runs: number }> {
+  return withOwnerClient(environment, async (client) => {
+    const result = await client.query<{ gpx: number; manual: number; runs: number }>(
+      `SELECT (SELECT count(*)::int FROM activities WHERE org_id = $1 AND source = 'gpx') AS gpx,
+              (SELECT count(*)::int FROM activities WHERE org_id = $1 AND source = 'manual') AS manual,
+              (SELECT count(*)::int FROM runs WHERE org_id = $1) AS runs`,
+      [orgId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error('The activity count query returned no row');
+    return row;
+  });
+}
+
 // The server's own 24-hour auto-finish (app_private.auto_finish_runs, run by the maintenance role) with the clock
 // moved 25 hours ahead, so every run still recording or paused becomes finished the way it does in production:
 // status and data revision change, control revision does not. The function is global by design; this runs only

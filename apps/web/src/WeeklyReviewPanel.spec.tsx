@@ -187,6 +187,34 @@ describe('weekly review section: movement (ADR-0079)', () => {
     expect(render({ load: { kind: 'error', message: 'The review could not be loaded.' } })).not.toContain('Steps and active energy');
   });
 
+  it('shows GPX imports in their own part, with elapsed time and distance, and counts them as a record (ADR-0086)', () => {
+    const empty = reviewFixture({
+      coverage: { ...reviewFixture().coverage, daysWithCheckInRecord: 0, daysWithCheckInValues: 0, gpsRuns: { count: 0, withCurrentDistance: 0, withoutCurrentDistance: 0 }, manualActivities: { count: 0, withDistance: 0 }, noteOnlyDays: 0 },
+    });
+    expect(isEmptyWeek(empty)).toBe(true);
+    const withImport = {
+      ...empty,
+      importedActivities: {
+        byType: [{ count: 1, distanceM: 40_250, elapsedDurationS: 5_400, type: 'ride' as const }],
+        count: 1,
+        distanceM: 40_250,
+        elapsedDurationS: 5_400,
+        source: 'gpx' as const,
+      },
+      statements: [{ code: 'imported.gpx' as const, text: '1 activity was imported from GPX files: 1 h 30 min elapsed, 40.3 km. Shown on their own.' }],
+    };
+    expect(isEmptyWeek(withImport)).toBe(false);
+    const html = render({ load: { kind: 'ready', refreshing: false, review: withImport } });
+    expect(html).toContain('<h3 id="review-imports-title">Imported from GPX</h3>');
+    expect(html).toContain('<span class="review-badge">GPX import</span>');
+    expect(html).toMatch(/pauses included; it is not moving time/u);
+    expect(html).toContain('<dt>Elapsed time</dt><dd>1:30:00</dd>');
+    expect(html).toContain('<dt>Distance</dt><dd>40.25 km</dd>');
+    expect(html).toContain('data-statement="imported.gpx"');
+    expect(html).not.toMatch(/Nothing is recorded/u);
+    expect(render({ load: { kind: 'ready', refreshing: false, review: reviewFixture() } })).not.toContain('Imported from GPX');
+  });
+
   it('formats a calendar date without shifting it by a zone', () => {
     expect(['2026-11-02', '2026-03-29', '2026-10-25'].map(formatReviewDay)).toEqual(['Mon 2 Nov', 'Sun 29 Mar', 'Sun 25 Oct']);
   });

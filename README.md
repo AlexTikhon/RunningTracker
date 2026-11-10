@@ -31,7 +31,9 @@ and grows one vertical slice at a time. Package names, database identifiers, coo
 
 - **Check-in**: weight, sleep, sleep quality, mood, soreness and a note, one record per local date.
 - **Movement**: steps and active energy entered by hand, stored with `manual` provenance.
-- **Activities**: manual entries (run, walk, ride, hike, swim, strength, other).
+- **Activities**: manual entries (run, walk, ride, hike, swim, strength, other), or one GPX 1.1 track imported after a
+  preview and an explicit type choice: start, elapsed time and distance only, labelled as a GPX import. The file and
+  its route are not kept, and an import is not compared with GPS runs recorded here.
 - **Meal log**: meals and snacks with optional user-reported energy and macronutrients. Nothing is estimated or looked up.
 
 ### Views

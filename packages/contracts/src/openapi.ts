@@ -2,10 +2,12 @@ import { z } from 'zod';
 import type { ZodType } from 'zod';
 
 import {
+  ACTIVITY_TYPES,
   activityListResponseSchema,
   activityViewSchema,
   createActivityRequestSchema,
 } from './activities.js';
+import { GPX_IMPORT_CONTENT_TYPE, GPX_IMPORT_MAX_BYTES, gpxImportPreviewSchema } from './activity-gpx-import.js';
 import {
   dailyMetricsListResponseSchema,
   dailyMetricsViewSchema,
@@ -97,6 +99,12 @@ const orgRunParameters = [parameterRef('OrgId'), parameterRef('RunId')];
 const notImplemented =
   'NOT IMPLEMENTED. Specified in SDD section 11 but not mounted by the service; the request is answered 404 ROUTE_NOT_FOUND. Archive display uses /archive/metadata and the revision-bound /tiles instead; live positions come from the /live stream.';
 const csrfParameters = [parameterRef('Origin'), parameterRef('CsrfToken')];
+// ADR-0086: the GPX upload body is the file itself, never JSON.
+const gpxFileBody = {
+  content: { [GPX_IMPORT_CONTENT_TYPE]: { schema: { format: 'binary', maxLength: GPX_IMPORT_MAX_BYTES, type: 'string' } } },
+  description: 'The GPX file exactly as selected, at most 10 MiB.',
+  required: true,
+};
 
 export const openApiDocument = {
   openapi: '3.1.0',
@@ -328,6 +336,32 @@ export const openApiDocument = {
           "Owner-only health data (ADR-0072): the owner is the session's identity and is never a parameter; coaches and other members never see another person's activities, whatever run sharing grants they hold. Ordered by `startedAt` descending, then activity id descending. `limit` 1 to 50, default 20. The keyset cursor is bound to the person and organization; a tampered or foreign cursor is a 400 INVALID_CURSOR. Answers `Cache-Control: no-store`.",
         parameters: [parameterRef('OrgId'), parameterRef('Limit50'), parameterRef('Cursor')],
         responses: { '200': jsonResponse('One page of activities.', 'ActivityListResponse'), ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/activities/gpx-preview': {
+      post: {
+        tags: ['Activities'],
+        summary: 'Preview what the server reads from a GPX file, writing nothing',
+        description:
+          "ADR-0086. The request body is the file itself (`Content-Type: application/gpx+xml`, no `Content-Encoding`), at most 10 MiB; a larger body is 413 GPX_FILE_TOO_LARGE and is never truncated. Session, Origin and CSRF are checked before the body is read. Supported subset: UTF-8, the GPX 1.1 namespace, no DOCTYPE or other declaration (entities are never expanded and nothing referenced by the file is fetched), exactly one `<trk>` with 1 to 1000 non-empty `<trkseg>`, 2 to 100000 `<trkpt>` in total, decimal `lat`/`lon` in range and not exactly 0,0, one `<time>` with a zone per point, strictly increasing within a segment and from one segment to the next. Waypoints, routes, metadata, elevation and extensions are not read. Anything else is 422 GPX_UNSUPPORTED with `details.reason`. The summary: `startedAt`/`endedAt` are the first and last point; `elapsedDurationS` is the time between them rounded to the nearest second, pauses and gaps between segments included (elapsed time, not moving time); `distanceM` is the sum of WGS84 geodesic distances between consecutive points of the same segment, rounded to the metre, nothing across a segment boundary, refused above 1000 km or when two consecutive points imply more than 100 m/s. `duplicateOf` names an activity of this person in this organization imported from the same track (same points, times and segments), advisory only; imports are never compared with GPS runs or manual activities. Runs in a REPEATABLE READ, READ ONLY transaction: nothing is written. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), ...csrfParameters],
+        requestBody: gpxFileBody,
+        responses: { '200': jsonResponse('The server\'s summary of the file.', 'GpxImportPreview'), ...defaultErrors },
+      },
+    },
+    '/api/orgs/{orgId}/activities/{activityId}/gpx-import': {
+      put: {
+        tags: ['Activities'],
+        summary: 'Import a GPX file as an owner-only, summary-only activity',
+        description:
+          "ADR-0086. The body is the same file as for the preview (same media type and limits); the server parses it and computes every value again and never accepts a total, a time or a source. The query holds exactly `type` (the person's choice) and `idempotencyKey` (one client UUID per import attempt); anything else is 400. Stores `source: gpx`, the start, `durationS` = the elapsed duration and `distanceM`; no point, route, name or file. In one transaction: the same id with the same track, type and key answers 200 with the stored activity, the same id with anything else (also a manual activity's id) is 409 ACTIVITY_CONFLICT; the same key under another id answers 200 with the stored activity for the same track and type, otherwise 409 ACTIVITY_ALREADY_SAVED naming it; a track this person already imported in this organization is 409 GPX_ALREADY_IMPORTED with `details.activityId`; another member's id is 404 ACTIVITY_NOT_FOUND. Concurrent confirmations are settled by unique constraints. Deleting an imported activity frees its track for a new import. Never creates or changes a GPS run. Answers `Cache-Control: no-store`.",
+        parameters: [parameterRef('OrgId'), parameterRef('ActivityId'), parameterRef('GpxImportType'), parameterRef('GpxImportKey'), ...csrfParameters],
+        requestBody: gpxFileBody,
+        responses: {
+          '200': jsonResponse('Existing import returned for a retry of the same attempt.', 'ActivityView'),
+          '201': jsonResponse('Activity imported.', 'ActivityView'),
+          ...defaultErrors,
+        },
       },
     },
     '/api/orgs/{orgId}/activities/{activityId}': {
@@ -731,6 +765,20 @@ export const openApiDocument = {
       OrgId: { name: 'orgId', in: 'path', required: true, schema: schemaRef('UUID') },
       RunId: { name: 'runId', in: 'path', required: true, schema: schemaRef('UUID') },
       ActivityId: { name: 'activityId', in: 'path', required: true, schema: schemaRef('UUID') },
+      GpxImportType: {
+        name: 'type',
+        in: 'query',
+        required: true,
+        description: 'The activity type the person chose for the imported file.',
+        schema: { enum: [...ACTIVITY_TYPES], type: 'string' },
+      },
+      GpxImportKey: {
+        name: 'idempotencyKey',
+        in: 'query',
+        required: true,
+        description: 'One client-generated UUID per import attempt, kept until a confirmed outcome (ADR-0073, ADR-0086).',
+        schema: schemaRef('UUID'),
+      },
       MealId: { name: 'mealId', in: 'path', required: true, schema: schemaRef('UUID') },
       MealLocalDate: {
         name: 'localDate',
@@ -909,6 +957,7 @@ export const openApiDocument = {
       RunListResponse: jsonSchema(runListResponseSchema),
       CreateActivityRequest: jsonSchema(createActivityRequestSchema),
       ActivityView: jsonSchema(activityViewSchema),
+      GpxImportPreview: jsonSchema(gpxImportPreviewSchema),
       ActivityListResponse: jsonSchema(activityListResponseSchema),
       PutDailyMetricsRequest: jsonSchema(putDailyMetricsRequestSchema),
       DailyMetricsView: jsonSchema(dailyMetricsViewSchema),

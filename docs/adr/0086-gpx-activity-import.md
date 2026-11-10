@@ -1,7 +1,7 @@
 # ADR-0086: GPX import into an owner-only activity
 
-- Status: accepted; backend implemented and verified locally (migration 0041, API, contracts, tests). The web flow is a
-  separate change.
+- Status: accepted; implemented and verified locally: backend (migration 0041, API, contracts) and the web flow
+  (Activity tab, Today, weekly review), with Chromium browser tests. Not yet run on an iPhone (pilot checklist step 18).
 - Date: 2026-11-10
 - Amends: ADR-0072 (a second, server-owned `source`), ADR-0082 (Today gains `importedActivities`,
   `daily-overview-3`), ADR-0077/0079 (the weekly review gains `importedActivities`, `weekly-review-3`). Runs, run
@@ -9,7 +9,8 @@
   and AI insight inputs are unchanged.
 - Scope: migration 0041, `packages/contracts` (`activity-gpx-import.ts`), `apps/api/src/activities`
   (`gpx-activity.ts`, `gpx-import-service.ts`, routes), the shared tokenizer `apps/api/src/gps-traces/xml-scanner.ts`,
-  the Today and weekly review reads, tests. No new dependency.
+  the Today and weekly review reads, `apps/web` (Activity import panel and controller, provenance in the list, Today and
+  the weekly review), OpenAPI, tests at every layer including `tests/e2e`. No new dependency.
 
 ## Context
 
@@ -148,7 +149,33 @@ one media type, without decompression, bounded by the 10 MiB file limit. A body 
 refused with 413 and never truncated. The global JSON parser does not read these requests (it reads
 `application/json` only).
 
-### 9. Owner-only, erasure
+### 9. Web flow
+
+The Activity tab has **Import a GPX file** beside the manual form (`GpxImportPanel`, `gpx-import-controller.ts`, the
+same framework-free controller pattern as the other Activity controllers):
+
+- **States**: idle; checking the file (preview request); preview (start, end, elapsed time, distance in the screen's
+  unit, points, segments, with the elapsed-time and no-GPS-comparison notes); invalid (empty, over 10 MB before
+  sending, or the server's `GPX_UNSUPPORTED` / 413 message); preview failed (Retry); importing; imported; already
+  imported (`GPX_ALREADY_IMPORTED`, or `duplicateOf` in the preview, which disables Import); already saved with another
+  type (`ACTIVITY_ALREADY_SAVED`); not confirmed (unknown outcome); access lost.
+- **Explicit type**: the type select starts at "Choose a type"; Import stays disabled until one is chosen.
+- **Import identity**: selecting a file creates it (the `File`, one idempotency key; the activity id at the first
+  confirmation). After an unknown outcome (5xx, timeout, network) the preview stays, and **Import again** sends the same
+  file, id, key and type; a changed type keeps the key with a new id, so the server can answer `ACTIVITY_ALREADY_SAVED`.
+  A definitive refusal of the id takes a new id under the same key. The identity ends with a confirmed outcome,
+  Cancel, or another file. Another file or Cancel is refused while a confirmation is on its way.
+- **Lifetimes**: the screen is keyed by session, person and organization, and the controller follows the session
+  signal: a session end or scope change disposes it, aborting its request; every answer is checked against the current
+  request and identity, so a preview of a replaced file, or any answer after disposal, is dropped.
+- **Provenance in views**: list cards show **Source: GPX import** or **Entered manually**, and **Elapsed time** instead
+  of Duration for imports. Today shows an "Imported from GPX" card (only when there is one) and notes that an import and
+  a GPS run may describe the same outing. The weekly review shows an "Imported from GPX" part and the server's
+  `imported.gpx` statement; a week with only imports is not "empty".
+- The file input has no `accept` filter: iOS greys out files whose type it does not map, and `.gpx` has no system type
+  on every device. The server is the authority on what a file is.
+
+### 10. Owner-only, erasure
 
 Row-level security, grants and the owner predicates are those of ADR-0072; the new column is covered by the existing
 table-level grants. The erasure-ledger trigger records a deleted import like any activity: identifiers and timestamps
@@ -175,4 +202,9 @@ only, never the fingerprint, type, distance or source. A restored backup is clea
 - Time zones: the stored start is an instant; the file's own offset is not kept.
 - Duplicate detection is exact on parsed points: the same outing exported by two apps with different sampling or
   rounding is two different tracks.
-- Browser evidence and the iPhone Safari file picker are not part of this change.
+- Browser evidence is Chromium only (`tests/e2e/activity-gpx-import.spec.ts`: preview without persistence,
+  confirmation with a lost first answer and an exact retry, the same file again, invalid files, a preview and a
+  confirmation answered after sign-out). No Firefox, WebKit or iPhone run; the iOS Files picker and Safari upload are
+  pilot checklist step 18, for the owner.
+- The browser's 15-second request deadline includes the upload; a 10 MB file on a slow link can time out, which the
+  flow reports as an unknown outcome (retry is safe).

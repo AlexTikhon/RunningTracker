@@ -8,6 +8,8 @@ import {
   dayLengthNote,
   gpsDistanceText,
   gpsRunsSummary,
+  importedActivitiesSummary,
+  importedActivityRows,
   isNoteOnlyCheckIn,
   manualActivityRows,
   manualActivitiesSummary,
@@ -40,7 +42,7 @@ function Rows({ label, rows }: { label: string; rows: LabelledValue[] }) {
 
 /** A loaded overview: the four sources, each in its own section, with its action. */
 export function OverviewContent({ onAction, overview }: { onAction: (action: TodayAction) => void; overview: DailyOverview }) {
-  const { checkIn, day, gpsRuns, manualActivities, meals, movement } = overview;
+  const { checkIn, day, gpsRuns, importedActivities, manualActivities, meals, movement } = overview;
   const mealRows = mealTotalRows(meals);
   const dateLabel = formatCheckInDate(day.localDate);
   const lengthNote = dayLengthNote(day);
@@ -118,6 +120,19 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
         <button onClick={() => onAction({ kind: 'activities' })} type="button">Open Activities</button>
       </section>
 
+      {importedActivities.count > 0 && (
+        <section aria-labelledby="today-imported-title" className="today-card">
+          <h2 id="today-imported-title">Imported from GPX</h2>
+          <p>{importedActivitiesSummary(overview)}</p>
+          <Rows label="GPX imports by type" rows={importedActivityRows(overview)} />
+          <p className="today-note">
+            Elapsed time runs from the first to the last point of each file, pauses included; it is not moving time. Imports
+            are not added to manual activities or GPS runs, and are not checked against them.
+          </p>
+          <button onClick={() => onAction({ kind: 'activities' })} type="button">Open Activities</button>
+        </section>
+      )}
+
       <section aria-labelledby="today-gps-title" className="today-card">
         <h2 id="today-gps-title">GPS runs</h2>
         <p className={gpsRuns.count === 0 ? 'today-missing' : undefined}>{gpsRunsSummary(gpsRuns)}</p>
@@ -125,6 +140,9 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
         <p className="today-note">Only your own finished runs, counted on the day they started in {day.timeZone}.</p>
         {manualActivities.count > 0 && gpsRuns.count > 0 && (
           <p className="today-note">Manual activities and GPS runs are shown separately and never added together: one may describe the other.</p>
+        )}
+        {importedActivities.count > 0 && gpsRuns.count > 0 && (
+          <p className="today-note">A GPX import and a GPS run may describe the same outing; both are shown, never added together.</p>
         )}
         <button onClick={() => onAction({ kind: 'runner' })} type="button">Open Runner</button>
       </section>

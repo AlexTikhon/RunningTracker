@@ -83,6 +83,7 @@ Mark each **PASS**, **FAIL** (with the observed defect) or **NOT RUN**. Change n
 | 15 | Navigation while recording | While recording, open Today and Trends, then return to Runner | Recording continues; points keep being counted and uploaded; same run | NOT RUN | - |
 | 16 | Finish | Finish the run | Run finished; appears in Archive › My runs within about a minute | NOT RUN | - |
 | 17 | Screen lock / background (observe only) | During a recording, lock the screen or switch apps for about a minute, then return | Record what happens: points during the gap, recovery, any message. **No continuous background GPS is promised**; a gap is an observation, not a failure | NOT RUN | - |
+| 18 | GPX import (ADR-0086, added after the checklist above was written) | Activity tab › Import a GPX file; choose a **synthetic** GPX 1.1 file (not a real route) from Files; read the preview; choose a type; Import activity; then choose the same file again | The Files picker offers the file; the preview shows start, end, elapsed time, distance, points and segments; the activity is listed with "Source: GPX import"; the second selection says the track is already imported | NOT RUN | - |
 
 For step 14–17, start and stop away from home or any place you would not want a route to point to, and do not attach
 the route, a map, coordinates or a screenshot of the map here. Write only counts and behaviour ("12 points in 1 min",

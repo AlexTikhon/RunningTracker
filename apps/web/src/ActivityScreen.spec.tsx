@@ -46,6 +46,12 @@ describe('ActivityScreen', () => {
     expect(markup).toContain(`Times are shown in ${defaultTimeZone()}`);
   });
 
+  it('offers a GPX import beside the form, and says imports show elapsed time (ADR-0086)', () => {
+    expect(markup).toContain('<h2 id="gpx-import-title">Import a GPX file</h2>');
+    expect(markup).toContain('type="file"');
+    expect(markup).toMatch(/A GPX import shows its\s+elapsed time \(pauses included\), not moving time\./u);
+  });
+
   it('does not put identifiers on the screen', () => {
     expect(markup).not.toContain(orgId);
   });

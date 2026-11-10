@@ -12,6 +12,8 @@ import {
   dailyMovementViewSchema,
   dailyOverviewSchema,
   dailyTrendsSchema,
+  GPX_IMPORT_CONTENT_TYPE,
+  gpxImportPreviewSchema,
   ingestPointsResponseSchema,
   mealListResponseSchema,
   mealViewSchema,
@@ -30,7 +32,9 @@ import {
   weeklyInsightViewSchema,
   weeklyReviewSchema,
   type ActivityListResponse,
+  type ActivityType,
   type ActivityView,
+  type GpxImportPreview,
   type ArchiveMetadataResponse,
   type CreateActivityRequest,
   type DailyMetricsListResponse,
@@ -400,6 +404,54 @@ export async function createActivity(
   const activity = activityViewSchema.parse(requireSuccess(response));
   const created = response.response.status === 201;
   // A new activity must be the one asked for; a replay may be the one this form session saved earlier under another id.
+  if (created && activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
+  return { activity, created };
+}
+
+function gpxUploadHeaders(csrf: CsrfCredentials): HeadersInit {
+  return { 'content-type': GPX_IMPORT_CONTENT_TYPE, [csrf.headerName]: csrf.token };
+}
+
+// GPX import (ADR-0086). The body is the file exactly as selected; nothing else about it is sent. The server parses it and
+// computes every number on preview and again on confirmation, so no total, time or source travels from the browser.
+export async function previewGpxImport(
+  input: { orgId: string },
+  file: Blob,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<GpxImportPreview> {
+  const response = await requestJson(`${activityPath(input.orgId)}/gpx-preview`, {
+    body: file,
+    cache: 'no-store',
+    credentials: 'same-origin',
+    headers: gpxUploadHeaders(csrf),
+    method: 'POST',
+    signal,
+  });
+  return gpxImportPreviewSchema.parse(requireSuccess(response));
+}
+
+// Idempotent like the manual create: the same id, key, type and file after an unknown outcome answer the stored activity
+// (200); a new id under the same key answers the activity that key already saved, or 409 ACTIVITY_ALREADY_SAVED when the
+// type differs; 409 GPX_ALREADY_IMPORTED names an existing import of the same track.
+export async function confirmGpxImport(
+  target: ActivityTarget,
+  choice: { idempotencyKey: string; type: ActivityType },
+  file: Blob,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<{ activity: ActivityView; created: boolean }> {
+  const query = new URLSearchParams({ idempotencyKey: choice.idempotencyKey, type: choice.type });
+  const response = await requestJson(`${activityPath(target.orgId, target.activityId)}/gpx-import?${query.toString()}`, {
+    body: file,
+    credentials: 'same-origin',
+    headers: gpxUploadHeaders(csrf),
+    method: 'PUT',
+    signal,
+  });
+  const activity = activityViewSchema.parse(requireSuccess(response));
+  const created = response.response.status === 201;
+  if (activity.source !== 'gpx') throw new Error('The server returned an activity that was not imported from GPX');
   if (created && activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
   return { activity, created };
 }

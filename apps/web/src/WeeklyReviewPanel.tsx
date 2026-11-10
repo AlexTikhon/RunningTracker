@@ -1,7 +1,14 @@
-import type { WeeklyReview, WeeklyReviewCoverage, WeeklyReviewMovement } from '@running-tracker/contracts';
+import type {
+  WeeklyReview,
+  WeeklyReviewCoverage,
+  WeeklyReviewImportedActivities,
+  WeeklyReviewMovement,
+} from '@running-tracker/contracts';
 import { useEffect, useRef, useState } from 'react';
 
+import { activityTypeLabels } from './activity-form.js';
 import { formatActiveEnergy, formatSteps, movementSourceLabel } from './daily-movement.js';
+import { formatDistance, formatDuration } from './run-search.js';
 import { readWeeklyReview } from './runner-api.js';
 import { loadingReview, WeeklyReviewController, type ReviewSnapshot } from './weekly-review-controller.js';
 import { formatWeek } from './weekly-insight.js';
@@ -48,12 +55,44 @@ function zoneLine(review: WeeklyReview): string {
     : `Days are read in ${week.timeZone}, the time zone of this device (no check-in this week has one).`;
 }
 
-/** Nothing of any source in the week. A movement day counts, also one with only recorded zeros. */
+/** Nothing of any source in the week. A movement day counts, also one with only recorded zeros; so does a GPX import. */
 export const isEmptyWeek = (review: WeeklyReview) =>
   review.coverage.daysWithCheckInRecord === 0 &&
   review.coverage.manualActivities.count === 0 &&
   review.coverage.gpsRuns.count === 0 &&
+  review.importedActivities.count === 0 &&
   review.movement.daysWithRecord === 0;
+
+/** GPX imports of the week (ADR-0086): their own part, never added to manual activities or GPS runs. */
+export function ReviewImports({ imported }: { imported: WeeklyReviewImportedActivities }) {
+  if (imported.count === 0) return null;
+  return (
+    <section aria-labelledby="review-imports-title" className="review-movement">
+      <h3 id="review-imports-title">Imported from GPX</h3>
+      <p className="review-movement__source">
+        <span className="review-badge">GPX import</span> Elapsed time runs from the first to the last point of each file,
+        pauses included; it is not moving time. Not added to manual activities or GPS runs, and not checked against them.
+      </p>
+      <dl className="review-movement__totals">
+        <div><dt>Imports</dt><dd>{imported.count}</dd></div>
+        <div><dt>Elapsed time</dt><dd>{formatDuration(imported.elapsedDurationS)}</dd></div>
+        <div><dt>Distance</dt><dd>{formatDistance(imported.distanceM, 'km')}</dd></div>
+      </dl>
+      <ul aria-label="GPX imports by type" className="review-movement__days">
+        {imported.byType.map((entry) => (
+          <li className="review-movement__day" key={entry.type}>
+            <strong>{activityTypeLabels[entry.type]}</strong>
+            <dl>
+              <div><dt>Imports</dt><dd>{entry.count}</dd></div>
+              <div><dt>Elapsed time</dt><dd>{formatDuration(entry.elapsedDurationS)}</dd></div>
+              <div><dt>Distance</dt><dd>{formatDistance(entry.distanceM, 'km')}</dd></div>
+            </dl>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 const dayLabel = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC', weekday: 'short' });
 
@@ -135,6 +174,7 @@ export function ReviewContent({ review }: { review: WeeklyReview }) {
           ))}
         </dl>
       </section>
+      <ReviewImports imported={review.importedActivities} />
       <ReviewMovement movement={review.movement} weekTimeZone={review.week.timeZone} />
       {review.facts.length > 0 && (
         <section aria-label="Numbers" className="review-numbers">

@@ -4030,3 +4030,34 @@ unseen row; no transaction-duration limit exists).
 **Not established.** No browser flow yet (next change). Parsing runs on the request thread and was not measured under
 load. No overlap detection with GPS runs or manual activities. The `.env` backup key path is a local configuration gap,
 not changed here.
+
+## GPX import into owner-only activities: web flow (ADR-0086) (2026-11-10)
+
+**What exists.** The Activity tab has **Import a GPX file** (`GpxImportPanel.tsx`, `gpx-import-controller.ts`): choose a
+file, read the server's preview (start, end, elapsed time, distance, points, segments, with notes that elapsed time is
+not moving time and that imports are not compared with GPS runs), choose a type explicitly ("Choose a type" until then),
+Import. States: checking, preview, invalid (empty or over 10 MB refused before sending; the server's reason otherwise),
+preview failed with Retry, importing, imported, already imported (also shown from the preview's `duplicateOf`, which
+disables Import), already saved with another type, not confirmed (unknown outcome) and access lost. The import identity
+(file, key, id, type) survives an unknown outcome, so **Import again** repeats it exactly; a changed type keeps the key
+with a new id. The controller follows the session signal and the screen is keyed by session, person and organization;
+answers of replaced or disposed requests are dropped. List cards show **Source: GPX import** / **Entered manually** and
+**Elapsed time** for imports; Today has an "Imported from GPX" card; the weekly review has an "Imported from GPX" part.
+OpenAPI documents both routes, their query and the file body. README, reference, product direction and ADR-0086 state
+the supported subset, the metric definitions and the limits; the iPhone pilot checklist gains step 18 (GPX import,
+NOT RUN).
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Web unit (`apps/web`, vitest) | 96 files, 1,233 passed (+24: controller 11, view 5, API calls 5, Today 1, weekly review 1, Activity screen 1) |
+| Contracts unit | 12 files, 257 passed, with the OpenAPI paths; `openapi-routes.spec.ts` 54 passed (both new operations are mounted) |
+| `npx playwright test --project=chromium activity-gpx-import.spec.ts` | 3 passed: preview with nothing stored; confirmation whose first answer is lost after the server stored it, then Import again: two identical PUTs (only `type` and `idempotencyKey` in the query), one `gpx` row, no run; the list shows "Source: GPX import" and "Elapsed time"; the same file again is refused in the preview; Today shows the import in its own card. Invalid files (GPX 1.0, CSV, a DTD with an external entity, an empty file) store nothing. A preview and a confirmation held until after sign-out are never shown in the next session, and the held confirmation, sent with the ended session, stored nothing |
+| Affected Chromium specs (`activity`, `activity-gpx-import`, `today`, `weekly-review`, `daily-checkin`, `trends`) | 14 passed |
+| `npm run test:e2e` (`chromium` and `chromium-oidc`) | 150 passed in 14.4 min |
+| `npm test` (all workspaces) | scripts 115, API 1,674 (+2: both new operations in the OpenAPI route check), web 1,233, contracts 257, fixtures 14, simulator 3 |
+| Lint and typecheck of the changed files (web, contracts, e2e) | pass |
+
+**Not established.** No Firefox, WebKit or iPhone run: the iOS Files picker, Safari's upload and the 15-second request
+deadline on a slow link are untested (pilot step 18 is for the owner). No overlap detection with GPS runs.

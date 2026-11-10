@@ -17,7 +17,8 @@ commitment to dates or to every item below.
 
 1. **Data foundation.**
    - Generic activities with manual entry (step 1, [ADR-0072](adr/0072-owner-only-manual-activities.md)).
-   - GPX/TCX/FIT import into activities.
+   - GPX/TCX/FIT import into activities: a first GPX 1.1 subset exists ([ADR-0086](adr/0086-gpx-activity-import.md));
+     TCX and FIT remain.
    - Daily check-in: weight, sleep, mood (and soreness).
    - Daily movement: steps and active energy, manual entry first ([ADR-0078](adr/0078-manual-daily-movement.md));
      phone/watch import later, under its own provenance.
@@ -111,6 +112,12 @@ local authority that the owner trusts on the phone, and the existing demo sign-i
 checklist (`docs/reports/iphone-lan-pilot.md`: trusted HTTPS, Today, editors, Trends, inputs, session, foreground GPS,
 screen-lock observation) and its defects are triaged. The pilot's sign-in is the development session, so it is for
 synthetic data only; real health data needs real sign-in and the deployment profile first.
+
+**GPX import** is [ADR-0086](adr/0086-gpx-activity-import.md): one GPX 1.1 track becomes an owner-only, summary-only
+activity (start, elapsed duration, distance) after a preview the server computes and a type the person chooses, with
+server-owned `source: gpx`. Elapsed time is never called moving time. Today and the weekly review show imports apart
+from manual activities and GPS runs; they are not AI input and are not compared with GPS runs. No route is stored or
+shown. TCX, FIT, multi-track files and any overlap detection remain open.
 
 **HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
 built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the

@@ -615,6 +615,121 @@
         }
       }
     },
+    "/api/orgs/{orgId}/activities/gpx-preview": {
+      "post": {
+        "tags": [
+          "Activities"
+        ],
+        "summary": "Preview what the server reads from a GPX file, writing nothing",
+        "description": "ADR-0086. The request body is the file itself (`Content-Type: application/gpx+xml`, no `Content-Encoding`), at most 10 MiB; a larger body is 413 GPX_FILE_TOO_LARGE and is never truncated. Session, Origin and CSRF are checked before the body is read. Supported subset: UTF-8, the GPX 1.1 namespace, no DOCTYPE or other declaration (entities are never expanded and nothing referenced by the file is fetched), exactly one `<trk>` with 1 to 1000 non-empty `<trkseg>`, 2 to 100000 `<trkpt>` in total, decimal `lat`/`lon` in range and not exactly 0,0, one `<time>` with a zone per point, strictly increasing within a segment and from one segment to the next. Waypoints, routes, metadata, elevation and extensions are not read. Anything else is 422 GPX_UNSUPPORTED with `details.reason`. The summary: `startedAt`/`endedAt` are the first and last point; `elapsedDurationS` is the time between them rounded to the nearest second, pauses and gaps between segments included (elapsed time, not moving time); `distanceM` is the sum of WGS84 geodesic distances between consecutive points of the same segment, rounded to the metre, nothing across a segment boundary, refused above 1000 km or when two consecutive points imply more than 100 m/s. `duplicateOf` names an activity of this person in this organization imported from the same track (same points, times and segments), advisory only; imports are never compared with GPS runs or manual activities. Runs in a REPEATABLE READ, READ ONLY transaction: nothing is written. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/gpx+xml": {
+              "schema": {
+                "format": "binary",
+                "maxLength": 10485760,
+                "type": "string"
+              }
+            }
+          },
+          "description": "The GPX file exactly as selected, at most 10 MiB.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpxImportPreview"
+                }
+              }
+            },
+            "description": "The server's summary of the file."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/activities/{activityId}/gpx-import": {
+      "put": {
+        "tags": [
+          "Activities"
+        ],
+        "summary": "Import a GPX file as an owner-only, summary-only activity",
+        "description": "ADR-0086. The body is the same file as for the preview (same media type and limits); the server parses it and computes every value again and never accepts a total, a time or a source. The query holds exactly `type` (the person's choice) and `idempotencyKey` (one client UUID per import attempt); anything else is 400. Stores `source: gpx`, the start, `durationS` = the elapsed duration and `distanceM`; no point, route, name or file. In one transaction: the same id with the same track, type and key answers 200 with the stored activity, the same id with anything else (also a manual activity's id) is 409 ACTIVITY_CONFLICT; the same key under another id answers 200 with the stored activity for the same track and type, otherwise 409 ACTIVITY_ALREADY_SAVED naming it; a track this person already imported in this organization is 409 GPX_ALREADY_IMPORTED with `details.activityId`; another member's id is 404 ACTIVITY_NOT_FOUND. Concurrent confirmations are settled by unique constraints. Deleting an imported activity frees its track for a new import. Never creates or changes a GPS run. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityId"
+          },
+          {
+            "$ref": "#/components/parameters/GpxImportType"
+          },
+          {
+            "$ref": "#/components/parameters/GpxImportKey"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/gpx+xml": {
+              "schema": {
+                "format": "binary",
+                "maxLength": 10485760,
+                "type": "string"
+              }
+            }
+          },
+          "description": "The GPX file exactly as selected, at most 10 MiB.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityView"
+                }
+              }
+            },
+            "description": "Existing import returned for a retry of the same attempt."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityView"
+                }
+              }
+            },
+            "description": "Activity imported."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/activities/{activityId}": {
       "put": {
         "tags": [
@@ -1995,6 +2110,33 @@
         "name": "activityId",
         "in": "path",
         "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/UUID"
+        }
+      },
+      "GpxImportType": {
+        "name": "type",
+        "in": "query",
+        "required": true,
+        "description": "The activity type the person chose for the imported file.",
+        "schema": {
+          "enum": [
+            "run",
+            "walk",
+            "ride",
+            "hike",
+            "swim",
+            "strength",
+            "other"
+          ],
+          "type": "string"
+        }
+      },
+      "GpxImportKey": {
+        "name": "idempotencyKey",
+        "in": "query",
+        "required": true,
+        "description": "One client-generated UUID per import attempt, kept until a confirmed outcome (ADR-0073, ADR-0086).",
         "schema": {
           "$ref": "#/components/schemas/UUID"
         }
@@ -3754,6 +3896,86 @@
           "source",
           "startedAt",
           "type"
+        ],
+        "additionalProperties": false
+      },
+      "GpxImportPreview": {
+        "type": "object",
+        "properties": {
+          "duplicateOf": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "activityId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "activityId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "distanceM": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "elapsedDurationS": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 172800
+              },
+              "endedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "metricsVersion": {
+                "type": "string",
+                "const": "gpx-summary-1"
+              },
+              "pointCount": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 100000
+              },
+              "segmentCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              }
+            },
+            "required": [
+              "distanceM",
+              "elapsedDurationS",
+              "endedAt",
+              "metricsVersion",
+              "pointCount",
+              "segmentCount",
+              "startedAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "duplicateOf",
+          "summary"
         ],
         "additionalProperties": false
       },

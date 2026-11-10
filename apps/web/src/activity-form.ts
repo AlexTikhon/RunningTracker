@@ -6,6 +6,7 @@ import {
   ACTIVITY_STARTED_AT_MIN,
   ACTIVITY_TYPES,
   createActivityRequestSchema,
+  type ActivitySource,
   type ActivityType,
   type CreateActivityRequest,
   type DistanceUnit,
@@ -34,6 +35,18 @@ export type ActivityDetails = Omit<Required<CreateActivityRequest>, 'idempotency
 export type ActivityDraftValidation =
   | { ok: true; request: ActivityDetails }
   | { errors: string[]; ok: false };
+
+/** Where an activity came from (server-owned, ADR-0086): never presented as manual when it was imported. */
+export const activitySourceLabels: Record<ActivitySource, string> = {
+  gpx: 'GPX import',
+  manual: 'Entered manually',
+};
+
+/** A GPX import's duration is the file's elapsed time, pauses included; a manual one is what the person entered. */
+export const activityDurationLabels: Record<ActivitySource, string> = {
+  gpx: 'Elapsed time',
+  manual: 'Duration',
+};
 
 export const activityTypeLabels: Record<ActivityType, string> = {
   hike: 'Hike',

@@ -134,3 +134,83 @@ describe('activity API calls', () => {
     }
   });
 });
+
+describe('GPX import API calls (ADR-0086)', () => {
+  const file = new File(['<gpx/>'], 'ride.gpx');
+  const summary = {
+    distanceM: 334,
+    elapsedDurationS: 370,
+    endedAt: '2026-11-09T07:06:10.000Z',
+    metricsVersion: 'gpx-summary-1',
+    pointCount: 8,
+    segmentCount: 2,
+    startedAt: '2026-11-09T07:00:00.000Z',
+  };
+  const imported = { ...view, distanceM: 334, durationS: 370, rpe: null, source: 'gpx', startedAt: '2026-11-09T07:00:00.000Z', type: 'ride' };
+  const choice = { idempotencyKey: 'b9000000-0000-4000-8000-000000000001', type: 'ride' as const };
+
+  it('previews with a POST of the file itself as application/gpx+xml, with the CSRF header and no cache', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(json({ duplicateOf: null, summary }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { previewGpxImport } = await import('./runner-api.js');
+    await expect(previewGpxImport({ orgId }, file, csrf, new AbortController().signal)).resolves.toEqual({ duplicateOf: null, summary });
+    expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/activities/gpx-preview`, {
+      body: file,
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/gpx+xml', 'x-csrf-token': csrf.token },
+      method: 'POST',
+      signal: expect.any(AbortSignal) as AbortSignal,
+    });
+  });
+
+  it('refuses a preview outside the contract', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json({ duplicateOf: null, summary: { ...summary, metricsVersion: 'other' } })));
+    const { previewGpxImport } = await import('./runner-api.js');
+    await expect(previewGpxImport({ orgId }, file, csrf, new AbortController().signal)).rejects.toThrow();
+  });
+
+  it('confirms with a PUT of the same file, sending only the type and the key as the query', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(json(imported, 201));
+    vi.stubGlobal('fetch', fetchMock);
+    const { confirmGpxImport } = await import('./runner-api.js');
+    await expect(confirmGpxImport({ activityId, orgId }, choice, file, csrf, new AbortController().signal)).resolves.toEqual({
+      activity: imported,
+      created: true,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/orgs/${orgId}/activities/${activityId}/gpx-import?idempotencyKey=${choice.idempotencyKey}&type=ride`,
+      {
+        body: file,
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/gpx+xml', 'x-csrf-token': csrf.token },
+        method: 'PUT',
+        signal: expect.any(AbortSignal) as AbortSignal,
+      },
+    );
+  });
+
+  it('accepts a replay under another id, but refuses a new activity under another id or one that is not a GPX import', async () => {
+    const { confirmGpxImport } = await import('./runner-api.js');
+    const other = { ...imported, activityId: 'ad000000-0000-4000-8000-000000000002' };
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json(other, 200)));
+    await expect(confirmGpxImport({ activityId, orgId }, choice, file, csrf, new AbortController().signal)).resolves.toEqual({ activity: other, created: false });
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json(other, 201)));
+    await expect(confirmGpxImport({ activityId, orgId }, choice, file, csrf, new AbortController().signal)).rejects.toThrow('The server returned a different activity');
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json({ ...imported, source: 'manual' }, 201)));
+    await expect(confirmGpxImport({ activityId, orgId }, choice, file, csrf, new AbortController().signal)).rejects.toThrow(
+      'The server returned an activity that was not imported from GPX',
+    );
+  });
+
+  it('surfaces a duplicate with the activity it names', async () => {
+    const error = { error: { code: 'GPX_ALREADY_IMPORTED', details: { activityId }, message: 'Already imported', requestId: '22222222-2222-4222-8222-222222222222' } };
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json(error, 409)));
+    const { confirmGpxImport } = await import('./runner-api.js');
+    await expect(confirmGpxImport({ activityId, orgId }, choice, file, csrf, new AbortController().signal)).rejects.toMatchObject({
+      code: 'GPX_ALREADY_IMPORTED',
+      details: { activityId },
+      status: 409,
+    });
+  });
+});

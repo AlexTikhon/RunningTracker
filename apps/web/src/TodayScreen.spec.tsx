@@ -159,6 +159,24 @@ describe('Today screen', () => {
     expect(html).toContain('shown separately and never added together');
   });
 
+  it('shows GPX imports in their own card with elapsed time, never among manual activities (ADR-0086)', () => {
+    expect(ready(overviewFixture())).not.toContain('Imported from GPX');
+    const html = ready(
+      overviewFixture({
+        gpsRuns: { count: 1, currentDistanceM: 5012, withCurrentDistance: 1, withoutCurrentDistance: 0 },
+        importedActivities: { byType: [{ count: 1, elapsedDurationS: 3_725, type: 'ride' }], count: 1, elapsedDurationS: 3_725, source: 'gpx' },
+      }),
+    );
+    expect(html).toContain('<h2 id="today-imported-title">Imported from GPX</h2>');
+    expect(html).toContain('1 activity imported from GPX started on this day, 1 h 02 min elapsed in total.');
+    expect(html).toContain('<dt>Ride</dt><dd>1 · 1 h 02 min elapsed</dd>');
+    expect(html).toMatch(/pauses included; it is not moving time/u);
+    expect(html).toContain('A GPX import and a GPS run may describe the same outing; both are shown, never added together.');
+    // The manual card still says nothing was entered by hand.
+    expect(html).toContain('No manual activity started on this day.');
+    expect(html).not.toMatch(/elapsed in total[^<]*entered|entered[^<]*elapsed/u);
+  });
+
   it('notes a day in progress', () => {
     expect(ready(overviewFixture({ day: { ...overviewFixture().day, inProgress: true } }))).toContain('The day is still in progress');
   });
