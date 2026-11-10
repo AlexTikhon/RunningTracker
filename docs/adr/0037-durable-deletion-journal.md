@@ -83,12 +83,22 @@ the plan explicitly rules out a system-wide queue for this.
 
 ## Recovery point and what is honestly claimed
 
-- **Journal RPO.** While the exporter is healthy, a deletion is off-host within
-  one export interval (default 30 s) plus one cycle. If the node is lost before
-  that, the deletion is lost with it and the run can reappear after a restore; the
-  owner would have to delete it again. If the exporter or the mount is failing,
-  the window grows without bound until it is repaired, and today the only signal is
-  a logged cycle failure. Structured metrics and alerting on backlog age are P11.1.
+- **Journal RPO.** One cycle exports at most one batch (500 rows), and the next
+  cycle waits a full interval even after a full batch. While the exporter is
+  healthy, a deletion is therefore off-host within one export interval (default
+  30 s) plus the time to drain any backlog queued ahead of it: about one more
+  interval per 500 older rows, plus cycle time. A burst of 1,001 deletions reaches
+  the journal on the third cycle, and sustained arrivals above about 500 per
+  interval grow the window while every cycle succeeds. If the node is lost before
+  export, the deletion is lost with it and the run can reappear after a restore;
+  the owner would have to delete it again. If the exporter or the mount is failing,
+  the window grows without bound until it is repaired.
+- **The signal is backlog age, not task success.** `maintenance_last_success_timestamp_seconds`
+  cannot tell a drained outbox from one that succeeds every cycle but is behind.
+  `journal_export_oldest_unexported_age_seconds{journal="deletion"}` is the age of
+  the oldest row still in `run_deletion_journal` (0 when it is empty), measured
+  after every export cycle, successful or not. It is the recovery window actually
+  in force; alert when it stays above a few intervals.
 - **Backup RPO** is separate: a daily backup, 24 hours (SDD 12). Reapplication
   covers deletions after that backup. The two RPOs do not add: the journal only has
   to cover the interval since the oldest backup that might be restored.

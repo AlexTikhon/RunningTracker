@@ -153,6 +153,11 @@ export function createApiMetrics(registry: MetricsRegistry = new MetricsRegistry
         labelNames: ['task'],
         name: 'maintenance_last_success_timestamp_seconds',
       }),
+      journalOldestUnexportedAgeSeconds: registry.gauge({
+        help: 'Age of the oldest outbox row not yet exported off-host (0 when drained), after every export cycle; the recovery window in force (ADR-0037, ADR-0073).',
+        labelNames: ['journal'],
+        name: 'journal_export_oldest_unexported_age_seconds',
+      }),
       rawPurgeBlocked: registry.counter({
         help: 'Raw purge cycles blocked because a current summary was unavailable (retention overrun).',
         name: 'raw_purge_blocked_total',

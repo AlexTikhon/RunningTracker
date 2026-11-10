@@ -273,7 +273,8 @@ take for one tiny database on one workstation. They are not the production RPO o
 - Recovery fails closed: access granted after the backup is not reconstructed and has to be granted again,
   and a share revoked and then granted again before the loss is removed again.
 - Deletions and restrictions committed but not yet exported when a node is lost are lost with it (one
-  export interval while the exporter is healthy, unbounded while it is failing).
+  export interval plus the time to drain any backlog while the exporter is healthy, unbounded while it is
+  failing; `journal_export_oldest_unexported_age_seconds` shows the window for deletions and erasures).
 - Deletions committed but not yet exported when the node is lost are lost with it (journal recovery
   point, ADR-0037).
 - Retention trusts the timestamp in the file name and does not check that a kept backup restores.

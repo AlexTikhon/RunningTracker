@@ -56,6 +56,8 @@ and grows one vertical slice at a time. Package names, database identifiers, coo
   accepted.
 - **Health data is owner-only.** Run sharing never grants access to check-ins, movement, activities or meals.
 - **Deleted stays deleted.** Erasures go to a ledger that leaves the database host and is replayed after a restore.
+  Limit: an erasure not yet exported when the host is lost can come back. The window is one export interval plus the
+  time to drain any backlog ([recovery limits](docs/runbooks/deletion-journal-and-recovery.md#failure-modes-and-honest-limits)).
 - **No derived health numbers without a definition.** No calories from steps, no "complete diary", no advice.
 
 Details and the roadmap: [docs/product-direction.md](docs/product-direction.md).

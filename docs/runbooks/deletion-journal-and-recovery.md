@@ -24,7 +24,7 @@ shares or memberships that were revoked afterwards. That is the access-restricti
 | Setting | Meaning |
 |---|---|
 | `DELETION_JOURNAL_DIR` | Absolute directory that receives journal files. **Must be storage outside the database host and outside its failure domain** (a separately replicated volume, an object-store mount, another machine). Required in production. The application cannot check that the mount is really off-host or durable. |
-| `RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS` | How often a batch of at most 500 pending deletions is exported. Default 30000. While healthy, a deletion is off-host within about this long. |
+| `RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS` | How often a batch of at most 500 pending deletions is exported. Default 30000. While healthy, a deletion is off-host within one interval plus the time to drain any backlog ahead of it (one more interval per 500 older rows); see "Backlog age" below. |
 
 At startup with the directory set, the API creates it if missing and proves it can
 write, fsync and remove a probe file. If that fails the API does not start.
@@ -47,10 +47,17 @@ the operators who perform restores, and do not put it on shared or public storag
   ```
 
   `pending` should be near zero. A growing `oldest` means the exporter cannot
-  write: check the API log for `Run deletion journal export cycle failed`, the mount,
+  write or cannot keep up: check the API log for `maintenance.cycle.failed`, the mount,
   free space and permissions. Nothing is lost while rows remain in the database, but
-  a node loss in that state loses exactly those deletions. Structured metrics and an
-  alert on backlog age are P11.1; until then this query and the log are the signal.
+  a node loss in that state loses exactly those deletions.
+- **Backlog age** is the signal to watch. `journal_export_oldest_unexported_age_seconds`
+  with `journal="deletion"` (run deletions) or `journal="erasure"` (activities, check-ins,
+  movement, meals) is the age of the oldest row not yet exported, 0 when the outbox is
+  drained. It is measured after every export cycle, successful or not. A cycle exports at
+  most 500 rows and the next one waits a full interval, so a backlog drains at about 500
+  rows per interval even while every cycle succeeds, and
+  `maintenance_last_success_timestamp_seconds` alone does not show it. The age is the
+  recovery window actually in force; alert when it stays above a few intervals.
 
 ## Retention of journal files
 
@@ -127,9 +134,11 @@ Nothing may connect as the runtime or maintenance role in the meantime.
 ## Failure modes and honest limits
 
 - Deletions committed but not yet exported when the node is lost are gone; the run
-  can reappear after a restore. Its owner must delete it again. The window is one
-  export interval while healthy and unbounded while the exporter is failing. The same
-  holds for activity, check-in and movement erasures in the erasure ledger (ADR-0073, ADR-0074, ADR-0078).
+  can reappear after a restore. Its owner must delete it again. While the exporter is
+  healthy the window is one export interval plus the time to drain any backlog queued
+  ahead (about one more interval per 500 older rows); it is unbounded while the exporter
+  is failing. The backlog-age metric above shows the window in force. The same holds for
+  activity, check-in, movement and meal erasures in the erasure ledger (ADR-0073, ADR-0074, ADR-0078, ADR-0083).
 - If the erasure ledger cannot be written, an activity, check-in or movement DELETE fails (HTTP 500)
   and the record stays; nothing is erased without its record. Fix the database, then the
   owner retries.
