@@ -141,10 +141,10 @@ describe('P11.1 observability against real PostgreSQL', () => {
       expect(output).toContain('point_ingest_commit_seconds_count{outcome="rejected"} 1');
       expect(output).toContain('point_ingest_rejections_total{code="POINT_CONFLICT"} 1');
       expect(output).toContain(
-        'http_requests_total{method="POST",route="/api/orgs/:uuid/runs/:uuid/points",status="200"} 2',
+        'http_requests_total{method="POST",route="/api/orgs/:orgId/runs/:runId/points",status="200"} 2',
       );
       expect(output).toContain(
-        'http_requests_total{method="POST",route="/api/orgs/:uuid/runs/:uuid/points",status="409"} 1',
+        'http_requests_total{method="POST",route="/api/orgs/:orgId/runs/:runId/points",status="409"} 1',
       );
       expect(output).toContain('http_requests_total{method="GET",route="unmatched",status="404"} 1');
       expect(output).toMatch(/db_pool_acquire_seconds_count\{pool="runtime"\} [1-9]/u);

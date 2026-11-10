@@ -23,9 +23,14 @@ instrumentation has to exist, and be safe, before any load is generated.
    no timer is added. A `prom-client` dependency was not needed for three instrument kinds and
    would add a supply-chain surface for no measured benefit.
 2. **Bounded cardinality by construction.** Label values come from code vocabularies, never
-   from identifiers, coordinates, or user input. HTTP `route` is the request path with UUID
-   segments and numbers replaced (`/api/orgs/:uuid/runs/:uuid/points`) and is the single value
-   `unmatched` for anything that matched no route. Every metric also has a series cap
+   from identifiers, coordinates, or user input. HTTP `route` is the template of the route that
+   matched, as written in code: the router's mount path (recorded by `routePrefix` in `app.ts`)
+   plus the route's own path, for example `/api/orgs/:orgId/runs/:runId/points`. Nothing of the
+   incoming URL is used, so malformed identifiers, local dates and other path text never become a
+   label, also when the matched route answers 401 or 503 (the same value is the `route` of the
+   5xx log line). Anything that matched no route is the single value `unmatched`. (Until
+   November 2026 the label was the request path with UUID and numeric segments replaced, which
+   let other segment values, such as dates, through.) Every metric also has a series cap
    (default 100); further combinations fold into one `_overflow` series and increment
    `metrics_series_overflow_total`, so a scanner or a labelling mistake cannot grow memory.
 3. **A separate listener.** `GET /metrics` is served by its own `http.Server` on

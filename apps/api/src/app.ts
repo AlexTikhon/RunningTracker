@@ -32,7 +32,7 @@ import { createHealthRouter } from './health/health.routes.js';
 import { apiErrorHandler, unknownApiRoute } from './http/errors.js';
 import { requestIdMiddleware } from './http/request-id.js';
 import { createApiMetrics, type ApiMetrics } from './observability/api-metrics.js';
-import { createHttpMetricsMiddleware } from './observability/http-metrics.js';
+import { createHttpMetricsMiddleware, routePrefix } from './observability/http-metrics.js';
 import { defaultLogger, type Logger } from './observability/logger.js';
 import { observeArchiveTiles } from './observability/runtime-metrics.js';
 import { createLiveRouter } from './live/live.routes.js';
@@ -162,7 +162,7 @@ export function createApp({
   app.disable('x-powered-by');
   app.use(requestIdMiddleware);
   app.use(createHttpMetricsMiddleware({ clock, logger, metrics: metrics.http }));
-  app.use('/api/health', createHealthRouter(database));
+  app.use('/api/health', routePrefix('/api/health', createHealthRouter(database)));
   app.use('/api/session', (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-store');
     next();
@@ -173,27 +173,27 @@ export function createApp({
   app.use('/api/orgs/:orgId/daily-trends', dailyTrendsNoStore);
   app.use('/api/orgs/:orgId/meals', mealsNoStore);
   app.use(express.json({ limit: '64kb' }));
-  app.use('/api/session', createSessionRouter(config, sessions));
+  app.use('/api/session', routePrefix('/api/session', createSessionRouter(config, sessions)));
   if (config.OIDC && oidcLoginStore) {
     app.use(
       '/api/auth',
-      createOidcRouter({
+      routePrefix('/api/auth', createOidcRouter({
         client: createOidcClient(config.OIDC, clock),
         config,
         logger,
         loginStore: oidcLoginStore,
         resolveIdentity: createDatabaseIdentityResolver(pool as Pick<Pool, 'connect'>),
         sessionManager: sessions,
-      }),
+      })),
     );
   }
   app.use(
     '/api/organizations',
-    createOrganizationRouter({ pool: pool as Pick<Pool, 'connect'>, sessionManager: sessions }),
+    routePrefix('/api/organizations', createOrganizationRouter({ pool: pool as Pick<Pool, 'connect'>, sessionManager: sessions })),
   );
   app.use(
     '/api/orgs/:orgId',
-    createArchiveRouter({
+    routePrefix('/api/orgs/:orgId', createArchiveRouter({
       clock,
       metrics: metrics.archive,
       pool: pool as Pick<Pool, 'connect'>,
@@ -201,16 +201,16 @@ export function createApp({
       tileCache: archiveTiles,
       tilePipeline: archiveTilePipeline ?? postgisArchiveTilePipeline,
       tileScheduler: archiveTileGenerations,
-    }),
+    })),
   );
   app.use(
     '/api/orgs/:orgId/coaches',
-    createOrganizationCoachRouter({ pool: pool as Pick<Pool, 'connect'>, sessionManager: sessions }),
+    routePrefix('/api/orgs/:orgId/coaches', createOrganizationCoachRouter({ pool: pool as Pick<Pool, 'connect'>, sessionManager: sessions })),
   );
-  app.use('/api/orgs/:orgId/live', createLiveRouter(sessions, live));
+  app.use('/api/orgs/:orgId/live', routePrefix('/api/orgs/:orgId/live', createLiveRouter(sessions, live)));
   app.use(
     '/api/orgs/:orgId/runs',
-    createRunRouter({
+    routePrefix('/api/orgs/:orgId/runs', createRunRouter({
       clock,
       config,
       ...(interpretation ? { interpretation } : {}),
@@ -218,85 +218,88 @@ export function createApp({
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
       ...(testOnlyFaultInjector ? { testOnlyFaultInjector } : {}),
-    }),
+    })),
   );
   app.use(
     '/api/orgs/:orgId/activities',
-    createActivityRouter({
+    routePrefix('/api/orgs/:orgId/activities', createActivityRouter({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
-    }),
+    })),
   );
   app.use(
     '/api/orgs/:orgId/daily-metrics',
-    createDailyMetricsRouter({
+    routePrefix('/api/orgs/:orgId/daily-metrics', createDailyMetricsRouter({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
-    }),
+    })),
   );
   // Manual daily movement (ADR-0078): owner-only, not an insight or weekly review source.
   app.use(
     '/api/orgs/:orgId/daily-movement',
-    createDailyMovementRouter({
+    routePrefix('/api/orgs/:orgId/daily-movement', createDailyMovementRouter({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
-    }),
+    })),
   );
   // The manual meal log (ADR-0083): owner-only, not an insight or weekly review source.
   app.use(
     '/api/orgs/:orgId/meals',
-    createMealRouter({
+    routePrefix('/api/orgs/:orgId/meals', createMealRouter({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
-    }),
+    })),
   );
   // The daily overview (Today, ADR-0082): read-only, derived on every read from the person's own records.
   app.use(
     '/api/orgs/:orgId/daily-overview',
-    createDailyOverviewRouter({
+    routePrefix('/api/orgs/:orgId/daily-overview', createDailyOverviewRouter({
       overview: new DailyOverviewService({
         clock,
         pool: pool as Pick<Pool, 'connect'>,
         ...(testOnlyDailyOverviewHooks ? { hooks: testOnlyDailyOverviewHooks } : {}),
       }),
       sessionManager: sessions,
-    }),
+    })),
   );
   // 28-day trends (ADR-0084): read-only, derived on every read from the person's own daily records.
   app.use(
     '/api/orgs/:orgId/daily-trends',
-    createDailyTrendsRouter({
+    routePrefix('/api/orgs/:orgId/daily-trends', createDailyTrendsRouter({
       sessionManager: sessions,
       trends: new DailyTrendsService({
         clock,
         pool: pool as Pick<Pool, 'connect'>,
         ...(testOnlyDailyTrendsHooks ? { hooks: testOnlyDailyTrendsHooks } : {}),
       }),
-    }),
+    })),
   );
-  app.use('/api/orgs/:orgId/insights', createWeeklyInsightRouter({ config, insights, sessionManager: sessions }));
+  app.use(
+    '/api/orgs/:orgId/insights',
+    routePrefix('/api/orgs/:orgId/insights', createWeeklyInsightRouter({ config, insights, sessionManager: sessions })),
+  );
   // The deterministic weekly review: independent of the insight service and of any model provider.
   app.use(
     '/api/orgs/:orgId/weekly-review',
-    createWeeklyReviewRouter({
+    routePrefix('/api/orgs/:orgId/weekly-review', createWeeklyReviewRouter({
       review: new WeeklyReviewService({
         clock,
         pool: pool as Pick<Pool, 'connect'>,
         ...(testOnlyWeeklyReviewHooks ? { hooks: testOnlyWeeklyReviewHooks } : {}),
       }),
       sessionManager: sessions,
-    }),
+    })),
   );
   if (testOnlyRouter) {
-    app.use('/api', testOnlyRouter);
+    app.use('/api', routePrefix('/api', testOnlyRouter));
   }
   app.use('/api', unknownApiRoute);
   app.use(
