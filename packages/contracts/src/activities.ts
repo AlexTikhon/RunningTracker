@@ -2,10 +2,13 @@ import { z } from 'zod';
 
 import { canonicalFiniteNumber, cursorSchema, timestampSchema, uuidSchema } from './primitives.js';
 
-// Manually entered activities of the signed-in person (ADR-0072). Owner-only: no request carries an owner, an
-// organization or a source; the server takes the owner from the session and the organization from the path.
+// Activities of the signed-in person (ADR-0072): entered manually, or imported from a GPX file (ADR-0086). Owner-only:
+// no request carries an owner, an organization or a source; the server takes the owner from the session, the
+// organization from the path and the source from the route that created the activity.
 export const ACTIVITY_TYPES = ['run', 'walk', 'ride', 'hike', 'swim', 'strength', 'other'] as const;
-export const ACTIVITY_SOURCES = ['manual'] as const;
+// `manual`: entered in the form (PUT /activities/{id}). `gpx`: imported from a GPX file (ADR-0086); its `durationS` is the
+// elapsed time from the first to the last point, pauses included, and its `distanceM` was computed by the server.
+export const ACTIVITY_SOURCES = ['manual', 'gpx'] as const;
 export const ACTIVITY_DURATION_MAX_S = 172_800;
 export const ACTIVITY_DISTANCE_MAX_M = 1_000_000;
 export const ACTIVITY_NOTES_MAX_LENGTH = 1_000;

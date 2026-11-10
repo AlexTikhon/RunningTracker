@@ -3722,7 +3722,8 @@
           "source": {
             "type": "string",
             "enum": [
-              "manual"
+              "manual",
+              "gpx"
             ]
           },
           "startedAt": {
@@ -3819,7 +3820,8 @@
                 "source": {
                   "type": "string",
                   "enum": [
-                    "manual"
+                    "manual",
+                    "gpx"
                   ]
                 },
                 "startedAt": {
@@ -5549,6 +5551,81 @@
               "additionalProperties": false
             }
           },
+          "importedActivities": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "gpx"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "elapsedDurationS": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1728000000
+              },
+              "distanceM": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000000000
+              },
+              "byType": {
+                "maxItems": 7,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    },
+                    "elapsedDurationS": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1728000000
+                    },
+                    "distanceM": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000000000
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "count",
+                    "elapsedDurationS",
+                    "distanceM"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "source",
+              "count",
+              "elapsedDurationS",
+              "distanceM",
+              "byType"
+            ],
+            "additionalProperties": false
+          },
           "movement": {
             "type": "object",
             "properties": {
@@ -5801,7 +5878,8 @@
                     "movement.active_energy_recorded",
                     "movement.active_energy_not_recorded",
                     "movement.manual_source",
-                    "movement.time_zones"
+                    "movement.time_zones",
+                    "imported.gpx"
                   ]
                 },
                 "text": {
@@ -5866,6 +5944,7 @@
           "coverage",
           "dataGaps",
           "facts",
+          "importedActivities",
           "movement",
           "provenance",
           "statements",
@@ -6051,6 +6130,69 @@
               "currentDistanceM",
               "withCurrentDistance",
               "withoutCurrentDistance"
+            ],
+            "additionalProperties": false
+          },
+          "importedActivities": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "gpx"
+              },
+              "byType": {
+                "maxItems": 7,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    },
+                    "elapsedDurationS": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1728000000
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "count",
+                    "elapsedDurationS"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "elapsedDurationS": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1728000000
+              }
+            },
+            "required": [
+              "source",
+              "byType",
+              "count",
+              "elapsedDurationS"
             ],
             "additionalProperties": false
           },
@@ -6354,6 +6496,7 @@
           "checkIn",
           "day",
           "gpsRuns",
+          "importedActivities",
           "manualActivities",
           "meals",
           "movement",

@@ -135,7 +135,8 @@ type Owner = { orgId: string; userId: string };
 // ones inside the week's range. Notes, activity effort, coordinates and identifiers are never selected: they cannot
 // reach the model. A GPS distance is used only from a summary that is current for the run's data (source_revision =
 // data_revision); a missing or stale summary is a data gap. The person's own finished runs only: run sharing makes
-// other people's runs readable, never part of this insight.
+// other people's runs readable, never part of this insight. Activities are the manual ones only: a GPX import
+// (ADR-0086) is not a manual activity, is not an AI input, and is shown by the weekly review in its own part.
 export const weekSourcesSql = `/* weekly-insight:sources */
 SELECT
   (SELECT coalesce(json_agg(json_build_object(
@@ -155,7 +156,7 @@ SELECT
             'durationS', activity.duration_s,
             'distanceM', activity.distance_m) ORDER BY activity.started_at, activity.id), '[]'::json)
    FROM activities AS activity
-   WHERE activity.org_id = $1 AND activity.user_id = $2
+   WHERE activity.org_id = $1 AND activity.user_id = $2 AND activity.source = 'manual'
      AND activity.started_at >= ($3::date - 2)::timestamp AT TIME ZONE 'UTC'
      AND activity.started_at < ($3::date + 9)::timestamp AT TIME ZONE 'UTC') AS activities,
   (SELECT coalesce(json_agg(json_build_object(

@@ -2,7 +2,8 @@
 
 - Status: accepted; implemented and verified locally. Amended by [ADR-0073](0073-erasure-ledger-and-idempotent-activity-creation.md):
   deletions are recorded in an erasure ledger and replayed after a restore (section 4's limitation is closed for the
-  recovery path), and creation takes a per-form-session idempotency key.
+  recovery path), and creation takes a per-form-session idempotency key. Amended by
+  [ADR-0086](0086-gpx-activity-import.md): a second, server-owned source `gpx` for GPX imports (migration 0041).
 - Date: 2026-11-06
 - Amends: nothing. Runs, run points, summaries, ingestion, the GPS algorithm and its version, SSE, tiles, retention
   and AI search are unchanged.

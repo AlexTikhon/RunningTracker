@@ -19,7 +19,7 @@ import { activityListContext, decodeActivityCursor, encodeActivityCursor } from 
 // security (owner-only, ADR-0072) is in force. The owner is still stated in each statement: ownership must not rest on
 // the policy alone.
 
-interface ActivityRow {
+export interface ActivityRow {
   activity_id: string;
   created_at: string;
   distance_m: number | null;
@@ -31,7 +31,7 @@ interface ActivityRow {
   type: string;
 }
 
-interface OwnedActivityRow extends ActivityRow {
+export interface OwnedActivityRow extends ActivityRow {
   payload_matches: boolean;
 }
 
@@ -43,7 +43,7 @@ export interface CreateActivityResult {
 const utcMicroseconds = (column: string) =>
   `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
-const projection = `activity.id AS activity_id,
+export const activityProjection = `activity.id AS activity_id,
          activity.type,
          ${utcMicroseconds('activity.started_at')} AS started_at,
          activity.duration_s,
@@ -64,14 +64,14 @@ const detailsMatch = (first: number) => `activity.type = $${first}
 
 // By id: $1 organization, $2 activity, $3 owner, $4..$9 details, $10 idempotency key. The key is part of what an id is
 // bound to, so the same id under another form session is a conflict like any other changed field.
-export const ownedActivitySql = `SELECT ${projection},
+export const ownedActivitySql = `SELECT ${activityProjection},
          (${detailsMatch(4)} AND activity.idempotency_key IS NOT DISTINCT FROM $10::uuid) AS payload_matches
   FROM activities AS activity
   WHERE activity.org_id = $1 AND activity.id = $2 AND activity.user_id = $3`;
 
 // By form session (ADR-0073): $1 organization, $2 owner, $3 idempotency key, $4..$9 details. The unique constraint
 // (org_id, user_id, idempotency_key) guarantees at most one row.
-export const keyedActivitySql = `SELECT ${projection},
+export const keyedActivitySql = `SELECT ${activityProjection},
          (${detailsMatch(4)}) AS payload_matches
   FROM activities AS activity
   WHERE activity.org_id = $1 AND activity.user_id = $2 AND activity.idempotency_key = $3::uuid`;
@@ -87,7 +87,7 @@ export const insertActivitySql = `INSERT INTO activities (
        ON CONFLICT DO NOTHING`;
 
 // $1 organization, $2 owner, $3/$4 keyset position or NULL, $5 fetch size. The order is total: start, then id.
-export const activityPageSql = `SELECT ${projection}
+export const activityPageSql = `SELECT ${activityProjection}
   FROM activities AS activity
   WHERE activity.org_id = $1
     AND activity.user_id = $2
@@ -105,7 +105,7 @@ function transportTimestamp(value: string): string {
   return `${matched[1]}${matched[2]!.replace(/0+$/u, '').padEnd(3, '0')}Z`;
 }
 
-function mapActivity(row: ActivityRow): ActivityView {
+export function mapActivity(row: ActivityRow): ActivityView {
   return activityViewSchema.parse({
     activityId: row.activity_id,
     createdAt: transportTimestamp(row.created_at),
@@ -119,10 +119,10 @@ function mapActivity(row: ActivityRow): ActivityView {
   });
 }
 
-const notFound = () => new ApiError(404, 'ACTIVITY_NOT_FOUND', 'The activity does not exist or is not accessible');
-const conflict = () =>
+export const notFound = () => new ApiError(404, 'ACTIVITY_NOT_FOUND', 'The activity does not exist or is not accessible');
+export const conflict = () =>
   new ApiError(409, 'ACTIVITY_CONFLICT', 'The activity ID is already bound to a different payload');
-const alreadySaved = (activityId: string) =>
+export const alreadySaved = (activityId: string) =>
   new ApiError(
     409,
     ACTIVITY_ALREADY_SAVED,
@@ -130,7 +130,7 @@ const alreadySaved = (activityId: string) =>
     { activityId },
   );
 
-async function readOne(
+export async function readOne(
   client: PoolClient,
   sql: string,
   parameters: unknown[],
@@ -213,7 +213,7 @@ export async function readActivity(
   activityId: string,
 ): Promise<ActivityView> {
   const result = await client.query<ActivityRow>(
-    `SELECT ${projection}
+    `SELECT ${activityProjection}
      FROM activities AS activity
      WHERE activity.org_id = $1 AND activity.id = $2 AND activity.user_id = $3`,
     [orgId, activityId, session.userId],

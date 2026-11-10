@@ -52,6 +52,7 @@ export function reviewFixture(patch: Partial<WeeklyReview> = {}): WeeklyReview {
       { day: 'none', direction: 'none', id: 'check_ins.days_with_data', label: 'Days with a check-in', text: 'Days with a check-in: 4 of 7', unit: 'days', value: 4 },
       { day: 'none', direction: 'none', id: 'sleep.average_minutes', label: 'Average sleep', text: 'Average sleep: 403 min', unit: 'minutes', value: 403 },
     ],
+    importedActivities: { byType: [], count: 0, distanceM: 0, elapsedDurationS: 0, source: 'gpx' },
     movement: movementFixture([]),
     provenance: {
       computedAt: '2026-11-09T08:00:00.000Z',

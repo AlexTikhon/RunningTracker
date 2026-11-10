@@ -3998,3 +3998,35 @@ session persistence, foreground GPS and screen-lock behaviour are NOT RUN in `do
 Whether iOS accepts the name-constrained root is unknown (a documented fallback exists). The phone's path through the
 Windows firewall was not exercised (the desktop reaches its own address). IPv4 only. The pilot's sign-in is the
 development session: synthetic data only.
+
+## GPX import into owner-only activities: backend (ADR-0086) (2026-11-10)
+
+**What exists.** Migration 0041 (additive): `activities.source` accepts `gpx` besides `manual`; `import_fingerprint`
+(32-byte SHA-256 of the canonical track) present exactly on `gpx` rows, unique per owner and organization; a `gpx` row
+needs its import attempt's key. `POST /api/orgs/{orgId}/activities/gpx-preview` (body: the file, `application/gpx+xml`)
+answers the server's summary and an advisory `duplicateOf` from a REPEATABLE READ, READ ONLY transaction.
+`PUT /api/orgs/{orgId}/activities/{activityId}/gpx-import?type=…&idempotencyKey=…` (body: the same file) parses and
+computes everything again and stores a summary-only activity (start, elapsed duration, distance). Only these two routes
+read more than 64 KiB, after session, Origin and CSRF, bounded at 10 MiB with no decompression. The reader shares the
+D10 tokenizer (now `gps-traces/xml-scanner.ts`) and geodesic; it refuses DTDs and never expands entities or fetches
+anything. Supported subset and metric definitions (`gpx-summary-1`) are in ADR-0086. Today (`daily-overview-3`) and the
+weekly review (`weekly-review-3`) count manual rows only in their manual parts and show imports in their own part; AI
+insight inputs select manual activities only. The deletion-journal runbook and ADR-0037 no longer call "sampled age plus
+time since the sample" an upper bound (a transaction that deleted before the sample and commits after it adds an older,
+unseen row; no transaction-duration limit exists).
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Connected identity before database writes | `TEST_MIGRATION_DATABASE_URL`, `TEST_DATABASE_URL`, `TEST_MAINTENANCE_DATABASE_URL`: server reported `running_tracker_test` as `running_tracker_owner`, `running_tracker_runtime`, `running_tracker_maintenance` |
+| `npm run db:migrate:test` | applied 0041 to `running_tracker_test` only |
+| `npm test` (all workspaces), on this change alone | scripts 115, API 1,671 of 1,672 (`run-search-evaluation-cli.spec.ts` hit its 5 s timeout, as already recorded for ADR-0085; that file alone 27 of 27), web 1,209, contracts 257, fixtures 14, simulator 3. An earlier run had stopped at the web workspace (fixtures without `importedActivities`), so the contract specs had not run; three of them were then updated (a `gpx` source is valid, `daily-overview-3`, `weekly-review-3`) and gained checks of the new parts |
+| API unit (`src/activities`, `src/insights`, `src/daily-overview`, `src/gps-traces`) | 25 files, 309 passed; the existing D10 GPX tests pass unchanged |
+| `npm run test:integration` | first run 1,002 of 1,016: 12 `backup-restore` tests stopped at `prepare` because `BACKUP_ENCRYPTION_KEY_FILE` in `.env` names a file that does not exist on this machine, and two exact-shape expectations (Today empty day, weekly review version) needed the new field. With a throwaway key in the session scratchpad (process environment only) and the two expectations updated: 73 files, 1,016 passed |
+| New `activity-gpx-import.integration.test.ts` | 21 passed: preview writes nothing (rows, ledger, insight gates), 401/403 before the body is read (a 40 MiB announced body is answered 401), 415/413/422 reasons, exact limit, retries, `ACTIVITY_ALREADY_SAVED`, `GPX_ALREADY_IMPORTED`, client totals/source refused, manual route refuses `source`, concurrent confirmations (six attempts: one 201, five 409; four retries of one attempt: one 201, three 200), an explicit interleaving on the unique constraint, owner/organization isolation, erasure ledger without content, export and replay after a simulated restore, re-import after deletion, Today and weekly review |
+| `npm run typecheck`, `npm run lint` | pass |
+
+**Not established.** No browser flow yet (next change). Parsing runs on the request thread and was not measured under
+load. No overlap detection with GPS runs or manual activities. The `.env` backup key path is a local configuration gap,
+not changed here.

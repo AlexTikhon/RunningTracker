@@ -21,6 +21,16 @@ const review = {
   },
   dataGaps: [{ code: 'missing_check_in_days', text: 'No check-in values on 3 of 7 days.' }],
   facts: [{ day: 'none', direction: 'none', id: 'sleep.nights_reported', label: 'Nights with sleep logged', text: 'Nights with sleep logged: 3 days', unit: 'days', value: 3 }],
+  importedActivities: {
+    byType: [
+      { count: 2, distanceM: 26_097, elapsedDurationS: 9_065, type: 'run' },
+      { count: 1, distanceM: 40_250, elapsedDurationS: 5_400, type: 'ride' },
+    ],
+    count: 3,
+    distanceM: 66_347,
+    elapsedDurationS: 14_465,
+    source: 'gpx',
+  },
   // The required regression: Monday steps 0, Tuesday both values, Wednesday energy only, the other days missing.
   movement: {
     activeEnergyKcal: { daysRecorded: 2, recordedTotal: 662.5 },
@@ -65,8 +75,21 @@ describe('weekly review contract', () => {
     expect(coverage({ manualActivities: { count: 1, withDistance: 2 } })).toBe(false);
   });
 
-  it('names the version that added movement', () => {
-    expect(WEEKLY_REVIEW_VERSION).toBe('weekly-review-2');
+  it('names the version that added GPX imports (after movement)', () => {
+    expect(WEEKLY_REVIEW_VERSION).toBe('weekly-review-3');
+  });
+
+  it('refuses an inconsistent GPX import part (ADR-0086)', () => {
+    const imported = (patch: Record<string, unknown>) =>
+      weeklyReviewSchema.safeParse({ ...review, importedActivities: { ...review.importedActivities, ...patch } }).success;
+    expect(imported({})).toBe(true);
+    expect(imported({ count: 4 })).toBe(false);
+    expect(imported({ distanceM: 1 })).toBe(false);
+    expect(imported({ elapsedDurationS: 1 })).toBe(false);
+    expect(imported({ source: 'manual' })).toBe(false);
+    expect(imported({ byType: [...review.importedActivities.byType].reverse() })).toBe(false);
+    expect(imported({ byType: [], count: 0, distanceM: 0, elapsedDurationS: 0 })).toBe(true);
+    expect(imported({ byType: [{ count: 0, distanceM: 0, elapsedDurationS: 0, type: 'run' }], count: 0, distanceM: 0, elapsedDurationS: 0 })).toBe(false);
   });
 
   describe('movement', () => {

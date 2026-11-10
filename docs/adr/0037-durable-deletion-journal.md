@@ -105,8 +105,12 @@ the plan explicitly rules out a system-wide queue for this.
   window grows. `journal_export_backlog_age_measured_timestamp_seconds{journal}`
   is the Unix time of the last valid, published measurement, 0 for an enabled
   exporter that has not measured yet in this process; a disabled exporter has no
-  series. The window in force now is at most the sampled age plus the time since
-  that measurement. Alert when the timestamp is older than about twice the
+  series. The sampled age plus the time since that measurement is an estimate of the
+  window in force now, **not** an upper bound: a row is stamped with its deleting
+  statement's time, so a transaction that deleted before the sample and committed after
+  it adds a row the sample never saw, possibly older than the sampled oldest one, and no
+  limit on how long such a transaction stays open exists (statement timeouts are per
+  statement; `idle_in_transaction_session_timeout` is not set). Alert when the timestamp is older than about twice the
   slowest measurement cadence (a failing export retries after up to 300 s), which
   also catches a hung export; the deletion journal runbook has the rules. Metrics
   scrapes do not query PostgreSQL, and nothing cancels a hung filesystem write.

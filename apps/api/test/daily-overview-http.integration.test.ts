@@ -215,6 +215,7 @@ describe('daily overview HTTP API', () => {
         checkIn: { recorded: false },
         day: { endsAt: '2026-11-05T23:00:00.000Z', inProgress: false, localDate: DAY, startsAt: '2026-11-04T23:00:00.000Z', timeZone: ZONE },
         gpsRuns: { count: 0, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 0 },
+        importedActivities: { byType: [], count: 0, elapsedDurationS: 0, source: 'gpx' },
         manualActivities: { byType: [], count: 0, enteredDurationS: 0 },
         meals: noMeals,
         movement: { recorded: false },

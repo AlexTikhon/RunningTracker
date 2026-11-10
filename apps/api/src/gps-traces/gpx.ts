@@ -1,27 +1,25 @@
 import { RawTraceError, validateRawTrace, type RawPoint, type RawTrace } from './raw-trace.js';
+import { localName, scanXml } from './xml-scanner.js';
 
 // A strict reader for the part of GPX 1.0/1.1 that a track needs: <trkpt lat lon> with a <time> and, optionally, a
-// horizontal accuracy in metres from an extension element. It is intentionally not a general XML parser:
+// horizontal accuracy in metres from an extension element. It is intentionally not a general XML parser (the shared
+// tokenizer, xml-scanner.ts, refuses DTDs and never expands entities):
 //  - DTDs and entity declarations are rejected, so there is nothing to expand;
 //  - metadata, names, authors, waypoints, routes, elevation and every other element are skipped, never stored;
 //  - HDOP is not accuracy in metres and is ignored rather than converted.
 // A file this reader cannot read exactly is an error, not a best effort.
 
-const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u;
+/** A plain decimal number as GPX writes coordinates: no exponent, no NaN or Infinity. */
+export const DECIMAL_NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u;
+const NUMBER = DECIMAL_NUMBER;
 const ACCURACY_ELEMENTS = new Set(['accuracy', 'hacc', 'horizontalaccuracy']);
 const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/u;
-const ATTRIBUTE = /([^\s=/>"']+)\s*=\s*(?:"([^"]*)"|'([^']*)')/gu;
 
-function localName(qualifiedName: string): string {
-  return qualifiedName.slice(qualifiedName.lastIndexOf(':') + 1);
-}
-
-function malformed(detail: string): never {
-  throw new RawTraceError(`The file is malformed XML: ${detail}`);
-}
-
-/** An ISO 8601 instant with an explicit timezone, in milliseconds since the epoch, or null. */
-function parseInstant(text: string): number | null {
+/**
+ * An ISO 8601 instant with an explicit timezone (`Z` or `±hh:mm`), in whole milliseconds since the epoch, or null. A
+ * fraction beyond milliseconds is truncated; years before 1970, impossible dates and leap seconds are refused.
+ */
+export function parseInstant(text: string): number | null {
   const match = ISO_TIME.exec(text.trim());
   if (!match) {
     return null;
@@ -94,22 +92,8 @@ function finishPoint(pending: PendingPoint): RawPoint {
   return { accuracyM: Number(pending.accuracyText), latitude, longitude, timeMs };
 }
 
-function parseAttributes(text: string): Record<string, string> {
-  const attributes: Record<string, string> = {};
-  for (const match of text.matchAll(ATTRIBUTE)) {
-    attributes[localName(match[1] as string)] = (match[2] ?? match[3]) as string;
-  }
-  if (text.replace(ATTRIBUTE, '').trim() !== '') {
-    malformed('an element has an attribute that is not name="value"');
-  }
-  return attributes;
-}
-
 export function parseGpx(text: string): RawTrace {
-  if (/<!DOCTYPE|<!ENTITY|<!\[(?!CDATA\[)/iu.test(text)) {
-    throw new RawTraceError('The file declares a DOCTYPE or entities; DTDs are not supported, export a plain GPX file');
-  }
-
+  // The tokenizer keeps the stack and refuses mismatched tags; this stack only mirrors it for parent lookups.
   const stack: string[] = [];
   const points: RawPoint[] = [];
   let segments = 0;
@@ -117,9 +101,8 @@ export function parseGpx(text: string): RawTrace {
   // The casts keep TypeScript from narrowing these to null: the element handlers below assign them.
   let pending = null as PendingPoint | null;
   let collecting = null as { readonly depth: number; readonly kind: 'accuracy' | 'time'; buffer: string } | null;
-  let sawElement = false;
 
-  const startElement = (qualifiedName: string, attributes: Record<string, string>): void => {
+  const startElement = (qualifiedName: string, rawAttributes: ReadonlyMap<string, string>): void => {
     const name = localName(qualifiedName);
     if (stack.length === 0 && name !== 'gpx') {
       throw new RawTraceError('The file is not a GPX document (the root element is not <gpx>)');
@@ -130,6 +113,8 @@ export function parseGpx(text: string): RawTrace {
       segments += 1;
     } else if (name === 'trkpt' && parent !== undefined && localName(parent) === 'trkseg') {
       pointCount += 1;
+      const attributes: Record<string, string> = {};
+      for (const [attributeName, value] of rawAttributes) attributes[localName(attributeName)] = value;
       pending = { accuracyText: undefined, attributes, index: pointCount, timeText: undefined };
     } else if (pending !== null && collecting === null) {
       if (name === 'time' && parent !== undefined && localName(parent) === 'trkpt') {
@@ -145,9 +130,7 @@ export function parseGpx(text: string): RawTrace {
   };
 
   const endElement = (qualifiedName: string): void => {
-    if (stack.pop() !== qualifiedName) {
-      malformed(`a closing tag does not match its opening tag`);
-    }
+    stack.pop();
     const name = localName(qualifiedName);
     if (collecting !== null && collecting.depth === stack.length + 1 && pending !== null) {
       if (collecting.kind === 'time') {
@@ -163,86 +146,20 @@ export function parseGpx(text: string): RawTrace {
     }
   };
 
-  let position = 0;
-  while (position < text.length) {
-    const open = text.indexOf('<', position);
-    if (open === -1) {
-      if (text.slice(position).trim() !== '') {
-        malformed('text outside the root element');
-      }
-      break;
-    }
-    if (collecting !== null && open > position) {
-      collecting.buffer += text.slice(position, open);
-    }
-    if (text.startsWith('<!--', open)) {
-      const end = text.indexOf('-->', open + 4);
-      if (end === -1) {
-        malformed('an unterminated comment');
-      }
-      position = end + 3;
-    } else if (text.startsWith('<![CDATA[', open)) {
-      const end = text.indexOf(']]>', open + 9);
-      if (end === -1) {
-        malformed('an unterminated CDATA section');
-      }
-      if (collecting !== null) {
-        collecting.buffer += text.slice(open + 9, end);
-      }
-      position = end + 3;
-    } else if (text.startsWith('<?', open)) {
-      const end = text.indexOf('?>', open + 2);
-      if (end === -1) {
-        malformed('an unterminated processing instruction');
-      }
-      position = end + 2;
-    } else {
-      // The end of a tag is the first '>' outside a quoted attribute value.
-      let quote = '';
-      let end = -1;
-      for (let index = open + 1; index < text.length; index += 1) {
-        const character = text[index] as string;
-        if (quote !== '') {
-          if (character === quote) {
-            quote = '';
-          }
-        } else if (character === '"' || character === "'") {
-          quote = character;
-        } else if (character === '>') {
-          end = index;
-          break;
-        }
-      }
-      if (end === -1) {
-        malformed('an unterminated tag');
-      }
-      const tag = text.slice(open + 1, end);
-      if (tag.startsWith('/')) {
-        endElement(tag.slice(1).trim());
-      } else {
-        const selfClosing = tag.endsWith('/');
-        const body = selfClosing ? tag.slice(0, -1) : tag;
-        const nameMatch = /^([^\s/>]+)([\s\S]*)$/u.exec(body);
-        if (!nameMatch) {
-          malformed('an element has no name');
-        }
-        sawElement = true;
-        const qualifiedName = nameMatch[1] as string;
-        startElement(qualifiedName, parseAttributes(nameMatch[2] as string));
-        if (selfClosing) {
-          endElement(qualifiedName);
-        }
-      }
-      position = end + 1;
-    }
-  }
+  scanXml(
+    text,
+    {
+      endElement,
+      startElement,
+      text: (chunk) => {
+        if (collecting !== null) collecting.buffer += chunk;
+      },
+    },
+    (_kind, message) => {
+      throw new RawTraceError(message);
+    },
+  );
 
-  if (!sawElement) {
-    throw new RawTraceError('The file is not XML (expected a GPX document); it may be empty or in another format');
-  }
-  if (stack.length !== 0) {
-    malformed('an element is never closed');
-  }
   if (points.length === 0) {
     throw new RawTraceError('The GPX file has no track points (<trk><trkseg><trkpt>); waypoints and routes are not read');
   }

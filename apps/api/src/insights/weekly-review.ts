@@ -8,6 +8,7 @@ import {
   type DailyMovementSource,
   type WeeklyReview,
   type WeeklyReviewCoverage,
+  type WeeklyReviewImportedActivities,
   type WeeklyReviewMovement,
   type WeeklyReviewMovementDay,
   type WeeklyReviewStatement,
@@ -410,6 +411,57 @@ export function describeMovement(movement: WeeklyReviewMovement, weekTimeZone: s
   return statements;
 }
 
+// --- GPX imports (ADR-0086) ------------------------------------------------------------------------------------------
+//
+// Review-only like movement: imports are not part of the aggregate, the facts, the coverage or the data gaps that AI
+// insights share. They are read for the week's own range (the same zone and bounds as the aggregate's activities) and
+// described apart: never added to manual activities or GPS runs, and never compared with GPS runs.
+
+/** One imported activity of the week's range, as the review query reads it. */
+export interface ImportedActivityRecord {
+  distanceM: number;
+  durationS: number;
+  type: ActivityType;
+}
+
+export function importedActivitiesOf(records: readonly ImportedActivityRecord[]): WeeklyReviewImportedActivities {
+  const byType = ACTIVITY_TYPES.flatMap((type) => {
+    const ofType = records.filter((record) => record.type === type);
+    if (ofType.length === 0) return [];
+    return [
+      {
+        count: ofType.length,
+        distanceM: ofType.reduce((sum, record) => sum + Math.round(record.distanceM), 0),
+        elapsedDurationS: ofType.reduce((sum, record) => sum + record.durationS, 0),
+        type,
+      },
+    ];
+  });
+  return {
+    byType,
+    count: records.length,
+    distanceM: byType.reduce((sum, entry) => sum + entry.distanceM, 0),
+    elapsedDurationS: byType.reduce((sum, entry) => sum + entry.elapsedDurationS, 0),
+    source: 'gpx',
+  };
+}
+
+/** Kilometres with one decimal, from whole metres (12 345 m is "12.3"). */
+function formatKm(metres: number): string {
+  return (Math.round(metres / 100) / 10).toFixed(1);
+}
+
+export function describeImported(imported: WeeklyReviewImportedActivities): WeeklyReviewStatement[] {
+  if (imported.count === 0) return [];
+  const activities = imported.count === 1 ? '1 activity was' : `${imported.count} activities were`;
+  return [
+    {
+      code: 'imported.gpx',
+      text: `${activities} imported from GPX files: ${formatDuration(Math.round(imported.elapsedDurationS / 60))} elapsed, ${formatKm(imported.distanceM)} km. Shown on their own, not added to manual activities or GPS runs, and not checked against GPS runs.`,
+    },
+  ];
+}
+
 /** Coverage with explicit denominators (see the contract). */
 export function coverageOf(aggregate: WeeklyAggregate, detail: ReviewDetail): WeeklyReviewCoverage {
   const withDistance = Object.values(detail.manualWithDistance).reduce((sum, value) => sum + (value ?? 0), 0);
@@ -443,14 +495,18 @@ export function buildWeeklyReview(input: {
   aggregate: WeeklyAggregate;
   computedAt: string;
   detail: ReviewDetail;
+  /** The week's GPX imports (ADR-0086), read in the same snapshot; review-only. */
+  imported: readonly ImportedActivityRecord[];
   movement: readonly MovementDayRecord[];
 }): WeeklyReview {
   const { aggregate, detail } = input;
   const movement = movementOf(input.movement, aggregate.week.start);
+  const importedActivities = importedActivitiesOf(input.imported);
   return weeklyReviewSchema.parse({
     coverage: coverageOf(aggregate, detail),
     dataGaps: dataGapsOf(aggregate),
     facts: buildFacts(aggregate),
+    importedActivities,
     movement,
     provenance: {
       computedAt: input.computedAt,
@@ -460,7 +516,11 @@ export function buildWeeklyReview(input: {
       snapshot: 'single_read_only_transaction',
       source: 'computed_by_app',
     },
-    statements: [...describeWeek(aggregate, detail), ...describeMovement(movement, aggregate.week.timeZone)],
+    statements: [
+      ...describeWeek(aggregate, detail),
+      ...describeImported(importedActivities),
+      ...describeMovement(movement, aggregate.week.timeZone),
+    ],
     week: {
       end: aggregate.week.end,
       inProgress: aggregate.week.inProgress,

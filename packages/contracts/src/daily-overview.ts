@@ -31,8 +31,10 @@ import { ianaTimeZoneSchema, localDateSchema, timestampSchema, uuidSchema } from
  * - `daily-overview-1`: ADR-0082.
  * - `daily-overview-2`: ADR-0083 adds `meals` (entries logged for the date, recorded nutrition totals and their
  *   coverage); every other part is unchanged.
+ * - `daily-overview-3`: ADR-0086 adds `importedActivities` (GPX imports, kept apart). `manualActivities` now counts rows
+ *   with the manual source only; before ADR-0086 no other source existed, so its meaning is unchanged.
  */
-export const DAILY_OVERVIEW_VERSION = 'daily-overview-2';
+export const DAILY_OVERVIEW_VERSION = 'daily-overview-3';
 
 const itemCount = z.number().int().min(0).max(10_000);
 // At most 10,000 activities of at most 48 h each.
@@ -135,6 +137,38 @@ export const dailyOverviewManualActivitiesSchema = z
     { message: 'types are listed once each, in the order of ACTIVITY_TYPES', path: ['byType'] },
   );
 
+export const dailyOverviewImportedActivityTypeSchema = z.strictObject({
+  type: activityTypeSchema,
+  count: itemCount,
+  elapsedDurationS: durationSeconds,
+});
+
+/**
+ * The person's GPX-imported activities that STARTED on the date in the requested zone (ADR-0086), kept apart from manual
+ * entries and from GPS runs and never added to either. `elapsedDurationS` is the elapsed time of the imported files, from
+ * the first to the last point, pauses included: not moving time, and the full time also for an import that continued
+ * past midnight. An import is never compared with GPS runs, so the same outing recorded both ways appears in both parts.
+ */
+export const dailyOverviewImportedActivitiesSchema = z
+  .strictObject({
+    source: z.literal('gpx'),
+    byType: z.array(dailyOverviewImportedActivityTypeSchema).max(ACTIVITY_TYPES.length),
+    count: itemCount,
+    elapsedDurationS: durationSeconds,
+  })
+  .refine((activities) => activities.byType.reduce((sum, entry) => sum + entry.count, 0) === activities.count, {
+    message: 'the per-type counts add up to the count',
+    path: ['count'],
+  })
+  .refine((activities) => activities.byType.reduce((sum, entry) => sum + entry.elapsedDurationS, 0) === activities.elapsedDurationS, {
+    message: 'the per-type durations add up to the duration',
+    path: ['elapsedDurationS'],
+  })
+  .refine(
+    (activities) => activities.byType.every((entry, index) => index === 0 || ACTIVITY_TYPES.indexOf(activities.byType[index - 1]!.type) < ACTIVITY_TYPES.indexOf(entry.type)),
+    { message: 'types are listed once each, in the order of ACTIVITY_TYPES', path: ['byType'] },
+  );
+
 /**
  * The person's own finished GPS runs that STARTED on the date in the requested zone. Runs another person shared with
  * them never count. A distance comes only from a summary computed for the run's current data revision:
@@ -213,6 +247,7 @@ export const dailyOverviewSchema = z.strictObject({
   checkIn: dailyOverviewCheckInSchema,
   day: dailyOverviewDaySchema,
   gpsRuns: dailyOverviewGpsRunsSchema,
+  importedActivities: dailyOverviewImportedActivitiesSchema,
   manualActivities: dailyOverviewManualActivitiesSchema,
   meals: dailyOverviewMealsSchema,
   movement: dailyOverviewMovementSchema,
@@ -229,11 +264,14 @@ export const dailyOverviewQuerySchema = z.strictObject({ timeZone: ianaTimeZoneS
  * True when nothing at all is recorded for the date. A note-only check-in, a movement day, a recorded 0 and a meal entry
  * (also a title-only one) are records.
  */
-export function isEmptyDailyOverview(overview: Pick<DailyOverview, 'checkIn' | 'gpsRuns' | 'manualActivities' | 'meals' | 'movement'>): boolean {
+export function isEmptyDailyOverview(
+  overview: Pick<DailyOverview, 'checkIn' | 'gpsRuns' | 'importedActivities' | 'manualActivities' | 'meals' | 'movement'>,
+): boolean {
   return (
     !overview.checkIn.recorded &&
     !overview.movement.recorded &&
     overview.manualActivities.count === 0 &&
+    overview.importedActivities.count === 0 &&
     overview.gpsRuns.count === 0 &&
     overview.meals.count === 0
   );
@@ -244,6 +282,7 @@ export type DailyOverviewDay = z.infer<typeof dailyOverviewDaySchema>;
 export type DailyOverviewCheckIn = z.infer<typeof dailyOverviewCheckInSchema>;
 export type DailyOverviewMovement = z.infer<typeof dailyOverviewMovementSchema>;
 export type DailyOverviewManualActivities = z.infer<typeof dailyOverviewManualActivitiesSchema>;
+export type DailyOverviewImportedActivities = z.infer<typeof dailyOverviewImportedActivitiesSchema>;
 export type DailyOverviewGpsRuns = z.infer<typeof dailyOverviewGpsRunsSchema>;
 export type DailyOverviewMeals = z.infer<typeof dailyOverviewMealsSchema>;
 export type DailyOverviewMealMetric = z.infer<typeof dailyOverviewMealMetricSchema>;

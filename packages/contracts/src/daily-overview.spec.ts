@@ -20,6 +20,7 @@ const overview: DailyOverview = {
     timeZone: 'Europe/Warsaw',
   },
   gpsRuns: { count: 2, currentDistanceM: 5012, withCurrentDistance: 1, withoutCurrentDistance: 1 },
+  importedActivities: { byType: [{ count: 1, elapsedDurationS: 3_605, type: 'ride' }], count: 1, elapsedDurationS: 3_605, source: 'gpx' },
   manualActivities: {
     byType: [
       { count: 2, enteredDurationS: 5400, type: 'run' },
@@ -50,6 +51,7 @@ const empty: DailyOverview = {
   ...overview,
   checkIn: { recorded: false },
   gpsRuns: { count: 0, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 0 },
+  importedActivities: { byType: [], count: 0, elapsedDurationS: 0, source: 'gpx' },
   manualActivities: { byType: [], count: 0, enteredDurationS: 0 },
   meals: {
     carbohydrateG: { recordedEntries: 0, total: null },
@@ -118,7 +120,7 @@ describe('daily overview contract', () => {
   });
 
   it('gives each meal metric its own coverage: a total exactly when an entry records it, recorded zeros as 0, one decimal', () => {
-    expect(DAILY_OVERVIEW_VERSION).toBe('daily-overview-2');
+    expect(DAILY_OVERVIEW_VERSION).toBe('daily-overview-3');
     const meals = overview.meals;
     expect(dailyOverviewSchema.parse(overview).meals).toEqual(meals);
     expect(dailyOverviewSchema.parse({ ...empty, meals: { ...empty.meals, count: 1 } }).meals.count).toBe(1);
@@ -155,11 +157,24 @@ describe('daily overview contract', () => {
     }
   });
 
+  it('keeps GPX imports in their own consistent part (ADR-0086)', () => {
+    expect(dailyOverviewSchema.parse(overview).importedActivities).toEqual(overview.importedActivities);
+    const imported = (patch: Record<string, unknown>) =>
+      dailyOverviewSchema.safeParse({ ...overview, importedActivities: { ...overview.importedActivities, ...patch } }).success;
+    expect(imported({ count: 2 })).toBe(false);
+    expect(imported({ elapsedDurationS: 1 })).toBe(false);
+    expect(imported({ source: 'manual' })).toBe(false);
+    expect(
+      imported({ byType: [{ count: 1, elapsedDurationS: 5, type: 'swim' }, { count: 1, elapsedDurationS: 5, type: 'run' }], count: 2, elapsedDurationS: 10 }),
+    ).toBe(false);
+  });
+
   it('calls a day empty only when nothing at all is recorded', () => {
     expect(isEmptyDailyOverview(empty)).toBe(true);
     expect(isEmptyDailyOverview({ ...empty, checkIn: overview.checkIn })).toBe(false);
     expect(isEmptyDailyOverview({ ...empty, movement: { activeEnergyKcal: null, recorded: true, source: 'manual', steps: 0, timeZone: 'UTC' } })).toBe(false);
     expect(isEmptyDailyOverview({ ...empty, manualActivities: overview.manualActivities })).toBe(false);
+    expect(isEmptyDailyOverview({ ...empty, importedActivities: overview.importedActivities })).toBe(false);
     expect(isEmptyDailyOverview({ ...empty, gpsRuns: { count: 1, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 1 } })).toBe(false);
     // A day with meals only, even title-only entries without any value, is not empty.
     expect(isEmptyDailyOverview({ ...empty, meals: { ...empty.meals, count: 1 } })).toBe(false);

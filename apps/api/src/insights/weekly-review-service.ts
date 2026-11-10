@@ -1,4 +1,4 @@
-import type { WeeklyReview, WeeklyReviewQuery } from '@running-tracker/contracts';
+import type { ActivityType, WeeklyReview, WeeklyReviewQuery } from '@running-tracker/contracts';
 import type { Pool, PoolClient } from 'pg';
 
 import type { StoredSession } from '../auth/session-store.js';
@@ -7,7 +7,13 @@ import { withAuthenticatedTenantTransaction } from '../database/authenticated-te
 import { ApiError } from '../http/errors.js';
 import { localDateOf } from '../runs/run-search-period.js';
 import { canonicalTimeZone, computeWeek } from './weekly-insight-service.js';
-import { buildWeeklyReview, kcalTenthsOf, reviewDetailOf, type MovementDayRecord } from './weekly-review.js';
+import {
+  buildWeeklyReview,
+  kcalTenthsOf,
+  reviewDetailOf,
+  type ImportedActivityRecord,
+  type MovementDayRecord,
+} from './weekly-review.js';
 
 // The deterministic weekly review: computed on every read, never stored, never queued, and independent of AI
 // generation. It does not know the weekly insight service or any model provider, so it cannot call a model.
@@ -74,6 +80,39 @@ export async function readWeekMovement(
   }));
 }
 
+// $1 organization, $2 owner, $3 first instant of the week's range, $4 first instant after it (exclusive): the bounds the
+// aggregate keeps manual activities by, in the week's zone. GPX imports only (ADR-0086); their own statement, outside
+// the AI-shared source statement, so an import never becomes model input. No note, effort, fingerprint or id is selected.
+export const weekImportsSql = `/* weekly-review:gpx-imports */
+SELECT activity.type,
+       activity.duration_s,
+       activity.distance_m
+  FROM activities AS activity
+ WHERE activity.org_id = $1
+   AND activity.user_id = $2
+   AND activity.source = 'gpx'
+   AND activity.started_at >= $3::timestamptz
+   AND activity.started_at < $4::timestamptz
+ ORDER BY activity.started_at, activity.id`;
+
+export async function readWeekImports(
+  client: PoolClient,
+  owner: { orgId: string; userId: string },
+  rangeStart: string,
+  rangeEnd: string,
+): Promise<ImportedActivityRecord[]> {
+  const result = await client.query<{ distance_m: number | null; duration_s: number; type: ActivityType }>(weekImportsSql, [
+    owner.orgId,
+    owner.userId,
+    rangeStart,
+    rangeEnd,
+  ]);
+  return result.rows.map((row) => {
+    if (row.distance_m === null) throw new Error('A GPX-imported activity has no distance');
+    return { distanceM: row.distance_m, durationS: row.duration_s, type: row.type };
+  });
+}
+
 export class WeeklyReviewService {
   readonly #clock: Clock;
   readonly #hooks: WeeklyReviewTestHooks | undefined;
@@ -96,18 +135,22 @@ export class WeeklyReviewService {
       });
     }
     const owner = { orgId, userId: session.userId };
-    const { movement, week } = await withAuthenticatedTenantTransaction(
+    const { imported, movement, week } = await withAuthenticatedTenantTransaction(
       this.#pool,
       session,
       orgId,
       async (client) => {
         const computed = await computeWeek(client, owner, query.weekStart, requestTimeZone, nowMs);
         await this.#hooks?.afterSourcesRead?.();
-        return { movement: await readWeekMovement(client, owner, query.weekStart), week: computed };
+        return {
+          imported: await readWeekImports(client, owner, computed.rangeStart, computed.rangeEnd),
+          movement: await readWeekMovement(client, owner, query.weekStart),
+          week: computed,
+        };
       },
       { snapshot: 'read-only snapshot' },
     );
     const detail = reviewDetailOf({ activities: week.sources.activities, checkIns: week.sources.checkIns, window: week.window });
-    return buildWeeklyReview({ aggregate: week.aggregate, computedAt: now.toISOString(), detail, movement });
+    return buildWeeklyReview({ aggregate: week.aggregate, computedAt: now.toISOString(), detail, imported, movement });
   }
 }

@@ -8,6 +8,7 @@ import {
   dailyMovementSources,
   dailyStepsSchema,
 } from './daily-movement.js';
+import { ACTIVITY_TYPES } from './activities.js';
 import { localDateSchema, timestampSchema, ianaTimeZoneSchema } from './primitives.js';
 import { weeklyInsightDataGapSchema, weeklyInsightFactSchema, weeklyInsightWeekStartSchema } from './weekly-insights.js';
 
@@ -22,8 +23,10 @@ import { weeklyInsightDataGapSchema, weeklyInsightFactSchema, weeklyInsightWeekS
  * changes. The facts and data gaps follow the aggregation policy named in `provenance.policyVersion`.
  * - `weekly-review-1`: ADR-0077.
  * - `weekly-review-2`: adds `movement` and the `movement.*` statements (ADR-0079). Nothing else changed meaning.
+ * - `weekly-review-3`: adds `importedActivities` and the `imported.*` statement (ADR-0086). `manual.*`, the facts and
+ *   the coverage count manual activities only, as before: no other source existed until then.
  */
-export const WEEKLY_REVIEW_VERSION = 'weekly-review-2';
+export const WEEKLY_REVIEW_VERSION = 'weekly-review-3';
 
 export const WEEKLY_REVIEW_STATEMENTS_MAX = 40;
 export const WEEKLY_REVIEW_FACTS_MAX = 64;
@@ -40,6 +43,7 @@ export const WEEKLY_REVIEW_STATEMENT_MAX_LENGTH = 240;
  * - `sources.*`: limits of combining sources.
  * - `movement.*`: manual daily movement (steps, active energy), each metric against the 7 calendar days, recorded
  *   totals with their coverage, the manual source, and days saved in other zones. Never added to activity figures.
+ * - `imported.*`: activities imported from GPX files (ADR-0086), described apart from manual activities and GPS runs.
  */
 export const weeklyReviewStatementCodes = [
   'week.in_progress',
@@ -82,6 +86,7 @@ export const weeklyReviewStatementCodes = [
   'movement.active_energy_not_recorded',
   'movement.manual_source',
   'movement.time_zones',
+  'imported.gpx',
 ] as const;
 export const weeklyReviewStatementCodeSchema = z.enum(weeklyReviewStatementCodes);
 
@@ -259,6 +264,46 @@ export const weeklyReviewMovementSchema = z
     }
   });
 
+// At most 10,000 activities of at most 48 hours and 1,000 km each.
+const importedSeconds = z.int().min(0).max(10_000 * 172_800);
+const importedMetres = z.int().min(0).max(10_000 * 1_000_000);
+
+export const weeklyReviewImportedTypeSchema = z.strictObject({
+  type: z.enum(ACTIVITY_TYPES),
+  count: itemCount,
+  elapsedDurationS: importedSeconds,
+  distanceM: importedMetres,
+});
+
+/**
+ * Activities imported from GPX files that started in the week's range (ADR-0086), in the week's zone like manual
+ * activities. Review-only: not part of `facts`, `coverage` or `dataGaps`, which AI insights share, and never added to
+ * manual activity or GPS run figures. `elapsedDurationS` is elapsed time (first to last point, pauses included), not
+ * moving time; `distanceM` is the server-computed distance of the imports. An import is never compared with GPS runs,
+ * so the same outing recorded both ways is counted in both parts.
+ */
+export const weeklyReviewImportedActivitiesSchema = z
+  .strictObject({
+    source: z.literal('gpx'),
+    count: itemCount,
+    elapsedDurationS: importedSeconds,
+    distanceM: importedMetres,
+    /** Types with at least one import, in the order of ACTIVITY_TYPES. */
+    byType: z.array(weeklyReviewImportedTypeSchema).max(ACTIVITY_TYPES.length),
+  })
+  .superRefine((imported, context) => {
+    const issue = (message: string, path: string[]) => context.addIssue({ code: 'custom', message, path });
+    const sum = (field: 'count' | 'distanceM' | 'elapsedDurationS') => imported.byType.reduce((total, entry) => total + entry[field], 0);
+    if (sum('count') !== imported.count) issue('the per-type counts add up to the count', ['count']);
+    if (sum('elapsedDurationS') !== imported.elapsedDurationS) issue('the per-type durations add up to the duration', ['elapsedDurationS']);
+    if (sum('distanceM') !== imported.distanceM) issue('the per-type distances add up to the distance', ['distanceM']);
+    const order = imported.byType.map((entry) => ACTIVITY_TYPES.indexOf(entry.type));
+    if (order.some((position, index) => index > 0 && order[index - 1]! >= position)) {
+      issue('types are listed once each, in the order of ACTIVITY_TYPES', ['byType']);
+    }
+    if (imported.byType.some((entry) => entry.count === 0)) issue('only types with an import are listed', ['byType']);
+  });
+
 export const weeklyReviewSchema = z
   .strictObject({
     coverage: weeklyReviewCoverageSchema,
@@ -266,6 +311,8 @@ export const weeklyReviewSchema = z
     dataGaps: z.array(weeklyInsightDataGapSchema).max(10),
     /** Every number of the week that has a value; a value that was not recorded has no fact (never a zero). */
     facts: z.array(weeklyInsightFactSchema).max(WEEKLY_REVIEW_FACTS_MAX),
+    /** GPX imports, review-only: not part of `facts`, `coverage` or `dataGaps`, which AI insights share. */
+    importedActivities: weeklyReviewImportedActivitiesSchema,
     /** Manual daily movement, review-only: not part of `facts`, `coverage` or `dataGaps`, which AI insights share. */
     movement: weeklyReviewMovementSchema,
     provenance: weeklyReviewProvenanceSchema,
@@ -294,5 +341,6 @@ export type WeeklyReviewWeek = z.infer<typeof weeklyReviewWeekSchema>;
 export type WeeklyReviewProvenance = z.infer<typeof weeklyReviewProvenanceSchema>;
 export type WeeklyReviewMovementDay = z.infer<typeof weeklyReviewMovementDaySchema>;
 export type WeeklyReviewMovement = z.infer<typeof weeklyReviewMovementSchema>;
+export type WeeklyReviewImportedActivities = z.infer<typeof weeklyReviewImportedActivitiesSchema>;
 export type WeeklyReview = z.infer<typeof weeklyReviewSchema>;
 export type WeeklyReviewQuery = z.infer<typeof weeklyReviewQuerySchema>;

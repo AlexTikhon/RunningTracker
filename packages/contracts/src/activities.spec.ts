@@ -157,7 +157,9 @@ describe('activity paths, list query, response and cursor', () => {
     const withoutNotes: Partial<typeof view> = { ...view };
     delete withoutNotes.notes;
     expect(activityViewSchema.safeParse(withoutNotes).success).toBe(false);
-    expect(activityViewSchema.safeParse({ ...view, source: 'gpx' }).success).toBe(false);
+    // ADR-0086: a GPX import is a stored activity too; any other source is not.
+    expect(activityViewSchema.safeParse({ ...view, source: 'gpx' }).success).toBe(true);
+    expect(activityViewSchema.safeParse({ ...view, source: 'tcx' }).success).toBe(false);
   });
 
   it('bounds a page to 50 items', () => {

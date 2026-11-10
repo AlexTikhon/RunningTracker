@@ -75,9 +75,17 @@ stops advancing. Both series are per process and reset on restart.
 | recent | `> 0` | Fresh: a backlog of that age existed at that time. |
 | old | any value | Stale: the export is hung or reads are failing. The age describes that time, not now. |
 
-The window actually in force now is unknown between measurements. It is at most the sampled
-age plus the time since the sample, because the oldest row then can only have aged and
-every newer row is younger than the sample:
+The window actually in force now is unknown between measurements, and the sampled age plus
+the time since the sample is **not** an upper bound for it. The sample reads the outbox in its
+own snapshot, so it sees only rows whose transactions had committed by then. A row is stamped
+with the time of its deleting statement (`statement_timestamp()`), not with its commit: a
+transaction that deleted before the sample and commits after it adds a row the sample never
+saw, and that row can be older than the sampled oldest row. The expression below is the
+current age of the oldest row that was already committed when the sample was taken (if it has
+not been exported since): a freshness-adjusted estimate, not a guarantee. A real bound would
+need a bound on how long a deleting transaction can stay open, and none exists:
+`DB_STATEMENT_TIMEOUT_MS` limits each statement, not a transaction, and
+`idle_in_transaction_session_timeout` is not set on the runtime pool.
 
 ```promql
 (journal_export_oldest_unexported_age_seconds

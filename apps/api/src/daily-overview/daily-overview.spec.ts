@@ -45,7 +45,7 @@ describe('localDayInterval: the half-open interval of a local date', () => {
 });
 
 const emptyRecords = { check_in: null, movement: null };
-const emptyStarted = { activities: [], gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 } };
+const emptyStarted = { activities: [], gpx_activities: [], gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 } };
 const noMetric = { recorded: 0, total: null };
 const emptyMeals = { carbohydrate_g: noMetric, count: 0, energy_kcal: noMetric, fat_g: noMetric, protein_g: noMetric };
 const base = {
@@ -65,6 +65,7 @@ describe('buildDailyOverview', () => {
       checkIn: { recorded: false },
       day: { endsAt: '2026-11-08T23:00:00.000Z', inProgress: true, localDate: '2026-11-08', startsAt: '2026-11-07T23:00:00.000Z', timeZone: 'Europe/Warsaw' },
       gpsRuns: { count: 0, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 0 },
+      importedActivities: { byType: [], count: 0, elapsedDurationS: 0, source: 'gpx' },
       manualActivities: { byType: [], count: 0, enteredDurationS: 0 },
       meals: {
         carbohydrateG: { recordedEntries: 0, total: null },
@@ -117,6 +118,7 @@ describe('buildDailyOverview', () => {
           { count: 2, enteredDurationS: 5400, type: 'run' },
           { count: 1, enteredDurationS: 600, type: 'walk' },
         ],
+        gpx_activities: [],
         gps_runs: { count: 3, currentDistanceM: 5012.4999, withCurrentDistance: 2 },
       },
     });
@@ -130,10 +132,35 @@ describe('buildDailyOverview', () => {
       enteredDurationS: 7200,
     });
     expect(overview.gpsRuns).toEqual({ count: 3, currentDistanceM: 5012, withCurrentDistance: 2, withoutCurrentDistance: 1 });
+    expect(overview.importedActivities).toEqual({ byType: [], count: 0, elapsedDurationS: 0, source: 'gpx' });
+  });
+
+  it('keeps GPX imports in their own part, ordered by type, never in the manual counts (ADR-0086)', () => {
+    const overview = buildDailyOverview({
+      ...base,
+      started: {
+        activities: [{ count: 1, enteredDurationS: 600, type: 'walk' }],
+        gpx_activities: [
+          { count: 1, elapsedDurationS: 5400, type: 'ride' },
+          { count: 2, elapsedDurationS: 3700, type: 'run' },
+        ],
+        gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 },
+      },
+    });
+    expect(overview.importedActivities).toEqual({
+      byType: [
+        { count: 2, elapsedDurationS: 3700, type: 'run' },
+        { count: 1, elapsedDurationS: 5400, type: 'ride' },
+      ],
+      count: 3,
+      elapsedDurationS: 9100,
+      source: 'gpx',
+    });
+    expect(overview.manualActivities).toEqual({ byType: [{ count: 1, enteredDurationS: 600, type: 'walk' }], count: 1, enteredDurationS: 600 });
   });
 
   it('gives no distance when no run has a current summary, never zero', () => {
-    const overview = buildDailyOverview({ ...base, started: { activities: [], gps_runs: { count: 2, currentDistanceM: null, withCurrentDistance: 0 } } });
+    const overview = buildDailyOverview({ ...base, started: { activities: [], gpx_activities: [], gps_runs: { count: 2, currentDistanceM: null, withCurrentDistance: 0 } } });
     expect(overview.gpsRuns).toEqual({ count: 2, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 2 });
   });
 

@@ -19,6 +19,7 @@ import {
   kcalTenthsOf,
   movementOf,
   reviewDetailOf,
+  type ImportedActivityRecord,
   type MovementDayRecord,
   type ReviewDetail,
 } from './weekly-review.js';
@@ -49,6 +50,7 @@ function review(input: {
   activities?: ManualActivityRecord[];
   checkIns?: CheckInRecord[];
   gpsRuns?: GpsRunRecord[];
+  imported?: ImportedActivityRecord[];
   movement?: MovementDayRecord[];
   requestTimeZone?: string;
   today?: string;
@@ -62,6 +64,7 @@ function review(input: {
     aggregate,
     computedAt: '2026-11-20T10:00:00.000Z',
     detail: reviewDetailOf({ activities, checkIns, window }),
+    imported: input.imported ?? [],
     movement: input.movement ?? [],
   });
 }
@@ -347,15 +350,25 @@ describe('weekly review: contract, provenance and wording', () => {
       aggregate,
       computedAt: '2026-11-20T10:00:00.000Z',
       detail: reviewDetailOf({ activities: [], checkIns, window }),
+      imported: [{ distanceM: 10_000, durationS: 3_600, type: 'ride' }],
       movement: [moved(day(0), 8042, '412.5'), moved(day(1), 0, null)],
     });
     expect(built.movement.daysWithRecord).toBe(2);
     expect(aggregate).toEqual(snapshot);
     expect(inputHashOf(aggregate)).toBe(before);
     // Movement reaches neither the shared facts nor the data gaps.
-    const without = buildWeeklyReview({ aggregate, computedAt: '2026-11-20T10:00:00.000Z', detail: reviewDetailOf({ activities: [], checkIns, window }), movement: [] });
+    const without = buildWeeklyReview({
+      aggregate,
+      computedAt: '2026-11-20T10:00:00.000Z',
+      detail: reviewDetailOf({ activities: [], checkIns, window }),
+      imported: [],
+      movement: [],
+    });
     expect([built.facts, built.dataGaps, built.coverage]).toEqual([without.facts, without.dataGaps, without.coverage]);
     expect(JSON.stringify(built.facts)).not.toMatch(/step|energy|kcal|movement/iu);
+    // Neither do GPX imports (ADR-0086).
+    expect(built.importedActivities.count).toBe(1);
+    expect(JSON.stringify([built.facts, built.dataGaps, built.coverage])).not.toMatch(/gpx|import|ride/iu);
   });
 
   it('formats durations with units', () => {
@@ -500,6 +513,41 @@ describe('weekly review: manual daily movement (ADR-0079)', () => {
       movement: [0, 1, 2, 3, 4, 5, 6].map((offset) => moved(day(offset), 1, null, `America/Argentina/ComodRivadavia${'x'.repeat(offset)}`)),
     });
     expect(text(long, 'movement.time_zones')).toMatch(/^Movement days were saved in 7 time zones; each counts/u);
+  });
+
+  it('describes GPX imports on their own, per type, apart from manual activities and GPS runs (ADR-0086)', () => {
+    const activities = [activity('2026-11-17T06:00:00Z')];
+    const none = review({ activities });
+    expect(none.importedActivities).toEqual({ byType: [], count: 0, distanceM: 0, elapsedDurationS: 0, source: 'gpx' });
+    expect(codes(none)).not.toContain('imported.gpx');
+
+    const built = review({
+      activities,
+      imported: [
+        { distanceM: 21_097.4, durationS: 7_265, type: 'run' },
+        { distanceM: 40_250, durationS: 5_400, type: 'ride' },
+        { distanceM: 5_000, durationS: 1_800, type: 'run' },
+      ],
+    });
+    expect(built.importedActivities).toEqual({
+      byType: [
+        { count: 2, distanceM: 26_097, elapsedDurationS: 9_065, type: 'run' },
+        { count: 1, distanceM: 40_250, elapsedDurationS: 5_400, type: 'ride' },
+      ],
+      count: 3,
+      distanceM: 66_347,
+      elapsedDurationS: 14_465,
+      source: 'gpx',
+    });
+    // Manual figures are unchanged by the imports.
+    expect(built.coverage.manualActivities).toEqual(none.coverage.manualActivities);
+    expect(built.facts).toEqual(none.facts);
+    expect(text(built, 'imported.gpx')).toBe(
+      '3 activities were imported from GPX files: 4 h 1 min elapsed, 66.3 km. Shown on their own, not added to manual activities or GPS runs, and not checked against GPS runs.',
+    );
+    expect(text(review({ imported: [{ distanceM: 0, durationS: 30, type: 'strength' }] }), 'imported.gpx')).toMatch(
+      /^1 activity was imported from GPX files: 1 min elapsed, 0\.0 km\./u,
+    );
   });
 
   it('keeps the in-progress notice first, and movement statements after every other statement', () => {

@@ -403,10 +403,91 @@ describe('ADR-0072 activities ACL (migration 0025)', () => {
       ['activities_rpe_range', { rpe: 11 }],
       ['activities_notes_length', { notes: '' }],
       ['activities_notes_length', { notes: 'x'.repeat(1_001) }],
-      ['activities_source_known', { source: 'gpx' }],
+      ['activities_source_known', { source: 'tcx' }],
+      ['activities_source_known', { source: 'GPX' }],
+      // Migration 0041 (ADR-0086): a gpx row needs its import attempt's key (and its fingerprint, checked below).
+      ['activities_gpx_idempotency_key_present', { source: 'gpx' }],
       ['activities_created_at_finite', { created_at: 'infinity' }],
     ] as const)('%s rejects %j', async (constraint, overrides) => {
       await expect(insertRow(overrides)).rejects.toEqual(violates(constraint));
+    });
+
+    describe('GPX imports (migration 0041, ADR-0086)', () => {
+      const fingerprint = Buffer.alloc(32, 7);
+      const key = 'bf000000-0000-4000-8000-0000000000c1';
+      const insertImport = (
+        values: { fingerprint?: Buffer | null; id?: string; key?: string | null; orgId?: string; source?: string; userId?: string } = {},
+      ) =>
+        ownerPool.query(
+          `INSERT INTO activities (org_id, id, user_id, type, started_at, duration_s, distance_m, idempotency_key, source, import_fingerprint, created_at)
+           VALUES ($1, $2, $3, 'ride', $4, 3600, 20000, $5, $6, $7, $8)`,
+          [
+            values.orgId ?? ids.orgA,
+            values.id ?? activityIds.inserted,
+            values.userId ?? ids.userOrgA,
+            startedAt,
+            values.key === undefined ? key : values.key,
+            values.source ?? 'gpx',
+            values.fingerprint === undefined ? fingerprint : values.fingerprint,
+            createdAt,
+          ],
+        );
+
+      it('accepts a gpx row with a 32-byte fingerprint and a key, and refuses every other shape', async () => {
+        await insertImport();
+        const other = { id: activityIds.forged, key: 'bf000000-0000-4000-8000-0000000000c3' };
+        await expect(insertImport({ ...other, fingerprint: Buffer.alloc(31) })).rejects.toEqual(violates('activities_import_fingerprint_length'));
+        await expect(insertImport({ ...other, fingerprint: null })).rejects.toEqual(violates('activities_import_fingerprint_matches_source'));
+        await expect(insertImport({ ...other, fingerprint: Buffer.alloc(32, 8), source: 'manual' })).rejects.toEqual(
+          violates('activities_import_fingerprint_matches_source'),
+        );
+        await expect(insertImport({ ...other, fingerprint: Buffer.alloc(32, 8), key: null })).rejects.toEqual(
+          violates('activities_gpx_idempotency_key_present'),
+        );
+      });
+
+      it('makes a track unique per owner and organization only', async () => {
+        await insertImport();
+        await expect(insertImport({ id: activityIds.forged, key: 'bf000000-0000-4000-8000-0000000000c2' })).rejects.toMatchObject({
+          code: '23505',
+          constraint: 'activities_owner_import_fingerprint_unique',
+        });
+        // Another member of the organization, and the same track in another organization, are independent.
+        await insertImport({ id: activityIds.forged, userId: ids.userStranger });
+        await insertImport({ id: activityIds.forged, orgId: ids.orgB, userId: ids.userOrgB });
+      });
+
+      it('shows an import only to its owner, and lets nobody else read or delete it through the runtime role', async () => {
+        await insertImport();
+        expect(await readActivities(ids.orgA, ids.userOrgA)).toContain(activityIds.inserted);
+        for (const [orgId, userId] of [[ids.orgA, ids.userStranger], [ids.orgA, ids.userDual], [ids.orgA, ids.userInactive], [ids.orgB, ids.userDual]] as const) {
+          expect(await readActivities(orgId, userId)).not.toContain(activityIds.inserted);
+          const fingerprints = await asRuntime(orgId, userId, (client) =>
+            client.query('SELECT 1 FROM activities WHERE import_fingerprint = $1', [fingerprint]),
+          ).catch(() => ({ rowCount: 0 }));
+          expect(fingerprints.rowCount).toBe(0);
+          await asRuntime(orgId, userId, (client) => client.query('DELETE FROM activities WHERE id = $1', [activityIds.inserted])).catch(() => undefined);
+        }
+        expect(await storedIds()).toContain(activityIds.inserted);
+      });
+
+      it('declares the new constraints exactly', async () => {
+        const definitions = await ownerPool.query<{ conname: string; definition: string }>(
+          `SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+           WHERE conrelid = 'public.activities'::regclass
+             AND conname IN ('activities_source_known', 'activities_import_fingerprint_length',
+                             'activities_import_fingerprint_matches_source', 'activities_gpx_idempotency_key_present',
+                             'activities_owner_import_fingerprint_unique')
+           ORDER BY conname`,
+        );
+        expect(definitions.rows).toEqual([
+          { conname: 'activities_gpx_idempotency_key_present', definition: "CHECK (((source <> 'gpx'::text) OR (idempotency_key IS NOT NULL)))" },
+          { conname: 'activities_import_fingerprint_length', definition: 'CHECK (((import_fingerprint IS NULL) OR (octet_length(import_fingerprint) = 32)))' },
+          { conname: 'activities_import_fingerprint_matches_source', definition: "CHECK (((source = 'gpx'::text) = (import_fingerprint IS NOT NULL)))" },
+          { conname: 'activities_owner_import_fingerprint_unique', definition: 'UNIQUE (org_id, user_id, import_fingerprint)' },
+          { conname: 'activities_source_known', definition: "CHECK ((source = ANY (ARRAY['manual'::text, 'gpx'::text])))" },
+        ]);
+      });
     });
 
     it('accepts the boundary values and stores the source as manual by default', async () => {
