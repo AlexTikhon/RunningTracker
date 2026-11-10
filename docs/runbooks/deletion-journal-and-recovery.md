@@ -50,14 +50,75 @@ the operators who perform restores, and do not put it on shared or public storag
   write or cannot keep up: check the API log for `maintenance.cycle.failed`, the mount,
   free space and permissions. Nothing is lost while rows remain in the database, but
   a node loss in that state loses exactly those deletions.
-- **Backlog age** is the signal to watch. `journal_export_oldest_unexported_age_seconds`
-  with `journal="deletion"` (run deletions) or `journal="erasure"` (activities, check-ins,
-  movement, meals) is the age of the oldest row not yet exported, 0 when the outbox is
-  drained. It is measured after every export cycle, successful or not. A cycle exports at
-  most 500 rows and the next one waits a full interval, so a backlog drains at about 500
-  rows per interval even while every cycle succeeds, and
-  `maintenance_last_success_timestamp_seconds` alone does not show it. The age is the
-  recovery window actually in force; alert when it stays above a few intervals.
+- **Backlog age** is the signal to watch, together with its freshness; see the next section.
+
+## Backlog age and its freshness
+
+`journal_export_oldest_unexported_age_seconds` with `journal="deletion"` (run deletions) or
+`journal="erasure"` (activities, check-ins, movement, meals) is the age of the oldest row not
+yet exported, 0 when the outbox was drained. A cycle exports at most 500 rows and the next
+one waits a full interval, so a backlog drains at about 500 rows per interval even while
+every cycle succeeds, and `maintenance_last_success_timestamp_seconds` alone does not show it.
+
+The age is a **sample**, read after each export cycle (successful or not), not a live value.
+`journal_export_backlog_age_measured_timestamp_seconds{journal}` is the Unix time (API clock)
+of the last valid read that was published. An export that never settles never reaches the
+measurement, and a failed or invalid read is logged as `journal.backlog_age.unavailable` and
+changes nothing, so in both cases the age keeps its old value, often 0, while the timestamp
+stops advancing. Both series are per process and reset on restart.
+
+| Timestamp | Age | Meaning |
+|---|---|---|
+| no series | no series | Exporter disabled in this process (`DELETION_JOURNAL_DIR` unset, logged as `deletion_journal.export_disabled`), or the target is not scraped (check `up`). |
+| `0` | no series | Exporter enabled, no valid measurement yet in this process: the first cycle is pending (one interval after start), the first export hangs, or every read fails. |
+| recent | `0` | Fresh: the outbox was empty at that time. |
+| recent | `> 0` | Fresh: a backlog of that age existed at that time. |
+| old | any value | Stale: the export is hung or reads are failing. The age describes that time, not now. |
+
+The window actually in force now is unknown between measurements. It is at most the sampled
+age plus the time since the sample, because the oldest row then can only have aged and
+every newer row is younger than the sample:
+
+```promql
+(journal_export_oldest_unexported_age_seconds
+  + (time() - journal_export_backlog_age_measured_timestamp_seconds))
+  and journal_export_backlog_age_measured_timestamp_seconds > 0
+```
+
+Alert on freshness first, then on age. A failed export still measures, but a failing task
+retries after up to 300 s (ADR-0070, or its interval if that is longer), so a fresh sample
+can be up to about `max(interval, 300 s)` old. The threshold below is twice that at the
+default 30 s interval. Use `2 × max(RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS, 300 s)` if the
+interval is changed:
+
+```yaml
+groups:
+  - name: somalane-journal-export
+    rules:
+      # Stale or never measured. Fires per journal label of an enabled exporter only: a disabled
+      # exporter has no series. A value of 0 (never measured) makes the difference huge, so it fires
+      # once the process has been up longer than the threshold; the uptime guard is the startup grace.
+      - alert: JournalBacklogAgeMeasurementStale
+        expr: |
+          (time() - journal_export_backlog_age_measured_timestamp_seconds > 600)
+            and on(job, instance) (process_uptime_seconds > 600)
+        annotations:
+          summary: 'No valid {{ $labels.journal }} backlog-age measurement for 10 minutes; the age gauge is stale.'
+      # Behind while measured. Read together with the rule above: a stale 0 does not clear it.
+      - alert: JournalBacklogBehind
+        expr: journal_export_oldest_unexported_age_seconds > 300
+        for: 5m
+        annotations:
+          summary: 'The {{ $labels.journal }} outbox has an unexported row older than 5 minutes.'
+```
+
+`journal_export_backlog_age_measured_timestamp_seconds == 0` tells "never measured" apart from
+"stale" when the first rule fires. If export is required in a deployment, also alert on
+`absent(journal_export_backlog_age_measured_timestamp_seconds{journal="deletion"})` (and
+`"erasure"`), because a disabled exporter is otherwise silent. A hung export is detected
+only by this staleness; nothing cancels the stuck write, and the task does not start another
+cycle until it settles (ADR-0070). If it has not settled once the mount is repaired, restart
+the API; the rows are still in the database and the next export takes them.
 
 ## Retention of journal files
 
@@ -137,7 +198,8 @@ Nothing may connect as the runtime or maintenance role in the meantime.
   can reappear after a restore. Its owner must delete it again. While the exporter is
   healthy the window is one export interval plus the time to drain any backlog queued
   ahead (about one more interval per 500 older rows); it is unbounded while the exporter
-  is failing. The backlog-age metric above shows the window in force. The same holds for
+  is failing. The backlog-age metric above shows the window as of its last measurement;
+  check its freshness before trusting it (see "Backlog age and its freshness"). The same holds for
   activity, check-in, movement and meal erasures in the erasure ledger (ADR-0073, ADR-0074, ADR-0078, ADR-0083).
 - If the erasure ledger cannot be written, an activity, check-in or movement DELETE fails (HTTP 500)
   and the record stays; nothing is erased without its record. Fix the database, then the

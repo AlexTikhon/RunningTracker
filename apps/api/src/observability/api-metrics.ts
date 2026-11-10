@@ -153,9 +153,16 @@ export function createApiMetrics(registry: MetricsRegistry = new MetricsRegistry
         labelNames: ['task'],
         name: 'maintenance_last_success_timestamp_seconds',
       }),
-      journalOldestUnexportedAgeSeconds: registry.gauge({
-        help: 'Age of the oldest outbox row not yet exported off-host (0 when drained), after every export cycle; the recovery window in force (ADR-0037, ADR-0073).',
+      journalBacklogAgeMeasuredTimestampSeconds: registry.gauge({
+        help: 'Unix time of the last successful read and publication of journal_export_oldest_unexported_age_seconds; 0 while an enabled exporter has not measured yet in this process. Alert on its age: a hung export or a failed read stops it.',
         labelNames: ['journal'],
+        maxSeries: 2,
+        name: 'journal_export_backlog_age_measured_timestamp_seconds',
+      }),
+      journalOldestUnexportedAgeSeconds: registry.gauge({
+        help: 'Age of the oldest outbox row not yet exported off-host (0 when drained) as of the last successful measurement, not now; read it with journal_export_backlog_age_measured_timestamp_seconds (ADR-0037, ADR-0073).',
+        labelNames: ['journal'],
+        maxSeries: 2,
         name: 'journal_export_oldest_unexported_age_seconds',
       }),
       rawPurgeBlocked: registry.counter({

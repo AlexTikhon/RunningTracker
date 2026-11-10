@@ -115,9 +115,10 @@ like `activities_record_erasure` on its table, an `ELSIF` branch in `app_private
 - **Erasures committed but not yet exported when the node is lost** come back with an old backup. While the exporter is
   healthy the recovery point is one export interval (default 30 s) plus the time to drain any backlog ahead of the
   erasure, because a cycle exports at most 500 rows and the next cycle waits a full interval (ADR-0037). It is unbounded
-  while the exporter fails. `journal_export_oldest_unexported_age_seconds{journal="erasure"}` reports the window in force
-  (the age of the oldest unexported ledger row, 0 when drained); a successful cycle alone does not mean the ledger is
-  drained.
+  while the exporter fails. `journal_export_oldest_unexported_age_seconds{journal="erasure"}` reports the window as of
+  its last measurement (the age of the oldest unexported ledger row, 0 when drained); a successful cycle alone does not
+  mean the ledger is drained. The age is a sample: `journal_export_backlog_age_measured_timestamp_seconds{journal="erasure"}`
+  says when it was taken (0 before the first), and a hung export or failed read stops it advancing (ADR-0037).
 - That `DELETION_JOURNAL_DIR` is really off-host and durable; in local runs it is a local directory.
 - `TRUNCATE activities` fires no row trigger and is not journaled. The runtime role cannot truncate; the owner uses it
   only in the load-test seeder on a `_load_test` database.

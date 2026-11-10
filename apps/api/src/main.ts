@@ -22,7 +22,7 @@ import {
   createFileDeletionJournalSink,
   type DeletionJournalSink,
 } from './maintenance/deletion-journal-sink.js';
-import { exportAndMeasureBacklog } from './maintenance/journal-backlog.js';
+import { createBacklogMeasuredExport } from './maintenance/journal-backlog.js';
 import { PeriodicRunner } from './maintenance/periodic-runner.js';
 import { RunAutoFinishRunner, runAutoFinishOnce } from './maintenance/run-auto-finish.js';
 import { runAccessJournalExportOnce } from './maintenance/run-access-journal-export.js';
@@ -248,14 +248,15 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
           clock,
           intervalMs: config.RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS,
           metrics: metrics.maintenance,
-          // Publishes the oldest-unexported age after every cycle: the recovery window actually in force (ADR-0037).
-          runOnce: () =>
-            exportAndMeasureBacklog({
-              exportOnce: () => runDeletionJournalExportOnce(maintenancePool, sink, clock),
-              journal: 'deletion',
-              metrics: metrics.maintenance,
-              pool: maintenancePool,
-            }),
+          // Measures the oldest-unexported age after every cycle and stamps when it last did (ADR-0037). The age is
+          // only as current as that stamp, which a hung export or a failed read stops advancing.
+          runOnce: createBacklogMeasuredExport({
+            clock,
+            exportOnce: () => runDeletionJournalExportOnce(maintenancePool, sink, clock),
+            journal: 'deletion',
+            metrics: metrics.maintenance,
+            pool: maintenancePool,
+          }),
           taskName: 'Run deletion journal export',
         });
   // The access-restriction journal (P12.4) goes to the same off-host directory, so it
@@ -278,13 +279,13 @@ export async function main(dependencies: MainDependencies = {}): Promise<void> {
           clock,
           intervalMs: config.RUN_DELETION_JOURNAL_EXPORT_INTERVAL_MS,
           metrics: metrics.maintenance,
-          runOnce: () =>
-            exportAndMeasureBacklog({
-              exportOnce: () => runErasureLedgerExportOnce(maintenancePool, sink, clock),
-              journal: 'erasure',
-              metrics: metrics.maintenance,
-              pool: maintenancePool,
-            }),
+          runOnce: createBacklogMeasuredExport({
+            clock,
+            exportOnce: () => runErasureLedgerExportOnce(maintenancePool, sink, clock),
+            journal: 'erasure',
+            metrics: metrics.maintenance,
+            pool: maintenancePool,
+          }),
           taskName: 'Erasure ledger export',
         });
   let metricsListener: MetricsListener | undefined;

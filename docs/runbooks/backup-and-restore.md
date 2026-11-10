@@ -274,7 +274,8 @@ take for one tiny database on one workstation. They are not the production RPO o
   and a share revoked and then granted again before the loss is removed again.
 - Deletions and restrictions committed but not yet exported when a node is lost are lost with it (one
   export interval plus the time to drain any backlog while the exporter is healthy, unbounded while it is
-  failing; `journal_export_oldest_unexported_age_seconds` shows the window for deletions and erasures).
+  failing; `journal_export_oldest_unexported_age_seconds` shows the window for deletions and erasures as of
+  `journal_export_backlog_age_measured_timestamp_seconds`, see the deletion journal runbook).
 - Deletions committed but not yet exported when the node is lost are lost with it (journal recovery
   point, ADR-0037).
 - Retention trusts the timestamp in the file name and does not check that a kept backup restores.

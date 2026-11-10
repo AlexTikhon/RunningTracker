@@ -97,8 +97,19 @@ the plan explicitly rules out a system-wide queue for this.
   cannot tell a drained outbox from one that succeeds every cycle but is behind.
   `journal_export_oldest_unexported_age_seconds{journal="deletion"}` is the age of
   the oldest row still in `run_deletion_journal` (0 when it is empty), measured
-  after every export cycle, successful or not. It is the recovery window actually
-  in force; alert when it stays above a few intervals.
+  after every export cycle, successful or not; alert when it stays above a few
+  intervals.
+- **The age is a sample, so its freshness is published too.** An export that
+  never settles never reaches the measurement, and a failed read leaves the gauge
+  unchanged, so the age alone can keep showing an old value (often 0) while the
+  window grows. `journal_export_backlog_age_measured_timestamp_seconds{journal}`
+  is the Unix time of the last valid, published measurement, 0 for an enabled
+  exporter that has not measured yet in this process; a disabled exporter has no
+  series. The window in force now is at most the sampled age plus the time since
+  that measurement. Alert when the timestamp is older than about twice the
+  slowest measurement cadence (a failing export retries after up to 300 s), which
+  also catches a hung export; the deletion journal runbook has the rules. Metrics
+  scrapes do not query PostgreSQL, and nothing cancels a hung filesystem write.
 - **Backup RPO** is separate: a daily backup, 24 hours (SDD 12). Reapplication
   covers deletions after that backup. The two RPOs do not add: the journal only has
   to cover the interval since the oldest backup that might be restored.
