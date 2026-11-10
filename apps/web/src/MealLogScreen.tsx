@@ -52,6 +52,9 @@ export interface MealLogHandlers {
 }
 
 export interface MealLogViewProps {
+  // A create, an edit or a deletion is in flight (ADR-0083: one mutation at a time). The date, the entry being edited
+  // and the entry being deleted stay as they are until it settles.
+  busy: boolean;
   dateInput: string;
   deletion: { mealId: string; snapshot: MealDeletionSnapshot } | null;
   draft: MealDraft;
@@ -72,14 +75,14 @@ export interface MealLogViewProps {
 }
 
 function EntryCard({
+  busy,
   deletion,
   editing,
   handlers,
   view,
-}: Pick<MealLogViewProps, 'deletion' | 'editing' | 'handlers'> & { view: MealView }) {
+}: Pick<MealLogViewProps, 'busy' | 'deletion' | 'editing' | 'handlers'> & { view: MealView }) {
   const label = `${mealTypeLabels[view.mealType].toLowerCase()} "${view.title}"`;
   const confirming = deletion?.mealId === view.mealId ? deletion.snapshot : null;
-  const deletionPending = deletion !== null && deletion.snapshot.phase === 'pending';
   const isEditing = editing?.mealId === view.mealId;
   return (
     <li className={confirming !== null ? 'run-card run-card--deleting' : 'run-card'}>
@@ -99,10 +102,10 @@ function EntryCard({
       </p>
       {confirming === null && (
         <div className="run-card__actions">
-          <button aria-label={`Edit ${label}`} disabled={deletionPending || isEditing} onClick={() => handlers.edit(view)} type="button">
+          <button aria-label={`Edit ${label}`} disabled={busy || isEditing} onClick={() => handlers.edit(view)} type="button">
             Edit
           </button>
-          <button aria-label={`Delete ${label}`} disabled={deletionPending} onClick={() => handlers.askDelete(view)} type="button">
+          <button aria-label={`Delete ${label}`} disabled={busy} onClick={() => handlers.askDelete(view)} type="button">
             Delete
           </button>
         </div>
@@ -115,13 +118,13 @@ function EntryCard({
           <div className="run-delete__actions">
             <button
               className="finish-action"
-              disabled={confirming.phase === 'pending' || confirming.phase === 'unavailable'}
+              disabled={busy || confirming.phase === 'unavailable'}
               onClick={handlers.confirmDelete}
               type="button"
             >
               {confirming.phase === 'pending' ? 'Deleting…' : 'Confirm delete'}
             </button>
-            <button disabled={confirming.phase === 'pending'} onClick={handlers.cancelDelete} type="button">Cancel</button>
+            <button disabled={busy} onClick={handlers.cancelDelete} type="button">Cancel</button>
           </div>
         </section>
       )}
@@ -131,7 +134,7 @@ function EntryCard({
 
 /** Everything the screen shows, from its state. Pure, so every state is testable without a DOM. */
 export function MealLogView(props: MealLogViewProps) {
-  const { dateInput, deletion, draft, editing, errors, handlers, list, notice, repeatsUncertain, save, timeZone, today } = props;
+  const { busy, dateInput, deletion, draft, editing, errors, handlers, list, notice, repeatsUncertain, save, timeZone, today } = props;
   const dateProblem = checkInDateProblem(dateInput, today);
   const dateLabel = formatCheckInDate(list.localDate);
   const pending = save.phase === 'pending';
@@ -153,9 +156,9 @@ export function MealLogView(props: MealLogViewProps) {
       <div className="today-controls">
         <label>
           Date
-          <input max={today} min={MEAL_LOCAL_DATE_MIN} onChange={(event) => handlers.chooseDate(event.target.value)} type="date" value={dateInput} />
+          <input disabled={busy} max={today} min={MEAL_LOCAL_DATE_MIN} onChange={(event) => handlers.chooseDate(event.target.value)} type="date" value={dateInput} />
         </label>
-        <button disabled={list.localDate === today && dateProblem === null} onClick={handlers.goToToday} type="button">Go to today</button>
+        <button disabled={busy || (list.localDate === today && dateProblem === null)} onClick={handlers.goToToday} type="button">Go to today</button>
       </div>
       {dateProblem !== null && <p className="activity-form__failure" role="alert">{dateProblem}</p>}
       <p className="today-day">
@@ -212,11 +215,11 @@ export function MealLogView(props: MealLogViewProps) {
           </div>
         )}
         <div className="activity-form__actions">
-          <button className="primary-action" disabled={pending || alreadySaved || dateProblem !== null} type="submit">
+          <button className="primary-action" disabled={busy || alreadySaved || dateProblem !== null} type="submit">
             {pending ? 'Saving…' : editing === null ? 'Add entry' : 'Save changes'}
           </button>
           {editing !== null && (
-            <button disabled={pending} onClick={handlers.cancelEdit} type="button">Cancel edit</button>
+            <button disabled={busy} onClick={handlers.cancelEdit} type="button">Cancel edit</button>
           )}
           <p className={save.phase === 'failed' ? 'activity-form__failure' : 'activity-form__status'} role="status">
             {alreadySaved ? '' : save.message ?? ''}
@@ -241,7 +244,7 @@ export function MealLogView(props: MealLogViewProps) {
           {list.status === 'ready' && list.items.length > 0 && (
             <ul aria-label={`Entries for ${dateLabel}`} className="run-cards">
               {list.items.map((view) => (
-                <EntryCard deletion={deletion} editing={editing} handlers={handlers} key={view.mealId} view={view} />
+                <EntryCard busy={busy} deletion={deletion} editing={editing} handlers={handlers} key={view.mealId} view={view} />
               ))}
             </ul>
           )}
@@ -427,9 +430,15 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
 
   const validation = validateMealDraft(draft);
   const save = editing === null ? createSave : editSave;
+  const deletionSnapshot = deletion !== null && deletionState?.id === deletion.id ? deletionState.snapshot : confirmingMealDeletion;
+  // One mutation at a time (ADR-0083). While one is in flight its target and the shown date stay fixed: the controls are
+  // disabled and every handler that would change the date, the entry being edited or deleted, or start another mutation
+  // returns without effect, so a failed save can only be retried against the entry and date it was made for.
+  const busy = createSave.phase === 'pending' || editSave.phase === 'pending' || (deletion !== null && deletionSnapshot.phase === 'pending');
   const repeatsUncertain = editing === null && validation.ok && creator.current?.wouldReuse(list.localDate, validation.details) === true;
 
   const leaveEdit = () => {
+    if (busy) return;
     setEditing(null);
     setEditSave(idleMealSave);
     setShowErrors(false);
@@ -437,28 +446,34 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
   };
 
   const chooseDate = (value: string) => {
+    if (busy) return;
     setDateInput(value);
     if (checkInDateProblem(value, today) !== null) return;
     setNotice(null);
     setDeletion(null);
     // An entry belongs to its date: editing it ends when another date is shown.
-    if (editing !== null && editSave.phase !== 'pending') leaveEdit();
+    if (editing !== null) leaveEdit();
     if (createSave.phase === 'saved') creator.current?.acknowledge();
     lister.current?.select(value);
   };
 
   const handlers: MealLogHandlers = {
     askDelete: (view) => {
+      if (busy) return;
       setNotice(null);
       setDeletion({ id: nextDeletionId.current++, mealId: view.mealId });
     },
     ...(onBackToToday === undefined ? {} : { backToToday: () => onBackToToday(list.localDate) }),
-    cancelDelete: () => setDeletion(null),
+    cancelDelete: () => {
+      if (!busy) setDeletion(null);
+    },
     cancelEdit: leaveEdit,
     chooseDate,
-    confirmDelete: () => deleter.current?.confirm(),
+    confirmDelete: () => {
+      if (!busy) deleter.current?.confirm();
+    },
     edit: (view) => {
-      if (creator.current?.pending === true) return;
+      if (busy || creator.current?.pending === true) return;
       setNotice(null);
       setShowErrors(false);
       setEditSave(idleMealSave);
@@ -478,7 +493,7 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
       event.preventDefault();
       setShowErrors(true);
       setNotice(null);
-      if (!validation.ok || checkInDateProblem(dateInput, today) !== null) return;
+      if (busy || !validation.ok || checkInDateProblem(dateInput, today) !== null) return;
       if (editing !== null) editor.current?.submit(validation.details);
       else creator.current?.submit(list.localDate, validation.details);
     },
@@ -488,9 +503,9 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
     },
   };
 
-  const deletionSnapshot = deletion !== null && deletionState?.id === deletion.id ? deletionState.snapshot : confirmingMealDeletion;
   return (
     <MealLogView
+      busy={busy}
       dateInput={dateInput}
       deletion={deletion === null ? null : { mealId: deletion.mealId, snapshot: deletionSnapshot }}
       draft={draft}

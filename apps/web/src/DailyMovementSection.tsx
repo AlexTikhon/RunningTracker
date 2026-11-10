@@ -338,7 +338,11 @@ export function DailyMovementSection({ csrf, focusOnOpen = false, initialDate, o
     heading.current?.scrollIntoView({ block: 'start' });
   }, [opening]);
 
+  const busy = day.save === 'pending' || day.deletion === 'pending';
+
   const chooseDate = (value: string) => {
+    // The controller keeps the day while a save or deletion is in flight; the shown date must not move away from it.
+    if (busy) return;
     setDateInput(value);
     setConfirmingDelete(false);
     if (checkInDateProblem(value, today) === null) dayController.current?.select(value);
@@ -352,8 +356,6 @@ export function DailyMovementSection({ csrf, focusOnOpen = false, initialDate, o
     setConfirmingDelete(false);
     dayController.current?.save(validation.values);
   };
-
-  const busy = day.save === 'pending' || day.deletion === 'pending';
 
   return (
     <section aria-labelledby="movement-title" className="movement-section search-results">

@@ -249,6 +249,8 @@ export function DailyCheckInScreen({ csrf, intent, nowMs, orgId, signal }: Daily
   }, [opening]);
 
   const chooseDate = (value: string) => {
+    // The controller keeps the day while a save or deletion is in flight; the shown date must not move away from it.
+    if (busy) return;
     setDateInput(value);
     setConfirmingDelete(false);
     if (checkInDateProblem(value, today) === null) dayController.current?.select(value);

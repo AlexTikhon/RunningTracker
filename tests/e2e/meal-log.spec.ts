@@ -249,3 +249,108 @@ test('Meal log at 375 px: usable without horizontal scrolling, and the Today mea
   // The navigation (now with Meal log) still wraps within the viewport.
   await inside(navigation(page).getByRole('button', { name: 'Meal log' }), 'Meal log navigation');
 });
+
+test('Meal log: while an edit save is pending, the date and the entry being edited stay fixed; a failed save is retried against the same entry (ADR-0083)', async ({
+  demoScenario,
+  environment,
+  page,
+}) => {
+  const today = dateIn(timeZone, Date.now());
+  test.skip(dateIn(timeZone, Date.now() + 600_000) !== today, 'Too close to midnight in Warsaw for a stable "today"');
+  const dayA = daysBefore(today, 3);
+  const dayB = daysBefore(today, 2);
+  await signInDemoRunner(page, environment.demoWebOrigin, demoScenario.runnerUserId, demoScenario.orgId);
+  await navigation(page).getByRole('button', { name: 'Meal log' }).click();
+  const mealLog = page.getByRole('region', { exact: true, name: 'Meal log' });
+  const form = mealLog.locator('form.meal-form');
+  const list = mealLog.locator('[data-meal-list-state]');
+  const cards = mealLog.locator('.run-cards > li');
+  const dateInput = mealLog.getByLabel('Date');
+  const showDate = async (date: string, titles: string[]) => {
+    await dateInput.fill(date);
+    await expect(list).toHaveAttribute('data-meal-list-state', 'ready');
+    await expect(cards.locator('h3')).toHaveText(titles);
+  };
+  const add = async (title: string) => {
+    await fillEntry(form, { title, type: 'Snack' });
+    await form.getByRole('button', { name: 'Add entry' }).click();
+    await expect(form.getByText('Entry saved.')).toBeVisible();
+  };
+
+  // Day A has two entries, day B one.
+  await showDate(dayA, []);
+  await add('Oats');
+  await add('Tea');
+  await showDate(dayB, []);
+  await add('Toast');
+  await showDate(dayA, ['Oats', 'Tea']);
+  const shownDay = mealLog.locator('.today-day strong');
+  const shownDayA = (await shownDay.textContent()) ?? '';
+
+  // Every PUT is held until the test releases it; the first one then fails without an answer.
+  const writes: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  await page.route('**/api/orgs/*/meals/*', async (route) => {
+    if (route.request().method() !== 'PUT') return route.continue();
+    writes.push(new URL(route.request().url()).pathname);
+    if (writes.length === 1) {
+      await new Promise<void>((resolve) => (releaseFirst = resolve));
+      return route.abort('connectionfailed');
+    }
+    return route.continue();
+  });
+
+  await cards.filter({ hasText: 'Oats' }).getByRole('button', { name: /^Edit / }).click();
+  await form.getByLabel('Title').fill('Oats with milk');
+  await form.getByRole('button', { name: 'Save changes' }).click();
+  await expect(form.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+  await expect.poll(() => writes.length).toBe(1);
+
+  // While it is pending: the date, Go to today, the other entry's Edit and Delete, and Cancel edit are disabled...
+  await expect(dateInput).toBeDisabled();
+  await expect(mealLog.getByRole('button', { name: 'Go to today' })).toBeDisabled();
+  await expect(cards.filter({ hasText: 'Tea' }).getByRole('button', { name: /^Edit / })).toBeDisabled();
+  await expect(cards.filter({ hasText: 'Tea' }).getByRole('button', { name: /^Delete / })).toBeDisabled();
+  await expect(form.getByRole('button', { name: 'Cancel edit' })).toBeDisabled();
+  // ...and a date change that reaches the handler anyway (an input event on the disabled control) changes nothing.
+  await dateInput.evaluate((element, value) => {
+    const input = element as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }, dayB);
+  await expect(dateInput).toHaveValue(dayA);
+  await expect(shownDay).toHaveText(shownDayA);
+  await expect(cards.locator('h3')).toHaveText(['Oats', 'Tea']);
+  // Opening the other entry is refused too.
+  await cards.filter({ hasText: 'Tea' }).getByRole('button', { name: /^Edit / }).click({ force: true });
+  await expect(form.getByRole('heading', { name: 'Edit "Oats"' })).toBeVisible();
+
+  // The save fails without an answer: still the same entry on the same date, and retrying is offered.
+  releaseFirst!();
+  await expect(form.getByText(/^The changes were not confirmed: .* Saving again is safe\.$/u)).toBeVisible();
+  await expect(dateInput).toBeEnabled();
+  await expect(dateInput).toHaveValue(dayA);
+  await expect(shownDay).toHaveText(shownDayA);
+  await expect(form.getByRole('heading', { name: 'Edit "Oats"' })).toBeVisible();
+  await expect(form.getByLabel('Title')).toHaveValue('Oats with milk');
+
+  // The retry writes the same entry, and day A shows it; day B is untouched.
+  await form.getByRole('button', { name: 'Save changes' }).click();
+  await expect(mealLog.getByText('Your changes to "Oats with milk" were saved.')).toBeVisible();
+  await page.unroute('**/api/orgs/*/meals/*');
+  expect(writes).toHaveLength(2);
+  expect(writes[1]).toBe(writes[0]);
+  expect(writes[0]).toMatch(new RegExp(`^/api/orgs/${demoScenario.orgId}/meals/[0-9a-f-]{36}$`, 'u'));
+  await expect(dateInput).toHaveValue(dayA);
+  await expect(cards.locator('h3')).toHaveText(['Oats with milk', 'Tea']);
+  await showDate(dayB, ['Toast']);
+
+  // Once nothing is in flight, changing the date ends an edit (ADR-0083).
+  await showDate(dayA, ['Oats with milk', 'Tea']);
+  await cards.filter({ hasText: 'Tea' }).getByRole('button', { name: /^Edit / }).click();
+  await expect(form.getByRole('heading', { name: 'Edit "Tea"' })).toBeVisible();
+  await showDate(dayB, ['Toast']);
+  await expect(form.getByRole('heading', { name: /^Add an entry for / })).toBeVisible();
+  await expect(form.getByLabel('Title')).toHaveValue('');
+});

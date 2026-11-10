@@ -42,6 +42,7 @@ const readyList = (patch: Partial<MealListSnapshot> = {}): MealListSnapshot => (
 
 function props(patch: Partial<MealLogViewProps> = {}): MealLogViewProps {
   return {
+    busy: false,
     dateInput: DAY,
     deletion: null,
     draft: emptyMealDraft,
@@ -99,7 +100,7 @@ describe('Meal log view (ADR-0083)', () => {
 
   it('shows validation problems, the saving state and the failure message', () => {
     expect(render({ errors: ['Enter a short title, for example "Porridge with berries".'] })).toContain('aria-label="Problems with the entry"');
-    const saving = render({ save: { message: null, phase: 'pending', uncertain: false } });
+    const saving = render({ busy: true, save: { message: null, phase: 'pending', uncertain: false } });
     expect(saving).toContain('<button class="primary-action" disabled="" type="submit">Saving…</button>');
     const failed = render({ save: { message: 'The entry was not saved: No.', phase: 'failed', uncertain: false } });
     expect(failed).toContain('<p class="activity-form__failure" role="status">The entry was not saved: No.</p>');
@@ -124,6 +125,24 @@ describe('Meal log view (ADR-0083)', () => {
     expect(confirming).toContain('<h4>Delete this entry?</h4>');
     expect(confirming).toContain('It is removed permanently. This cannot be undone.');
     expect(confirming).toContain('>Confirm delete</button>');
+  });
+
+  it('while a mutation is in flight, keeps the date, the edited entry and the other entries fixed (ADR-0083)', () => {
+    const other: MealView = { ...entry, mealId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', title: 'Toast' };
+    const busy = render({
+      busy: true,
+      editing: entry,
+      list: readyList({ items: [entry, other] }),
+      save: { message: null, phase: 'pending', uncertain: false },
+    });
+    expect(busy).toMatch(/<input disabled="" max="2026-11-08" min="[^"]+" type="date" value="2026-11-05"/u);
+    expect(busy).toContain('<button disabled="" type="button">Go to today</button>');
+    expect(busy).toContain('<button disabled="" type="button">Cancel edit</button>');
+    expect(busy).toContain('<button aria-label="Edit lunch &quot;Toast&quot;" disabled="" type="button">Edit</button>');
+    expect(busy).toContain('<button aria-label="Delete lunch &quot;Toast&quot;" disabled="" type="button">Delete</button>');
+    const settled = render({ busy: false, editing: entry, list: readyList({ items: [entry, other] }) });
+    expect(settled).toContain('<button aria-label="Edit lunch &quot;Toast&quot;" type="button">Edit</button>');
+    expect(settled).not.toMatch(/<input disabled=""[^>]*type="date"/u);
   });
 
   it('refuses a date after today and offers Back to Today on the date shown', () => {
