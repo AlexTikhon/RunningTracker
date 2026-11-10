@@ -70,6 +70,7 @@ export class MealListController {
   readonly #orgId: string;
   #cursor: string | null = null;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: MealListSnapshot;
   #started = false;
@@ -79,7 +80,7 @@ export class MealListController {
     this.#onChange = options.onChange;
     this.#orgId = options.orgId;
     this.#snapshot = loadingMealList(options.localDate);
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): MealListSnapshot {
@@ -123,6 +124,7 @@ export class MealListController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }
@@ -248,6 +250,7 @@ function alreadySavedId(error: unknown): { mealId: string | null } | null {
 export class MealCreateController {
   readonly #options: MealCreateControllerOptions;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   // The form session's idempotency key.
   #formKey: string;
   #request: AbortController | null = null;
@@ -258,7 +261,7 @@ export class MealCreateController {
   public constructor(options: MealCreateControllerOptions) {
     this.#options = options;
     this.#formKey = options.newKey();
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): MealSaveSnapshot {
@@ -336,6 +339,7 @@ export class MealCreateController {
   // Aborting does not undo a POST the server already received; it only stops this controller from reporting it.
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }
@@ -367,12 +371,13 @@ export interface MealEditControllerOptions extends MealTarget {
 export class MealEditController {
   readonly #options: MealEditControllerOptions;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: MealSaveSnapshot = idleMealSave;
 
   public constructor(options: MealEditControllerOptions) {
     this.#options = options;
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): MealSaveSnapshot {
@@ -412,6 +417,7 @@ export class MealEditController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }
@@ -452,12 +458,13 @@ export interface MealDeletionControllerOptions extends MealTarget {
 export class MealDeletionController {
   readonly #options: MealDeletionControllerOptions;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: MealDeletionSnapshot = confirmingMealDeletion;
 
   public constructor(options: MealDeletionControllerOptions) {
     this.#options = options;
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): MealDeletionSnapshot {
@@ -491,6 +498,7 @@ export class MealDeletionController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }

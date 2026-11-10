@@ -7,6 +7,7 @@ import {
 } from '@running-tracker/contracts';
 
 import { sameActivityRequest, type ActivityDetails } from './activity-form.js';
+import { followSession } from './daily-checkin-controller.js';
 import { RunnerApiError, type ActivityTarget, type CsrfCredentials } from './runner-api.js';
 
 // Framework-free controllers for the Activity tab (ADR-0072). Each belongs to one organization and one session: a
@@ -23,16 +24,6 @@ function reference(error: RunnerApiError): string {
 
 function serverText(error: RunnerApiError): string {
   return `${error.message.replace(/[.\s]+$/u, '')}.${reference(error)}`;
-}
-
-// The controller stops for good when the session it was created for ends.
-function followSession(signal: AbortSignal | undefined, dispose: () => void): void {
-  if (signal === undefined) return;
-  if (signal.aborted) {
-    dispose();
-    return;
-  }
-  signal.addEventListener('abort', dispose, { once: true });
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -82,6 +73,7 @@ export class ActivityListController {
   readonly #orgId: string;
   #cursor: string | null = null;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: ActivityListSnapshot = loadingActivityList;
   #started = false;
@@ -90,7 +82,7 @@ export class ActivityListController {
     this.#load = options.load;
     this.#onChange = options.onChange;
     this.#orgId = options.orgId;
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): ActivityListSnapshot {
@@ -134,6 +126,7 @@ export class ActivityListController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }
@@ -316,6 +309,7 @@ export class ActivitySubmissionController {
   // The attempt whose outcome is unknown, kept for an exact retry.
   #retained: Attempt | null = null;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: ActivitySubmissionSnapshot = idleSubmission;
 
@@ -329,7 +323,7 @@ export class ActivitySubmissionController {
     this.#onSaved = options.onSaved;
     this.#orgId = options.orgId;
     this.#formKey = options.newKey();
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): ActivitySubmissionSnapshot {
@@ -401,6 +395,7 @@ export class ActivitySubmissionController {
   // Aborting does not undo a PUT the server already received; it only stops this controller from reporting it.
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }
@@ -455,6 +450,7 @@ export class ActivityDeletionController {
   readonly #onDeleted: () => void;
   readonly #target: ActivityTarget;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: ActivityDeletionSnapshot = confirmingActivityDeletion;
 
@@ -464,7 +460,7 @@ export class ActivityDeletionController {
     this.#onChange = options.onChange;
     this.#onDeleted = options.onDeleted;
     this.#target = { activityId: options.activityId, orgId: options.orgId };
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): ActivityDeletionSnapshot {
@@ -501,6 +497,7 @@ export class ActivityDeletionController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }

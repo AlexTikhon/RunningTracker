@@ -42,13 +42,14 @@ export interface MovementHistoryControllerOptions {
 export class MovementHistoryController {
   readonly #options: MovementHistoryControllerOptions;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: MovementHistorySnapshot = loadingMovementHistory;
   #started = false;
 
   public constructor(options: MovementHistoryControllerOptions) {
     this.#options = options;
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): MovementHistorySnapshot {
@@ -74,6 +75,7 @@ export class MovementHistoryController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }
@@ -214,6 +216,7 @@ export class MovementDayController {
   readonly #options: MovementDayControllerOptions;
   #deleteRequest: AbortController | null = null;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #loadRequest: AbortController | null = null;
   #saveRequest: AbortController | null = null;
   #snapshot: MovementDaySnapshot;
@@ -221,7 +224,7 @@ export class MovementDayController {
   public constructor(options: MovementDayControllerOptions) {
     this.#options = options;
     this.#snapshot = loadingMovementDay(options.date);
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): MovementDaySnapshot {
@@ -267,6 +270,7 @@ export class MovementDayController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#loadRequest?.abort();
     this.#saveRequest?.abort();
     this.#deleteRequest?.abort();

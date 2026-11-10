@@ -103,6 +103,8 @@ export class WeeklyInsightController {
   readonly #timeZone: string;
   readonly #timers: InsightTimers;
   #disposed = false;
+  readonly #onSessionEnd = (): void => this.dispose();
+  #session: AbortSignal | undefined;
   #inFlight: AbortController | null = null;
   #polls = 0;
   #snapshot: InsightPanelSnapshot;
@@ -122,7 +124,11 @@ export class WeeklyInsightController {
     this.#snapshot = loadingInsight(options.weekStart);
     const signal = options.signal;
     if (signal?.aborted) this.dispose();
-    else signal?.addEventListener('abort', () => this.dispose(), { once: true });
+    else if (signal !== undefined) {
+      // Kept so that dispose() can remove it: the session outlives this controller.
+      this.#session = signal;
+      signal.addEventListener('abort', this.#onSessionEnd, { once: true });
+    }
   }
 
   public get snapshot(): InsightPanelSnapshot {
@@ -160,6 +166,8 @@ export class WeeklyInsightController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#session?.removeEventListener('abort', this.#onSessionEnd);
+    this.#session = undefined;
     this.#stopAll();
   }
 

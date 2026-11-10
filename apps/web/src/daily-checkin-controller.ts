@@ -17,13 +17,19 @@ export function serverText(error: RunnerApiError): string {
   return `${error.message.replace(/[.\s]+$/u, '')}.${reference}`;
 }
 
-export function followSession(signal: AbortSignal | undefined, dispose: () => void): void {
-  if (signal === undefined) return;
+/**
+ * The controller stops for good when the session it was created for ends. Returns the unsubscribe function its own
+ * dispose() calls: the session outlives the controller, so a listener left on it would keep a disposed controller
+ * reachable until sign-out. Calling it more than once is harmless.
+ */
+export function followSession(signal: AbortSignal | undefined, dispose: () => void): () => void {
+  if (signal === undefined) return () => undefined;
   if (signal.aborted) {
     dispose();
-    return;
+    return () => undefined;
   }
   signal.addEventListener('abort', dispose, { once: true });
+  return () => signal.removeEventListener('abort', dispose);
 }
 
 export function lostAccess(error: unknown): boolean {
@@ -63,6 +69,7 @@ export class CheckInHistoryController {
   readonly #orgId: string;
   readonly #today: string;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #request: AbortController | null = null;
   #snapshot: CheckInHistorySnapshot = loadingCheckInHistory;
   #started = false;
@@ -72,7 +79,7 @@ export class CheckInHistoryController {
     this.#onChange = options.onChange;
     this.#orgId = options.orgId;
     this.#today = options.today;
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): CheckInHistorySnapshot {
@@ -98,6 +105,7 @@ export class CheckInHistoryController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#request?.abort();
     this.#request = null;
   }
@@ -255,6 +263,7 @@ export class CheckInDayController {
   readonly #options: CheckInDayControllerOptions;
   #deleteRequest: AbortController | null = null;
   #disposed = false;
+  #unfollowSession: () => void = () => undefined;
   #loadRequest: AbortController | null = null;
   #saveRequest: AbortController | null = null;
   #snapshot: CheckInDaySnapshot;
@@ -262,7 +271,7 @@ export class CheckInDayController {
   public constructor(options: CheckInDayControllerOptions) {
     this.#options = options;
     this.#snapshot = loadingCheckInDay(options.date);
-    followSession(options.signal, () => this.dispose());
+    this.#unfollowSession = followSession(options.signal, () => this.dispose());
   }
 
   public get snapshot(): CheckInDaySnapshot {
@@ -310,6 +319,7 @@ export class CheckInDayController {
 
   public dispose(): void {
     this.#disposed = true;
+    this.#unfollowSession();
     this.#loadRequest?.abort();
     this.#saveRequest?.abort();
     this.#deleteRequest?.abort();
