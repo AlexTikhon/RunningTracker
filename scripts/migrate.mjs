@@ -5,6 +5,7 @@ import process from 'node:process';
 
 import pg from 'pg';
 
+import { assertConnectedIdentity, parseDatabaseUrl } from './database-url.mjs';
 import { normalizeMigrationSql } from './migration-checksum.mjs';
 import { prepareMigrations, validateMigrationHistory } from './migration-history.mjs';
 
@@ -17,21 +18,11 @@ if (existsSync('.env')) {
 
 const variableName = useTestDatabase ? 'TEST_MIGRATION_DATABASE_URL' : 'MIGRATION_DATABASE_URL';
 const databaseUrl = process.env[variableName];
+// Refuses query parameters that would make pg connect as another user, host, port or database than the URL names.
+const migrationTarget = parseDatabaseUrl(databaseUrl, variableName, { expectedUser: 'running_tracker_owner' });
 
-if (!databaseUrl) {
-  throw new Error(`${variableName} is required. Copy .env.example to .env or set it explicitly.`);
-}
-
-const migrationUrl = new URL(databaseUrl);
-if (decodeURIComponent(migrationUrl.username) !== 'running_tracker_owner') {
-  throw new Error(`${variableName} must authenticate as running_tracker_owner`);
-}
-
-if (useTestDatabase) {
-  const databaseName = migrationUrl.pathname.slice(1);
-  if (!databaseName.endsWith('_test')) {
-    throw new Error(`Refusing to run test migrations against non-test database ${databaseName}`);
-  }
+if (useTestDatabase && !migrationTarget.database.endsWith('_test')) {
+  throw new Error(`Refusing to run test migrations against non-test database ${migrationTarget.database}`);
 }
 
 const migrationsDirectory = join(process.cwd(), 'db', 'migrations');
@@ -61,6 +52,9 @@ await client.connect();
 let locked = false;
 
 try {
+  // The login and database actually in force (an options or PGOPTIONS role switch included), before the migration lock,
+  // schema_migrations or any DDL: objects and SECURITY DEFINER functions must be owned by the owner role, nobody else.
+  await assertConnectedIdentity(client, { database: migrationTarget.database, user: 'running_tracker_owner' }, variableName);
   // lock_timeout bounds the advisory lock wait too; it is reset before any migration runs.
   await client.query(`SET lock_timeout = ${lockTimeoutMs}`);
   try {

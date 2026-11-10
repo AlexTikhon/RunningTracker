@@ -3,6 +3,8 @@ import process from 'node:process';
 
 import pg from 'pg';
 
+import { assertConnectedIdentity, parseDatabaseUrl } from './database-url.mjs';
+
 const { Client } = pg;
 const useTestDatabase = process.argv.includes('--test');
 
@@ -24,42 +26,30 @@ const names = useTestDatabase
       runtime: 'DATABASE_URL',
     };
 
+// The same checks as the migration runner and the API parser: the role URLs name the logins whose passwords are set
+// here, so a URL whose query parameters would point pg elsewhere is refused rather than half-trusted.
 function requireDatabaseUrl(variableName, expectedUser) {
-  const value = process.env[variableName];
-  if (!value) {
-    throw new Error(`${variableName} is required. Copy .env.example to .env or set it explicitly.`);
-  }
-
-  const url = new URL(value);
-  if (!['postgres:', 'postgresql:'].includes(url.protocol)) {
-    throw new Error(`${variableName} must use the postgres or postgresql protocol`);
-  }
-  if (expectedUser && decodeURIComponent(url.username) !== expectedUser) {
-    throw new Error(`${variableName} must authenticate as ${expectedUser}`);
-  }
-  if (!url.password) {
-    throw new Error(`${variableName} must include the role password for bootstrap`);
-  }
-  if (useTestDatabase && !decodeURIComponent(url.pathname.slice(1)).endsWith('_test')) {
-    throw new Error(`${variableName} must target a database ending in _test`);
-  }
-
-  return url;
+  return parseDatabaseUrl(process.env[variableName], variableName, {
+    expectedUser,
+    requirePassword: true,
+    requireTestDatabase: useTestDatabase,
+  });
 }
 
-const bootstrapUrl = requireDatabaseUrl(names.bootstrap);
+const bootstrap = requireDatabaseUrl(names.bootstrap);
+const bootstrapUrl = bootstrap.url;
 const roleUrls = [
   {
     role: 'running_tracker_owner',
-    url: requireDatabaseUrl(names.migration, 'running_tracker_owner'),
+    url: requireDatabaseUrl(names.migration, 'running_tracker_owner').url,
   },
   {
     role: 'running_tracker_runtime',
-    url: requireDatabaseUrl(names.runtime, 'running_tracker_runtime'),
+    url: requireDatabaseUrl(names.runtime, 'running_tracker_runtime').url,
   },
   {
     role: 'running_tracker_maintenance',
-    url: requireDatabaseUrl(names.maintenance, 'running_tracker_maintenance'),
+    url: requireDatabaseUrl(names.maintenance, 'running_tracker_maintenance').url,
   },
 ];
 const databaseName = decodeURIComponent(bootstrapUrl.pathname.slice(1));
@@ -98,6 +88,8 @@ const client = new Client({
 await client.connect();
 
 try {
+  // Grants and role passwords go to the database the URL names, through the login it names.
+  await assertConnectedIdentity(client, { database: databaseName, user: bootstrap.user }, names.bootstrap);
   for (const { role, url } of roleUrls) {
     await createOrUpdateRole(client, role, decodeURIComponent(url.password));
   }
