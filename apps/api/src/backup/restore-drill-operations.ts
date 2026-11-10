@@ -8,6 +8,7 @@ import { Client, Pool } from 'pg';
 
 import { systemClock, type Clock } from '../clock.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { deleteActivity } from '../activities/activity-service.js';
 import { deleteDailyMetrics } from '../daily-metrics/daily-metrics-service.js';
 import { deleteDailyMovement } from '../daily-movement/daily-movement-service.js';
@@ -674,7 +675,10 @@ export function createRestoreDrillOperations(options: DrillOperationsOptions): D
       const poolLimits = { ...DRILL_CONNECTION_LIMITS, idleTimeoutMillis: 1_000, max: 2 };
       const runtimePool = new Pool({ application_name: 'running-tracker-restore-drill-runtime', connectionString: source.runtimeUrl, ...poolLimits });
       const maintenancePool = new Pool({ application_name: 'running-tracker-restore-drill-maintenance', connectionString: source.maintenanceUrl, ...poolLimits });
-      for (const pool of [runtimePool, maintenancePool]) pool.on('error', () => undefined);
+      for (const pool of [runtimePool, maintenancePool]) {
+        pool.on('error', () => undefined);
+        guardBorrowedClients(pool, 'restore-drill');
+      }
       sourcePools.push(runtimePool, maintenancePool);
       sourceMaintenancePool = maintenancePool;
       sourceRuntimePool = runtimePool;

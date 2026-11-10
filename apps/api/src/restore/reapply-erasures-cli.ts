@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { loadErasureLedger, reapplyErasures } from './reapply-erasures.js';
 
 const usage =
@@ -36,7 +37,7 @@ export async function runReapplyErasuresCli(dependencies: ReapplyErasuresCliDepe
   const ledger = await loadErasureLedger(journalDir);
   const pool =
     dependencies.createPool?.(connectionString) ??
-    new Pool({ application_name: 'running-tracker-restore-erasures', connectionString, max: 1 });
+    guardBorrowedClients(new Pool({ application_name: 'running-tracker-restore-erasures', connectionString, max: 1 }), 'running-tracker-restore-erasures');
   try {
     const identity = await pool.query<{ database_name: string; role_name: string }>(
       'SELECT current_database() AS database_name, current_user AS role_name',

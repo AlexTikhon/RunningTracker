@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { loadAccessJournal, reapplyAccessRestrictions } from './reapply-access.js';
 
 const usage =
@@ -37,11 +38,14 @@ export async function runReapplyAccessCli(dependencies: ReapplyAccessCliDependen
   const journal = await loadAccessJournal(journalDir);
   const pool =
     dependencies.createPool?.(connectionString) ??
-    new Pool({
-      application_name: 'running-tracker-restore-reapply-access',
-      connectionString,
-      max: 1,
-    });
+    guardBorrowedClients(
+      new Pool({
+        application_name: 'running-tracker-restore-reapply-access',
+        connectionString,
+        max: 1,
+      }),
+      'running-tracker-restore-reapply-access',
+    );
   try {
     const identity = await pool.query<{ database_name: string; role_name: string }>(
       'SELECT current_database() AS database_name, current_user AS role_name',

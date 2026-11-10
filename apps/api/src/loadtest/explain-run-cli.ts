@@ -4,6 +4,7 @@ import { cpus, platform, release, totalmem } from 'node:os';
 import process from 'node:process';
 import { Pool } from 'pg';
 
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { planDataset } from './dataset-plan.js';
 import { collectExplain, type ExplainCollection } from './explain-collect.js';
 import { collectRelationStats, type RelationStats } from './explain-relations.js';
@@ -121,7 +122,7 @@ export async function runExplainCli(dependencies: ExplainCliDependencies): Promi
   const createPool =
     dependencies.createPool ??
     ((connectionString: string, applicationName: string): PoolLike =>
-      new Pool({ application_name: applicationName, connectionString, max: 2 }));
+      guardBorrowedClients(new Pool({ application_name: applicationName, connectionString, max: 2 }), applicationName));
 
   const ownerPool = createPool(target.owner.connectionString, 'running-tracker-explain-owner');
   const runtimePool = createPool(target.runtime.connectionString, 'running-tracker-explain-runtime');

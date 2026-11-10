@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import process from 'node:process';
 import { Pool } from 'pg';
 
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { planDataset } from './dataset-plan.js';
 import { startApiProcess, type ApiTarget } from './load-api-process.js';
 import {
@@ -72,7 +73,7 @@ export async function runLoadCli(dependencies: LoadCliDependencies): Promise<Loa
   const createPool =
     dependencies.createPool ??
     ((connectionString: string, applicationName: string): PoolLike =>
-      new Pool({ application_name: applicationName, connectionString, max: 2 }));
+      guardBorrowedClients(new Pool({ application_name: applicationName, connectionString, max: 2 }), applicationName));
 
   const ownerPool = createPool(target.owner.connectionString, 'running-tracker-load-owner');
   let api: ApiTarget | undefined;

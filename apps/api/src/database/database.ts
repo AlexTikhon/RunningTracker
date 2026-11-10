@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
 import { defaultLogger, describeError } from '../observability/logger.js';
+import { guardBorrowedClients } from './borrowed-client-guard.js';
 
 export interface DatabaseClient {
   query(text: string): Promise<unknown>;
@@ -27,8 +28,8 @@ export class DatabaseQueryTimeoutError extends Error {
  * them with SET LOCAL (the archive tile render does); PostgreSQL restores these values when it ends.
  * `statement_timeout` also covers time spent waiting for a lock, so `lock_timeout` is the earlier, finer bound.
  * Maintenance has separate, longer budgets; it never inherits the runtime settings.
- * `idle_in_transaction_session_timeout` is intentionally not set: when the server ends a checked-out
- * connection, pg raises an unhandled client 'error' that terminates the process.
+ * `idle_in_transaction_session_timeout` is not set. A server-ended checked-out connection no longer ends the process
+ * (guardBorrowedClients); it fails the operation that holds it.
  */
 export function createDatabasePool(config: Environment): Pool {
   const pool = new Pool({
@@ -44,7 +45,7 @@ export function createDatabasePool(config: Environment): Pool {
     defaultLogger.error('database.pool.idle_client_error', { ...describeError(error), reason: 'runtime' });
   });
 
-  return pool;
+  return guardBorrowedClients(pool, 'runtime');
 }
 
 export function createMaintenanceDatabasePool(config: Environment): Pool {
@@ -61,7 +62,7 @@ export function createMaintenanceDatabasePool(config: Environment): Pool {
     defaultLogger.error('database.pool.idle_client_error', { ...describeError(error), reason: 'maintenance' });
   });
 
-  return pool;
+  return guardBorrowedClients(pool, 'maintenance');
 }
 
 export class DatabaseProbe {

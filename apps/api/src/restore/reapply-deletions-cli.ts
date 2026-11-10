@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { systemClock, type Clock } from '../clock.js';
 import { loadDeletionJournal, reapplyDeletions } from './reapply-deletions.js';
 
@@ -38,11 +39,14 @@ export async function runReapplyCli(dependencies: ReapplyCliDependencies): Promi
   const journal = await loadDeletionJournal(journalDir);
   const pool =
     dependencies.createPool?.(connectionString) ??
-    new Pool({
-      application_name: 'running-tracker-restore-reapply',
-      connectionString,
-      max: 1,
-    });
+    guardBorrowedClients(
+      new Pool({
+        application_name: 'running-tracker-restore-reapply',
+        connectionString,
+        max: 1,
+      }),
+      'running-tracker-restore-reapply',
+    );
   try {
     const identity = await pool.query<{ database_name: string; role_name: string }>(
       'SELECT current_database() AS database_name, current_user AS role_name',

@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { namedProfiles, type DatasetProfile } from './dataset-plan.js';
 import { loadDatabaseSuffix, seedDataset, type DatasetManifest } from './seed-dataset.js';
 
@@ -89,7 +90,7 @@ export async function runSeedCli(dependencies: SeedCliDependencies): Promise<Dat
 
   const pool =
     dependencies.createPool?.(connectionString) ??
-    new Pool({ application_name: 'running-tracker-load-seed', connectionString, max: 1 });
+    guardBorrowedClients(new Pool({ application_name: 'running-tracker-load-seed', connectionString, max: 1 }), 'running-tracker-load-seed');
   try {
     const manifest = await seedDataset(pool, {
       allowedDatabaseSuffixes: [loadDatabaseSuffix],

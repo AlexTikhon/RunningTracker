@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 import { clearRestoredAuthentication } from './clear-sessions.js';
 
 const usage =
@@ -31,7 +32,7 @@ export async function runClearSessionsCli(dependencies: ClearSessionsCliDependen
   }
   const pool =
     dependencies.createPool?.(connectionString) ??
-    new Pool({ application_name: 'running-tracker-restore-sessions', connectionString, max: 1 });
+    guardBorrowedClients(new Pool({ application_name: 'running-tracker-restore-sessions', connectionString, max: 1 }), 'running-tracker-restore-sessions');
   try {
     const identity = await pool.query<{ database_name: string; role_name: string }>(
       'SELECT current_database() AS database_name, current_user AS role_name',

@@ -17,14 +17,19 @@ export function createDatabaseIdentityResolver(pool: Pick<Pool, 'connect'>): Ide
       return undefined;
     }
     const client = await pool.connect();
+    let failure: Error | undefined;
     try {
       const result = await client.query<{ user_id: string | null }>(
         'SELECT app_private.resolve_login_user($1) AS user_id',
         [externalIdentity],
       );
       return result.rows[0]?.user_id ?? undefined;
+    } catch (error) {
+      // A failed connection is destroyed, not lent again.
+      failure = error instanceof Error ? error : new Error('Identity lookup failed');
+      throw error;
     } finally {
-      client.release();
+      client.release(failure);
     }
   };
 }

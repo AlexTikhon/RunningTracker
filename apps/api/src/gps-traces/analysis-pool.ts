@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 
 import { loadIntegrationTestConfiguration } from '../config/environment.js';
+import { guardBorrowedClients } from '../database/borrowed-client-guard.js';
 
 /**
  * A single-connection pool on the integration test database as the schema owner. The configuration loader refuses
@@ -8,9 +9,9 @@ import { loadIntegrationTestConfiguration } from '../config/environment.js';
  */
 export function createAnalysisPool(): Pool {
   const config = loadIntegrationTestConfiguration();
-  return new Pool({
+  return guardBorrowedClients(new Pool({
     application_name: 'running-tracker-gps-trace-analysis',
     connectionString: config.migration.connectionString,
     max: 1,
-  });
+  }), 'gps-trace-analysis');
 }
