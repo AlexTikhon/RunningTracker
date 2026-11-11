@@ -127,6 +127,8 @@ measure (entered duration, GPX elapsed time, or a recorded run's observed durati
 a missing or stale summary stays unknown). Sources are never added together or deduplicated, and there are no totals.
 A run shared by someone else never appears. Recorded runs open the existing run details. Whether device GPS or the
 simulator recorded a run is not stored on the server, so it is shown as not recorded; storing it is a separate decision.
+[ADR-0088](adr/0088-activity-history-local-day.md) filters the history to one local calendar day by Today's start-time
+rule, and Today's activity cards open it on their own date, zone and source; still no totals in the history.
 
 **HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
 built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the

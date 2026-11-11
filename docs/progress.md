@@ -4184,3 +4184,36 @@ reference, product direction, README and ADR-0087 describe it.
 **Not established.** No `EXPLAIN` or load run: a filtered branch may read past non-matching rows of the owner index. No
 Firefox, WebKit or iPhone run. Capture provenance of recorded runs is unknown until a separate decision stores it. The
 unused `listActivities` client and `ActivityListController` remain.
+
+## Activity history for one local day, opened from Today (ADR-0088) (2026-11-11)
+
+**What exists.** `GET /api/orgs/{orgId}/activity-history` accepts an optional pair `localDate` + `timeZone` (both or
+neither; strict calendar date from 2000-01-01, shared IANA check). The service canonicalises the zone and computes
+`[start of the date, start of the next calendar date)` with Today's `localDayInterval`; both `UNION ALL` branches filter
+`started_at >= $9 AND started_at < $10` beside the unchanged owner predicates, RLS, read-only snapshot, source/type
+filters and microsecond keyset. The response echoes `applied.day { localDate, timeZone, startsAt, endsAt }` (`null`
+without the filter); the contract is `activity-history-2`. The cursor context appends the date and canonical zone only
+when a day is set, so pre-ADR-0088 cursors stay valid for the whole history and never cross into a day, date or zone.
+Web: a **Day** input and **All dates** in the history filters, a line naming the active day and zone (with the 23/25-hour
+note from the server's interval), times in that zone (list and run details), the day in the controller's filters and
+key (a change disposes the controller, aborts its request and restarts at page one). Today's Manual activities, Imported
+from GPX and GPS runs cards offer **Show in history** (when they count something) with the overview's own date, zone and
+the card's source; "Open Activities" and "Open Runner" stay. A scoped `HistoryIntent` in `App.tsx` is read once when the
+Activity screen mounts, cleared by any ordinary navigation and on sign-out; **Back to Today** returns to the originating
+date. OpenAPI (two parameters, description), reference, product direction, README, ADR-0087 (amended-by) and ADR-0088.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Test database identity | `.env` test URLs point to loopback `127.0.0.1:5433/running_tracker_test`; connected as the owner, runtime and maintenance roles, each reported `current_database() = running_tracker_test` (42 migrations applied); `npm run db:migrate:test` applied nothing new (no migration in this change). The E2E environment refuses a database not ending in `_test` |
+| `npm run verify` | lint, typecheck, build pass; scripts 115, API 1,782, web 1,265, contracts 272, fixtures 14, simulator 3; all passed |
+| New or changed unit tests | contracts `activity-history.spec.ts` 15 (pairing, impossible/out-of-range dates, offsets, unknown and repeated zones, `applied.day` with an end before its start refused, version, OpenAPI parameters); API `activity-history.spec.ts` 16 (day bound into the cursor digest, ADR-0087 digest unchanged, a whole-history cursor refused with a day before any connection, both branches filtered by start in a half-open interval, Warsaw 23/25-hour intervals, canonical zone); web controller 12 (day sent and paged, echo checked for date, zone and presence, a previous day's late answer dropped after the day changed), list 14, Activity screen 7, Today 2 new, navigation intent 1 new, API client 2 |
+| `activity-history-http.integration.test.ts` | 26 passed (8 new): inclusive start and exclusive end at the microsecond for activities and runs, neighbouring dates holding exactly the excluded edges; activity and run crossing midnight counted on the start date only (and the same instants read in UTC); Europe/Warsaw 2026-03-29 (23 h) and 2026-10-25 (25 h, both 02:30s) with their neighbours; day pages through microsecond ties at sizes 1–6, combined with a source filter; day cursors refused for the whole history, another date, Europe/Berlin (same offsets), UTC, another source and another person, a whole-history cursor refused with a day, the ADR-0087 cursor still accepted without one; shared runs absent for a grantee and a coach on the runs' date; half a pair, impossible and pre-2000 dates, offsets and unknown zones are 400 `INVALID_REQUEST` with `no-store` |
+| Mutation checks | run branch end `<=` instead of `<`: 3 day tests fail; end computed as start + 24 h: both Warsaw DST tests fail; day left out of the cursor scope: the cursor test fails. The service file was restored byte for byte after each |
+| `npm run test:integration` | 74 files, 1,031 of 1,043: the 12 `backup-restore` tests stopped at `prepare` because `BACKUP_ENCRYPTION_KEY_FILE` in `.env` names a file that does not exist here (as for ADR-0086/0087). With a throwaway key generated in the session scratchpad, set in the process environment only and deleted afterwards: that file 12 of 12 |
+| `npx playwright test --project=chromium` (history, Today, activity, GPX import, run details) | 21 passed, among them the new `today-activity-history.spec.ts` (3): Today on 2026-03-29 → GPS runs card → history on that day, zone and source (request query checked, 23-hour note, 03:30 CEST run only, previous evening and the coach's shared run absent, form and import still there) → Run details → back with focus on the trigger → **Back to Today** on 2026-03-29 → manual card (the walk from 23:30 included, the midnight swim not) → another day → All dates → GPX card → ordinary navigation shows the whole history without the intent; the same at 375 px with a wide font and no horizontal scroll at each step; a held answer for the previous day dropped after the day changed |
+| `npm run test:e2e` (`chromium`, `chromium-oidc`) | 156 passed in 15.1 min (153 before, plus the 3 new specs) |
+
+**Not established.** No `EXPLAIN` or load run for the day range. Chromium only (desktop and a 375 px viewport); no Firefox,
+WebKit or iPhone run. No totals in the history by design.

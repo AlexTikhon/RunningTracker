@@ -39,7 +39,8 @@ and grows one vertical slice at a time. Package names, database identifiers, coo
 
 ### Views
 
-- **Today**: one day across all of the above, with actions that open each editor on that date.
+- **Today**: one day across all of the above, with actions that open each editor on that date and the day's
+  activities and runs in the activity history.
 - **Trends**: the 28 dates ending on a chosen date (weight, sleep, steps, food energy), each with its coverage. Gaps
   stay gaps; a missing value never counts as zero.
 - **Weekly review**: one week's coverage, values and limitations, worded by code on every read.
@@ -88,7 +89,7 @@ Details and the roadmap: [docs/product-direction.md](docs/product-direction.md).
 | `infra/` | Compose files (development, loopback TLS, production, iPhone pilot), nginx proxy, API images |
 | `scripts/` | setup, demo, profile verification, pilot tooling, and their tests |
 | `tests/e2e` | Playwright browser suite (Chromium, an OpenID Connect project, a Firefox core gate) |
-| `docs/` | design, 87 decision records, runbooks, reports and the progress log |
+| `docs/` | design, 88 decision records, runbooks, reports and the progress log |
 
 ## Quick start
 
@@ -169,7 +170,7 @@ Firefox gate, on pushes to `main`, on pull requests and on demand. It reads no s
 |---|---|
 | [docs/reference.md](docs/reference.md) | the detailed reference: API behaviour, data rules, configuration and verification for every feature |
 | [docs/SDD.md](docs/SDD.md) | the system design |
-| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0087) |
+| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0088) |
 | [docs/product-direction.md](docs/product-direction.md) | roadmap, principles and the next milestone |
 | [docs/progress.md](docs/progress.md) | what was built and how it was verified, entry by entry |
 | [docs/runbooks/](docs/runbooks/) | how to run, demo, deploy, back up and pilot it |

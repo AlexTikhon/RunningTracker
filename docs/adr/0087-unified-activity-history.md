@@ -9,6 +9,8 @@
   ADR-0011/0047 (capture sources live in the browser), ADR-0082 (Today: one read-only snapshot).
 - Amends: the Activity tab's list (ADR-0072 section 3) is replaced by the history; `GET /activities` and every write route
   are unchanged.
+- Amended by: ADR-0088 (an optional local calendar day filter, `activity-history-2`, the cursor context extended with the
+  day when one is set, and history actions on Today's cards).
 - Scope: `GET /api/orgs/{orgId}/activity-history`, `packages/contracts/src/activity-history.ts`,
   `apps/api/src/activity-history/*`, the Activity screen (`ActivityHistoryList`, `activity-history-controller.ts`), OpenAPI,
   tests at every layer, docs. No migration, table, view, persisted aggregate, background job, cache, model call, import
