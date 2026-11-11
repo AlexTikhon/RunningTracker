@@ -1,5 +1,6 @@
 import {
   ACTIVITY_HISTORY_VERSION,
+  type ActivityHistoryDay,
   type ActivityHistoryItem,
   type ActivityHistoryResponse,
 } from '@running-tracker/contracts';
@@ -40,9 +41,9 @@ const recorded = (n: number): ActivityHistoryItem => ({
 const page = (
   items: ActivityHistoryItem[],
   nextCursor: string | null = null,
-  applied: ActivityHistoryFilters = noHistoryFilters,
+  applied: { day?: ActivityHistoryDay | null; source: ActivityHistoryFilters['source']; type: ActivityHistoryFilters['type'] } = { day: null, source: null, type: null },
 ): ActivityHistoryResponse => ({
-  applied,
+  applied: { day: applied.day ?? null, source: applied.source, type: applied.type },
   items,
   nextCursor,
   provenance: { historyVersion: ACTIVITY_HISTORY_VERSION, persisted: false, snapshot: 'single_read_only_transaction' },
@@ -60,6 +61,9 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
+const warsawDay = { localDate: '2026-03-29', timeZone: 'Europe/Warsaw' };
+const warsawApplied: ActivityHistoryDay = { ...warsawDay, endsAt: '2026-03-29T22:00:00.000Z', startsAt: '2026-03-28T23:00:00.000Z' };
+
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 function harness(load: ActivityHistoryLoader, filters: ActivityHistoryFilters = noHistoryFilters, signal?: AbortSignal) {
@@ -73,22 +77,26 @@ describe('history keys', () => {
     expect(historyItemKey(manual(1))).not.toBe(historyItemKey(recorded(1)));
     expect(new Set([
       historyFilterKey(noHistoryFilters),
-      historyFilterKey({ source: 'manual', type: null }),
-      historyFilterKey({ source: null, type: 'run' }),
-      historyFilterKey({ source: 'manual', type: 'run' }),
-    ]).size).toBe(4);
+      historyFilterKey({ day: null, source: 'manual', type: null }),
+      historyFilterKey({ day: null, source: null, type: 'run' }),
+      historyFilterKey({ day: null, source: 'manual', type: 'run' }),
+      historyFilterKey({ day: warsawDay, source: null, type: null }),
+      historyFilterKey({ day: { ...warsawDay, localDate: '2026-03-30' }, source: null, type: null }),
+      historyFilterKey({ day: { ...warsawDay, timeZone: 'Europe/Berlin' }, source: null, type: null }),
+      historyFilterKey({ day: warsawDay, source: 'manual', type: null }),
+    ]).size).toBe(8);
   });
 });
 
 describe('ActivityHistoryController', () => {
   it('loads the first page with its filters and no cursor', async () => {
-    const filters = { source: 'recorded_run' as const, type: 'run' as const };
+    const filters = { day: null, source: 'recorded_run' as const, type: 'run' as const };
     const load = vi.fn<ActivityHistoryLoader>().mockResolvedValue(page([recorded(1)], 'c1', filters));
     const { controller, last, snapshots } = harness(load, filters);
     controller.start();
     expect(snapshots[0]).toMatchObject({ filters, items: [], status: 'loading' });
     await flush();
-    expect(load).toHaveBeenCalledWith({ cursor: null, orgId, source: 'recorded_run', type: 'run' }, expect.any(AbortSignal));
+    expect(load).toHaveBeenCalledWith({ cursor: null, day: null, orgId, source: 'recorded_run', type: 'run' }, expect.any(AbortSignal));
     expect(last()).toMatchObject({ filters, hasMore: true, status: 'ready' });
   });
 
@@ -104,7 +112,7 @@ describe('ActivityHistoryController', () => {
     controller.loadMore();
     controller.loadMore();
     expect(load).toHaveBeenCalledTimes(2);
-    expect(load.mock.calls[1]![0]).toEqual({ cursor: 'c1', orgId, source: null, type: null });
+    expect(load.mock.calls[1]![0]).toEqual({ cursor: 'c1', day: null, orgId, source: null, type: null });
     expect(last().loadingMore).toBe(true);
     second.resolve(page([manual(1), manual(2)]));
     await flush();
@@ -164,10 +172,68 @@ describe('ActivityHistoryController', () => {
 
   it('refuses an answer for other filters', async () => {
     const load = vi.fn<ActivityHistoryLoader>().mockResolvedValue(page([manual(1)], null, { source: 'gpx', type: null }));
-    const { controller, last } = harness(load, { source: 'manual', type: null });
+    const { controller, last } = harness(load, { day: null, source: 'manual', type: null });
     controller.start();
     await flush();
     expect(last()).toMatchObject({ items: [], status: 'error' });
+  });
+
+  it('loads a day with its zone, pages within it and keeps the server’s interval', async () => {
+    const filters = { day: warsawDay, source: 'recorded_run' as const, type: null };
+    const load = vi
+      .fn<ActivityHistoryLoader>()
+      .mockResolvedValueOnce(page([recorded(1)], 'c1', { day: warsawApplied, source: 'recorded_run', type: null }))
+      .mockResolvedValueOnce(page([recorded(2)], null, { day: warsawApplied, source: 'recorded_run', type: null }));
+    const { controller, last } = harness(load, filters);
+    controller.start();
+    await flush();
+    expect(load.mock.calls[0]![0]).toEqual({ cursor: null, day: warsawDay, orgId, source: 'recorded_run', type: null });
+    expect(last()).toMatchObject({ appliedDay: warsawApplied, hasMore: true, status: 'ready' });
+    controller.loadMore();
+    await flush();
+    expect(load.mock.calls[1]![0]).toEqual({ cursor: 'c1', day: warsawDay, orgId, source: 'recorded_run', type: null });
+    expect(last().items.map(historyItemKey)).toEqual([`run:${id(1)}`, `run:${id(2)}`]);
+  });
+
+  it('refuses an answer for another date, another zone, no day, or a day it did not ask for', async () => {
+    for (const [requested, applied] of [
+      [warsawDay, { ...warsawApplied, localDate: '2026-03-30' }],
+      [warsawDay, { ...warsawApplied, timeZone: 'Europe/Berlin' }],
+      [warsawDay, null],
+      [null, warsawApplied],
+    ] as const) {
+      const load = vi.fn<ActivityHistoryLoader>().mockResolvedValue(page([manual(1)], 'c', { day: applied, source: null, type: null }));
+      const { controller, last } = harness(load, { day: requested, source: null, type: null });
+      controller.start();
+      await flush();
+      expect(last(), JSON.stringify({ applied, requested })).toMatchObject({ appliedDay: null, items: [], status: 'error' });
+    }
+  });
+
+  it('never shows the previous day’s late answer once the day changed (the old controller is disposed)', async () => {
+    const previous = deferred<ActivityHistoryResponse>();
+    let previousSignal: AbortSignal | undefined;
+    const oldLoad = vi.fn<ActivityHistoryLoader>().mockImplementation((_input, signal) => {
+      previousSignal = signal;
+      return previous.promise;
+    });
+    const old = harness(oldLoad, { day: warsawDay, source: null, type: null });
+    old.controller.start();
+    // The screen changes the day: it disposes the old controller and starts one for the new day.
+    old.controller.dispose();
+    const nextDay = { ...warsawDay, localDate: '2026-03-30' };
+    const fresh = harness(
+      vi.fn<ActivityHistoryLoader>().mockResolvedValue(
+        page([manual(2)], null, { day: { ...warsawApplied, endsAt: '2026-03-30T22:00:00.000Z', localDate: '2026-03-30', startsAt: '2026-03-29T22:00:00.000Z' }, source: null, type: null }),
+      ),
+      { day: nextDay, source: null, type: null },
+    );
+    fresh.controller.start();
+    expect(previousSignal?.aborted).toBe(true);
+    previous.resolve(page([manual(1)], null, { day: warsawApplied, source: null, type: null }));
+    await flush();
+    expect(old.snapshots.every((snapshot) => snapshot.items.length === 0)).toBe(true);
+    expect(fresh.last().items.map(historyItemKey)).toEqual([`activity:${id(2)}`]);
   });
 
   it('reports lost access, a failed first page with the server’s message, and retries from page one', async () => {

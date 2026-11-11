@@ -486,18 +486,24 @@ export async function listActivities(
 
 export interface ActivityHistoryInput {
   cursor: string | null;
+  /** The local calendar day and the zone it is read in (ADR-0088), always sent together; null for every date. */
+  day: { localDate: string; timeZone: string } | null;
   orgId: string;
   source: ActivityHistorySource | null;
   type: ActivityType | null;
 }
 
 // The unified history (ADR-0087): manual activities, GPX imports and the person's own finished recorded runs. The cursor
-// is bound by the server to the person, the organization and both filters, so it is only ever sent with the filters it
-// came from.
+// is bound by the server to the person, the organization, both filters and the day filter, so it is only ever sent with
+// the filters it came from.
 export async function loadActivityHistory(input: ActivityHistoryInput, signal: AbortSignal): Promise<ActivityHistoryResponse> {
   const query = new URLSearchParams();
   if (input.source !== null) query.set('source', input.source);
   if (input.type !== null) query.set('type', input.type);
+  if (input.day !== null) {
+    query.set('localDate', input.day.localDate);
+    query.set('timeZone', input.day.timeZone);
+  }
   if (input.cursor !== null) query.set('cursor', input.cursor);
   const suffix = query.size === 0 ? '' : `?${query.toString()}`;
   const response = await requestJson(`/api/orgs/${encodeURIComponent(input.orgId)}/activity-history${suffix}`, {

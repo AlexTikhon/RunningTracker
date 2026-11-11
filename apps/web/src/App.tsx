@@ -17,6 +17,7 @@ import {
   navigationFor,
   type AppView,
   type EditorIntent,
+  type HistoryIntent,
   type KeptDate,
   type KeptMetric,
 } from './navigation-intent.js';
@@ -133,6 +134,9 @@ export function App() {
   // tied to the scope they were made in (navigation-intent.ts) and forgotten on sign-out.
   const [todayDate, setTodayDate] = useState<KeptDate | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
+  // The day, zone and source a Today card opens the Activity history on (ADR-0088). Scoped like the editor intent and
+  // cleared by any ordinary navigation, so it is applied only to the opening it was made for.
+  const [historyIntent, setHistoryIntent] = useState<HistoryIntent | null>(null);
   // The Trends range (its end date) and series, kept like Today's date (ADR-0084).
   const [trendsEnd, setTrendsEnd] = useState<KeptDate | null>(null);
   const [trendsMetric, setTrendsMetric] = useState<KeptMetric | null>(null);
@@ -177,6 +181,7 @@ export function App() {
     setWriter({ status: 'unclaimed' });
     setTodayDate(null);
     setEditorIntent(null);
+    setHistoryIntent(null);
     setTrendsEnd(null);
     setTrendsMetric(null);
   }, []);
@@ -818,6 +823,7 @@ export function App() {
   const openView = (view: AppView) => {
     setRunnerResult(null);
     setEditorIntent(null);
+    setHistoryIntent(null);
     setActiveView(view);
   };
   const openFromToday = (action: TodayAction) => {
@@ -825,6 +831,7 @@ export function App() {
     const next = navigationFor(action, viewScope);
     setRunnerResult(null);
     setEditorIntent(next.editor);
+    setHistoryIntent(next.history ?? null);
     if (next.trendsEnd) setTrendsEnd(next.trendsEnd);
     setActiveView(next.view);
   };
@@ -840,6 +847,7 @@ export function App() {
   ];
   const scopedIntent = inScope(editorIntent, viewScope);
   const checkInIntent = checkInIntentOf(scopedIntent);
+  const scopedHistory = inScope(historyIntent, viewScope);
   // Back from the Meal log to Today on the date the Meal log shows, or from a date of the Trends range to Today on that
   // date (Trends keeps its range for the way back); Today reads it again when it opens.
   const backToToday = (localDate: string) => {
@@ -1057,11 +1065,18 @@ export function App() {
         session.status === 'ready' && selectedOrgId !== null ? (
           // Owner-only manual activities (ADR-0072), GPX imports (ADR-0086) and the unified history with the person's own
           // finished runs (ADR-0087), outside the run lifecycle, writer lease and upload queue. A new session, person or
-          // organization is a new screen with no request carried over.
+          // organization is a new screen with no request carried over. A Today card opens it on that card's day, zone and
+          // source (ADR-0088); "Back to Today" returns to that date.
           <ActivityScreen
             key={`${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`}
             accessToken={mapboxAccessToken}
             csrf={session.session.csrf}
+            historyIntent={
+              scopedHistory === null
+                ? null
+                : { localDate: scopedHistory.localDate, source: scopedHistory.source, timeZone: scopedHistory.timeZone }
+            }
+            onBackToToday={backToToday}
             orgId={selectedOrgId}
             signal={session.signal}
             userId={session.session.identity.userId}

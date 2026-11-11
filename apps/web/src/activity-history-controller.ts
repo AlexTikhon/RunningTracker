@@ -1,4 +1,5 @@
 import type {
+  ActivityHistoryDay,
   ActivityHistoryItem,
   ActivityHistoryResponse,
   ActivityHistorySource,
@@ -8,20 +9,34 @@ import type {
 import { followSession } from './daily-checkin-controller.js';
 import { RunnerApiError, type ActivityHistoryInput } from './runner-api.js';
 
-// The unified activity history (ADR-0087), one page at a time. A controller belongs to one organization, one pair of
-// filters and one session: changing any of them means a new controller, and disposing the old one (or ending its
-// session) aborts its request and silences it, so a late answer for other filters, another organization or an ended
-// session can never be shown. Only one request is in flight at a time, the cursor sent is only ever the one the server
-// returned for these filters, and an item repeated across pages is dropped.
+// The unified activity history (ADR-0087), one page at a time. A controller belongs to one organization, one set of
+// filters (source, type and the local day of ADR-0088) and one session: changing any of them means a new controller, and
+// disposing the old one (or ending its session) aborts its request and silences it, so a late answer for other filters,
+// another day, another organization or an ended session can never be shown. Only one request is in flight at a time, the
+// cursor sent is only ever the one the server returned for these filters, and an item repeated across pages is dropped.
+
+/** A local calendar date and the IANA zone it is read in; the server lists what started in that date there. */
+export interface HistoryDay {
+  localDate: string;
+  timeZone: string;
+}
 
 export interface ActivityHistoryFilters {
+  day: HistoryDay | null;
   source: ActivityHistorySource | null;
   type: ActivityType | null;
 }
 
-export const noHistoryFilters: ActivityHistoryFilters = { source: null, type: null };
+export const noHistoryFilters: ActivityHistoryFilters = { day: null, source: null, type: null };
 
-export const historyFilterKey = (filters: ActivityHistoryFilters) => `${filters.source ?? '*'}|${filters.type ?? '*'}`;
+export const historyFilterKey = (filters: ActivityHistoryFilters) =>
+  `${filters.source ?? '*'}|${filters.type ?? '*'}|${filters.day === null ? '*' : `${filters.day.localDate}@${filters.day.timeZone}`}`;
+
+/** Whether the server's echo of the applied day is the day these filters asked for. */
+function sameDay(requested: HistoryDay | null, applied: ActivityHistoryDay | null): boolean {
+  if (requested === null || applied === null) return requested === null && applied === null;
+  return requested.localDate === applied.localDate && requested.timeZone === applied.timeZone;
+}
 
 export const historyItemKey = (item: ActivityHistoryItem) =>
   item.source === 'recorded_run' ? `run:${item.runId}` : `activity:${item.activityId}`;
@@ -31,6 +46,9 @@ export type ActivityHistoryLoader = (input: ActivityHistoryInput, signal: AbortS
 export type ActivityHistoryStatus = 'access-denied' | 'error' | 'loading' | 'ready';
 
 export interface ActivityHistorySnapshot {
+  // The day the server applied, with its UTC interval (23 or 25 hours around a daylight saving change); null for every
+  // date or before the first answer.
+  appliedDay: ActivityHistoryDay | null;
   filters: ActivityHistoryFilters;
   hasMore: boolean;
   items: ActivityHistoryItem[];
@@ -45,7 +63,17 @@ export interface ActivityHistorySnapshot {
 }
 
 export function loadingActivityHistory(filters: ActivityHistoryFilters): ActivityHistorySnapshot {
-  return { filters, hasMore: false, items: [], loadingMore: false, message: null, moreMessage: null, outdated: false, status: 'loading' };
+  return {
+    appliedDay: null,
+    filters,
+    hasMore: false,
+    items: [],
+    loadingMore: false,
+    message: null,
+    moreMessage: null,
+    outdated: false,
+    status: 'loading',
+  };
 }
 
 export interface ActivityHistoryControllerOptions {
@@ -79,7 +107,8 @@ export class ActivityHistoryController {
   #unfollowSession: () => void = () => undefined;
 
   public constructor(options: ActivityHistoryControllerOptions) {
-    this.#filters = { source: options.filters.source, type: options.filters.type };
+    const { day, source, type } = options.filters;
+    this.#filters = { day: day === null ? null : { localDate: day.localDate, timeZone: day.timeZone }, source, type };
     this.#load = options.load;
     this.#onChange = options.onChange;
     this.#orgId = options.orgId;
@@ -164,8 +193,13 @@ export class ActivityHistoryController {
     }
     if (!this.#current(controller)) return;
     this.#request = null;
-    // The server echoes the filters it applied. An answer for other filters is not this list's, whatever caused it.
-    if (response.applied.source !== this.#filters.source || response.applied.type !== this.#filters.type) {
+    // The server echoes the filters it applied. An answer for other filters or another day is not this list's, whatever
+    // caused it.
+    if (
+      response.applied.source !== this.#filters.source ||
+      response.applied.type !== this.#filters.type ||
+      !sameDay(this.#filters.day, response.applied.day)
+    ) {
       this.#fail(new Error('The history answer belongs to other filters'), kind);
       return;
     }
@@ -173,6 +207,7 @@ export class ActivityHistoryController {
     const known = new Set(this.#snapshot.items.map(historyItemKey));
     const added = response.items.filter((item) => !known.has(historyItemKey(item)));
     this.#emit({
+      appliedDay: response.applied.day,
       hasMore: response.nextCursor !== null,
       items: kind === 'first' ? response.items : [...this.#snapshot.items, ...added],
       loadingMore: false,

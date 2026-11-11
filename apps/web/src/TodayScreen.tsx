@@ -40,6 +40,32 @@ function Rows({ label, rows }: { label: string; rows: LabelledValue[] }) {
   );
 }
 
+/**
+ * Opens the Activity history on the items behind one card (ADR-0088): the overview's own date and zone (as the server
+ * answered them, not the device's), and the card's source. Shown only when the card counts at least one item.
+ */
+function HistoryButton({
+  day,
+  label,
+  onAction,
+  source,
+}: {
+  day: DailyOverview['day'];
+  label: string;
+  onAction: (action: TodayAction) => void;
+  source: 'gpx' | 'manual' | 'recorded_run';
+}) {
+  return (
+    <button
+      aria-label={`Show in history: your ${label} of ${formatCheckInDate(day.localDate)}`}
+      onClick={() => onAction({ kind: 'history', localDate: day.localDate, source, timeZone: day.timeZone })}
+      type="button"
+    >
+      Show in history
+    </button>
+  );
+}
+
 /** A loaded overview: the four sources, each in its own section, with its action. */
 export function OverviewContent({ onAction, overview }: { onAction: (action: TodayAction) => void; overview: DailyOverview }) {
   const { checkIn, day, gpsRuns, importedActivities, manualActivities, meals, movement } = overview;
@@ -117,7 +143,10 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
         <p className="today-note">
           An activity counts in full on the day it started in {day.timeZone}, also when it continued past midnight.
         </p>
-        <button onClick={() => onAction({ kind: 'activities' })} type="button">Open Activities</button>
+        <div className="run-card__actions">
+          {manualActivities.count > 0 && <HistoryButton day={day} label="manual activities" onAction={onAction} source="manual" />}
+          <button onClick={() => onAction({ kind: 'activities' })} type="button">Open Activities</button>
+        </div>
       </section>
 
       {importedActivities.count > 0 && (
@@ -129,7 +158,10 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
             Elapsed time runs from the first to the last point of each file, pauses included; it is not moving time. Imports
             are not added to manual activities or GPS runs, and are not checked against them.
           </p>
-          <button onClick={() => onAction({ kind: 'activities' })} type="button">Open Activities</button>
+          <div className="run-card__actions">
+            <HistoryButton day={day} label="GPX imports" onAction={onAction} source="gpx" />
+            <button onClick={() => onAction({ kind: 'activities' })} type="button">Open Activities</button>
+          </div>
         </section>
       )}
 
@@ -144,7 +176,10 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
         {importedActivities.count > 0 && gpsRuns.count > 0 && (
           <p className="today-note">A GPX import and a GPS run may describe the same outing; both are shown, never added together.</p>
         )}
-        <button onClick={() => onAction({ kind: 'runner' })} type="button">Open Runner</button>
+        <div className="run-card__actions">
+          {gpsRuns.count > 0 && <HistoryButton day={day} label="GPS runs" onAction={onAction} source="recorded_run" />}
+          <button onClick={() => onAction({ kind: 'runner' })} type="button">Open Runner</button>
+        </div>
       </section>
 
       <p className="today-meta">{computedLine(overview)}</p>

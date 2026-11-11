@@ -5,7 +5,7 @@ import { loadActivityHistory, type RunnerApiError } from './runner-api.js';
 
 const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-const response = (applied = { source: null, type: null }) => ({
+const response = (applied = { day: null, source: null, type: null }) => ({
   applied,
   items: [
     {
@@ -31,25 +31,27 @@ describe('activity history API call', () => {
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(json(response())));
     vi.stubGlobal('fetch', fetchMock);
     const signal = new AbortController().signal;
-    await expect(loadActivityHistory({ cursor: null, orgId, source: null, type: null }, signal)).resolves.toEqual(response());
-    await loadActivityHistory({ cursor: 'abc_-', orgId, source: 'recorded_run', type: 'run' }, signal);
-    await loadActivityHistory({ cursor: null, orgId, source: 'gpx', type: null }, signal);
+    await expect(loadActivityHistory({ cursor: null, day: null, orgId, source: null, type: null }, signal)).resolves.toEqual(response());
+    await loadActivityHistory({ cursor: 'abc_-', day: null, orgId, source: 'recorded_run', type: 'run' }, signal);
+    await loadActivityHistory({ cursor: null, day: null, orgId, source: 'gpx', type: null }, signal);
+    await loadActivityHistory({ cursor: 'c', day: { localDate: '2026-03-29', timeZone: 'Europe/Warsaw' }, orgId, source: 'manual', type: null }, signal);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       `/api/orgs/${orgId}/activity-history`,
       `/api/orgs/${orgId}/activity-history?source=recorded_run&type=run&cursor=abc_-`,
       `/api/orgs/${orgId}/activity-history?source=gpx`,
+      `/api/orgs/${orgId}/activity-history?source=manual&localDate=2026-03-29&timeZone=Europe%2FWarsaw&cursor=c`,
     ]);
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ cache: 'no-store', credentials: 'same-origin', signal });
   });
 
   it('refuses an answer outside the contract and passes the server’s refusal on', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json({ ...response(), totalDistanceM: 5 })));
-    await expect(loadActivityHistory({ cursor: null, orgId, source: null, type: null }, new AbortController().signal)).rejects.toThrow();
+    await expect(loadActivityHistory({ cursor: null, day: null, orgId, source: null, type: null }, new AbortController().signal)).rejects.toThrow();
     vi.stubGlobal(
       'fetch',
       vi.fn<typeof fetch>().mockResolvedValue(json({ error: { code: 'INVALID_CURSOR', message: 'The activity history cursor is invalid', requestId: '22222222-2222-4222-8222-222222222222' } }, 400)),
     );
-    await expect(loadActivityHistory({ cursor: 'x', orgId, source: null, type: null }, new AbortController().signal)).rejects.toMatchObject({
+    await expect(loadActivityHistory({ cursor: 'x', day: null, orgId, source: null, type: null }, new AbortController().signal)).rejects.toMatchObject({
       code: 'INVALID_CURSOR',
       status: 400,
     } satisfies Partial<RunnerApiError>);

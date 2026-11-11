@@ -1,5 +1,7 @@
 import {
   ACTIVITY_TYPES,
+  DAILY_METRICS_LOCAL_DATE_MIN,
+  dailyMetricsLocalDateSchema,
   type ActivityHistoryItem,
   type ActivityHistorySource,
   type ActivityType,
@@ -7,11 +9,13 @@ import {
   type GpsQuality,
   type RecordedRunHistoryItem,
 } from '@running-tracker/contracts';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import type { ActivityDeletionSnapshot } from './activity-controller.js';
 import { activityTypeLabels } from './activity-form.js';
 import { historyItemKey, type ActivityHistoryFilters, type ActivityHistorySnapshot } from './activity-history-controller.js';
+import { formatCheckInDate } from './daily-checkin.js';
+import { dayLengthNote } from './daily-overview.js';
 import { formatDistance, formatDuration, formatStartedAt } from './run-search.js';
 
 // The provenance of every item, said explicitly on every card (ADR-0087).
@@ -36,7 +40,37 @@ export interface HistoryDeletion {
   snapshot: ActivityDeletionSnapshot;
 }
 
+/** The zone the list's times are shown in: the day filter's zone when there is one, otherwise the device's. */
+export const historyDisplayZone = (filters: ActivityHistoryFilters, deviceTimeZone: string): string =>
+  filters.day?.timeZone ?? deviceTimeZone;
+
+/**
+ * The day input. It keeps what is being typed locally and applies only a complete, real date (2000-01-01 or later); an
+ * empty or partial value changes nothing, so typing never resets the list. "All dates" is the explicit way back to the
+ * whole history. Keyed by the applied day, so a change made elsewhere (All dates, a Today action) shows at once.
+ */
+function DayFilter({ day, onChoose }: { day: ActivityHistoryFilters['day']; onChoose: (localDate: string) => void }) {
+  const [value, setValue] = useState(day?.localDate ?? '');
+  return (
+    <label>
+      Day
+      <input
+        min={DAILY_METRICS_LOCAL_DATE_MIN}
+        onChange={(event) => {
+          const next = event.target.value;
+          setValue(next);
+          if (dailyMetricsLocalDateSchema.safeParse(next).success && next !== day?.localDate) onChoose(next);
+        }}
+        type="date"
+        value={value}
+      />
+    </label>
+  );
+}
+
 export interface ActivityHistoryListProps {
+  // Opened from Today (ADR-0088): the date "Back to Today" returns to, or null.
+  backToToday: { localDate: string; onBack: () => void } | null;
   deletion: HistoryDeletion | null;
   filters: ActivityHistoryFilters;
   history: ActivityHistorySnapshot;
@@ -49,6 +83,7 @@ export interface ActivityHistoryListProps {
   onOpenRun: (runId: string) => void;
   onRefresh: () => void;
   onRetry: () => void;
+  // The device's zone: times are shown in it without a day filter, and a day chosen here without one is read in it.
   timeZone: string;
   unit: DistanceUnit;
 }
@@ -101,6 +136,7 @@ function details(item: ActivityHistoryItem, unit: DistanceUnit): ReactNode {
 
 /** The unified history of the person's own activities and recorded runs (ADR-0087). Presentational: state is the screen's. */
 export function ActivityHistoryList({
+  backToToday,
   deletion,
   filters,
   history,
@@ -113,14 +149,32 @@ export function ActivityHistoryList({
   onOpenRun,
   onRefresh,
   onRetry,
-  timeZone,
+  timeZone: deviceTimeZone,
   unit,
 }: ActivityHistoryListProps) {
   const filtered = filters.source !== null || filters.type !== null;
   const deletionPending = deletion !== null && deletion.snapshot.phase === 'pending';
+  const day = filters.day;
+  const timeZone = historyDisplayZone(filters, deviceTimeZone);
+  const dayLabel = day === null ? null : formatCheckInDate(day.localDate);
+  // The server's interval for the applied day, once it has answered for exactly this day.
+  const applied =
+    day !== null && history.appliedDay?.localDate === day.localDate && history.appliedDay.timeZone === day.timeZone ? history.appliedDay : null;
+  const lengthNote = applied === null ? null : dayLengthNote(applied);
   return (
     <section aria-labelledby="activity-history-title" className="search-results">
-      <h2 id="activity-history-title">Your activity history</h2>
+      <h2 id="activity-history-title" tabIndex={-1}>Your activity history</h2>
+      {backToToday !== null && (
+        <div className="run-card__actions">
+          <button
+            aria-label={`Back to Today on ${formatCheckInDate(backToToday.localDate)}`}
+            onClick={backToToday.onBack}
+            type="button"
+          >
+            Back to Today
+          </button>
+        </div>
+      )}
       <p className="search-results__note">
         Manual entries, GPX imports and the runs you recorded here, newest first. Times are shown in {timeZone}. Distances
         in {unit === 'km' ? 'kilometres' : 'miles'}. Each source keeps its own measure: a manual entry shows the duration you
@@ -153,8 +207,21 @@ export function ActivityHistoryList({
             ))}
           </select>
         </label>
+        <DayFilter
+          day={day}
+          key={day === null ? '*' : `${day.localDate}@${day.timeZone}`}
+          onChoose={(localDate) => onFiltersChange({ ...filters, day: { localDate, timeZone: day?.timeZone ?? deviceTimeZone } })}
+        />
+        <button disabled={day === null} onClick={() => onFiltersChange({ ...filters, day: null })} type="button">All dates</button>
         <button disabled={history.status === 'loading'} onClick={onRefresh} type="button">Refresh history</button>
       </form>
+      {day !== null && (
+        <p className="search-results__note" role="note">
+          Showing what started on <strong>{dayLabel}</strong> in the time zone {day.timeZone}, from its midnight to the next
+          midnight there. An activity that continued past midnight is listed on the day it started.
+          {lengthNote !== null && <> {lengthNote}</>}
+        </p>
+      )}
       <p className="search-panel__notice" role="status">{notice ?? ''}</p>
       {history.status === 'loading' && <p className="search-results__loading">Loading your activity history…</p>}
       {(history.status === 'error' || history.status === 'access-denied') && (
@@ -165,9 +232,11 @@ export function ActivityHistoryList({
       )}
       {history.status === 'ready' && history.items.length === 0 && (
         <p className="search-results__empty">
-          {filtered
-            ? 'Nothing in your history matches these filters.'
-            : 'No activities yet. Activities you enter or import and runs you record here appear in this history, newest first.'}
+          {day !== null
+            ? `Nothing in your history ${filtered ? 'matches these filters' : 'started'} on ${dayLabel ?? day.localDate} in ${day.timeZone}.`
+            : filtered
+              ? 'Nothing in your history matches these filters.'
+              : 'No activities yet. Activities you enter or import and runs you record here appear in this history, newest first.'}
         </p>
       )}
       {history.status === 'ready' && history.items.length > 0 && (

@@ -42,7 +42,9 @@ describe('ActivityScreen', () => {
   });
 
   it('shows the unified history loading, unfiltered, with the zone it will use (ADR-0087)', () => {
-    expect(markup).toContain('<h2 id="activity-history-title">Your activity history</h2>');
+    expect(markup).toContain('<h2 id="activity-history-title" tabindex="-1">Your activity history</h2>');
+    expect(markup).toContain('<button disabled="" type="button">All dates</button>');
+    expect(markup).not.toContain('Back to Today');
     expect(markup).toContain('Loading your activity history…');
     expect(markup).toContain(`Times are shown in ${defaultTimeZone()}`);
     expect(markup).toContain('aria-label="History filters"');
@@ -56,6 +58,29 @@ describe('ActivityScreen', () => {
     expect(markup).toContain('<h2 id="gpx-import-title">Import a GPX file</h2>');
     expect(markup).toContain('type="file"');
     expect(markup).toMatch(/a GPX import shows its elapsed time, pauses included, not moving time/u);
+  });
+
+  it('opens on a Today card’s day, zone and source, keeps the form and import, and offers Back to Today (ADR-0088)', () => {
+    const fromToday = renderToStaticMarkup(
+      <ActivityScreen
+        csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }}
+        historyIntent={{ localDate: '2026-03-29', source: 'recorded_run', timeZone: 'Asia/Tokyo' }}
+        onBackToToday={() => undefined}
+        orgId={orgId}
+        signal={new AbortController().signal}
+        userId={userId}
+      />,
+    );
+    expect(fromToday).toContain('<option value="recorded_run" selected="">Recorded run</option>');
+    expect(fromToday).toContain('<option value="" selected="">All types</option>');
+    expect(fromToday).toMatch(/<input min="2000-01-01" type="date" value="2026-03-29"\/>/u);
+    expect(fromToday).toContain('Showing what started on <strong>Sun, 29 Mar 2026</strong> in the time zone Asia/Tokyo');
+    expect(fromToday).toContain('Times are shown in Asia/Tokyo.');
+    expect(fromToday).toContain('aria-label="Back to Today on Sun, 29 Mar 2026"');
+    expect(fromToday).toContain('<button type="button">All dates</button>');
+    // Creation and import stay available.
+    expect(fromToday).toContain('aria-label="Add an activity"');
+    expect(fromToday).toContain('<h2 id="gpx-import-title">Import a GPX file</h2>');
   });
 
   it('does not put identifiers on the screen', () => {

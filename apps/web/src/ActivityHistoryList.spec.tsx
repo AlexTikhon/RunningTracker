@@ -62,10 +62,14 @@ const ready = (list: ActivityHistoryItem[], patch: Partial<ActivityHistorySnapsh
   ...patch,
 });
 
-function render(history: ActivityHistorySnapshot, options: { deletion?: HistoryDeletion | null; filters?: ActivityHistoryFilters } = {}): string {
+function render(
+  history: ActivityHistorySnapshot,
+  options: { backToToday?: string; deletion?: HistoryDeletion | null; filters?: ActivityHistoryFilters } = {},
+): string {
   const noop = () => undefined;
   return renderToStaticMarkup(
     <ActivityHistoryList
+      backToToday={options.backToToday === undefined ? null : { localDate: options.backToToday, onBack: noop }}
       deletion={options.deletion ?? null}
       filters={options.filters ?? noHistoryFilters}
       history={history}
@@ -141,9 +145,57 @@ describe('ActivityHistoryList', () => {
 
   it('distinguishes an empty history from an empty filter result', () => {
     expect(render(ready([]))).toContain('No activities yet.');
-    const filtered = render(ready([], {}, { source: 'gpx', type: null }), { filters: { source: 'gpx', type: null } });
+    const gpxOnly = { day: null, source: 'gpx', type: null } as const;
+    const filtered = render(ready([], {}, gpxOnly), { filters: gpxOnly });
     expect(filtered).toContain('Nothing in your history matches these filters.');
     expect(filtered).toContain('<option value="gpx" selected="">GPX import</option>');
+  });
+
+  describe('day filter (ADR-0088)', () => {
+    const tokyo = { day: { localDate: '2026-10-05', timeZone: 'Asia/Tokyo' }, source: null, type: null };
+    const appliedTokyo = { endsAt: '2026-10-05T15:00:00.000Z', localDate: '2026-10-05', startsAt: '2026-10-04T15:00:00.000Z', timeZone: 'Asia/Tokyo' };
+
+    it('offers a day input and an explicit All dates action, disabled without a day', () => {
+      expect(markup).toMatch(/<label>Day<input min="2000-01-01" type="date" value=""\/><\/label>/u);
+      expect(markup).toContain('<button disabled="" type="button">All dates</button>');
+      expect(markup).not.toContain('Showing what started on');
+      const html = render(ready(items, { appliedDay: appliedTokyo }, tokyo), { filters: tokyo });
+      expect(html).toMatch(/<label>Day<input min="2000-01-01" type="date" value="2026-10-05"\/><\/label>/u);
+      expect(html).toContain('<button type="button">All dates</button>');
+    });
+
+    it('shows the active day and zone, and every time in that zone rather than the device’s', () => {
+      const html = render(ready(items, { appliedDay: appliedTokyo }, tokyo), { filters: tokyo });
+      expect(html).toContain('Showing what started on <strong>Mon, 5 Oct 2026</strong> in the time zone Asia/Tokyo');
+      expect(html).toContain('listed on the day it started');
+      expect(html).toContain('Times are shown in Asia/Tokyo.');
+      // 06:00 UTC is 15:00 in Tokyo (and 08:00 in the device's Warsaw).
+      expect(html).toContain('aria-label="Run details of your run of 5 Oct 2026, 15:00"');
+      expect(html).not.toContain('5 Oct 2026, 08:00');
+      expect(html).not.toContain('hours in Asia/Tokyo');
+    });
+
+    it('says when the applied day is not 24 hours long, from the server’s interval', () => {
+      const warsaw = { day: { localDate: '2026-03-29', timeZone: timeZone }, source: 'recorded_run', type: null } as const;
+      const applied = { endsAt: '2026-03-29T22:00:00.000Z', localDate: '2026-03-29', startsAt: '2026-03-28T23:00:00.000Z', timeZone };
+      const html = render(ready([], { appliedDay: applied }, warsaw), { filters: warsaw });
+      expect(html).toContain('This date has 23 hours in Europe/Warsaw because the clocks change.');
+      expect(html).toContain('Nothing in your history matches these filters on Sun, 29 Mar 2026 in Europe/Warsaw.');
+      // An interval for another day is never described as this one's.
+      const other = render(ready([], { appliedDay: { ...applied, localDate: '2026-03-30' } }, warsaw), { filters: warsaw });
+      expect(other).not.toContain('23 hours');
+    });
+
+    it('words an empty day without other filters', () => {
+      const html = render(ready([], { appliedDay: appliedTokyo }, tokyo), { filters: tokyo });
+      expect(html).toContain('Nothing in your history started on Mon, 5 Oct 2026 in Asia/Tokyo.');
+    });
+
+    it('offers Back to Today on the originating date only when opened from Today', () => {
+      expect(markup).not.toContain('Back to Today');
+      const html = render(ready(items, { appliedDay: appliedTokyo }, tokyo), { backToToday: '2026-10-05', filters: tokyo });
+      expect(html).toContain('aria-label="Back to Today on Mon, 5 Oct 2026" type="button">Back to Today</button>');
+    });
   });
 
   it('shows loading, error with Retry, and lost access', () => {

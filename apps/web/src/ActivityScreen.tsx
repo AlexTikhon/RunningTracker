@@ -24,7 +24,7 @@ import {
   type ActivityHistorySnapshot,
 } from './activity-history-controller.js';
 import { ActivityAlreadySaved, type SavedActivityView } from './ActivityAlreadySaved.js';
-import { ActivityHistoryList } from './ActivityHistoryList.js';
+import { ActivityHistoryList, historyDisplayZone } from './ActivityHistoryList.js';
 import { GpxImportPanel } from './GpxImportPanel.js';
 import { RunDetailScreen } from './RunDetailScreen.js';
 import { defaultTimeZone } from './run-search.js';
@@ -40,6 +40,10 @@ export interface ActivityScreenProps {
   // The public Mapbox token for a recorded run's route in its details, or null (the details then say so).
   accessToken?: string | null;
   csrf: CsrfCredentials;
+  // Opened from a Today card (ADR-0088): the history starts on that date, zone and source, and "Back to Today" returns to
+  // that date. Read once when the screen mounts; the parent passes it only under the scope it was made in.
+  historyIntent?: { localDate: string; source: 'gpx' | 'manual' | 'recorded_run'; timeZone: string } | null;
+  onBackToToday?: (localDate: string) => void;
   orgId: string;
   // The session's signal: ending or replacing the session silences every request of this screen.
   signal: AbortSignal;
@@ -62,13 +66,28 @@ interface RunDetailSelection {
 // their own finished recorded runs in one history (ADR-0087). The parent keys it by session, person and organization,
 // so a change of any of them starts from a clean form, import, filters and history with no request carried over.
 // Owner-only: nothing here is visible to a coach or another member.
-export function ActivityScreen({ accessToken = null, csrf, orgId, signal, userId }: ActivityScreenProps) {
+export function ActivityScreen({
+  accessToken = null,
+  csrf,
+  historyIntent = null,
+  onBackToToday,
+  orgId,
+  signal,
+  userId,
+}: ActivityScreenProps) {
   const timeZone = useMemo(() => defaultTimeZone(), []);
   const csrfRef = useRef(csrf);
   csrfRef.current = csrf;
   const [draft, setDraft] = useState<ActivityDraft>(() => defaultActivityDraft(new Date()));
   const [showErrors, setShowErrors] = useState(false);
-  const [filters, setFilters] = useState<ActivityHistoryFilters>(noHistoryFilters);
+  // The Today intent is read once, here: later prop changes never re-apply it, and the person's own filter changes win.
+  const [origin] = useState(historyIntent);
+  const [filters, setFilters] = useState<ActivityHistoryFilters>(() =>
+    origin === null
+      ? noHistoryFilters
+      : { day: { localDate: origin.localDate, timeZone: origin.timeZone }, source: origin.source, type: null },
+  );
+  const displayZone = historyDisplayZone(filters, timeZone);
   const filterKey = historyFilterKey(filters);
   const [historyState, setHistoryState] = useState<{ key: string; snapshot: ActivityHistorySnapshot } | null>(null);
   // A snapshot of other filters is never shown: until the new controller answers, the history is loading.
@@ -149,13 +168,17 @@ export function ActivityScreen({ accessToken = null, csrf, orgId, signal, userId
     };
   }, [signal]);
 
-  // One history controller per organization, filter pair and session: changing a filter disposes the previous one,
-  // which aborts its request and silences any answer it would still have produced.
+  // One history controller per organization, filter set (source, type, day) and session: changing a filter or the day
+  // disposes the previous one, which aborts its request and silences any answer it would still have produced, and the
+  // new one starts from the first page.
   const { source: sourceFilter, type: typeFilter } = filters;
+  const dayDate = filters.day?.localDate ?? null;
+  const dayZone = filters.day?.timeZone ?? null;
   useEffect(() => {
-    const key = historyFilterKey({ source: sourceFilter, type: typeFilter });
+    const day = dayDate === null || dayZone === null ? null : { localDate: dayDate, timeZone: dayZone };
+    const key = historyFilterKey({ day, source: sourceFilter, type: typeFilter });
     const next = new ActivityHistoryController({
-      filters: { source: sourceFilter, type: typeFilter },
+      filters: { day, source: sourceFilter, type: typeFilter },
       load: loadActivityHistory,
       onChange: (snapshot) => setHistoryState({ key, snapshot }),
       orgId,
@@ -167,7 +190,12 @@ export function ActivityScreen({ accessToken = null, csrf, orgId, signal, userId
       next.dispose();
       if (lister.current === next) lister.current = null;
     };
-  }, [orgId, signal, sourceFilter, typeFilter]);
+  }, [dayDate, dayZone, orgId, signal, sourceFilter, typeFilter]);
+
+  // Opened from Today: the person came for the history, so it gets focus (and scrolls into view below the form).
+  useEffect(() => {
+    if (origin !== null) document.getElementById('activity-history-title')?.focus();
+  }, [origin]);
 
   useEffect(() => {
     const next = new ActivitySubmissionController({
@@ -362,6 +390,11 @@ export function ActivityScreen({ accessToken = null, csrf, orgId, signal, userId
       />
 
       <ActivityHistoryList
+        backToToday={
+          origin !== null && onBackToToday !== undefined
+            ? { localDate: origin.localDate, onBack: () => onBackToToday(origin.localDate) }
+            : null
+        }
         deletion={deletion === null ? null : { activityId: deletion.activityId, snapshot: deletionSnapshot }}
         filters={filters}
         history={history}
@@ -393,7 +426,7 @@ export function ActivityScreen({ accessToken = null, csrf, orgId, signal, userId
           orgId={orgId}
           runId={selectedRun.runId}
           signal={signal}
-          timeZone={timeZone}
+          timeZone={displayZone}
           unit={draft.unit}
           userId={userId}
         />

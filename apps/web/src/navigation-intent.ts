@@ -29,10 +29,26 @@ export interface KeptMetric {
 }
 
 /**
- * The view a Today action opens and, for the editors, the intent that carries the selected date. The Trends action
- * carries the selected date as the end of its range instead (`trendsEnd`); it opens no editor.
+ * Opens the Activity tab's history on one Today card's items (ADR-0088): the overview's date and zone, and the card's
+ * source. The Activity screen reads it once when it mounts, as its starting filters and as the date "Back to Today"
+ * returns to. Any ordinary navigation clears it, so opening Activity from the view switcher shows the whole history.
  */
-export function navigationFor(action: TodayAction, scope: string): { editor: EditorIntent | null; trendsEnd?: KeptDate; view: AppView } {
+export interface HistoryIntent {
+  localDate: string;
+  scope: string;
+  source: 'gpx' | 'manual' | 'recorded_run';
+  timeZone: string;
+}
+
+/**
+ * The view a Today action opens and, for the editors, the intent that carries the selected date. The Trends action
+ * carries the selected date as the end of its range instead (`trendsEnd`); it opens no editor. A history action carries
+ * the date, zone and source the Activity history opens on (`history`).
+ */
+export function navigationFor(
+  action: TodayAction,
+  scope: string,
+): { editor: EditorIntent | null; history?: HistoryIntent; trendsEnd?: KeptDate; view: AppView } {
   switch (action.kind) {
     case 'check-in':
       return { editor: { localDate: action.localDate, scope, section: 'check-in' }, view: 'checkin' };
@@ -46,6 +62,12 @@ export function navigationFor(action: TodayAction, scope: string): { editor: Edi
       return { editor: null, view: 'runner' };
     case 'trends':
       return { editor: null, trendsEnd: { localDate: action.localDate, scope }, view: 'trends' };
+    case 'history':
+      return {
+        editor: null,
+        history: { localDate: action.localDate, scope, source: action.source, timeZone: action.timeZone },
+        view: 'activity',
+      };
   }
 }
 

@@ -17,7 +17,12 @@ export type TodayAction =
   | { kind: 'activities' }
   | { kind: 'runner' }
   /** The 28-day trends ending on the selected date (ADR-0084). */
-  | { kind: 'trends'; localDate: string };
+  | { kind: 'trends'; localDate: string }
+  /**
+   * The activity history filtered to the overview's date, in the overview's zone, and to the source behind one card
+   * (ADR-0088): the actual items behind that card's figures.
+   */
+  | { kind: 'history'; localDate: string; source: 'gpx' | 'manual' | 'recorded_run'; timeZone: string };
 
 export interface LabelledValue {
   label: string;

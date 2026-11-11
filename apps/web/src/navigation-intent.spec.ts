@@ -36,6 +36,23 @@ describe('Today navigation', () => {
     expect(inScope({ metric: 'steps' as const, scope: SCOPE }, '0|user-a|org-b')).toBeNull();
   });
 
+  it('opens the Activity history on the overview’s date, zone and source, scoped, without an editor intent (ADR-0088)', () => {
+    for (const source of ['manual', 'gpx', 'recorded_run'] as const) {
+      const next = navigationFor({ kind: 'history', localDate: '2026-03-29', source, timeZone: 'Europe/Warsaw' }, SCOPE);
+      expect(next).toEqual({
+        editor: null,
+        history: { localDate: '2026-03-29', scope: SCOPE, source, timeZone: 'Europe/Warsaw' },
+        view: 'activity',
+      });
+      expect(inScope(next.history ?? null, SCOPE)).toEqual(next.history);
+      for (const other of ['1|user-a|org-a', '0|user-b|org-a', '0|user-a|org-b', null]) {
+        expect(inScope(next.history ?? null, other), String(other)).toBeNull();
+      }
+    }
+    // The plain Activities action carries no history intent: the whole history opens.
+    expect(navigationFor({ kind: 'activities' }, SCOPE).history).toBeUndefined();
+  });
+
   it('opens Activities and Runner without any intent', () => {
     expect(navigationFor({ kind: 'activities' }, SCOPE)).toEqual({ editor: null, view: 'activity' });
     expect(navigationFor({ kind: 'runner' }, SCOPE)).toEqual({ editor: null, view: 'runner' });

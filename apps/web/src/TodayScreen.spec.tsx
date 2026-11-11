@@ -38,6 +38,11 @@ function actionsOf(overview: DailyOverview): TodayAction[] {
     }
     if (node === null || typeof node !== 'object' || !('props' in node) || !('type' in node)) return;
     const { props, type } = node as { props: { children?: unknown; onClick?: () => void }; type: unknown };
+    // A small function component (the history button) is expanded to the element it renders.
+    if (typeof type === 'function') {
+      visit((type as (input: unknown) => unknown)(props));
+      return;
+    }
     if (type === 'button' && props.onClick) props.onClick();
     visit(props.children);
   };
@@ -201,6 +206,39 @@ describe('Today screen', () => {
       { kind: 'activities' },
       { kind: 'runner' },
     ]);
+  });
+
+  it('opens the history on the overview’s date, zone and each card’s source, next to the existing actions (ADR-0088)', () => {
+    const base = overviewFixture();
+    const overview = overviewFixture({
+      // The overview's own zone travels, not the device's.
+      day: { ...base.day, timeZone: 'Asia/Tokyo', startsAt: '2026-11-04T15:00:00.000Z', endsAt: '2026-11-05T15:00:00.000Z' },
+      gpsRuns: { count: 1, currentDistanceM: 5_000, withCurrentDistance: 1, withoutCurrentDistance: 0 },
+      importedActivities: { byType: [{ count: 1, elapsedDurationS: 1_800, type: 'hike' }], count: 1, elapsedDurationS: 1_800, source: 'gpx' },
+      manualActivities: { byType: [{ count: 1, enteredDurationS: 600, type: 'ride' }], count: 1, enteredDurationS: 600 },
+    });
+    const history = (source: 'gpx' | 'manual' | 'recorded_run') => ({ kind: 'history', localDate: DAY, source, timeZone: 'Asia/Tokyo' });
+    expect(actionsOf(overview)).toEqual([
+      { kind: 'check-in', localDate: DAY },
+      { kind: 'movement', localDate: DAY },
+      { kind: 'meals', localDate: DAY },
+      history('manual'),
+      { kind: 'activities' },
+      history('gpx'),
+      { kind: 'activities' },
+      history('recorded_run'),
+      { kind: 'runner' },
+    ]);
+    const html = ready(overview);
+    expect(html).toContain('aria-label="Show in history: your manual activities of Thu, 5 Nov 2026" type="button">Show in history</button>');
+    expect(html).toContain('aria-label="Show in history: your GPX imports of Thu, 5 Nov 2026"');
+    expect(html).toContain('aria-label="Show in history: your GPS runs of Thu, 5 Nov 2026"');
+    expect(html).toContain('>Open Activities</button>');
+    expect(html).toContain('>Open Runner</button>');
+  });
+
+  it('offers no history action for a card with nothing to show', () => {
+    expect(ready(overviewFixture())).not.toContain('Show in history');
   });
 
   it('opens the 28-day trends ending on the selected date, and not for an invalid date (ADR-0084)', () => {
