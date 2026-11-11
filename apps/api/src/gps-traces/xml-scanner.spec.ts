@@ -199,4 +199,37 @@ describe('XML namespaces', () => {
   it('accepts the xml prefix declared to its own namespace', () => {
     expect(starts('<r xmlns:xml="http://www.w3.org/XML/1998/namespace" xml:lang="en"/>')).toEqual(['r']);
   });
+
+  describe('duplicate expanded attribute names', () => {
+    // Long, equal-length URIs that differ only in their last character: the duplicate check must compare whole
+    // namespaces, not a prefix of them or their length.
+    const LONG_A = `urn:${'y'.repeat(100_000)}a`;
+    const LONG_B = `urn:${'y'.repeat(100_000)}b`;
+
+    it.each([
+      ['an alias declared on a child of the element that binds the first prefix', `<r xmlns:a="${A}"><c xmlns:b="${A}" a:x="1" b:x="2"/></r>`],
+      ['an alias of a long namespace', `<r xmlns:a="${LONG_A}" xmlns:b="${LONG_A}" a:x="1" b:x="2"/>`],
+      ['a prefix rebound onto the namespace of another prefix', `<r xmlns:a="${A}" xmlns:b="${B}"><c xmlns:b="${A}" a:x="1" b:x="2"/></r>`],
+      ['an alias declared again after its first scope closed', `<r><c xmlns:a="${A}" a:x="1"/><d xmlns:a="${A}" xmlns:b="${A}" a:x="1" b:x="2"/></r>`],
+      ['three prefixes of one namespace, the duplicate on the last two', `<r xmlns:a="${A}" xmlns:b="${A}" xmlns:c="${A}" a:x="1" b:y="2" c:y="3"/>`],
+    ])('refuses %s', (_label, text) => {
+      const error = refusal(() => namespacedEvents(text));
+      expect([error.kind, error.message]).toEqual([
+        'malformed',
+        'The file is malformed XML: an element repeats an attribute under two prefixes of one namespace',
+      ]);
+      expect(error.message).not.toContain('urn:');
+    });
+
+    it.each([
+      ['one local name in two namespaces', `<r xmlns:a="${A}" xmlns:b="${B}" a:x="1" b:x="2"/>`],
+      ['one local name in two long namespaces that differ in their last character', `<r xmlns:a="${LONG_A}" xmlns:b="${LONG_B}" a:x="1" b:x="2"/>`],
+      ['aliases with different local names', `<r xmlns:a="${A}" xmlns:b="${A}" a:x="1" b:y="2"/>`],
+      ['an unprefixed attribute and a prefixed one with the same local name', `<r xmlns:a="${A}" x="1" a:x="2"/>`],
+      ['a prefix rebound to another namespace on a later sibling', `<r xmlns:a="${A}"><c xmlns:b="${A}" b:y="1"/><d xmlns:b="${B}" a:x="1" b:x="2"/></r>`],
+      ['a namespace released by its scope and a different one bound later', `<r><c xmlns:a="${A}" a:x="1"/><d xmlns:b="${B}" xmlns:a="${A}" a:x="1" b:x="2"/></r>`],
+    ])('accepts %s', (_label, text) => {
+      expect(() => namespacedEvents(text)).not.toThrow();
+    });
+  });
 });

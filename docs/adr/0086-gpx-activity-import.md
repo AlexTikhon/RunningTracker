@@ -84,6 +84,15 @@ whitespace (space, tab, CR, LF). The import reader resolves namespaces through `
 above). The D10 trace tools keep identifying elements by local name (they also read GPX 1.0 and namespace-less files);
 their existing tests pass unchanged on the new tokenizer.
 
+Namespace memory (2026-11-11). The duplicate-attribute check built `${namespaceUri} ${localName}` for every prefixed
+attribute, so memory grew with attributes × URI length: a 1 MB file (one 1 MB URI, 150 attributes in it, inside
+`<extensions>`) exhausted a 128 MB heap. Each URI is now interned once, when it is declared, into a numbered entry
+shared by every binding to an equal URI; attributes are grouped by that number, so aliases (two prefixes of one URI)
+are still caught and a URI is never copied, hashed or compared per use. An entry is forgotten when its last binding
+goes out of scope. The namespace layer no longer copies the attribute map or allocates objects per open element. The
+accepted documents, refusal reasons, limits, metrics and fingerprints are unchanged; `xml-scanner.hostile.spec.ts` runs
+the namespace cases with a 128 MB heap as well as a deadline.
+
 Not reused, on purpose: the GPS run edge filter (ADR-0012, `v1`: accuracy at most 30 m, 0 to 10 s between points,
 at most 12 m/s, same segment). A GPS run's distance and "observed duration" sum accepted edges only. For an import:
 

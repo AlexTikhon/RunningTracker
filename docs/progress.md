@@ -4093,3 +4093,58 @@ trace tools keep local-name matching on the new tokenizer.
 **Not established.** No iPhone or physical-device run. A legitimate 10 MiB file still parses on the request thread
 (about 0.2 s locally); a hostile 10 MiB file with a million attributes on one element costs under 1 s, linearly. No
 per-element attribute limit was added.
+
+## GPX import hardening: namespace memory amplification (ADR-0086) (2026-11-11)
+
+**Defect fixed.** HIGH: `scanNamespacedXml` detected duplicate expanded attribute names with the key
+`${resolvePrefix(prefix)} ${localName}`, which materialized the whole namespace URI for every prefixed attribute.
+Reproduction: a valid two-point GPX 1.1 track with `<x:payload>` in a point's `<extensions>`, `x` bound to
+`'urn:' + 'x'.repeat(1_000_000)` and 150 attributes `x:a0="v"` … (about 1 MB in total): `readGpxActivity()` exhausted a
+child started with `--max-old-space-size=128` (V8 "heap out of memory"). The cost was attributes × URI length, so a
+10 MiB upload could ask for hundreds of gigabytes. Each namespace URI is now interned once, when it is declared, into a
+numbered entry shared by every binding to an equal URI (reference-counted, forgotten when the last binding to it goes
+out of scope), and the check groups local names by that number. A URI is hashed and compared only at its declaration,
+never per use: keying the check by the URI string itself would still have compared a megabyte per attribute when two
+prefixes bind equal URIs. Aliases are still refused (`an element repeats an attribute under two prefixes of one
+namespace`).
+
+**Other namespace bookkeeping inspected.** The namespace layer copied every attribute in no namespace into a second
+map per element, and allocated a scope object, an `ExpandedName` and an array for every open element. It now removes
+what it consumes from the tokenizer's (fresh, per-tag) map and passes the rest on, and keeps open elements in three
+parallel arrays with one undo log. Unchanged and checked: binding lookups by prefix, the reserved `xml`/`xmlns` rules
+(compared against fixed-length constants), scope restoration, the GPX namespace comparison in the reader, upload
+limits, DTD refusal, metrics and fingerprints.
+
+**Measured** (smallest `--max-old-space-size` at which the child finishes, tried at 48/64/96/128/192/256 MB; 10 MiB
+documents unless stated):
+
+| Document | Before | After |
+|---|---|---|
+| Reproduction (1 MB URI, 150 attributes, about 1 MB) | out of memory at 128 MB | 48 MB, 5 ms |
+| Same plus `y:a0` with `y` an alias of the URI | out of memory at 128 MB | 48 MB, refused `malformed_xml` |
+| 8.5 MiB URI, about 135 000 attributes in it | out of memory at 128 MB | 64 MB, 95 ms |
+| Two prefixes of one 1 MiB URI, about 419 000 elements using both | killed at the 30 s deadline | 48 MB, 0.32 s |
+| About 363 000 siblings each declaring and using its own namespace | 128 MB passes | 48 MB, 0.33 s |
+| One million attributes in no namespace (existing hostile case) | 256 MB (out of memory at 192) | 128 MB |
+| 262 000 nested prefix declarations (existing hostile case) | 192 MB (out of memory at 128) | 96 MB |
+| 1.5 million nested `<e>` elements (`<e>` × n, `</e>` × n) | out of memory at 128 MB | 128 MB (the D10 trace reader, no namespace layer: 64 MB) |
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| New tests seen failing first | the four namespace cases under 128 MB: three out of memory, one killed at the 30 s deadline (the sibling case passed and guards that entries are released) |
+| `xml-scanner.spec.ts` | 67 passed (+11: aliases across scopes, of a long URI, after a rebinding or a released scope, three prefixes; distinct equal-length long URIs, different local names, a rebound sibling accepted) |
+| `xml-scanner.hostile.spec.ts` (child processes, 30 s deadline, 5 s parse budget, namespace cases with a 128 MB heap) | 18 passed (+5) |
+| `npm test --workspace=@running-tracker/api` | 1,765 passed |
+| Integration (`running_tracker_test`; server-reported database and runtime/owner/maintenance roles checked first): `activity-gpx-import`, `gps-trace-analysis`, `gps-trace-report` | 3 files, 42 passed |
+| `npx playwright test --project=chromium activity-gpx-import.spec.ts` | 3 passed |
+| `npm run lint`, `npm run typecheck --workspace=@running-tracker/api` | pass |
+
+**Not established / remaining.** (1) V8 hashes a string longer than 16 383 characters by its length only, so maps keyed
+by long names of equal length degrade to chains: the tokenizer's attribute map, the prefix bindings and the new URI
+table each take about 0.2–0.3 s on a 10 MiB document of 638 such keys (about 40 ms at 16 383 characters), with a flat
+heap. This is quadratic in the number of keys but bounded by the upload limit; no name or URI length limit was added.
+(2) Deep nesting still costs memory in proportion to depth in the tokenizer and both readers (1.5 million levels need
+128 MB in the import reader). No nesting-depth or per-element attribute limit was added; either would be a new refusal
+rule for the ADR-0086 contract.

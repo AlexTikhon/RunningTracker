@@ -15,8 +15,11 @@
 export type XmlScanFailure = 'declaration' | 'malformed' | 'not_xml';
 
 export interface XmlScanHandlers {
-  /** Attribute names are qualified, exactly as written (`xmlns:gpx`, `lat`). */
-  startElement(qualifiedName: string, attributes: ReadonlyMap<string, string>): void;
+  /**
+   * Attribute names are qualified, exactly as written (`xmlns:gpx`, `lat`). `attributes` is a new map for this tag that
+   * the tokenizer never reads again, so the handler may change it (the namespace layer removes what it consumes).
+   */
+  startElement(qualifiedName: string, attributes: Map<string, string>): void;
   endElement(qualifiedName: string): void;
   /** Character data between tags and the content of CDATA sections, in document order. */
   text(chunk: string): void;
@@ -226,10 +229,21 @@ export interface NamespacedXmlHandlers {
   text(chunk: string): void;
 }
 
+/**
+ * One namespace URI, shared by every binding to an equal URI that is in scope or shadowed. `id` identifies the URI
+ * while it is interned, so the duplicate-attribute check never copies, hashes or compares the URI itself.
+ */
+interface InternedNamespace {
+  readonly id: number;
+  readonly uri: string;
+  /** Bindings (in scope or shadowed) that refer to this entry; it is forgotten at zero. */
+  references: number;
+}
+
 /** One namespace binding that an element's declarations replaced, restored when the element closes. */
 interface Shadowed {
   readonly prefix: string;
-  readonly previous: string | undefined;
+  readonly previous: InternedNamespace | undefined;
 }
 
 /**
@@ -237,14 +251,42 @@ interface Shadowed {
  * undeclare the default namespace, and the previous bindings restored when an element closes. Refuses as malformed an
  * undeclared prefix, a QName with an empty part or more than one colon, an empty prefix binding (`xmlns:p=""`), a
  * misuse of the reserved `xml` and `xmlns` prefixes or namespaces, and two attributes with the same expanded name.
- * Each binding change is undone in constant time, so deep nesting stays linear.
+ *
+ * Its bookkeeping stays linear in time and memory, whatever the URIs: a namespace URI is a slice of the document that
+ * is hashed and compared only when it is declared (interned into a numbered entry), never per use, so a megabyte URI
+ * shared by many attributes or elements costs nothing more per use. An entry is forgotten when the last binding to it
+ * goes out of scope, each binding change is undone in constant time, and an open element costs three array slots.
  */
 export function scanNamespacedXml(text: string, handlers: NamespacedXmlHandlers, fail: XmlScanFail): void {
   const malformed = (detail: string): never => fail('malformed', `The file is malformed XML: ${detail}`);
-  // The key '' is the default namespace; '' as a value never occurs for a prefix (refused) and means "undeclared"
-  // for the default namespace, which is stored as a missing key.
-  const bindings = new Map<string, string>([['xml', XML_NAMESPACE]]);
-  const scopes: { readonly name: ExpandedName; readonly shadowed: readonly Shadowed[] }[] = [];
+
+  const interned = new Map<string, InternedNamespace>();
+  let nextNamespaceId = 0;
+  const acquire = (uri: string): InternedNamespace => {
+    let entry = interned.get(uri);
+    if (entry === undefined) {
+      entry = { id: nextNamespaceId, references: 0, uri };
+      nextNamespaceId += 1;
+      interned.set(uri, entry);
+    }
+    entry.references += 1;
+    return entry;
+  };
+  const release = (entry: InternedNamespace | undefined): void => {
+    if (entry === undefined) return;
+    entry.references -= 1;
+    // `entry.uri` is the very string used as the key, so the lookup does not compare URI contents.
+    if (entry.references === 0) interned.delete(entry.uri);
+  };
+
+  // The key '' is the default namespace; '' as a URI never occurs for a prefix (refused) and means "undeclared" for the
+  // default namespace, which is stored as a missing key.
+  const bindings = new Map<string, InternedNamespace>([['xml', acquire(XML_NAMESPACE)]]);
+  // The open elements, innermost last: their resolved names, and where each one's entries in `undo` start.
+  const openNamespaces: (string | null)[] = [];
+  const openLocalNames: string[] = [];
+  const undoMarks: number[] = [];
+  const undo: Shadowed[] = [];
 
   /** Splits a QName into prefix ('' when none) and local part, refusing anything that is not a QName. */
   const splitQName = (qualifiedName: string): readonly [string, string] => {
@@ -256,66 +298,77 @@ export function scanNamespacedXml(text: string, handlers: NamespacedXmlHandlers,
     return [qualifiedName.slice(0, colon), qualifiedName.slice(colon + 1)];
   };
 
-  const resolvePrefix = (prefix: string): string => {
+  const resolvePrefix = (prefix: string): InternedNamespace => {
     if (prefix === 'xmlns') malformed('the reserved prefix xmlns is used on an element or attribute name');
-    const namespace = bindings.get(prefix);
-    if (namespace === undefined) malformed('an element or attribute uses an undeclared namespace prefix');
-    return namespace as string;
+    const entry = bindings.get(prefix);
+    if (entry === undefined) malformed('an element or attribute uses an undeclared namespace prefix');
+    return entry as InternedNamespace;
   };
 
-  const declare = (prefix: string, namespace: string, shadowed: Shadowed[]): void => {
+  const declare = (prefix: string, namespace: string): void => {
     if (prefix === 'xmlns') malformed('the reserved prefix xmlns is declared');
     if (prefix === 'xml' ? namespace !== XML_NAMESPACE : namespace === XML_NAMESPACE) {
       malformed('the reserved prefix xml is bound to another namespace, or its namespace to another prefix');
     }
     if (namespace === XMLNS_NAMESPACE) malformed('the reserved xmlns namespace is declared');
     if (prefix !== '' && namespace === '') malformed('a namespace prefix is bound to an empty name');
-    shadowed.push({ prefix, previous: bindings.get(prefix) });
+    // The replaced binding stays referenced while it is shadowed; it is restored, not re-interned, at the end tag.
+    undo.push({ prefix, previous: bindings.get(prefix) });
     if (namespace === '') bindings.delete(prefix);
-    else bindings.set(prefix, namespace);
+    else bindings.set(prefix, acquire(namespace));
   };
 
   scanXml(
     text,
     {
       endElement: () => {
-        const scope = scopes.pop() as (typeof scopes)[number];
-        for (let index = scope.shadowed.length - 1; index >= 0; index -= 1) {
-          const { prefix, previous } = scope.shadowed[index] as Shadowed;
+        const mark = undoMarks.pop() as number;
+        while (undo.length > mark) {
+          const { prefix, previous } = undo.pop() as Shadowed;
+          release(bindings.get(prefix));
           if (previous === undefined) bindings.delete(prefix);
           else bindings.set(prefix, previous);
         }
-        handlers.endElement(scope.name);
+        handlers.endElement({ localName: openLocalNames.pop() as string, namespace: openNamespaces.pop() as string | null });
       },
-      startElement: (qualifiedName, rawAttributes) => {
-        // Declarations first: they apply to the element's own name and to its other attributes.
-        const shadowed: Shadowed[] = [];
-        for (const [attributeName, value] of rawAttributes) {
+      startElement: (qualifiedName, attributes) => {
+        // Declarations first: they apply to the element's own name and to its other attributes. Each one is removed
+        // from `attributes` once read, as is each prefixed attribute below, so what is left is passed on as is.
+        undoMarks.push(undo.length);
+        for (const [attributeName, value] of attributes) {
           if (attributeName === 'xmlns') {
-            declare('', value, shadowed);
+            declare('', value);
+            attributes.delete(attributeName);
           } else if (attributeName.startsWith('xmlns:')) {
             const [, prefix] = splitQName(attributeName);
-            declare(prefix, value, shadowed);
+            declare(prefix, value);
+            attributes.delete(attributeName);
           }
         }
-        // Pushed before any later refusal, so the scope always matches the tokenizer's stack.
         const [prefix, local] = splitQName(qualifiedName);
-        const name: ExpandedName = { localName: local, namespace: prefix === '' ? (bindings.get('') ?? null) : resolvePrefix(prefix) };
-        scopes.push({ name, shadowed });
+        const name: ExpandedName = {
+          localName: local,
+          namespace: prefix === '' ? (bindings.get('')?.uri ?? null) : resolvePrefix(prefix).uri,
+        };
+        openNamespaces.push(name.namespace);
+        openLocalNames.push(local);
 
-        const attributes = new Map<string, string>();
-        const qualified = new Set<string>();
-        for (const [attributeName, value] of rawAttributes) {
-          if (attributeName === 'xmlns' || attributeName.startsWith('xmlns:')) continue;
+        // Local names of the prefixed attributes, grouped by interned namespace: two prefixes bound to equal URIs share
+        // an entry, so an attribute repeated under an alias is found without touching the URI.
+        let localNamesByNamespace: Map<number, Set<string>> | undefined;
+        for (const attributeName of attributes.keys()) {
+          if (!attributeName.includes(':')) continue;
           const [attributePrefix, attributeLocal] = splitQName(attributeName);
-          if (attributePrefix === '') {
-            attributes.set(attributeLocal, value);
-            continue;
+          const { id } = resolvePrefix(attributePrefix);
+          localNamesByNamespace ??= new Map();
+          let localNames = localNamesByNamespace.get(id);
+          if (localNames === undefined) {
+            localNames = new Set();
+            localNamesByNamespace.set(id, localNames);
           }
-          // An expanded name cannot contain a space, so the pair is unambiguous as a key.
-          const key = `${resolvePrefix(attributePrefix)} ${attributeLocal}`;
-          if (qualified.has(key)) malformed('an element repeats an attribute under two prefixes of one namespace');
-          qualified.add(key);
+          if (localNames.has(attributeLocal)) malformed('an element repeats an attribute under two prefixes of one namespace');
+          localNames.add(attributeLocal);
+          attributes.delete(attributeName);
         }
         handlers.startElement(name, attributes);
       },
