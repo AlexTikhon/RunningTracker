@@ -9,8 +9,9 @@ import {
 } from '@running-tracker/contracts';
 import { Pool } from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { activityHistoryContext, encodeActivityHistoryCursor } from '../src/activity-history/activity-history-cursor.js';
 import { createApp } from '../src/app.js';
 import { csrfHeaderName } from '../src/auth/session-http.js';
 import { SessionManager } from '../src/auth/session-manager.js';
@@ -415,6 +416,29 @@ describe('activity history HTTP API', () => {
       }
       // The matching scope accepts it.
       await read({ cursor: manualCursor, source: 'manual' });
+    });
+
+    it('refuses a correctly scoped cursor with an impossible start before acquiring a database connection', async () => {
+      await seedSources();
+      const context = activityHistoryContext({ orgId: ids.orgA, source: null, type: null, userId: ids.userOrgA });
+      const connect = vi.spyOn(runtimePool, 'connect');
+      try {
+        for (const startedAt of ['2026-02-30T00:00:00.000000Z', '2025-02-29T00:00:00.000000Z', '2026-04-31T00:00:00.000000Z', '0000-01-01T00:00:00.000000Z', '2026-01-01T24:00:00.000000Z']) {
+          const cursor = encodeActivityHistoryCursor({ context, id: randomUUID(), kind: 'activity', startedAt });
+          connect.mockClear();
+          const response = await get(owner, { cursor }).expect(400);
+          expect(errorCode(response), startedAt).toBe('INVALID_CURSOR');
+          expect(response.headers['cache-control']).toBe('no-store');
+          expect(connect, startedAt).not.toHaveBeenCalled();
+        }
+        // The same scope with a real leap day and microseconds is read from the database.
+        connect.mockClear();
+        const cursor = encodeActivityHistoryCursor({ context, id: randomUUID(), kind: 'activity', startedAt: '2024-02-29T23:59:59.999999Z' });
+        expect((await read({ cursor })).items).toEqual([]);
+        expect(connect).toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
     });
 
     it('refuses repeated, unknown and invalid parameters', async () => {

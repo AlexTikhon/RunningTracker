@@ -64,7 +64,10 @@ trailing zeros like every other timestamp).
 
 The cursor is base64url JSON `{ version: 1, startedAt, kind, id, context }`, `context` being a SHA-256 digest of
 `['activity-history', 1, userId, orgId, source ?? '*', type ?? '*']`. A tampered or malformed cursor, or one from another
-person, organization or filter, is `400 INVALID_CURSOR`, decided before the transaction. It is not signed, for the
+person, organization or filter, is `400 INVALID_CURSOR`, decided before the transaction. Malformed includes a
+`startedAt` that is not exactly `YYYY-MM-DDTHH:MM:SS.ffffffZ`, not a real calendar date and clock time (February 30,
+February 29 of a common year, 24:00) or in year 0000: PostgreSQL refuses these, and `Date.parse` would roll some of them
+over instead of refusing them. The string is passed on unchanged, never through a JavaScript `Date`. It is not signed, for the
 reason of ADR-0056/0072: forging one only moves a position inside the caller's own rows. Consistency is that of an
 unchanged dataset: pages neither repeat nor skip; a write between two page requests may move items (no cross-page
 snapshot is promised).

@@ -1,5 +1,5 @@
 import { activityHistoryItemSchema } from '@running-tracker/contracts';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '../http/errors.js';
 import {
@@ -7,7 +7,12 @@ import {
   decodeActivityHistoryCursor,
   encodeActivityHistoryCursor,
 } from './activity-history-cursor.js';
-import { activityHistoryPageSql, mapActivityHistoryRow, type ActivityHistoryRow } from './activity-history-service.js';
+import {
+  ActivityHistoryService,
+  activityHistoryPageSql,
+  mapActivityHistoryRow,
+  type ActivityHistoryRow,
+} from './activity-history-service.js';
 
 const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const userId = '44444444-4444-4444-8444-444444444444';
@@ -63,6 +68,37 @@ describe('activity history cursor', () => {
     ]) {
       expect(code(() => decodeActivityHistoryCursor(cursor, { context })), cursor).toBe('INVALID_CURSOR');
     }
+  });
+
+  // Date.parse normalises some impossible dates (February 30 becomes March 2) instead of refusing them; PostgreSQL
+  // refuses them, so such a cursor must stop here and never reach the statement.
+  it('refuses a correctly scoped cursor whose start is not a real instant PostgreSQL accepts', () => {
+    for (const startedAt of [
+      '2026-02-30T00:00:00.000000Z',
+      '2025-02-29T00:00:00.000000Z',
+      '2026-04-31T00:00:00.000000Z',
+      '0000-01-01T00:00:00.000000Z',
+      '2026-01-01T24:00:00.000000Z',
+      '2026-01-01T23:60:00.000000Z',
+      '2026-01-01T23:59:60.000000Z',
+    ]) {
+      const cursor = encodeActivityHistoryCursor({ ...position, startedAt });
+      expect(code(() => decodeActivityHistoryCursor(cursor, { context })), startedAt).toBe('INVALID_CURSOR');
+    }
+  });
+
+  it('keeps a valid leap day and its microseconds exactly as encoded', () => {
+    for (const startedAt of ['2024-02-29T23:59:59.999999Z', '2026-10-05T06:00:00.000001Z']) {
+      expect(decodeActivityHistoryCursor(encodeActivityHistoryCursor({ ...position, startedAt }), { context }).startedAt).toBe(startedAt);
+    }
+  });
+
+  it('refuses an impossible cursor before acquiring a database connection', async () => {
+    const connect = vi.fn(() => Promise.reject(new Error('must not connect')));
+    const service = new ActivityHistoryService({ pool: { connect } });
+    const cursor = encodeActivityHistoryCursor({ ...position, startedAt: '2026-02-30T00:00:00.000000Z' });
+    await expect(service.read({ userId }, orgId, { cursor })).rejects.toMatchObject({ code: 'INVALID_CURSOR', statusCode: 400 });
+    expect(connect).not.toHaveBeenCalled();
   });
 });
 

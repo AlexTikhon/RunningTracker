@@ -112,6 +112,16 @@ export const activityHistoryResponseSchema = z.strictObject({
   }),
 });
 
+// The keyset start of a cursor: microsecond precision, as PostgreSQL stores it, so the keyset comparison is exact. It
+// is kept as the string the server wrote and sent to PostgreSQL as is, never converted through a JavaScript Date (which
+// would drop the microseconds). The shared timestamp check refuses impossible calendar dates (February 30, February 29
+// of a common year, April 31) and clock values (24:00, :60), which Date.parse would quietly roll over and PostgreSQL
+// would refuse with an error. On top of it: exactly six fraction digits and UTC `Z`, and no year 0000, which the ISO
+// check allows and PostgreSQL rejects.
+export const activityHistoryCursorStartedAtSchema = timestampSchema
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u, 'Expected a UTC timestamp with six fraction digits')
+  .refine((value) => !value.startsWith('0000-'), 'Expected a year from 0001, as PostgreSQL accepts');
+
 // The decoded content of `nextCursor`. Opaque to clients; documented so the server's checks are explicit. `kind` and
 // `id` break ties between items that started at the same microsecond, also between an activity and a run that happen
 // to share an id. `context` is a digest of the person, the organization and both filters, so a cursor from another
@@ -120,8 +130,7 @@ export const activityHistoryCursorSchema = z.strictObject({
   context: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
   id: uuidSchema,
   kind: z.enum(['activity', 'run']),
-  // Microsecond precision, as PostgreSQL stores it, so the keyset comparison is exact.
-  startedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u),
+  startedAt: activityHistoryCursorStartedAtSchema,
   version: z.literal(1),
 });
 

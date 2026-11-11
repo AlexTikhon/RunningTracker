@@ -53,8 +53,10 @@ export function decodeActivityHistoryCursor(cursor: string, expected: { context:
   } catch {
     throw invalid();
   }
+  // The schema checks the start is a real calendar instant PostgreSQL accepts (not Date.parse, which rolls February 30
+  // over to March 2), so an impossible position is refused here, before any database connection is taken.
   const parsed = activityHistoryCursorSchema.safeParse(decoded);
-  if (!parsed.success || parsed.data.context !== expected.context || Number.isNaN(Date.parse(parsed.data.startedAt))) {
+  if (!parsed.success || parsed.data.context !== expected.context) {
     throw invalid();
   }
   return { ...parsed.data, id: parsed.data.id.toLowerCase() };

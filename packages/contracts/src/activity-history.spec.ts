@@ -132,6 +132,42 @@ describe('activity history cursor', () => {
       expect(activityHistoryCursorSchema.safeParse({ ...cursor, ...changed }).success, JSON.stringify(changed)).toBe(false);
     }
   });
+
+  it('accepts real leap days and nonzero microseconds, unchanged', () => {
+    for (const startedAt of [
+      '2024-02-29T00:00:00.000000Z',
+      '2000-02-29T12:34:56.000001Z',
+      '0001-01-01T00:00:00.000000Z',
+      '9999-12-31T23:59:59.999999Z',
+      '2026-10-05T06:00:00.987654Z',
+    ]) {
+      expect(activityHistoryCursorSchema.parse({ ...cursor, startedAt }).startedAt, startedAt).toBe(startedAt);
+    }
+  });
+
+  it('refuses impossible dates, year 0000, invalid clock values and other spellings', () => {
+    for (const startedAt of [
+      '2026-02-30T00:00:00.000000Z',
+      '2025-02-29T00:00:00.000000Z',
+      '1900-02-29T00:00:00.000000Z',
+      '2026-04-31T00:00:00.000000Z',
+      '2026-13-01T00:00:00.000000Z',
+      '2026-00-10T00:00:00.000000Z',
+      '2026-01-00T00:00:00.000000Z',
+      '0000-01-01T00:00:00.000000Z',
+      '2026-01-01T24:00:00.000000Z',
+      '2026-01-01T23:60:00.000000Z',
+      '2026-01-01T23:59:60.000000Z',
+      '2026-01-01T23:59:59Z',
+      '2026-01-01T23:59:59.1234567Z',
+      '2026-01-01T23:59:59.123456z',
+      '2026-01-01T23:59:59.123456+00:00',
+      '2026-01-01 23:59:59.123456Z',
+      '+02026-01-01T23:59:59.123456Z',
+    ]) {
+      expect(activityHistoryCursorSchema.safeParse({ ...cursor, startedAt }).success, startedAt).toBe(false);
+    }
+  });
 });
 
 describe('activity history OpenAPI', () => {
