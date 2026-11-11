@@ -445,6 +445,53 @@ export async function countScenarioRows(
   });
 }
 
+export interface ActivitySeed {
+  readonly distanceM?: number | null;
+  readonly durationS: number;
+  readonly notes?: string | null;
+  readonly rpe?: number | null;
+  readonly source: 'gpx' | 'manual';
+  readonly startedAt: string;
+  readonly type: string;
+  readonly userId: string;
+}
+
+// Activities written directly as the owner role, so a history test (ADR-0087) does not go through the form or a file
+// upload. A GPX row carries what the import route would write: an idempotency key and a 32-byte fingerprint (random
+// here, no route). Removed with the organization (cascades), like every other row here.
+export async function createActivities(
+  environment: E2eEnvironment,
+  orgId: string,
+  activities: readonly ActivitySeed[],
+): Promise<string[]> {
+  return withOwnerTransaction(environment, async (client) => {
+    const ids: string[] = [];
+    for (const activity of activities) {
+      const id = randomUUID();
+      ids.push(id);
+      const gpx = activity.source === 'gpx';
+      await client.query(
+        `INSERT INTO activities (org_id, id, user_id, type, started_at, duration_s, distance_m, rpe, notes, source, idempotency_key, import_fingerprint)
+         VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9, $10, $11::uuid, CASE WHEN $10 = 'gpx' THEN sha256(gen_random_uuid()::text::bytea) END)`,
+        [
+          orgId,
+          id,
+          activity.userId,
+          activity.type,
+          activity.startedAt,
+          activity.durationS,
+          activity.distanceM ?? null,
+          gpx ? null : activity.rpe ?? null,
+          gpx ? null : activity.notes ?? null,
+          activity.source,
+          gpx ? randomUUID() : null,
+        ],
+      );
+    }
+    return ids;
+  });
+}
+
 /** The organization's activities by source, and its runs: what a GPX import may and may not have written (ADR-0086). */
 export async function countActivityRows(
   environment: E2eEnvironment,

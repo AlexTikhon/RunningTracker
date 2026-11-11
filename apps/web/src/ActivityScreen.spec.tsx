@@ -5,10 +5,11 @@ import { ActivityScreen } from './ActivityScreen.js';
 import { defaultTimeZone } from './run-search.js';
 
 const orgId = '11111111-1111-4111-8111-111111111111';
+const userId = '44444444-4444-4444-8444-444444444444';
 
 describe('ActivityScreen', () => {
   const markup = renderToStaticMarkup(
-    <ActivityScreen csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }} orgId={orgId} signal={new AbortController().signal} />,
+    <ActivityScreen csrf={{ headerName: 'x-csrf-token', token: 'a'.repeat(43) }} orgId={orgId} signal={new AbortController().signal} userId={userId} />,
   );
 
   it('is titled Activity and says plainly that only the person can see their activities', () => {
@@ -40,19 +41,25 @@ describe('ActivityScreen', () => {
     expect(markup).not.toContain('role="alert"');
   });
 
-  it('shows the list loading, with the zone it will use', () => {
-    expect(markup).toContain('Your activities');
-    expect(markup).toContain('Loading your activities…');
+  it('shows the unified history loading, unfiltered, with the zone it will use (ADR-0087)', () => {
+    expect(markup).toContain('<h2 id="activity-history-title">Your activity history</h2>');
+    expect(markup).toContain('Loading your activity history…');
     expect(markup).toContain(`Times are shown in ${defaultTimeZone()}`);
+    expect(markup).toContain('aria-label="History filters"');
+    expect(markup).toContain('<option value="" selected="">All sources</option>');
+    expect(markup).toContain('<option value="" selected="">All types</option>');
+    expect(markup).toContain('<option value="recorded_run">Recorded run</option>');
+    expect(markup).not.toContain('Run details');
   });
 
   it('offers a GPX import beside the form, and says imports show elapsed time (ADR-0086)', () => {
     expect(markup).toContain('<h2 id="gpx-import-title">Import a GPX file</h2>');
     expect(markup).toContain('type="file"');
-    expect(markup).toMatch(/A GPX import shows its\s+elapsed time \(pauses included\), not moving time\./u);
+    expect(markup).toMatch(/a GPX import shows its elapsed time, pauses included, not moving time/u);
   });
 
   it('does not put identifiers on the screen', () => {
     expect(markup).not.toContain(orgId);
+    expect(markup).not.toContain(userId);
   });
 });

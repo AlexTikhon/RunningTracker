@@ -38,7 +38,7 @@ test('the demo runner adds an activity, sees it in the list after a reload, and 
   await expectOrganizationSelected(page, demoScenario.orgId);
 
   await openActivity(page);
-  const list = page.getByRole('region', { name: 'Your activities' });
+  const list = page.getByRole('region', { name: 'Your activity history' });
   await expect(list.getByText('No activities yet.')).toBeVisible();
 
   const form = page.getByRole('form', { name: 'Add an activity' });
@@ -52,7 +52,7 @@ test('the demo runner adds an activity, sees it in the list after a reload, and 
   await form.getByRole('button', { name: 'Save activity' }).click();
 
   await expect(form.getByRole('status')).toHaveText('Activity saved.');
-  const cards = list.getByRole('list', { name: 'Your activities' }).locator(':scope > li');
+  const cards = list.getByRole('list', { name: 'Your activity history' }).locator(':scope > li');
   await expect(cards).toHaveCount(1);
   for (const text of ['Ride', label, '1:15:00', '32.50 km', '6/10', 'Hilly loop']) {
     await expect(cards.first()).toContainText(text);

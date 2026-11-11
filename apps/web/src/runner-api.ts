@@ -1,4 +1,5 @@
 import {
+  activityHistoryResponseSchema,
   activityListResponseSchema,
   activityViewSchema,
   apiErrorResponseSchema,
@@ -31,6 +32,8 @@ import {
   weeklyInsightAcceptedSchema,
   weeklyInsightViewSchema,
   weeklyReviewSchema,
+  type ActivityHistoryResponse,
+  type ActivityHistorySource,
   type ActivityListResponse,
   type ActivityType,
   type ActivityView,
@@ -479,6 +482,30 @@ export async function listActivities(
     signal,
   });
   return activityListResponseSchema.parse(requireSuccess(response));
+}
+
+export interface ActivityHistoryInput {
+  cursor: string | null;
+  orgId: string;
+  source: ActivityHistorySource | null;
+  type: ActivityType | null;
+}
+
+// The unified history (ADR-0087): manual activities, GPX imports and the person's own finished recorded runs. The cursor
+// is bound by the server to the person, the organization and both filters, so it is only ever sent with the filters it
+// came from.
+export async function loadActivityHistory(input: ActivityHistoryInput, signal: AbortSignal): Promise<ActivityHistoryResponse> {
+  const query = new URLSearchParams();
+  if (input.source !== null) query.set('source', input.source);
+  if (input.type !== null) query.set('type', input.type);
+  if (input.cursor !== null) query.set('cursor', input.cursor);
+  const suffix = query.size === 0 ? '' : `?${query.toString()}`;
+  const response = await requestJson(`/api/orgs/${encodeURIComponent(input.orgId)}/activity-history${suffix}`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal,
+  });
+  return activityHistoryResponseSchema.parse(requireSuccess(response));
 }
 
 // 204 in every case, including an activity that is already gone (there is no tombstone), so a retry is always safe.

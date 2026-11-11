@@ -68,7 +68,7 @@ test('previews a GPX file without saving, imports it once with the chosen type, 
   await signIn(page, environment.demoWebOrigin, demoScenario.runnerUserId, demoScenario.orgId);
   await openActivity(page);
   const region = importRegion(page);
-  const list = page.getByRole('region', { name: 'Your activities' });
+  const list = page.getByRole('region', { name: 'Your activity history' });
   await expect(list.getByText('No activities yet.')).toBeVisible();
 
   // 1. Preview: the server's numbers, nothing stored.
@@ -111,7 +111,7 @@ test('previews a GPX file without saving, imports it once with the chosen type, 
   expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 1, manual: 0, runs: 0 });
 
   // 3. Listed as a GPX import with elapsed time, never as manual, and no GPS run was created.
-  const cards = list.getByRole('list', { name: 'Your activities' }).locator(':scope > li');
+  const cards = list.getByRole('list', { name: 'Your activity history' }).locator(':scope > li');
   await expect(cards).toHaveCount(1);
   for (const text of ['Ride', label(startMs), 'Elapsed time6:10', '0.33 km', 'SourceGPX import']) {
     await expect(cards.first()).toContainText(text);

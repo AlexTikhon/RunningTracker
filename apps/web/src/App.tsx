@@ -1055,13 +1055,16 @@ export function App() {
 
       {activeView === 'activity' && (
         session.status === 'ready' && selectedOrgId !== null ? (
-          // Owner-only manual activities (ADR-0072), outside the run lifecycle, writer lease and upload queue. A new
-          // session, person or organization is a new screen with no request carried over.
+          // Owner-only manual activities (ADR-0072), GPX imports (ADR-0086) and the unified history with the person's own
+          // finished runs (ADR-0087), outside the run lifecycle, writer lease and upload queue. A new session, person or
+          // organization is a new screen with no request carried over.
           <ActivityScreen
             key={`${sessionGeneration(session.signal)}|${session.session.identity.userId}|${selectedOrgId}`}
+            accessToken={mapboxAccessToken}
             csrf={session.session.csrf}
             orgId={selectedOrgId}
             signal={session.signal}
+            userId={session.session.identity.userId}
           />
         ) : (
           <section className="coach-prerequisite" role="status">{viewPrerequisite('activity log')}</section>

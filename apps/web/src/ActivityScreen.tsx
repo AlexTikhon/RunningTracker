@@ -1,41 +1,49 @@
-import { ACTIVITY_NOTES_MAX_LENGTH, ACTIVITY_TYPES, type ActivityView } from '@running-tracker/contracts';
+import { ACTIVITY_NOTES_MAX_LENGTH, ACTIVITY_TYPES } from '@running-tracker/contracts';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import {
   ActivityDeletionController,
-  ActivityListController,
   ActivitySubmissionController,
   confirmingActivityDeletion,
   idleSubmission,
-  loadingActivityList,
   type ActivityDeletionSnapshot,
-  type ActivityListSnapshot,
   type ActivitySubmissionSnapshot,
 } from './activity-controller.js';
 import {
-  activityDurationLabels,
-  activitySourceLabels,
   activityTypeLabels,
   defaultActivityDraft,
   validateActivityDraft,
   type ActivityDraft,
 } from './activity-form.js';
+import {
+  ActivityHistoryController,
+  historyFilterKey,
+  loadingActivityHistory,
+  noHistoryFilters,
+  type ActivityHistoryFilters,
+  type ActivityHistorySnapshot,
+} from './activity-history-controller.js';
 import { ActivityAlreadySaved, type SavedActivityView } from './ActivityAlreadySaved.js';
+import { ActivityHistoryList } from './ActivityHistoryList.js';
 import { GpxImportPanel } from './GpxImportPanel.js';
-import { defaultTimeZone, formatDistance, formatDuration, formatStartedAt } from './run-search.js';
+import { RunDetailScreen } from './RunDetailScreen.js';
+import { defaultTimeZone } from './run-search.js';
 import {
   createActivity,
   deleteActivity,
-  listActivities,
+  loadActivityHistory,
   readActivity,
   type CsrfCredentials,
 } from './runner-api.js';
 
 export interface ActivityScreenProps {
+  // The public Mapbox token for a recorded run's route in its details, or null (the details then say so).
+  accessToken?: string | null;
   csrf: CsrfCredentials;
   orgId: string;
   // The session's signal: ending or replacing the session silences every request of this screen.
   signal: AbortSignal;
+  userId: string;
 }
 
 interface DeletionSelection {
@@ -44,24 +52,36 @@ interface DeletionSelection {
   label: string;
 }
 
-function describeActivity(activity: ActivityView, timeZone: string): string {
-  return `${activityTypeLabels[activity.type].toLowerCase()} of ${formatStartedAt(activity.startedAt, timeZone)}`;
+interface RunDetailSelection {
+  runId: string;
+  scope: string;
+  session: AbortSignal;
 }
 
-// Activities of the signed-in person: entered by hand (ADR-0072) or imported from a GPX file (ADR-0086). The parent keys
-// it by session, person and organization, so a change of any of them starts from a clean form, import and list with no
-// request carried over. Owner-only: nothing here is visible to a coach or another member.
-export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
+// Activities of the signed-in person: entered by hand (ADR-0072) or imported from a GPX file (ADR-0086), listed with
+// their own finished recorded runs in one history (ADR-0087). The parent keys it by session, person and organization,
+// so a change of any of them starts from a clean form, import, filters and history with no request carried over.
+// Owner-only: nothing here is visible to a coach or another member.
+export function ActivityScreen({ accessToken = null, csrf, orgId, signal, userId }: ActivityScreenProps) {
   const timeZone = useMemo(() => defaultTimeZone(), []);
   const csrfRef = useRef(csrf);
   csrfRef.current = csrf;
   const [draft, setDraft] = useState<ActivityDraft>(() => defaultActivityDraft(new Date()));
   const [showErrors, setShowErrors] = useState(false);
-  const [list, setList] = useState<ActivityListSnapshot>(loadingActivityList);
+  const [filters, setFilters] = useState<ActivityHistoryFilters>(noHistoryFilters);
+  const filterKey = historyFilterKey(filters);
+  const [historyState, setHistoryState] = useState<{ key: string; snapshot: ActivityHistorySnapshot } | null>(null);
+  // A snapshot of other filters is never shown: until the new controller answers, the history is loading.
+  const history = historyState?.key === filterKey ? historyState.snapshot : loadingActivityHistory(filters);
   const [submission, setSubmission] = useState<ActivitySubmissionSnapshot>(idleSubmission);
   const [notice, setNotice] = useState<string | null>(null);
-  const lister = useRef<ActivityListController | null>(null);
+  const lister = useRef<ActivityHistoryController | null>(null);
   const submitter = useRef<ActivitySubmissionController | null>(null);
+  const identityScope = `${userId}|${orgId}`;
+  const [runDetail, setRunDetail] = useState<RunDetailSelection | null>(null);
+  const selectedRun = runDetail?.scope === identityScope && runDetail.session === signal && !signal.aborted ? runDetail : null;
+  if (runDetail !== null && selectedRun === null) setRunDetail(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
 
   const validation = validateActivityDraft(draft, Date.now());
@@ -129,15 +149,25 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
     };
   }, [signal]);
 
+  // One history controller per organization, filter pair and session: changing a filter disposes the previous one,
+  // which aborts its request and silences any answer it would still have produced.
+  const { source: sourceFilter, type: typeFilter } = filters;
   useEffect(() => {
-    const next = new ActivityListController({ load: listActivities, onChange: setList, orgId, signal });
+    const key = historyFilterKey({ source: sourceFilter, type: typeFilter });
+    const next = new ActivityHistoryController({
+      filters: { source: sourceFilter, type: typeFilter },
+      load: loadActivityHistory,
+      onChange: (snapshot) => setHistoryState({ key, snapshot }),
+      orgId,
+      signal,
+    });
     lister.current = next;
     next.start();
     return () => {
       next.dispose();
       if (lister.current === next) lister.current = null;
     };
-  }, [orgId, signal]);
+  }, [orgId, signal, sourceFilter, typeFilter]);
 
   useEffect(() => {
     const next = new ActivitySubmissionController({
@@ -164,7 +194,6 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
   const nextDeletionId = useRef(1);
   const deleter = useRef<ActivityDeletionController | null>(null);
   const deletionSnapshot = deletion !== null && deletionState?.id === deletion.id ? deletionState.snapshot : confirmingActivityDeletion;
-  const deletionPending = deletion !== null && deletionSnapshot.phase === 'pending';
 
   const afterDeleted = useRef<(selection: DeletionSelection) => void>(() => undefined);
   afterDeleted.current = (selection) => {
@@ -203,8 +232,31 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
 
   const update = (patch: Partial<ActivityDraft>) => setDraft((current) => ({ ...current, ...patch }));
 
+  // A filter change starts a new history: no confirmation of the previous list stays open and its notice is dropped.
+  const changeFilters = (next: ActivityHistoryFilters) => {
+    setDeletion(null);
+    setNotice(null);
+    setFilters(next);
+  };
+
+  const openRun = (runId: string) => {
+    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setDeletion(null);
+    setRunDetail({ runId, scope: identityScope, session: signal });
+  };
+
+  const closeRun = () => {
+    setRunDetail(null);
+    requestAnimationFrame(() => {
+      const trigger = returnFocus.current;
+      if (trigger?.isConnected) trigger.focus();
+      else document.getElementById('activity-history-title')?.focus();
+    });
+  };
+
   return (
-    <section aria-labelledby="activity-title" className="activity-shell">
+    <section aria-labelledby={selectedRun === null ? 'activity-title' : 'run-detail-title'} className="activity-shell">
+      <div className="activity-overview" hidden={selectedRun !== null}>
       <div className="search-panel__heading">
         <p className="eyebrow">Activity log</p>
         <h1 id="activity-title" ref={heading} tabIndex={-1}>Activity</h1>
@@ -309,89 +361,43 @@ export function ActivityScreen({ csrf, orgId, signal }: ActivityScreenProps) {
         unit={draft.unit}
       />
 
-      <section aria-labelledby="activity-list-title" className="search-results">
-        <h2 id="activity-list-title">Your activities</h2>
-        <p className="search-results__note">
-          Times are shown in {timeZone}. Distances in {draft.unit === 'km' ? 'kilometres' : 'miles'}. A GPX import shows its
-          elapsed time (pauses included), not moving time.
-        </p>
-        <p className="search-panel__notice" role="status">{notice ?? ''}</p>
-        {list.status === 'loading' && <p className="search-results__loading">Loading your activities…</p>}
-        {(list.status === 'error' || list.status === 'access-denied') && (
-          <div className="run-share__failure" role="alert">
-            <span>{list.message}</span>
-            <button onClick={() => lister.current?.retry()} type="button">Retry</button>
-          </div>
-        )}
-        {list.status === 'ready' && list.items.length === 0 && (
-          <p className="search-results__empty">No activities yet. Saved activities appear here, newest first.</p>
-        )}
-        {list.status === 'ready' && list.items.length > 0 && (
-          <ul aria-label="Your activities" className="run-cards">
-            {list.items.map((activity) => {
-              const label = describeActivity(activity, timeZone);
-              const confirming = deletion?.activityId === activity.activityId;
-              return (
-                <li className={confirming ? 'run-card run-card--deleting' : 'run-card'} key={activity.activityId}>
-                  <h3>{activityTypeLabels[activity.type]}</h3>
-                  <time dateTime={activity.startedAt}>{formatStartedAt(activity.startedAt, timeZone)}</time>
-                  <dl>
-                    <div><dt>{activityDurationLabels[activity.source]}</dt><dd>{formatDuration(activity.durationS)}</dd></div>
-                    <div><dt>Distance</dt><dd>{activity.distanceM === null ? '—' : formatDistance(activity.distanceM, draft.unit)}</dd></div>
-                    <div><dt>Effort</dt><dd>{activity.rpe === null ? '—' : `${activity.rpe}/10`}</dd></div>
-                    <div><dt>Source</dt><dd>{activitySourceLabels[activity.source]}</dd></div>
-                  </dl>
-                  {activity.notes !== null && <p className="activity-card__notes">{activity.notes}</p>}
-                  {!confirming && (
-                    <div className="run-card__actions">
-                      <button
-                        aria-label={`Delete your ${label}`}
-                        disabled={deletionPending}
-                        onClick={() => {
-                          setNotice(null);
-                          setDeletion({ activityId: activity.activityId, id: nextDeletionId.current++, label });
-                        }}
-                        type="button"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  )}
-                  {confirming && (
-                    <section aria-label={`Delete your ${label}?`} className="run-delete">
-                      <h4>Delete this activity?</h4>
-                      <p className="run-delete__warning">It is removed permanently. This cannot be undone.</p>
-                      {deletionSnapshot.message !== null && <p className="run-delete__failure" role="alert">{deletionSnapshot.message}</p>}
-                      <div className="run-delete__actions">
-                        <button
-                          className="finish-action"
-                          disabled={deletionPending || deletionSnapshot.phase === 'unavailable'}
-                          onClick={() => deleter.current?.confirm()}
-                          type="button"
-                        >
-                          {deletionPending ? 'Deleting…' : 'Confirm delete'}
-                        </button>
-                        <button disabled={deletionPending} onClick={() => setDeletion(null)} type="button">Cancel</button>
-                      </div>
-                    </section>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        {list.status === 'ready' && list.moreMessage !== null && (
-          <div className="run-share__failure" role="alert">
-            <span>{list.moreMessage}</span>
-            <button onClick={() => lister.current?.retry()} type="button">{list.outdated ? 'Refresh' : 'Retry'}</button>
-          </div>
-        )}
-        {list.status === 'ready' && list.hasMore && list.moreMessage === null && (
-          <button disabled={list.loadingMore} onClick={() => lister.current?.loadMore()} type="button">
-            {list.loadingMore ? 'Loading…' : 'Load more'}
-          </button>
-        )}
-      </section>
+      <ActivityHistoryList
+        deletion={deletion === null ? null : { activityId: deletion.activityId, snapshot: deletionSnapshot }}
+        filters={filters}
+        history={history}
+        notice={notice}
+        onCancelDelete={() => setDeletion(null)}
+        onConfirmDelete={() => deleter.current?.confirm()}
+        onDelete={(activityId, label) => {
+          setNotice(null);
+          setDeletion({ activityId, id: nextDeletionId.current++, label });
+        }}
+        onFiltersChange={changeFilters}
+        onLoadMore={() => lister.current?.loadMore()}
+        onOpenRun={openRun}
+        onRefresh={() => {
+          setNotice(null);
+          lister.current?.refresh();
+        }}
+        onRetry={() => lister.current?.retry()}
+        timeZone={timeZone}
+        unit={draft.unit}
+      />
+      </div>
+      {selectedRun !== null && (
+        <RunDetailScreen
+          accessToken={accessToken}
+          backLabel="Back to activity history"
+          key={`${identityScope}|${selectedRun.runId}`}
+          onBack={closeRun}
+          orgId={orgId}
+          runId={selectedRun.runId}
+          signal={signal}
+          timeZone={timeZone}
+          unit={draft.unit}
+          userId={userId}
+        />
+      )}
     </section>
   );
 }
