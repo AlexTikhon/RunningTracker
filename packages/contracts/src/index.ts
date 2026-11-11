@@ -1,4 +1,5 @@
 export * from './activities.js';
+export * from './activity-history.js';
 export * from './activity-gpx-import.js';
 export * from './daily-metrics.js';
 export * from './daily-movement.js';

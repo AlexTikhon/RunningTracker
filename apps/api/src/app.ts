@@ -2,6 +2,8 @@ import express, { type Express, type Router } from 'express';
 import type { Pool } from 'pg';
 
 import { createActivityRouter } from './activities/activity.routes.js';
+import { ActivityHistoryService, type ActivityHistoryTestHooks } from './activity-history/activity-history-service.js';
+import { activityHistoryNoStore, createActivityHistoryRouter } from './activity-history/activity-history.routes.js';
 import { createDailyMetricsRouter } from './daily-metrics/daily-metrics.routes.js';
 import { createDailyMovementRouter, dailyMovementNoStore } from './daily-movement/daily-movement.routes.js';
 import { DailyOverviewService, type DailyOverviewTestHooks } from './daily-overview/daily-overview-service.js';
@@ -70,6 +72,8 @@ export interface AppDependencies {
   archiveTileCache?: ArchiveTileCacheStore;
   archiveTilePipeline?: ArchiveTilePipeline;
   archiveTileScheduler?: ArchiveTileGenerationScheduler;
+  /** Barriers inside the activity history's read transaction, for snapshot tests. */
+  testOnlyActivityHistoryHooks?: ActivityHistoryTestHooks;
   /** Barriers inside the daily overview's read transaction, for snapshot tests. */
   testOnlyDailyOverviewHooks?: DailyOverviewTestHooks;
   testOnlyDailyTrendsHooks?: DailyTrendsTestHooks;
@@ -97,6 +101,7 @@ export function createApp({
   archiveTileCache,
   archiveTilePipeline,
   archiveTileScheduler,
+  testOnlyActivityHistoryHooks,
   testOnlyDailyOverviewHooks,
   testOnlyDailyTrendsHooks,
   testOnlyFaultInjector,
@@ -107,7 +112,8 @@ export function createApp({
   weeklyInsights,
 }: AppDependencies): Express {
   if (
-    (testOnlyDailyOverviewHooks ||
+    (testOnlyActivityHistoryHooks ||
+      testOnlyDailyOverviewHooks ||
       testOnlyDailyTrendsHooks ||
       testOnlyFaultInjector ||
       testOnlyRouter ||
@@ -169,6 +175,7 @@ export function createApp({
   });
   // Before the body parser, so that a malformed or oversized body's error answer is not cacheable either (ADR-0078).
   app.use('/api/orgs/:orgId/daily-movement', dailyMovementNoStore);
+  app.use('/api/orgs/:orgId/activity-history', activityHistoryNoStore);
   app.use('/api/orgs/:orgId/daily-overview', dailyOverviewNoStore);
   app.use('/api/orgs/:orgId/daily-trends', dailyTrendsNoStore);
   app.use('/api/orgs/:orgId/meals', mealsNoStore);
@@ -228,6 +235,17 @@ export function createApp({
       clock,
       config,
       pool: pool as Pick<Pool, 'connect'>,
+      sessionManager: sessions,
+    })),
+  );
+  // The unified activity history (ADR-0087): read-only, owner-only, over activities and the person's own finished runs.
+  app.use(
+    '/api/orgs/:orgId/activity-history',
+    routePrefix('/api/orgs/:orgId/activity-history', createActivityHistoryRouter({
+      history: new ActivityHistoryService({
+        pool: pool as Pick<Pool, 'connect'>,
+        ...(testOnlyActivityHistoryHooks ? { hooks: testOnlyActivityHistoryHooks } : {}),
+      }),
       sessionManager: sessions,
     })),
   );

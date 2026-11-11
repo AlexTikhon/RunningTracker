@@ -7,6 +7,7 @@ import {
   activityViewSchema,
   createActivityRequestSchema,
 } from './activities.js';
+import { ACTIVITY_HISTORY_SOURCES, activityHistoryResponseSchema } from './activity-history.js';
 import { GPX_IMPORT_CONTENT_TYPE, GPX_IMPORT_MAX_BYTES, gpxImportPreviewSchema } from './activity-gpx-import.js';
 import {
   dailyMetricsListResponseSchema,
@@ -523,6 +524,22 @@ export const openApiDocument = {
         responses: { '204': noContentResponse, ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/activity-history': {
+      get: {
+        tags: ['Activities'],
+        summary: "List the signed-in person's own activities and finished recorded runs in one chronological history",
+        description:
+          "Owner-only, read-only (ADR-0087). One page of the person's manual activities (`source: manual`), GPX-imported activities (`source: gpx`) and own finished recorded GPS runs (`source: recorded_run`), read on every request from the existing `activities`, `runs` and `run_summaries` tables by one UNION ALL statement in one REPEATABLE READ, READ ONLY transaction; nothing is copied, stored, queued or written. Every branch states the organization and the owner (the session's identity) in addition to row-level security, so a run that another person shared with the caller never appears, whatever sharing grants exist; another organization's rows never appear; a person who is not an active member gets 403 ORG_ACCESS_DENIED. Order: `startedAt` descending, then a recorded run before an activity at the same instant, then id descending; the order is total, also across an activity and a run that share an id. `limit` 1 to 50, default 20. `source` (one of the three) and `type` (an activity type; a recorded run has type `run`) are optional single-valued filters; a repeated or unknown parameter is 400 INVALID_REQUEST. The keyset cursor is bound to the person, the organization and both filters: a tampered cursor, or one from another person, organization or filter, is 400 INVALID_CURSOR. Each source names its duration for what it is: `enteredDurationS` (entered by the person), `elapsedDurationS` (GPX: first to last point, pauses included, not moving time) and, for a recorded run, `summary.observedDurationS` (accepted GPS edges only). Recorded-run metrics come only from a summary whose source revision equals the run's current data revision (`summary.state: current`); a missing summary is `pending` and one made for an older revision is `stale`, and both carry no metric. `captureSource` is null: the server does not record whether device GPS or the simulator captured a run. Items are never merged, deduplicated or added together across sources, and no total is returned. A deleted activity or run is absent from the next read. Answers `Cache-Control: no-store`, errors included.",
+        parameters: [
+          parameterRef('OrgId'),
+          parameterRef('HistorySource'),
+          parameterRef('HistoryType'),
+          parameterRef('Limit50'),
+          parameterRef('Cursor'),
+        ],
+        responses: { '200': jsonResponse('One page of the history.', 'ActivityHistoryResponse'), ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/daily-overview/{localDate}': {
       get: {
         tags: ['Daily overview'],
@@ -779,6 +796,20 @@ export const openApiDocument = {
         description: 'One client-generated UUID per import attempt, kept until a confirmed outcome (ADR-0073, ADR-0086).',
         schema: schemaRef('UUID'),
       },
+      HistorySource: {
+        name: 'source',
+        in: 'query',
+        required: false,
+        description: 'Only items of this provenance. Omitted: every source.',
+        schema: { enum: [...ACTIVITY_HISTORY_SOURCES], type: 'string' },
+      },
+      HistoryType: {
+        name: 'type',
+        in: 'query',
+        required: false,
+        description: 'Only items of this activity type. A recorded run has type `run`. Omitted: every type.',
+        schema: { enum: [...ACTIVITY_TYPES], type: 'string' },
+      },
       MealId: { name: 'mealId', in: 'path', required: true, schema: schemaRef('UUID') },
       MealLocalDate: {
         name: 'localDate',
@@ -959,6 +990,7 @@ export const openApiDocument = {
       ActivityView: jsonSchema(activityViewSchema),
       GpxImportPreview: jsonSchema(gpxImportPreviewSchema),
       ActivityListResponse: jsonSchema(activityListResponseSchema),
+      ActivityHistoryResponse: jsonSchema(activityHistoryResponseSchema),
       PutDailyMetricsRequest: jsonSchema(putDailyMetricsRequestSchema),
       DailyMetricsView: jsonSchema(dailyMetricsViewSchema),
       DailyMetricsListResponse: jsonSchema(dailyMetricsListResponseSchema),

@@ -1349,6 +1349,47 @@
         }
       }
     },
+    "/api/orgs/{orgId}/activity-history": {
+      "get": {
+        "tags": [
+          "Activities"
+        ],
+        "summary": "List the signed-in person's own activities and finished recorded runs in one chronological history",
+        "description": "Owner-only, read-only (ADR-0087). One page of the person's manual activities (`source: manual`), GPX-imported activities (`source: gpx`) and own finished recorded GPS runs (`source: recorded_run`), read on every request from the existing `activities`, `runs` and `run_summaries` tables by one UNION ALL statement in one REPEATABLE READ, READ ONLY transaction; nothing is copied, stored, queued or written. Every branch states the organization and the owner (the session's identity) in addition to row-level security, so a run that another person shared with the caller never appears, whatever sharing grants exist; another organization's rows never appear; a person who is not an active member gets 403 ORG_ACCESS_DENIED. Order: `startedAt` descending, then a recorded run before an activity at the same instant, then id descending; the order is total, also across an activity and a run that share an id. `limit` 1 to 50, default 20. `source` (one of the three) and `type` (an activity type; a recorded run has type `run`) are optional single-valued filters; a repeated or unknown parameter is 400 INVALID_REQUEST. The keyset cursor is bound to the person, the organization and both filters: a tampered cursor, or one from another person, organization or filter, is 400 INVALID_CURSOR. Each source names its duration for what it is: `enteredDurationS` (entered by the person), `elapsedDurationS` (GPX: first to last point, pauses included, not moving time) and, for a recorded run, `summary.observedDurationS` (accepted GPS edges only). Recorded-run metrics come only from a summary whose source revision equals the run's current data revision (`summary.state: current`); a missing summary is `pending` and one made for an older revision is `stale`, and both carry no metric. `captureSource` is null: the server does not record whether device GPS or the simulator captured a run. Items are never merged, deduplicated or added together across sources, and no total is returned. A deleted activity or run is absent from the next read. Answers `Cache-Control: no-store`, errors included.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/HistorySource"
+          },
+          {
+            "$ref": "#/components/parameters/HistoryType"
+          },
+          {
+            "$ref": "#/components/parameters/Limit50"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityHistoryResponse"
+                }
+              }
+            },
+            "description": "One page of the history."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/daily-overview/{localDate}": {
       "get": {
         "tags": [
@@ -2139,6 +2180,38 @@
         "description": "One client-generated UUID per import attempt, kept until a confirmed outcome (ADR-0073, ADR-0086).",
         "schema": {
           "$ref": "#/components/schemas/UUID"
+        }
+      },
+      "HistorySource": {
+        "name": "source",
+        "in": "query",
+        "required": false,
+        "description": "Only items of this provenance. Omitted: every source.",
+        "schema": {
+          "enum": [
+            "manual",
+            "gpx",
+            "recorded_run"
+          ],
+          "type": "string"
+        }
+      },
+      "HistoryType": {
+        "name": "type",
+        "in": "query",
+        "required": false,
+        "description": "Only items of this activity type. A recorded run has type `run`. Omitted: every type.",
+        "schema": {
+          "enum": [
+            "run",
+            "walk",
+            "ride",
+            "hike",
+            "swim",
+            "strength",
+            "other"
+          ],
+          "type": "string"
         }
       },
       "MealId": {
@@ -4094,6 +4167,338 @@
         "required": [
           "items",
           "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "ActivityHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "manual",
+                      "gpx",
+                      "recorded_run"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "run",
+                      "walk",
+                      "ride",
+                      "hike",
+                      "swim",
+                      "strength",
+                      "other"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "source",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          "items": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "activityId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "distanceM": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "enteredDurationS": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 172800
+                    },
+                    "notes": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "rpe": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 10
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "manual"
+                    },
+                    "startedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "activityId",
+                    "distanceM",
+                    "enteredDurationS",
+                    "notes",
+                    "rpe",
+                    "source",
+                    "startedAt",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "activityId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "distanceM": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "elapsedDurationS": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 172800
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "gpx"
+                    },
+                    "startedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "activityId",
+                    "distanceM",
+                    "elapsedDurationS",
+                    "source",
+                    "startedAt",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "captureSource": {
+                      "type": "null"
+                    },
+                    "finishedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "runId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "recorded_run"
+                    },
+                    "startedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "summary": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "distanceM": {
+                              "type": "number",
+                              "minimum": 0
+                            },
+                            "gpsQuality": {
+                              "type": "string",
+                              "enum": [
+                                "good",
+                                "poor",
+                                "insufficient"
+                              ]
+                            },
+                            "observedDurationS": {
+                              "type": "number",
+                              "minimum": 0
+                            },
+                            "state": {
+                              "type": "string",
+                              "const": "current"
+                            }
+                          },
+                          "required": [
+                            "distanceM",
+                            "gpsQuality",
+                            "observedDurationS",
+                            "state"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "pending",
+                                "stale"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "state"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "type": {
+                      "type": "string",
+                      "const": "run"
+                    }
+                  },
+                  "required": [
+                    "captureSource",
+                    "finishedAt",
+                    "runId",
+                    "source",
+                    "startedAt",
+                    "summary",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "historyVersion": {
+                "type": "string",
+                "const": "activity-history-1"
+              },
+              "persisted": {
+                "type": "boolean",
+                "const": false
+              },
+              "snapshot": {
+                "type": "string",
+                "const": "single_read_only_transaction"
+              }
+            },
+            "required": [
+              "historyVersion",
+              "persisted",
+              "snapshot"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "applied",
+          "items",
+          "nextCursor",
+          "provenance"
         ],
         "additionalProperties": false
       },
