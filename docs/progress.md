@@ -4061,3 +4061,35 @@ NOT RUN).
 
 **Not established.** No Firefox, WebKit or iPhone run: the iOS Files picker, Safari's upload and the 15-second request
 deadline on a slow link are untested (pilot step 18 is for the owner). No overlap detection with GPS runs.
+
+## GPX import hardening: linear tokenizer and namespace resolution (ADR-0086) (2026-11-11)
+
+**Defects fixed.** (1) HIGH: the shared tokenizer (`gps-traces/xml-scanner.ts`) parsed attributes with an unanchored
+regex through `matchAll()` and `replace()`, which rescanned every suffix of a malformed tag: `<gpx ` + n × `x` + `>` took
+about 0.1 s at n = 10 000, 1.5 s at 40 000 and more than 5 s at 200 000, on the request thread of an authenticated
+upload. Tags are now read with one forward cursor: every step consumes input or refuses the document at the first
+invalid position, and no regex runs over a tag. The same 200 000-character upload previously held the integration test
+server for 90.8 s (preview and confirmation); it is now refused with `malformed_xml` at once. (2) MEDIUM: the import
+reader identified descendants by local name only, so `<trk xmlns="urn:foreign">` or `<x:trk>` with `x` undeclared counted
+as the GPX track under a valid root. `scanNamespacedXml` now resolves every name (inherited bindings, `xmlns=""`, scope
+restoration with a constant-time undo log, reserved `xml`/`xmlns` rules, undeclared prefixes refused) and the reader
+recognizes `gpx`, `trk`, `trkseg`, `trkpt`, `time` and `extensions` by GPX 1.1 namespace plus local name. Foreign
+content stays allowed inside a GPX `<extensions>`. The "prefixed root" unit fixture left its children unprefixed (so
+outside the GPX namespace) and used an undeclared `gpxtpx:` prefix; it is now a fully prefixed, namespace-well-formed
+document. Storage, metrics, fingerprints, limits, deduplication, retries and owner isolation are unchanged. The D10
+trace tools keep local-name matching on the new tokenizer.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| New tests seen failing first | 40 unit tests failed on the old code for the expected reasons; the hostile child for the reproduction was killed at its deadline; the new HTTP test failed on the old code after 90.8 s |
+| `xml-scanner.hostile.spec.ts` (child processes, external deadline 30 s, parse budget 5 s, documents of about 10 MiB) | 13 passed; locally about 5–25 ms for the malformed cases, 0.3 s for 262 000 nested namespace declarations, 0.85 s for one million valid attributes |
+| `npm test` (all workspaces) | scripts 115, API 1,749, web 1,233, contracts 257, fixtures 14, simulator 3; all passed |
+| Integration (`running_tracker_test`, server-reported runtime/owner/maintenance roles checked first): `activity-gpx-import`, `gps-trace-analysis`, `gps-trace-report` | 3 files, 42 passed (+1: hostile tag, foreign track and undeclared prefix answered 422 for preview and confirmation, nothing written) |
+| `npx playwright test --project=chromium activity-gpx-import.spec.ts` | 3 passed |
+| `npm run lint`, `npm run typecheck` | pass |
+
+**Not established.** No iPhone or physical-device run. A legitimate 10 MiB file still parses on the request thread
+(about 0.2 s locally); a hostile 10 MiB file with a million attributes on one element costs under 1 s, linearly. No
+per-element attribute limit was added.

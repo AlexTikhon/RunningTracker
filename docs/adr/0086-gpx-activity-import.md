@@ -37,6 +37,7 @@ no live sharing, and an import never creates or touches a GPS run.
 | Encoding | UTF-8 (a byte-order mark is allowed); invalid UTF-8, NUL, or a declared non-UTF-8 encoding is `not_utf8` |
 | Markup | no DOCTYPE and no other `<!` declaration (`declaration`); entity and character references are never expanded; nothing referenced by the file is fetched (the reader has no I/O) |
 | Root | `<gpx>` in the GPX 1.1 namespace `http://www.topografix.com/GPX/1/1` (prefixed or not); GPX 1.0 or no namespace is `not_gpx_1_1` |
+| Namespaces | every element is identified by namespace URI and local name, with inherited bindings, `xmlns=""` and scope restoration (Namespaces in XML 1.0); only elements in the GPX 1.1 namespace count as `gpx`, `trk`, `trkseg`, `trkpt`, `time` or `extensions`, so a foreign `<trk>` or `<time>` never satisfies a required element; an undeclared prefix, a malformed qualified name, an empty prefix binding or a misused `xml`/`xmlns` prefix is `malformed_xml`; foreign content is allowed (and skipped) inside a GPX `<extensions>` |
 | Track | exactly one `<trk>`, a direct child of `<gpx>` (`track_count`, `structure`) |
 | Segments | 1 to 1 000 `<trkseg>`, each with at least one point (`too_many_segments`, `empty_segment`) |
 | Points | 2 to 100 000 `<trkpt>` in total (`too_few_points`, `too_many_points`, counted while reading) |
@@ -72,6 +73,16 @@ and the 24-hour future rule of ADR-0072.
 Moving the tokenizer into `xml-scanner.ts` made it slightly stricter for the D10 tools too: text outside the root
 element, a second root element, a repeated attribute and any `<!` declaration other than a comment or CDATA are now
 refused instead of ignored. Their existing tests pass unchanged.
+
+Hardening (2026-11-11). The tokenizer now reads every tag with a single forward cursor instead of an unanchored
+attribute regex, which rescanned every suffix of a malformed tag (`<gpx xxxx…>`: about 1.5 s at 40 000 characters,
+more than 5 s at 200 000) and could block the request thread with a file far below the upload limit. Each step consumes
+input or refuses at the first invalid position; a 10 MiB hostile tag is refused in milliseconds
+(`xml-scanner.hostile.spec.ts`, run in a child process under an external deadline). Tags follow XML more closely:
+attributes must be separated by whitespace, `</ name>` and `<` inside a name are refused, and whitespace means XML
+whitespace (space, tab, CR, LF). The import reader resolves namespaces through `scanNamespacedXml` (row "Namespaces"
+above). The D10 trace tools keep identifying elements by local name (they also read GPX 1.0 and namespace-less files);
+their existing tests pass unchanged on the new tokenizer.
 
 Not reused, on purpose: the GPS run edge filter (ADR-0012, `v1`: accuracy at most 30 m, 0 to 10 s between points,
 at most 12 m/s, same segment). A GPS run's distance and "observed duration" sum accepted edges only. For an import:

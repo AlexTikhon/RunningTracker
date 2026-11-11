@@ -6,6 +6,11 @@
 //    so a reader that needs a number or an instant simply fails to parse a value that contains one;
 //  - tags must nest and close; text outside the root element is refused.
 // Callers decide which elements mean anything; everything else is skipped and never stored.
+//
+// The reader runs on uploaded files on the request thread, so it must stay linear in the size of its input. It reads
+// with one cursor that only moves forward: every step either consumes at least one character or refuses the document
+// at the position where it stopped making sense. There are no regular expressions over unbounded input in the tag
+// path (an unanchored attribute regex once rescanned every suffix of `<gpx xxxx…>`, which was quadratic).
 
 export type XmlScanFailure = 'declaration' | 'malformed' | 'not_xml';
 
@@ -20,7 +25,7 @@ export interface XmlScanHandlers {
 /** Called with a complete, human-readable message that never quotes the document. Must throw. */
 export type XmlScanFail = (kind: XmlScanFailure, message: string) => never;
 
-const ATTRIBUTE = /([^\s=/>"']+)\s*=\s*(?:"([^"]*)"|'([^']*)')/gu;
+// Anchored on the literal `<!`, so each position is tested in constant time.
 const DECLARATION = /<!DOCTYPE|<!ENTITY|<!\[(?!CDATA\[)/iu;
 
 export const DECLARATION_MESSAGE =
@@ -30,31 +35,119 @@ export function localName(qualifiedName: string): string {
   return qualifiedName.slice(qualifiedName.lastIndexOf(':') + 1);
 }
 
+const TAB = 0x09;
+const LINE_FEED = 0x0a;
+const CARRIAGE_RETURN = 0x0d;
+const SPACE = 0x20;
+const DOUBLE_QUOTE = 0x22;
+const SINGLE_QUOTE = 0x27;
+const SLASH = 0x2f;
+const LESS_THAN = 0x3c;
+const EQUALS = 0x3d;
+const GREATER_THAN = 0x3e;
+
+/** XML whitespace (S): space, tab, carriage return, line feed. */
+const isWhitespace = (code: number) => code === SPACE || code === TAB || code === LINE_FEED || code === CARRIAGE_RETURN;
+
+/** Characters that end a name inside a tag. Everything else is part of the name; the namespace layer checks colons. */
+const endsName = (code: number) =>
+  isWhitespace(code) ||
+  code === SLASH ||
+  code === GREATER_THAN ||
+  code === EQUALS ||
+  code === DOUBLE_QUOTE ||
+  code === SINGLE_QUOTE ||
+  code === LESS_THAN;
+
 export function scanXml(text: string, handlers: XmlScanHandlers, fail: XmlScanFail): void {
   const malformed = (detail: string): never => fail('malformed', `The file is malformed XML: ${detail}`);
   if (DECLARATION.test(text)) {
     fail('declaration', DECLARATION_MESSAGE);
   }
+  const length = text.length;
 
-  const parseAttributes = (source: string): Map<string, string> => {
+  /** The index after the name that starts at `from` (equal to `from` when there is none). */
+  const nameEnd = (from: number): number => {
+    let index = from;
+    while (index < length && !endsName(text.charCodeAt(index))) index += 1;
+    return index;
+  };
+  const skipWhitespace = (from: number): number => {
+    let index = from;
+    while (index < length && isWhitespace(text.charCodeAt(index))) index += 1;
+    return index;
+  };
+  const unterminatedTag = (): never => malformed('an unterminated tag');
+
+  /** Reads a closing tag whose `</` starts at `open`; returns the index after its `>`. */
+  const closingTag = (open: number, stack: string[]): number => {
+    const nameStart = open + 2;
+    const end = nameEnd(nameStart);
+    if (end === nameStart) {
+      if (end >= length) unterminatedTag();
+      malformed('a closing tag has no name');
+    }
+    const qualifiedName = text.slice(nameStart, end);
+    const close = skipWhitespace(end);
+    if (close >= length) unterminatedTag();
+    if (text.charCodeAt(close) !== GREATER_THAN) malformed('a closing tag has something after its name');
+    if (stack.pop() !== qualifiedName) malformed('a closing tag does not match its opening tag');
+    handlers.endElement(qualifiedName);
+    return close + 1;
+  };
+
+  /** Reads a start or empty-element tag whose `<` is at `open`; returns the index after its `>`. */
+  const startTag = (open: number, stack: string[]): number => {
+    const nameStart = open + 1;
+    let index = nameEnd(nameStart);
+    if (index === nameStart) {
+      if (index >= length) unterminatedTag();
+      malformed('an element has no name');
+    }
+    const qualifiedName = text.slice(nameStart, index);
     const attributes = new Map<string, string>();
-    for (const match of source.matchAll(ATTRIBUTE)) {
-      const name = match[1] as string;
-      if (attributes.has(name)) {
-        malformed('an element repeats an attribute');
+    for (;;) {
+      const separated = index;
+      index = skipWhitespace(index);
+      if (index >= length) unterminatedTag();
+      const code = text.charCodeAt(index);
+      if (code === GREATER_THAN) {
+        stack.push(qualifiedName);
+        handlers.startElement(qualifiedName, attributes);
+        return index + 1;
       }
-      attributes.set(name, (match[2] ?? match[3]) as string);
+      if (code === SLASH) {
+        if (index + 1 >= length) unterminatedTag();
+        if (text.charCodeAt(index + 1) !== GREATER_THAN) malformed('a "/" in a tag is not followed by ">"');
+        handlers.startElement(qualifiedName, attributes);
+        handlers.endElement(qualifiedName);
+        return index + 2;
+      }
+      // An attribute: whitespace, a name, optional whitespace, "=", optional whitespace, a quoted value.
+      if (index === separated) malformed('attributes are not separated by whitespace');
+      const attributeStart = index;
+      index = nameEnd(index);
+      if (index === attributeStart) malformed('an element has an attribute that is not name="value"');
+      const attributeName = text.slice(attributeStart, index);
+      index = skipWhitespace(index);
+      if (index >= length) unterminatedTag();
+      if (text.charCodeAt(index) !== EQUALS) malformed('an element has an attribute that is not name="value"');
+      index = skipWhitespace(index + 1);
+      if (index >= length) unterminatedTag();
+      const quote = text.charCodeAt(index);
+      if (quote !== DOUBLE_QUOTE && quote !== SINGLE_QUOTE) malformed('an attribute value is not quoted');
+      const valueEnd = text.indexOf(quote === DOUBLE_QUOTE ? '"' : "'", index + 1);
+      if (valueEnd === -1) malformed('an attribute value is never closed');
+      if (attributes.has(attributeName)) malformed('an element repeats an attribute');
+      attributes.set(attributeName, text.slice(index + 1, valueEnd));
+      index = valueEnd + 1;
     }
-    if (source.replace(ATTRIBUTE, '').trim() !== '') {
-      malformed('an element has an attribute that is not name="value"');
-    }
-    return attributes;
   };
 
   const stack: string[] = [];
   let sawElement = false;
   let position = 0;
-  while (position < text.length) {
+  while (position < length) {
     const open = text.indexOf('<', position);
     if (open === -1) {
       if (text.slice(position).trim() !== '') {
@@ -90,53 +183,14 @@ export function scanXml(text: string, handlers: XmlScanHandlers, fail: XmlScanFa
         malformed('an unterminated processing instruction');
       }
       position = end + 2;
+    } else if (text.startsWith('</', open)) {
+      position = closingTag(open, stack);
     } else {
-      // The end of a tag is the first '>' outside a quoted attribute value.
-      let quote = '';
-      let end = -1;
-      for (let index = open + 1; index < text.length; index += 1) {
-        const character = text[index] as string;
-        if (quote !== '') {
-          if (character === quote) {
-            quote = '';
-          }
-        } else if (character === '"' || character === "'") {
-          quote = character;
-        } else if (character === '>') {
-          end = index;
-          break;
-        }
+      if (stack.length === 0 && sawElement) {
+        malformed('more than one root element');
       }
-      if (end === -1) {
-        malformed('an unterminated tag');
-      }
-      const tag = text.slice(open + 1, end);
-      if (tag.startsWith('/')) {
-        const qualifiedName = tag.slice(1).trim();
-        if (stack.pop() !== qualifiedName) {
-          malformed('a closing tag does not match its opening tag');
-        }
-        handlers.endElement(qualifiedName);
-      } else {
-        const selfClosing = tag.endsWith('/');
-        const body = selfClosing ? tag.slice(0, -1) : tag;
-        const nameMatch = /^([^\s/>]+)([\s\S]*)$/u.exec(body);
-        if (!nameMatch) {
-          return malformed('an element has no name');
-        }
-        if (stack.length === 0 && sawElement) {
-          malformed('more than one root element');
-        }
-        sawElement = true;
-        const qualifiedName = nameMatch[1] as string;
-        stack.push(qualifiedName);
-        handlers.startElement(qualifiedName, parseAttributes(nameMatch[2] as string));
-        if (selfClosing) {
-          stack.pop();
-          handlers.endElement(qualifiedName);
-        }
-      }
-      position = end + 1;
+      sawElement = true;
+      position = startTag(open, stack);
     }
   }
 
@@ -146,4 +200,127 @@ export function scanXml(text: string, handlers: XmlScanHandlers, fail: XmlScanFa
   if (stack.length !== 0) {
     malformed('an element is never closed');
   }
+}
+
+// Namespaces in XML 1.0 on top of the tokenizer. A reader that identifies elements by namespace URI and local name uses
+// this instead of `localName()`, so an element in a foreign namespace, or one with an undeclared prefix, never passes
+// for a GPX element.
+
+export const XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
+export const XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/';
+
+export interface ExpandedName {
+  /** The namespace URI, or null for an element in no namespace. */
+  readonly namespace: string | null;
+  readonly localName: string;
+}
+
+export interface NamespacedXmlHandlers {
+  /**
+   * `attributes` holds the attributes in no namespace (unprefixed, not `xmlns`), by name. Namespace declarations and
+   * prefixed attributes are validated and resolved but not passed on.
+   */
+  startElement(name: ExpandedName, attributes: ReadonlyMap<string, string>): void;
+  /** The name as resolved at the matching start tag. */
+  endElement(name: ExpandedName): void;
+  text(chunk: string): void;
+}
+
+/** One namespace binding that an element's declarations replaced, restored when the element closes. */
+interface Shadowed {
+  readonly prefix: string;
+  readonly previous: string | undefined;
+}
+
+/**
+ * Scans `text` like `scanXml` and resolves every element and attribute name: inherited bindings, `xmlns=""` to
+ * undeclare the default namespace, and the previous bindings restored when an element closes. Refuses as malformed an
+ * undeclared prefix, a QName with an empty part or more than one colon, an empty prefix binding (`xmlns:p=""`), a
+ * misuse of the reserved `xml` and `xmlns` prefixes or namespaces, and two attributes with the same expanded name.
+ * Each binding change is undone in constant time, so deep nesting stays linear.
+ */
+export function scanNamespacedXml(text: string, handlers: NamespacedXmlHandlers, fail: XmlScanFail): void {
+  const malformed = (detail: string): never => fail('malformed', `The file is malformed XML: ${detail}`);
+  // The key '' is the default namespace; '' as a value never occurs for a prefix (refused) and means "undeclared"
+  // for the default namespace, which is stored as a missing key.
+  const bindings = new Map<string, string>([['xml', XML_NAMESPACE]]);
+  const scopes: { readonly name: ExpandedName; readonly shadowed: readonly Shadowed[] }[] = [];
+
+  /** Splits a QName into prefix ('' when none) and local part, refusing anything that is not a QName. */
+  const splitQName = (qualifiedName: string): readonly [string, string] => {
+    const colon = qualifiedName.indexOf(':');
+    if (colon === -1) return ['', qualifiedName];
+    if (colon === 0 || colon === qualifiedName.length - 1 || qualifiedName.includes(':', colon + 1)) {
+      malformed('a name is not a valid qualified name');
+    }
+    return [qualifiedName.slice(0, colon), qualifiedName.slice(colon + 1)];
+  };
+
+  const resolvePrefix = (prefix: string): string => {
+    if (prefix === 'xmlns') malformed('the reserved prefix xmlns is used on an element or attribute name');
+    const namespace = bindings.get(prefix);
+    if (namespace === undefined) malformed('an element or attribute uses an undeclared namespace prefix');
+    return namespace as string;
+  };
+
+  const declare = (prefix: string, namespace: string, shadowed: Shadowed[]): void => {
+    if (prefix === 'xmlns') malformed('the reserved prefix xmlns is declared');
+    if (prefix === 'xml' ? namespace !== XML_NAMESPACE : namespace === XML_NAMESPACE) {
+      malformed('the reserved prefix xml is bound to another namespace, or its namespace to another prefix');
+    }
+    if (namespace === XMLNS_NAMESPACE) malformed('the reserved xmlns namespace is declared');
+    if (prefix !== '' && namespace === '') malformed('a namespace prefix is bound to an empty name');
+    shadowed.push({ prefix, previous: bindings.get(prefix) });
+    if (namespace === '') bindings.delete(prefix);
+    else bindings.set(prefix, namespace);
+  };
+
+  scanXml(
+    text,
+    {
+      endElement: () => {
+        const scope = scopes.pop() as (typeof scopes)[number];
+        for (let index = scope.shadowed.length - 1; index >= 0; index -= 1) {
+          const { prefix, previous } = scope.shadowed[index] as Shadowed;
+          if (previous === undefined) bindings.delete(prefix);
+          else bindings.set(prefix, previous);
+        }
+        handlers.endElement(scope.name);
+      },
+      startElement: (qualifiedName, rawAttributes) => {
+        // Declarations first: they apply to the element's own name and to its other attributes.
+        const shadowed: Shadowed[] = [];
+        for (const [attributeName, value] of rawAttributes) {
+          if (attributeName === 'xmlns') {
+            declare('', value, shadowed);
+          } else if (attributeName.startsWith('xmlns:')) {
+            const [, prefix] = splitQName(attributeName);
+            declare(prefix, value, shadowed);
+          }
+        }
+        // Pushed before any later refusal, so the scope always matches the tokenizer's stack.
+        const [prefix, local] = splitQName(qualifiedName);
+        const name: ExpandedName = { localName: local, namespace: prefix === '' ? (bindings.get('') ?? null) : resolvePrefix(prefix) };
+        scopes.push({ name, shadowed });
+
+        const attributes = new Map<string, string>();
+        const qualified = new Set<string>();
+        for (const [attributeName, value] of rawAttributes) {
+          if (attributeName === 'xmlns' || attributeName.startsWith('xmlns:')) continue;
+          const [attributePrefix, attributeLocal] = splitQName(attributeName);
+          if (attributePrefix === '') {
+            attributes.set(attributeLocal, value);
+            continue;
+          }
+          // An expanded name cannot contain a space, so the pair is unambiguous as a key.
+          const key = `${resolvePrefix(attributePrefix)} ${attributeLocal}`;
+          if (qualified.has(key)) malformed('an element repeats an attribute under two prefixes of one namespace');
+          qualified.add(key);
+        }
+        handlers.startElement(name, attributes);
+      },
+      text: (chunk) => handlers.text(chunk),
+    },
+    fail,
+  );
 }

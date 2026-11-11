@@ -18,7 +18,7 @@ import {
 
 import { geodesicDistanceM } from '../gps-traces/geodesy.js';
 import { DECIMAL_NUMBER, parseInstant } from '../gps-traces/gpx.js';
-import { localName, scanXml } from '../gps-traces/xml-scanner.js';
+import { scanNamespacedXml, type ExpandedName } from '../gps-traces/xml-scanner.js';
 
 // The GPX reader of the activity import (ADR-0086). It reads the documented subset (packages/contracts,
 // activity-gpx-import.ts) and computes a summary; it never repairs, reorders, filters or truncates. Every message names
@@ -104,8 +104,9 @@ export function readGpxActivity(bytes: Uint8Array, nowMs: number): GpxActivity {
   const text = decodeUtf8(bytes);
 
   const hash = createHash('sha256').update(FINGERPRINT_DOMAIN, 'utf8');
-  // Local names of the open elements; `extensionsDepth` > 0 inside an <extensions> subtree, whose content is skipped.
-  const stack: string[] = [];
+  // The GPX local names of the open elements (null for an element in another namespace). `extensionsDepth` is the
+  // depth of the open GPX <extensions> element (0 outside one); its whole subtree is skipped.
+  const stack: (string | null)[] = [];
   let extensionsDepth = 0;
   let tracks = 0;
   let segments = 0;
@@ -175,33 +176,33 @@ export function readGpxActivity(bytes: Uint8Array, nowMs: number): GpxActivity {
     segmentPoints += 1;
   };
 
-  const startElement = (qualifiedName: string, attributes: ReadonlyMap<string, string>): void => {
-    const name = localName(qualifiedName);
+  const startElement = (name: ExpandedName, attributes: ReadonlyMap<string, string>): void => {
+    // GPX elements are identified by namespace URI and local name; anything else is foreign (null) and never stands in
+    // for a GPX element, whatever its local name.
+    const element = name.namespace === GPX_NAMESPACE_1_1 ? name.localName : null;
     const parent = stack[stack.length - 1];
-    stack.push(name);
+    stack.push(element);
     if (parent === undefined) {
-      if (name !== 'gpx') unsupported('not_gpx', 'The file is not a GPX document (the root element is not <gpx>)');
-      const colon = qualifiedName.lastIndexOf(':');
-      const namespace = attributes.get(colon === -1 ? 'xmlns' : `xmlns:${qualifiedName.slice(0, colon)}`);
-      if (namespace !== GPX_NAMESPACE_1_1) {
+      if (name.localName !== 'gpx') unsupported('not_gpx', 'The file is not a GPX document (the root element is not <gpx>)');
+      if (element !== 'gpx') {
         unsupported(
           'not_gpx_1_1',
-          namespace === GPX_1_0_NAMESPACE
+          name.namespace === GPX_1_0_NAMESPACE
             ? 'The file is GPX 1.0; only GPX 1.1 is supported'
             : 'The file does not declare the GPX 1.1 namespace; only GPX 1.1 is supported',
         );
       }
       return;
     }
-    if (extensionsDepth > 0 || name === 'extensions') {
-      if (name === 'extensions') extensionsDepth += 1;
-      return;
-    }
-    if (name === 'trk') {
+    if (extensionsDepth > 0) return;
+    if (element === 'extensions') {
+      // The whole subtree is skipped, whatever namespaces and names it uses.
+      extensionsDepth = stack.length;
+    } else if (element === 'trk') {
       if (stack.length !== 2) unsupported('structure', 'A <trk> element is not a direct child of <gpx>');
       tracks += 1;
       if (tracks > 1) unsupported('track_count', 'The file has more than one track; only one <trk> is supported');
-    } else if (name === 'trkseg') {
+    } else if (element === 'trkseg') {
       if (parent !== 'trk') unsupported('structure', 'A <trkseg> element is not inside <trk>');
       segments += 1;
       if (segments > GPX_IMPORT_MAX_SEGMENTS) {
@@ -209,39 +210,38 @@ export function readGpxActivity(bytes: Uint8Array, nowMs: number): GpxActivity {
       }
       segmentPoints = 0;
       hash.update('s\n', 'utf8');
-    } else if (name === 'trkpt') {
+    } else if (element === 'trkpt') {
       if (parent !== 'trkseg') unsupported('structure', 'A <trkpt> element is not inside <trkseg>');
       pointsTotal += 1;
       if (pointsTotal > GPX_IMPORT_MAX_POINTS) {
         unsupported('too_many_points', `The track has more than ${String(GPX_IMPORT_MAX_POINTS)} points`);
       }
       pending = { index: segmentPoints + 1, latText: attributes.get('lat'), lonText: attributes.get('lon'), timeText: undefined };
-    } else if (name === 'time' && parent === 'trkpt' && pending !== null) {
+    } else if (element === 'time' && parent === 'trkpt' && pending !== null) {
       if (pending.timeText !== undefined) unsupported('structure', `${pointName(pending.index)}: has more than one <time>`);
       collectingTime = { buffer: '' };
     }
   };
 
-  const endElement = (qualifiedName: string): void => {
-    const name = localName(qualifiedName);
-    stack.pop();
-    if (name === 'extensions' && extensionsDepth > 0) {
-      extensionsDepth -= 1;
+  const endElement = (): void => {
+    const depth = stack.length;
+    const element = stack.pop();
+    if (extensionsDepth > 0) {
+      if (depth === extensionsDepth) extensionsDepth = 0;
       return;
     }
-    if (extensionsDepth > 0) return;
-    if (name === 'time' && collectingTime !== null && pending !== null) {
+    if (element === 'time' && collectingTime !== null && pending !== null) {
       pending.timeText = collectingTime.buffer;
       collectingTime = null;
-    } else if (name === 'trkpt' && pending !== null) {
+    } else if (element === 'trkpt' && pending !== null) {
       finishPoint(pending);
       pending = null;
-    } else if (name === 'trkseg' && segmentPoints === 0) {
+    } else if (element === 'trkseg' && segmentPoints === 0) {
       unsupported('empty_segment', `Segment ${String(segments)} has no track points`);
     }
   };
 
-  scanXml(
+  scanNamespacedXml(
     text,
     {
       endElement,

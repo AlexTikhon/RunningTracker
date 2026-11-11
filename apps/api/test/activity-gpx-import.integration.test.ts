@@ -458,6 +458,28 @@ describe('ADR-0086 GPX activity import', () => {
       expect((await storedRows()).map((row) => [row.id, row.source, row.fingerprint_bytes])).toEqual([[activityId(9), 'manual', null]]);
     });
 
+    it('refuses a malformed tag and foreign or undeclared track elements over HTTP, and stores nothing', async () => {
+      const before = await writeState();
+      const foreignTrack = TRACK.replace('<trk>', '<trk xmlns="urn:foreign">');
+      const undeclaredPrefix = TRACK.replace(/<(\/?)(trk|trkseg|trkpt|time)>/gu, '<$1x:$2>').replace(/<trkpt /gu, '<x:trkpt ');
+      const cases: [string, string, string][] = [
+        // The reproduction that took more than 5 s with the regex attribute parser; refused at once now.
+        ['an attribute name that never gets a value', `<gpx ${'x'.repeat(200_000)}>`, 'malformed_xml'],
+        ['a track in a foreign namespace', foreignTrack, 'track_count'],
+        ['a track with an undeclared prefix', undeclaredPrefix, 'malformed_xml'],
+      ];
+      for (const [label, file, reason] of cases) {
+        const started = Date.now();
+        const previewed = await preview(owner, file);
+        expect([label, previewed.status, errorOf(previewed).code, errorOf(previewed).details]).toEqual([label, 422, 'GPX_UNSUPPORTED', { reason }]);
+        const confirmed = await confirm(owner, activityId(1), file);
+        expect([label, confirmed.status, errorOf(confirmed).code, errorOf(confirmed).details]).toEqual([label, 422, 'GPX_UNSUPPORTED', { reason }]);
+        expect(Date.now() - started, label).toBeLessThan(2_000);
+      }
+      expect(await storedRows()).toEqual([]);
+      expect(await writeState()).toEqual(before);
+    });
+
     it('refuses without a session, Origin or CSRF token, and stores nothing', async () => {
       const url = `${base(ids.orgA)}/${activityId(1)}/gpx-import?idempotencyKey=${importKey(1)}&type=ride`;
       await request(app).put(url).set('Origin', allowedOrigin).set('Content-Type', GPX_TYPE).send(TRACK).expect(401);

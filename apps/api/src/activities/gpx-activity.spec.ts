@@ -51,6 +51,13 @@ ${options.header ?? ''}${options.root ?? '<gpx version="1.1" creator="Synthetic"
 </gpx>`;
 }
 
+const GPX_NS = 'http://www.topografix.com/GPX/1/1';
+const GARMIN_NS = 'http://www.garmin.com/xmlschemas/TrackPointExtension/v1';
+const GPX_ELEMENTS = /<(\/?)(gpx|metadata|name|time|wpt|trk|trkseg|trkpt|ele|extensions|rte|rtept|desc)(?=[\s/>])/gu;
+
+/** The same document with every GPX element (not extension content) written with the `g:` prefix. */
+const prefixed = (text: string) => text.replace(GPX_ELEMENTS, '<$1g:$2');
+
 const bytes = (text: string) => new TextEncoder().encode(text);
 const read = (text: string, nowMs = NOW_MS) => readGpxActivity(bytes(text), nowMs);
 
@@ -110,17 +117,106 @@ describe('GPX activity import reader (ADR-0086)', () => {
     expect(offset.summary.distanceM).toBe(0);
   });
 
-  it('accepts a byte-order mark, a prefixed GPX 1.1 root, CDATA, comments, extensions and skipped elements', () => {
-    const text = gpx(
-      [[{ ...equator(0, 0), inner: '<extensions><gpxtpx:hr>140</gpxtpx:hr><trkseg>ignored</trkseg></extensions>' }, { ...equator(1, 10), time: `<![CDATA[${at(10)}]]>` }]],
-      {
-        afterTrack: '<rte><rtept lat="1" lon="1"><time>2020-01-01T00:00:00Z</time></rtept></rte><!-- a comment -->',
-        root: '<g:gpx version="1.1" creator="Synthetic" xmlns:g="http://www.topografix.com/GPX/1/1">',
-      },
-    ).replace('</gpx>', '</g:gpx>');
+  it('accepts a byte-order mark, a fully prefixed GPX 1.1 document, CDATA, comments, extensions and skipped elements', () => {
+    // Every GPX element carries the prefix: with no default namespace, an unprefixed child would be in no namespace.
+    const text = prefixed(
+      gpx(
+        [[{ ...equator(0, 0), inner: `<extensions><gpxtpx:hr>140</gpxtpx:hr><trkseg>ignored</trkseg></extensions>` }, { ...equator(1, 10), time: `<![CDATA[${at(10)}]]>` }]],
+        {
+          afterTrack: '<rte><rtept lat="1" lon="1"><time>2020-01-01T00:00:00Z</time></rtept></rte><!-- a comment -->',
+          root: `<gpx version="1.1" creator="Synthetic" xmlns:g="${GPX_NS}" xmlns:gpxtpx="${GARMIN_NS}">`,
+        },
+      ),
+    );
+    expect(text).toContain('<g:trkpt');
     const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...bytes(text)]);
     const { summary } = readGpxActivity(withBom, NOW_MS);
     expect(summary).toMatchObject({ elapsedDurationS: 10, pointCount: 2, segmentCount: 1 });
+  });
+
+  describe('namespaces', () => {
+    const one = equator(0, 0);
+    const two = equator(1, 10);
+    const plain = read(gpx([[one, two]]));
+
+    it('reads the same track from a default-namespace and a fully prefixed document', () => {
+      const text = prefixed(gpx([[one, two]], { root: `<gpx version="1.1" creator="Synthetic" xmlns:g="${GPX_NS}">` }));
+      const result = read(text);
+      expect(result.summary).toEqual(plain.summary);
+      expect(result.fingerprint.equals(plain.fingerprint)).toBe(true);
+    });
+
+    it('resolves nested prefix declarations and redundant redeclarations of the GPX namespace', () => {
+      const text = gpx([[one, two]]).replace(
+        /<trk>(.*)<\/trk>/su,
+        `<trk xmlns:t="${GPX_NS}"><name>x</name><t:trkseg xmlns="${GPX_NS}">${trkpt(one)}<t:trkpt lat="0" lon="${two.lon as string}"><t:time>${two.time as string}</t:time></t:trkpt></t:trkseg></trk>`,
+      );
+      expect(read(text).summary).toEqual(plain.summary);
+    });
+
+    it('skips legitimate foreign content inside <extensions>, also when it reuses GPX element names', () => {
+      const extensions = [
+        `<extensions><gpxtpx:TrackPointExtension xmlns:gpxtpx="${GARMIN_NS}"><gpxtpx:hr>140</gpxtpx:hr></gpxtpx:TrackPointExtension></extensions>`,
+        `<extensions><vendor xmlns="urn:vendor"><time>not a time</time><trkseg><trkpt lat="1" lon="1"/></trkseg></vendor></extensions>`,
+        `<extensions><v:data xmlns:v="urn:vendor"><v:trk/><inner xmlns=""><time>x</time></inner></v:data></extensions>`,
+      ];
+      for (const inner of extensions) {
+        const result = read(gpx([[{ ...one, inner }, { ...two, inner }]], { trackExtra: inner }));
+        expect(result.summary, inner).toEqual(plain.summary);
+        expect(result.fingerprint.equals(plain.fingerprint), inner).toBe(true);
+      }
+      // A prefix declared on the root is inherited by extension content anywhere below it.
+      const inherited = gpx([[{ ...one, inner: '<extensions><gpxtpx:hr>140</gpxtpx:hr></extensions>' }, two]], {
+        root: `<gpx version="1.1" creator="Synthetic" xmlns="${GPX_NS}" xmlns:gpxtpx="${GARMIN_NS}">`,
+      });
+      expect(read(inherited).summary).toEqual(plain.summary);
+    });
+
+    const onlyTrack = (replacement: string) => gpx([[one, two]]).replace(/<trk>.*<\/trk>/su, replacement);
+    const points = `${trkpt(one)}${trkpt(two)}`;
+    const cases: [string, GpxUnsupportedReason, string][] = [
+      ['a track in a foreign default namespace', 'track_count', onlyTrack(`<trk xmlns="urn:foreign"><trkseg>${points}</trkseg></trk>`)],
+      ['a track with an undeclared prefix', 'malformed_xml', onlyTrack(`<x:trk><x:trkseg>${points}</x:trkseg></x:trk>`)],
+      ['a track in no namespace (xmlns="")', 'track_count', onlyTrack(`<trk xmlns=""><trkseg>${points}</trkseg></trk>`)],
+      ['a track in the GPX 1.0 namespace under a 1.1 root', 'track_count', onlyTrack(`<trk xmlns="http://www.topografix.com/GPX/1/0"><trkseg>${points}</trkseg></trk>`)],
+      [
+        'a prefix rebound to a foreign namespace for the track',
+        'track_count',
+        prefixed(gpx([[one, two]], { root: `<gpx version="1.1" creator="Synthetic" xmlns:g="${GPX_NS}">` })).replace('<g:trk>', '<g:trk xmlns:g="urn:foreign">'),
+      ],
+      [
+        'a prefixed root whose unprefixed children are in no namespace',
+        'track_count',
+        gpx([[one, two]], { root: `<g:gpx version="1.1" creator="Synthetic" xmlns:g="${GPX_NS}">` }).replace('</gpx>', '</g:gpx>'),
+      ],
+      [
+        'a GPX track inside a foreign element',
+        'structure',
+        onlyTrack(`<w:wrap xmlns:w="urn:foreign"><trk><trkseg>${points}</trkseg></trk></w:wrap>`),
+      ],
+      ['a segment in a foreign namespace', 'too_few_points', onlyTrack(`<trk><trkseg xmlns="urn:foreign">${points}</trkseg></trk>`)],
+      ['points in a foreign namespace', 'empty_segment', onlyTrack(`<trk><trkseg><trkpt xmlns="urn:foreign" lat="0" lon="10"><time>${at(0)}</time></trkpt></trkseg></trk>`)],
+      [
+        'a prefixed time in a foreign namespace',
+        'time_missing',
+        gpx([[{ ...one, time: null, inner: `<t:time xmlns:t="urn:foreign">${at(0)}</t:time>` }, two]]),
+      ],
+      ['a time in a foreign default namespace', 'time_missing', gpx([[{ ...one, time: null, inner: `<time xmlns="urn:foreign">${at(0)}</time>` }, two]])],
+      [
+        'a prefix used after the element that declared it has closed',
+        'malformed_xml',
+        onlyTrack(`<trk><trkseg xmlns:g="${GPX_NS}">${points}</trkseg><g:trkseg>${trkpt(equator(5, 100))}</g:trkseg></trk>`),
+      ],
+      ['an undeclared prefix inside extensions', 'malformed_xml', gpx([[{ ...one, inner: '<extensions><gpxtpx:hr>140</gpxtpx:hr></extensions>' }, two]])],
+      ['an undeclared attribute prefix on a point', 'malformed_xml', gpx([[{ ...one, inner: '' }, two]]).replace('<trkpt lat', '<trkpt x:a="1" lat')],
+    ];
+
+    it.each(cases)('refuses %s (%s)', (_label, reason, input) => {
+      const error = rejection(input);
+      expect(error.reason).toBe(reason);
+      expect(error.message).not.toContain(MARKER_LON);
+      expect(error.message).not.toMatch(/\d{4}-\d{2}-\d{2}T|10\.00\d|Synthetic|urn:foreign/u);
+    });
   });
 
   describe('fingerprint', () => {
