@@ -1355,7 +1355,7 @@
           "Activities"
         ],
         "summary": "List the signed-in person's own activities and finished recorded runs in one chronological history",
-        "description": "Owner-only, read-only (ADR-0087). One page of the person's manual activities (`source: manual`), GPX-imported activities (`source: gpx`) and own finished recorded GPS runs (`source: recorded_run`), read on every request from the existing `activities`, `runs` and `run_summaries` tables by one UNION ALL statement in one REPEATABLE READ, READ ONLY transaction; nothing is copied, stored, queued or written. Every branch states the organization and the owner (the session's identity) in addition to row-level security, so a run that another person shared with the caller never appears, whatever sharing grants exist; another organization's rows never appear; a person who is not an active member gets 403 ORG_ACCESS_DENIED. Order: `startedAt` descending, then a recorded run before an activity at the same instant, then id descending; the order is total, also across an activity and a run that share an id. `limit` 1 to 50, default 20. `source` (one of the three) and `type` (an activity type; a recorded run has type `run`) are optional single-valued filters; a repeated or unknown parameter is 400 INVALID_REQUEST. The keyset cursor is bound to the person, the organization and both filters: a tampered cursor, or one from another person, organization or filter, is 400 INVALID_CURSOR. Each source names its duration for what it is: `enteredDurationS` (entered by the person), `elapsedDurationS` (GPX: first to last point, pauses included, not moving time) and, for a recorded run, `summary.observedDurationS` (accepted GPS edges only). Recorded-run metrics come only from a summary whose source revision equals the run's current data revision (`summary.state: current`); a missing summary is `pending` and one made for an older revision is `stale`, and both carry no metric. `captureSource` is null: the server does not record whether device GPS or the simulator captured a run. Items are never merged, deduplicated or added together across sources, and no total is returned. A deleted activity or run is absent from the next read. Answers `Cache-Control: no-store`, errors included.",
+        "description": "Owner-only, read-only (ADR-0087). One page of the person's manual activities (`source: manual`), GPX-imported activities (`source: gpx`) and own finished recorded GPS runs (`source: recorded_run`), read on every request from the existing `activities`, `runs` and `run_summaries` tables by one UNION ALL statement in one REPEATABLE READ, READ ONLY transaction; nothing is copied, stored, queued or written. Every branch states the organization and the owner (the session's identity) in addition to row-level security, so a run that another person shared with the caller never appears, whatever sharing grants exist; another organization's rows never appear; a person who is not an active member gets 403 ORG_ACCESS_DENIED. Order: `startedAt` descending, then a recorded run before an activity at the same instant, then id descending; the order is total, also across an activity and a run that share an id. `limit` 1 to 50, default 20. `source` (one of the three) and `type` (an activity type; a recorded run has type `run`) are optional single-valued filters; a repeated or unknown parameter is 400 INVALID_REQUEST. `localDate` and `timeZone` (ADR-0088) are an optional pair, both or neither (one alone is 400 INVALID_REQUEST, as are an impossible or pre-2000 date and a zone that is not a supported IANA name): with them the page holds only the items that started in [start of `localDate`, start of the next calendar date) in `timeZone`, Today's attribution rule, so a date is 23 or 25 hours long around a daylight saving change and an item that continued past midnight belongs to the date it started on; without them, the whole history. The applied day, its canonical zone and its UTC interval are echoed as `applied.day` (null without the filter). The keyset cursor is bound to the person, the organization, both filters and the day filter (date and canonical zone): a tampered cursor, or one from another person, organization, filter, date or zone, is 400 INVALID_CURSOR. A cursor issued before the day filter existed remains valid for the whole history only. Each source names its duration for what it is: `enteredDurationS` (entered by the person), `elapsedDurationS` (GPX: first to last point, pauses included, not moving time) and, for a recorded run, `summary.observedDurationS` (accepted GPS edges only). Recorded-run metrics come only from a summary whose source revision equals the run's current data revision (`summary.state: current`); a missing summary is `pending` and one made for an older revision is `stale`, and both carry no metric. `captureSource` is null: the server does not record whether device GPS or the simulator captured a run. Items are never merged, deduplicated or added together across sources, and no total is returned. A deleted activity or run is absent from the next read. Answers `Cache-Control: no-store`, errors included.",
         "parameters": [
           {
             "$ref": "#/components/parameters/OrgId"
@@ -1365,6 +1365,12 @@
           },
           {
             "$ref": "#/components/parameters/HistoryType"
+          },
+          {
+            "$ref": "#/components/parameters/HistoryLocalDate"
+          },
+          {
+            "$ref": "#/components/parameters/HistoryTimeZone"
           },
           {
             "$ref": "#/components/parameters/Limit50"
@@ -2212,6 +2218,27 @@
             "other"
           ],
           "type": "string"
+        }
+      },
+      "HistoryLocalDate": {
+        "name": "localDate",
+        "in": "query",
+        "required": false,
+        "description": "Only items that started on this local calendar date (YYYY-MM-DD, not before 2000-01-01) in `timeZone`. Requires `timeZone`; omitted together with it: every date.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "HistoryTimeZone": {
+        "name": "timeZone",
+        "in": "query",
+        "required": false,
+        "description": "IANA time zone name, for example Europe/Warsaw, in which `localDate` is read: from its local midnight up to, not including, the next date's. Requires `localDate`.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
         }
       },
       "MealId": {
@@ -4176,6 +4203,43 @@
           "applied": {
             "type": "object",
             "properties": {
+              "day": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "endsAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                      },
+                      "localDate": {
+                        "type": "string"
+                      },
+                      "startsAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                      },
+                      "timeZone": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      }
+                    },
+                    "required": [
+                      "endsAt",
+                      "localDate",
+                      "startsAt",
+                      "timeZone"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "source": {
                 "anyOf": [
                   {
@@ -4212,6 +4276,7 @@
               }
             },
             "required": [
+              "day",
               "source",
               "type"
             ],
@@ -4475,7 +4540,7 @@
             "properties": {
               "historyVersion": {
                 "type": "string",
-                "const": "activity-history-1"
+                "const": "activity-history-2"
               },
               "persisted": {
                 "type": "boolean",

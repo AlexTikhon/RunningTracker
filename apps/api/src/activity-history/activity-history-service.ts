@@ -3,6 +3,7 @@ import {
   ACTIVITY_HISTORY_VERSION,
   activityHistoryResponseSchema,
   qualityStatsSchema,
+  type ActivityHistoryDay,
   type ActivityHistoryItem,
   type ActivityHistoryQuery,
   type ActivityHistoryResponse,
@@ -10,6 +11,8 @@ import {
 import type { Pool } from 'pg';
 
 import type { StoredSession } from '../auth/session-store.js';
+import { canonicalTimeZone } from '../daily-metrics/daily-metrics-service.js';
+import { localDayInterval } from '../daily-overview/daily-overview-service.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
 import { classifyGpsQuality } from '../runs/run-search-query.js';
 import {
@@ -47,7 +50,14 @@ type Kind = keyof typeof KIND_RANK;
 const utcMicroseconds = (column: string) => `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 // $1 organization, $2 owner, $3 source filter or NULL, $4 type filter or NULL, $5/$6/$7 keyset position (start, kind
-// rank, id) or NULL, $8 fetch size (page size + 1).
+// rank, id) or NULL, $8 fetch size (page size + 1), $9/$10 the day filter's half-open interval [start, end) or NULL
+// (ADR-0088).
+//
+// Day filter: both branches keep an item only when started_at >= $9 AND started_at < $10, the start of the selected
+// local date and the start of the next one in the requested zone (computed by the caller from the zone's rules, never
+// start + 24 hours). That is Today's rule (ADR-0082): an item belongs to the date it started on, also when it continued
+// past midnight. Together with the owner predicates it is a range of the same owner index, so a day page reads at most
+// that day's rows of the person, not the whole history.
 //
 // Order: started_at DESC, kind rank DESC, id DESC, which is total. The outer ORDER BY decides; each branch applies the
 // same keyset predicate and its own ORDER BY ... LIMIT, so it can stop after one page from its owner index
@@ -86,6 +96,7 @@ SELECT entry.kind_rank, entry.entry_id, entry.source, entry.type, entry.started_
         AND activity.user_id = $2
         AND ($3::text IS NULL OR activity.source = $3::text)
         AND ($4::text IS NULL OR activity.type = $4::text)
+        AND ($9::timestamptz IS NULL OR (activity.started_at >= $9::timestamptz AND activity.started_at < $10::timestamptz))
         AND ($5::timestamptz IS NULL
              OR (activity.started_at <= $5::timestamptz
                  AND (activity.started_at < $5::timestamptz OR $6::smallint > 0 OR activity.id < $7::uuid)))
@@ -117,6 +128,7 @@ SELECT entry.kind_rank, entry.entry_id, entry.source, entry.type, entry.started_
         AND run.status = 'finished'
         AND ($3::text IS NULL OR $3::text = 'recorded_run')
         AND ($4::text IS NULL OR $4::text = 'run')
+        AND ($9::timestamptz IS NULL OR (run.started_at >= $9::timestamptz AND run.started_at < $10::timestamptz))
         AND ($5::timestamptz IS NULL
              OR (run.started_at <= $5::timestamptz
                  AND (run.started_at < $5::timestamptz OR ($6::smallint = 1 AND run.id < $7::uuid))))
@@ -203,6 +215,24 @@ export function mapActivityHistoryRow(row: ActivityHistoryRow): ActivityHistoryI
 
 const kindOfRank = (rank: number): Kind => (rank === KIND_RANK.run ? 'run' : 'activity');
 
+/**
+ * The day filter of a query (ADR-0088), or null without one. The zone is put in the platform's canonical spelling first,
+ * so the interval, the echo and the cursor scope all name the same zone. The interval runs from the start of the date to
+ * the start of the next calendar date in that zone, both located from the zone's own offset history (startOfLocalDate);
+ * the end is never the start plus 24 hours. The bounds are whole seconds, so the millisecond ISO strings are exact.
+ */
+export function activityHistoryDay(query: Pick<ActivityHistoryQuery, 'localDate' | 'timeZone'>): ActivityHistoryDay | null {
+  if (query.localDate === undefined || query.timeZone === undefined) return null;
+  const timeZone = canonicalTimeZone(query.timeZone);
+  const interval = localDayInterval(query.localDate, timeZone);
+  return {
+    endsAt: new Date(interval.endsAtMs).toISOString(),
+    localDate: query.localDate,
+    startsAt: new Date(interval.startsAtMs).toISOString(),
+    timeZone,
+  };
+}
+
 export class ActivityHistoryService {
   readonly #hooks: ActivityHistoryTestHooks | undefined;
   readonly #pool: Pick<Pool, 'connect'>;
@@ -219,7 +249,14 @@ export class ActivityHistoryService {
   ): Promise<ActivityHistoryResponse> {
     const source = query.source ?? null;
     const type = query.type ?? null;
-    const context = activityHistoryContext({ orgId, source, type, userId: session.userId });
+    const day = activityHistoryDay(query);
+    const context = activityHistoryContext({
+      day: day === null ? null : { localDate: day.localDate, timeZone: day.timeZone },
+      orgId,
+      source,
+      type,
+      userId: session.userId,
+    });
     // Decoded before the transaction: a cursor of another scope is refused without touching the database.
     const cursor = query.cursor === undefined ? undefined : decodeActivityHistoryCursor(query.cursor, { context });
     const limit = query.limit ?? ACTIVITY_HISTORY_PAGE_DEFAULT;
@@ -239,6 +276,8 @@ export class ActivityHistoryService {
           cursor === undefined ? null : KIND_RANK[cursor.kind],
           cursor?.id ?? null,
           limit + 1,
+          day?.startsAt ?? null,
+          day?.endsAt ?? null,
         ]);
         return result.rows;
       },
@@ -248,7 +287,7 @@ export class ActivityHistoryService {
     const page = rows.slice(0, limit);
     const last = page.at(-1);
     return activityHistoryResponseSchema.parse({
-      applied: { source, type },
+      applied: { day, source, type },
       items: page.map(mapActivityHistoryRow),
       nextCursor:
         rows.length > limit && last

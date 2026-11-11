@@ -7,8 +7,9 @@ import {
   activityRpeSchema,
   activityTypeSchema,
 } from './activities.js';
+import { dailyMetricsLocalDateSchema } from './daily-metrics.js';
 import { gpsQualitySchema } from './http.js';
-import { cursorSchema, timestampSchema, uuidSchema } from './primitives.js';
+import { cursorSchema, ianaTimeZoneSchema, timestampSchema, uuidSchema } from './primitives.js';
 
 // The unified activity history (ADR-0087): one chronological, read-only list of the signed-in person's own manual
 // activities, GPX-imported activities and finished recorded (GPS) runs. It is read from the existing tables on every
@@ -20,7 +21,12 @@ import { cursorSchema, timestampSchema, uuidSchema } from './primitives.js';
 // - `gpx`: `elapsedDurationS`, first to last point of the file, pauses included (ADR-0086);
 // - `recorded_run`: `observedDurationS`, the sum of accepted GPS edges, from a summary current for the run's data
 //   (ADR-0013, ADR-0056), or no metric at all when that summary is missing or stale.
-export const ACTIVITY_HISTORY_VERSION = 'activity-history-1';
+//
+// Versions of the response's meaning:
+// - `activity-history-1`: ADR-0087.
+// - `activity-history-2`: ADR-0088 adds the optional local calendar day filter (`localDate` with `timeZone`) and echoes
+//   it, with its UTC interval, as `applied.day` (null without the filter). Every item keeps its meaning.
+export const ACTIVITY_HISTORY_VERSION = 'activity-history-2';
 export const ACTIVITY_HISTORY_SOURCES = ['manual', 'gpx', 'recorded_run'] as const;
 export const ACTIVITY_HISTORY_PAGE_MAX = 50;
 export const ACTIVITY_HISTORY_PAGE_DEFAULT = 20;
@@ -29,17 +35,48 @@ export const activityHistorySourceSchema = z.enum(ACTIVITY_HISTORY_SOURCES);
 
 // Filters are single-valued: omitted means every source or every type. A repeated parameter arrives as an array and is
 // refused like any other invalid value. A recorded run is a run, so `type` other than `run` excludes recorded runs.
-export const activityHistoryQuerySchema = z.strictObject({
-  cursor: cursorSchema.optional(),
-  limit: z
-    .string()
-    .regex(/^\d+$/u)
-    .transform(Number)
-    .pipe(z.int().min(1).max(ACTIVITY_HISTORY_PAGE_MAX))
-    .optional(),
-  source: activityHistorySourceSchema.optional(),
-  type: activityTypeSchema.optional(),
-});
+//
+// The day filter (ADR-0088) is a pair: `localDate` (a real calendar date, 2000-01-01 or later) and the IANA `timeZone`
+// it is read in. Both or neither: one without the other is refused, never completed with a default. With it, the page
+// holds the items that STARTED in [start of that date, start of the next date) in that zone, Today's attribution rule
+// (ADR-0082); without it, the whole history, as before.
+export const activityHistoryQuerySchema = z
+  .strictObject({
+    cursor: cursorSchema.optional(),
+    limit: z
+      .string()
+      .regex(/^\d+$/u)
+      .transform(Number)
+      .pipe(z.int().min(1).max(ACTIVITY_HISTORY_PAGE_MAX))
+      .optional(),
+    localDate: dailyMetricsLocalDateSchema.optional(),
+    source: activityHistorySourceSchema.optional(),
+    timeZone: ianaTimeZoneSchema.optional(),
+    type: activityTypeSchema.optional(),
+  })
+  .refine((query) => (query.localDate === undefined) === (query.timeZone === undefined), {
+    message: '`localDate` and `timeZone` must be given together or not at all',
+    path: ['timeZone'],
+  });
+
+/**
+ * The day a page of the history is filtered to (ADR-0088): the requested date, the zone in the server's canonical
+ * spelling, and the half-open UTC interval it was read as. `endsAt` is the start of the next calendar date in the zone,
+ * not `startsAt` plus 24 hours: 23 or 25 hours around a daylight saving change.
+ */
+export const activityHistoryDaySchema = z
+  .strictObject({
+    /** The first instant of the next date in `timeZone` (exclusive). */
+    endsAt: timestampSchema,
+    localDate: dailyMetricsLocalDateSchema,
+    /** The first instant of the date in `timeZone` (inclusive). */
+    startsAt: timestampSchema,
+    timeZone: z.string().min(1).max(64),
+  })
+  .refine((day) => Date.parse(day.startsAt) <= Date.parse(day.endsAt), {
+    message: 'the day cannot end before it starts',
+    path: ['endsAt'],
+  });
 
 export const manualHistoryItemSchema = z.strictObject({
   activityId: uuidSchema,
@@ -99,6 +136,7 @@ export const activityHistoryItemSchema = z.discriminatedUnion('source', [
 export const activityHistoryResponseSchema = z.strictObject({
   // The filters the page belongs to; null means not filtered.
   applied: z.strictObject({
+    day: activityHistoryDaySchema.nullable(),
     source: activityHistorySourceSchema.nullable(),
     type: activityTypeSchema.nullable(),
   }),
@@ -124,8 +162,8 @@ export const activityHistoryCursorStartedAtSchema = timestampSchema
 
 // The decoded content of `nextCursor`. Opaque to clients; documented so the server's checks are explicit. `kind` and
 // `id` break ties between items that started at the same microsecond, also between an activity and a run that happen
-// to share an id. `context` is a digest of the person, the organization and both filters, so a cursor from another
-// person, organization or filter is refused.
+// to share an id. `context` is a digest of the person, the organization, both filters and, when there is one, the day
+// filter (date and canonical zone), so a cursor from another person, organization, filter, date or zone is refused.
 export const activityHistoryCursorSchema = z.strictObject({
   context: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
   id: uuidSchema,
@@ -140,5 +178,6 @@ export type ActivityHistoryItem = z.infer<typeof activityHistoryItemSchema>;
 export type ManualHistoryItem = z.infer<typeof manualHistoryItemSchema>;
 export type GpxHistoryItem = z.infer<typeof gpxHistoryItemSchema>;
 export type RecordedRunHistoryItem = z.infer<typeof recordedRunHistoryItemSchema>;
+export type ActivityHistoryDay = z.infer<typeof activityHistoryDaySchema>;
 export type ActivityHistoryResponse = z.infer<typeof activityHistoryResponseSchema>;
 export type ActivityHistoryCursor = z.infer<typeof activityHistoryCursorSchema>;

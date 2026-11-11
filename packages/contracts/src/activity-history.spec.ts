@@ -41,7 +41,7 @@ const run = {
   type: 'run',
 };
 const response = {
-  applied: { source: null, type: null },
+  applied: { day: null, source: null, type: null },
   items: [run, manual, gpx],
   nextCursor: null,
   provenance: { historyVersion: ACTIVITY_HISTORY_VERSION, persisted: false, snapshot: 'single_read_only_transaction' },
@@ -68,6 +68,37 @@ describe('activity history query', () => {
       { limit: String(ACTIVITY_HISTORY_PAGE_MAX + 1) },
       { limit: '1.5' },
       { cursor: '' },
+    ]) {
+      expect(activityHistoryQuerySchema.safeParse(query).success, JSON.stringify(query)).toBe(false);
+    }
+  });
+
+  it('accepts a day filter as a pair of a real date and an IANA zone, with the other filters', () => {
+    expect(activityHistoryQuerySchema.parse({ localDate: '2026-03-29', timeZone: 'Europe/Warsaw' })).toEqual({
+      localDate: '2026-03-29',
+      timeZone: 'Europe/Warsaw',
+    });
+    expect(
+      activityHistoryQuerySchema.parse({ cursor: 'abc', limit: '5', localDate: '2024-02-29', source: 'gpx', timeZone: 'UTC', type: 'hike' }),
+    ).toMatchObject({ localDate: '2024-02-29', source: 'gpx', timeZone: 'UTC' });
+  });
+
+  it('refuses half a day filter, impossible or out-of-range dates, offsets, unknown and repeated zones', () => {
+    for (const query of [
+      { localDate: '2026-03-29' },
+      { timeZone: 'Europe/Warsaw' },
+      { localDate: '2026-02-30', timeZone: 'Europe/Warsaw' },
+      { localDate: '2025-02-29', timeZone: 'Europe/Warsaw' },
+      { localDate: '2026-3-29', timeZone: 'Europe/Warsaw' },
+      { localDate: '2026-03-29T00:00', timeZone: 'Europe/Warsaw' },
+      { localDate: '1999-12-31', timeZone: 'Europe/Warsaw' },
+      { localDate: '2101-01-01', timeZone: 'Europe/Warsaw' },
+      { localDate: '', timeZone: 'Europe/Warsaw' },
+      { localDate: '2026-03-29', timeZone: '+01:00' },
+      { localDate: '2026-03-29', timeZone: 'Mars/Olympus_Mons' },
+      { localDate: '2026-03-29', timeZone: '' },
+      { localDate: ['2026-03-29', '2026-03-30'], timeZone: 'Europe/Warsaw' },
+      { localDate: '2026-03-29', timeZone: ['Europe/Warsaw', 'UTC'] },
     ]) {
       expect(activityHistoryQuerySchema.safeParse(query).success, JSON.stringify(query)).toBe(false);
     }
@@ -111,6 +142,16 @@ describe('activity history items', () => {
     expect(activityHistoryItemSchema.safeParse({ ...manual, source: 'healthkit' }).success).toBe(false);
     expect(activityHistoryResponseSchema.safeParse({ ...response, totalDistanceM: 1 }).success).toBe(false);
     expect(activityHistoryResponseSchema.safeParse({ ...response, provenance: { ...response.provenance, persisted: true } }).success).toBe(false);
+  });
+
+  it('echoes the applied day with its interval, or null; a day that ends before it starts is refused', () => {
+    const day = { endsAt: '2026-03-29T22:00:00.000Z', localDate: '2026-03-29', startsAt: '2026-03-28T23:00:00.000Z', timeZone: 'Europe/Warsaw' };
+    const withDay = { ...response, applied: { ...response.applied, day } };
+    expect(activityHistoryResponseSchema.parse(withDay)).toEqual(withDay);
+    expect(activityHistoryResponseSchema.safeParse({ ...response, applied: { source: null, type: null } }).success).toBe(false);
+    expect(activityHistoryResponseSchema.safeParse({ ...response, applied: { ...response.applied, day: { ...day, endsAt: '2026-03-28T22:00:00.000Z' } } }).success).toBe(false);
+    expect(activityHistoryResponseSchema.safeParse({ ...response, applied: { ...response.applied, day: { ...day, localDate: '2026-02-30' } } }).success).toBe(false);
+    expect(ACTIVITY_HISTORY_VERSION).toBe('activity-history-2');
   });
 });
 
@@ -177,12 +218,17 @@ describe('activity history OpenAPI', () => {
       { $ref: '#/components/parameters/OrgId' },
       { $ref: '#/components/parameters/HistorySource' },
       { $ref: '#/components/parameters/HistoryType' },
+      { $ref: '#/components/parameters/HistoryLocalDate' },
+      { $ref: '#/components/parameters/HistoryTimeZone' },
       { $ref: '#/components/parameters/Limit50' },
       { $ref: '#/components/parameters/Cursor' },
     ]);
     expect(openApiDocument.components.parameters.HistorySource.schema.enum).toEqual([...ACTIVITY_HISTORY_SOURCES]);
+    expect(openApiDocument.components.parameters.HistoryLocalDate).toMatchObject({ in: 'query', name: 'localDate', required: false });
+    expect(openApiDocument.components.parameters.HistoryTimeZone).toMatchObject({ in: 'query', name: 'timeZone', required: false });
     expect(openApiDocument.components.schemas.ActivityHistoryResponse).toBeDefined();
     expect(operation.description).toContain('UNION ALL');
     expect(operation.description).toContain('INVALID_CURSOR');
+    expect(operation.description).toContain('both or neither');
   });
 });

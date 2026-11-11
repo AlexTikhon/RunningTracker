@@ -377,7 +377,7 @@ describe('activity history HTTP API', () => {
       const seeded = await seedSources();
       const ids_ = async (query: Record<string, string>) => {
         const response = await read(query);
-        expect(response.applied).toEqual({ source: query.source ?? null, type: query.type ?? null });
+        expect(response.applied).toEqual({ day: null, source: query.source ?? null, type: query.type ?? null });
         return response.items.map(itemId);
       };
       expect(await ids_({ source: 'manual' })).toEqual([seeded.manualRun, seeded.manualRide]);
@@ -420,7 +420,7 @@ describe('activity history HTTP API', () => {
 
     it('refuses a correctly scoped cursor with an impossible start before acquiring a database connection', async () => {
       await seedSources();
-      const context = activityHistoryContext({ orgId: ids.orgA, source: null, type: null, userId: ids.userOrgA });
+      const context = activityHistoryContext({ day: null, orgId: ids.orgA, source: null, type: null, userId: ids.userOrgA });
       const connect = vi.spyOn(runtimePool, 'connect');
       try {
         for (const startedAt of ['2026-02-30T00:00:00.000000Z', '2025-02-29T00:00:00.000000Z', '2026-04-31T00:00:00.000000Z', '0000-01-01T00:00:00.000000Z', '2026-01-01T24:00:00.000000Z']) {
@@ -456,6 +456,205 @@ describe('activity history HTTP API', () => {
         expect(errorCode(response), JSON.stringify(query)).toBe('INVALID_REQUEST');
       }
       expect(errorCode(await get(owner, {}, { orgId: 'not-a-uuid' }).expect(400))).toBe('INVALID_REQUEST');
+    });
+  });
+
+  describe('local calendar day filter (ADR-0088)', () => {
+    const warsaw = 'Europe/Warsaw';
+    const day = (localDate: string, timeZone: string = warsaw) => ({ localDate, timeZone });
+    const keys = (items: ActivityHistoryItem[]) => items.map(itemKey);
+
+    it('keeps the items that started in [local midnight, next local midnight) and echoes the day and its interval', async () => {
+      await withoutFixtureRuns();
+      // 2026-11-11 in Warsaw (UTC+1): [2026-11-10T23:00Z, 2026-11-11T23:00Z).
+      const beforeStart = await activity('2026-11-10T22:59:59.999999Z');
+      const atStart = await activity('2026-11-10T23:00:00.000000Z', { source: 'gpx' });
+      const runAtStart = await run('2026-11-10T23:00:00.000000Z', { summary: 2 });
+      const lastMicro = await activity('2026-11-11T22:59:59.999999Z');
+      const runLastMicro = await run('2026-11-11T22:59:59.999999Z', { summary: null });
+      const atEnd = await activity('2026-11-11T23:00:00.000000Z');
+      const runAtEnd = await run('2026-11-11T23:00:00.000000Z', { summary: 2 });
+
+      const response = await read(day('2026-11-11'));
+      expect(response.applied).toEqual({
+        day: { endsAt: '2026-11-11T23:00:00.000Z', localDate: '2026-11-11', startsAt: '2026-11-10T23:00:00.000Z', timeZone: warsaw },
+        source: null,
+        type: null,
+      });
+      expect(keys(response.items)).toEqual([
+        `recorded_run:${runLastMicro}`,
+        `manual:${lastMicro}`,
+        `recorded_run:${runAtStart}`,
+        `gpx:${atStart}`,
+      ]);
+      // The neighbouring dates hold exactly the excluded edges.
+      expect(keys((await read(day('2026-11-10'))).items)).toEqual([`manual:${beforeStart}`]);
+      expect(keys((await read(day('2026-11-12'))).items)).toEqual([`recorded_run:${runAtEnd}`, `manual:${atEnd}`]);
+      // The whole history is unchanged without the pair, with `day: null`.
+      const all = await read();
+      expect(all.applied.day).toBeNull();
+      expect(all.items).toHaveLength(7);
+    });
+
+    it('counts an activity or a run that crosses midnight on the date it started only', async () => {
+      await withoutFixtureRuns();
+      // 23:30 Warsaw on 2026-11-11 for three hours, and a run from 23:50 that finishes 40 minutes later.
+      const late = await activity('2026-11-11T22:30:00.000Z', { durationS: 10_800 });
+      const lateRun = await run('2026-11-11T22:50:00.000Z', { summary: 2 });
+      expect(keys((await read(day('2026-11-11'))).items)).toEqual([`recorded_run:${lateRun}`, `manual:${late}`]);
+      expect((await read(day('2026-11-12'))).items).toEqual([]);
+      // Read in UTC the same instants are still 2026-11-11: the zone decides, not the device or a fixed offset.
+      expect(keys((await read(day('2026-11-11', 'UTC'))).items)).toEqual([`recorded_run:${lateRun}`, `manual:${late}`]);
+    });
+
+    it('reads the Warsaw spring-forward date 2026-03-29 as 23 hours', async () => {
+      await withoutFixtureRuns();
+      const previous = await activity('2026-03-28T22:59:59.999999Z');
+      const first = await activity('2026-03-28T23:00:00.000000Z');
+      // 03:30 CEST, after the skipped hour.
+      const afterJump = await run('2026-03-29T01:30:00.000000Z', { summary: 2 });
+      const last = await activity('2026-03-29T21:59:59.999999Z', { source: 'gpx' });
+      const next = await run('2026-03-29T22:00:00.000000Z', { summary: 2 });
+      const response = await read(day('2026-03-29'));
+      expect(response.applied.day).toEqual({ endsAt: '2026-03-29T22:00:00.000Z', localDate: '2026-03-29', startsAt: '2026-03-28T23:00:00.000Z', timeZone: warsaw });
+      expect(Date.parse(response.applied.day!.endsAt) - Date.parse(response.applied.day!.startsAt)).toBe(23 * 3_600_000);
+      expect(keys(response.items)).toEqual([`gpx:${last}`, `recorded_run:${afterJump}`, `manual:${first}`]);
+      expect(keys((await read(day('2026-03-28'))).items)).toEqual([`manual:${previous}`]);
+      expect(keys((await read(day('2026-03-30'))).items)).toEqual([`recorded_run:${next}`]);
+    });
+
+    it('reads the Warsaw fall-back date 2026-10-25 as 25 hours, with both 02:30s', async () => {
+      await withoutFixtureRuns();
+      const previous = await activity('2026-10-24T21:59:59.999999Z');
+      const first = await run('2026-10-24T22:00:00.000000Z', { summary: 2 });
+      const firstHalfPastTwo = await activity('2026-10-25T00:30:00.000000Z'); // 02:30 CEST
+      const secondHalfPastTwo = await activity('2026-10-25T01:30:00.000000Z', { source: 'gpx' }); // 02:30 CET
+      const last = await activity('2026-10-25T22:59:59.999999Z');
+      const next = await activity('2026-10-25T23:00:00.000000Z');
+      const response = await read(day('2026-10-25'));
+      expect(response.applied.day).toEqual({ endsAt: '2026-10-25T23:00:00.000Z', localDate: '2026-10-25', startsAt: '2026-10-24T22:00:00.000Z', timeZone: warsaw });
+      expect(Date.parse(response.applied.day!.endsAt) - Date.parse(response.applied.day!.startsAt)).toBe(25 * 3_600_000);
+      expect(keys(response.items)).toEqual([
+        `manual:${last}`,
+        `gpx:${secondHalfPastTwo}`,
+        `manual:${firstHalfPastTwo}`,
+        `recorded_run:${first}`,
+      ]);
+      expect(keys((await read(day('2026-10-24'))).items)).toEqual([`manual:${previous}`]);
+      expect(keys((await read(day('2026-10-26'))).items)).toEqual([`manual:${next}`]);
+    });
+
+    it('pages a day through microsecond ties at every page size, nothing repeated, skipped or outside the day', async () => {
+      await withoutFixtureRuns();
+      const tie = '2026-11-11T22:59:59.999999Z';
+      const shared = '00000000-0000-4000-8000-0000000000bb';
+      await activity(tie, { id: shared });
+      await run(tie, { id: shared, summary: 2 });
+      await activity(tie, { source: 'gpx' });
+      await run(tie, { summary: null });
+      await activity('2026-11-11T22:59:59.999998Z');
+      await run('2026-11-10T23:00:00.000001Z', { summary: 2 });
+      await activity('2026-11-10T23:00:00.000000Z');
+      // Outside the day by one microsecond on each side.
+      const afterDay = await activity('2026-11-11T23:00:00.000000Z');
+      const beforeDay = await run('2026-11-10T22:59:59.999999Z', { summary: 2 });
+
+      // The whole history in its total order, minus the two items outside the day, is the day's expected order.
+      const all = await readAll({}, 50);
+      expect(all).toHaveLength(9);
+      const outside = new Set([`manual:${afterDay}`, `recorded_run:${beforeDay}`]);
+      const inDay = all.filter((item) => !outside.has(itemKey(item)));
+      expect(inDay).toHaveLength(7);
+      for (const limit of [1, 2, 3, 4, 6]) {
+        expect(keys(await readAll(day('2026-11-11'), limit)), `limit ${limit}`).toEqual(keys(inDay));
+      }
+      // Combined with a source filter.
+      expect(keys(await readAll({ ...day('2026-11-11'), source: 'recorded_run' }, 1))).toEqual(
+        keys(inDay.filter((item) => item.source === 'recorded_run')),
+      );
+    });
+
+    it('binds a cursor to its date and canonical zone; cursors never cross dates, zones or the whole history', async () => {
+      await withoutFixtureRuns();
+      for (let index = 0; index < 3; index += 1) {
+        await activity(new Date(Date.parse('2026-11-11T08:00:00.000Z') + index * 60_000).toISOString());
+        await activity(new Date(Date.parse('2026-11-12T08:00:00.000Z') + index * 60_000).toISOString());
+      }
+      const dayCursor = (await read({ ...day('2026-11-11'), limit: '1' })).nextCursor!;
+      const wholeCursor = (await read({ limit: '1' })).nextCursor!;
+      expect(dayCursor).not.toBeNull();
+      for (const query of [
+        { cursor: dayCursor },
+        { cursor: dayCursor, ...day('2026-11-12') },
+        // Berlin has Warsaw's offsets on this date, so the interval is the same; the zone is still another scope.
+        { cursor: dayCursor, ...day('2026-11-11', 'Europe/Berlin') },
+        { cursor: dayCursor, ...day('2026-11-11', 'UTC') },
+        { cursor: dayCursor, ...day('2026-11-11'), source: 'manual' },
+        { cursor: wholeCursor, ...day('2026-11-11') },
+      ]) {
+        const response = await get(owner, query).expect(400);
+        expect(errorCode(response), JSON.stringify(query)).toBe('INVALID_CURSOR');
+        expect(response.headers['cache-control']).toBe('no-store');
+      }
+      // Another person's day cursor is refused for the same date and zone.
+      expect(errorCode(await get(grantee, { cursor: dayCursor, ...day('2026-11-11') }).expect(400))).toBe('INVALID_CURSOR');
+      // The matching scope accepts it, also when the zone is spelled in another case: it is canonicalised first.
+      expect((await read({ cursor: dayCursor, ...day('2026-11-11') })).items).toHaveLength(2);
+      const canonical = await read({ cursor: dayCursor, ...day('2026-11-11', 'europe/warsaw') });
+      expect(canonical.applied.day?.timeZone).toBe(warsaw);
+      // A whole-history cursor of ADR-0087 (same digest) still works without a day filter.
+      const legacy = encodeActivityHistoryCursor({
+        context: activityHistoryContext({ day: null, orgId: ids.orgA, source: null, type: null, userId: ids.userOrgA }),
+        id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        kind: 'run',
+        startedAt: '2026-11-12T08:00:30.000000Z',
+      });
+      // Below it: 2026-11-12 08:00 and the three items of 2026-11-11.
+      expect((await read({ cursor: legacy })).items).toHaveLength(4);
+    });
+
+    it('never adds runs shared with the caller to a day, while their own items of that day appear', async () => {
+      const shared = await ownerPool.query<{ local_date: string }>(
+        `SELECT to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS local_date FROM runs WHERE org_id = $1 AND id = ANY($2::uuid[])`,
+        [ids.orgA, ownFixtureRuns],
+      );
+      const dates = [...new Set(shared.rows.map((row) => row.local_date))];
+      expect(dates.length).toBeGreaterThan(0);
+      for (const localDate of dates) {
+        // The owner sees their own runs on that date; the grantee, who holds grants on them, sees none.
+        expect((await read(day(localDate, 'UTC'))).items.some((item) => item.source === 'recorded_run'), localDate).toBe(true);
+        for (const source of [undefined, 'recorded_run']) {
+          const query = { ...day(localDate, 'UTC'), ...(source === undefined ? {} : { source }) };
+          expect((await read(query, grantee)).items, JSON.stringify(query)).toEqual([]);
+        }
+      }
+      const own = await activity(`${dates[0]}T12:00:00.000Z`, { userId: ids.userDual });
+      expect((await read(day(dates[0]!, 'UTC'), grantee)).items.map(itemId)).toEqual([own]);
+      // A coach in the organization sees nothing of the runner's day either.
+      expect((await read(day(dates[0]!, 'UTC'), coach)).items).toEqual([]);
+    });
+
+    it('refuses half a pair, an impossible or out-of-range date and an unsupported zone with 400', async () => {
+      for (const query of [
+        { localDate: '2026-11-11' },
+        { timeZone: warsaw },
+        { localDate: '2026-02-30', timeZone: warsaw },
+        { localDate: '2025-02-29', timeZone: warsaw },
+        { localDate: '2026-11-31', timeZone: warsaw },
+        { localDate: '1999-12-31', timeZone: warsaw },
+        { localDate: '2026-11-11T00:00:00Z', timeZone: warsaw },
+        { localDate: '11/11/2026', timeZone: warsaw },
+        { localDate: '2026-11-11', timeZone: '+01:00' },
+        { localDate: '2026-11-11', timeZone: 'CET+1' },
+        { localDate: '2026-11-11', timeZone: 'Europe/Atlantis' },
+        { localDate: '2026-11-11', timeZone: '' },
+        { localDate: ['2026-11-11', '2026-11-12'], timeZone: warsaw },
+        { localDate: '2026-11-11', timeZone: [warsaw, 'UTC'] },
+      ]) {
+        const response = await get(owner, query).expect(400);
+        expect(errorCode(response), JSON.stringify(query)).toBe('INVALID_REQUEST');
+        expect(response.headers['cache-control']).toBe('no-store');
+      }
     });
   });
 
