@@ -161,6 +161,22 @@ Both need the session, an allowed Origin and the CSRF token, which are checked b
 
 **Duplicates and limits.** The same track (same points, times and segments; formatting and metadata do not matter) can be imported once per person and organization while that activity exists; deleting it frees the track. An import is **not** compared with GPS runs or manual activities: an outing recorded live and imported later is two records, shown separately. Deleted imports are recorded in the erasure ledger like any activity (identifiers only). After an unknown outcome the web flow keeps the file, id, key and type, so **Import again** cannot create a second activity. Only one track per file; GPX 1.0, TCX and FIT are not supported. Parsing runs on the request thread.
 
+### Activity history (ADR-0087)
+
+Decided in [ADR-0087](adr/0087-unified-activity-history.md). The Activity tab's list is **Your activity history**: the person's manual entries, GPX imports and own finished recorded runs, newest first, in one list. It is read on every request from `activities`, `runs` and `run_summaries` (one `UNION ALL` statement in one REPEATABLE READ, READ ONLY transaction); nothing is copied or stored, and there is no migration.
+
+| Route | Behaviour |
+|---|---|
+| `GET /api/orgs/:orgId/activity-history?source=&type=&limit=&cursor=` | `200 { applied, items, nextCursor, provenance }`. `source`: `manual`, `gpx` or `recorded_run`; `type`: an activity type (a recorded run is `run`); both optional and single-valued. `limit` 1 to 50, default 20. `400 INVALID_REQUEST` for a repeated or unknown parameter, `400 INVALID_CURSOR` for a cursor of another person, organization or filter, `403 ORG_ACCESS_DENIED` for a non-member. `Cache-Control: no-store`. |
+
+**Owner-only.** Every branch states the organization and the owner as well as row-level security, so a run someone shared with you never appears in your history, and a coach never sees yours.
+
+**Order.** Start time descending (microseconds), then a recorded run before an activity at the same instant, then id descending. The order is total, also when an activity and a run share an id, so pages neither repeat nor skip on an unchanged dataset.
+
+**Each source keeps its own measure.** `manual` items carry `enteredDurationS` (what you typed), distance, effort and notes; `gpx` items carry `elapsedDurationS` (first to last point, pauses included, not moving time) and the distance computed at import; `recorded_run` items carry `summary`: `current` with distance, observed duration (accepted GPS edges only) and GPS quality when the published summary is for the run's current data revision, otherwise `pending` or `stale` with no value. Nothing is added across sources and nothing is deduplicated: the same outing entered, imported and recorded appears separately. `captureSource` is `null`: whether device GPS or the simulator recorded a run is kept only in the browser, so the screen says **Capture source: Not recorded**.
+
+**Screen.** Source and Activity type filters (each change starts a new list and cancels the previous request), Refresh, Load more, loading, empty, error with Retry and access-lost states. Manual entries and imports keep **Delete**; a recorded run opens the existing **Run details** inside the Activity tab, with **Back to activity history**. Run deletion stays in Archive → My runs.
+
 ## Daily check-in
 
 Step 2, decided in [ADR-0074](adr/0074-daily-check-in-local-date-and-put-replace.md). Migration `0028_daily_metrics.sql` adds `daily_metrics`: one row per person, organization and **local calendar date**, with nullable `weight_kg` (20 to 400, two decimals), `sleep_minutes` (0 to 1440), `sleep_quality` and `mood` (1 to 5), `soreness` (0 to 10) and `note` (1 to 500 characters), at least one of them present. Row-level security is the activities template plus an owner-only UPDATE; the runtime role may write only the value columns, and `created_at`/`updated_at` come from the database clock.

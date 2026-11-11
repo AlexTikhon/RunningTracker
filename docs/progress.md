@@ -4148,3 +4148,39 @@ heap. This is quadratic in the number of keys but bounded by the upload limit; n
 (2) Deep nesting still costs memory in proportion to depth in the tokenizer and both readers (1.5 million levels need
 128 MB in the import reader). No nesting-depth or per-element attribute limit was added; either would be a new refusal
 rule for the ADR-0086 contract.
+
+## Unified, owner-only activity history (ADR-0087) (2026-11-11)
+
+**What exists.** `GET /api/orgs/{orgId}/activity-history` (strict query: optional single-valued `source` = `manual` |
+`gpx` | `recorded_run` and `type`, `limit` 1–50, `cursor`) answers one page of the person's manual activities, GPX
+imports and own finished recorded runs from one `UNION ALL` statement over `activities`, `runs` and `run_summaries`, in
+one REPEATABLE READ, READ ONLY transaction with the membership check; nothing is stored and there is no migration. Both
+branches state organization and owner besides RLS, so a run shared by someone else never appears. Order: start
+(microseconds) descending, a run before an activity at the same instant, id descending; the keyset cursor carries
+`(startedAt, kind, id)` and a digest of person, organization and both filters (`INVALID_CURSOR` otherwise). Each source
+names its own measure (`enteredDurationS`, `elapsedDurationS`, or a run's `summary`: `current` with distance, observed
+duration and GPS quality only for the current data revision, otherwise `pending`/`stale` without values). No totals, no
+deduplication. `captureSource` is `null`: the server has never stored whether device GPS or the simulator recorded a run
+(ADR-0047 keeps it in IndexedDB), so the screen says "Not recorded" instead of guessing. The Activity tab's list is now
+**Your activity history** with Source and Activity type filters, Refresh, Load more, loading/empty/error/access-lost
+states, Delete for manual entries and imports (unchanged controller), and **Run details** for recorded runs (the existing
+`RunDetailScreen`, "Back to activity history"). The form, the GPX import and `GET /activities` are unchanged. OpenAPI,
+reference, product direction, README and ADR-0087 describe it.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Test database identity | loopback `running_tracker_test` from `.env`; `npm run db:migrate:test` applied nothing new (no migration in this change); the integration fixtures verify the server-reported database and owner role before writing |
+| `npm test` (all workspaces) | scripts 115, API 1,772, web 1,253, contracts 267, fixtures 14, simulator 3; all passed |
+| New unit tests | contracts `activity-history.spec.ts` 10; API `activity-history.spec.ts` 6 (cursor scope binding and tampering, statement shape, row mapping); web controller 9 (filters, paging without repeats, an activity and a run sharing an id, late answers after disposal or session end, refresh replacing an in-flight page, echoed filters checked, errors, outdated cursor), list view 9, API client 2; `openapi-routes.spec.ts` 55 (the new operation is mounted) |
+| New `activity-history-http.integration.test.ts` | 17 passed: owner-only despite live/history grants (grantee, coach, other organization, inactive member, anonymous); mixed-source ties at one microsecond including an activity and a run with the same id, paged at sizes 1–9 with nothing repeated or skipped; default page; labelled durations; source/type filters alone and combined, paged; cursor refused across filters, persons, organizations and when tampered; repeated/unknown parameters; pending/stale/current summaries and a revision advance; deletions (manual, GPX, run) absent on the next read; one snapshot under a hook that commits deletions and an insert mid-transaction; no row count changes |
+| Mutation checks | without the run branch's `run.user_id` predicate, 2 isolation tests fail; with READ COMMITTED instead of the read-only snapshot, the snapshot test fails |
+| `npm run test:integration` | 74 files, 1,022 of 1,034: the 12 `backup-restore` tests stopped at `prepare` because `BACKUP_ENCRYPTION_KEY_FILE` in `.env` names a file that does not exist here (as recorded for ADR-0086). With a throwaway key generated in the session scratchpad and set in the process environment only: that file 12 of 12 |
+| `npx playwright test --project=chromium activity` | 7 passed: the new `activity-history.spec.ts` (3: mixed history with provenance, labels, unknown metrics, shared run and coach activity absent, filters with exact request queries, Run details and focus return, 375 px without horizontal scroll; a held unfiltered answer dropped after a filter change, a 500 with Retry, lost membership and recovery; an organization change dropping the previous organization's held answer), plus the updated `activity.spec.ts` and `activity-gpx-import.spec.ts` |
+| `npm run test:e2e` (`chromium`, `chromium-oidc`) | 153 passed in 14.9 min (150 before, plus the 3 new history specs) |
+| `npm run lint`, `npm run typecheck` | pass |
+
+**Not established.** No `EXPLAIN` or load run: a filtered branch may read past non-matching rows of the owner index. No
+Firefox, WebKit or iPhone run. Capture provenance of recorded runs is unknown until a separate decision stores it. The
+unused `listActivities` client and `ActivityListController` remain.

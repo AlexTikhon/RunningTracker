@@ -24,7 +24,8 @@ commitment to dates or to every item below.
      phone/watch import later, under its own provenance.
    - Meal log: manual entries with optional user-reported nutrition totals ([ADR-0083](adr/0083-manual-meal-log.md)).
 2. **Deterministic analytics.** SQL, with versioned snapshots: weekly volume, pace trends, training load, personal
-   bests. A unified read model over `runs` and `activities` (a view or a union) belongs here.
+   bests. A unified read model over `runs` and `activities` (a view or a union) belongs here; its first, read-only
+   form is the activity history ([ADR-0087](adr/0087-unified-activity-history.md)), a list without totals.
 3. **AI layer.**
    - An asynchronous weekly review written from a facts bundle that SQL produced.
    - Food text parsing against a JSON schema, which the person confirms before anything is stored.
@@ -118,6 +119,14 @@ activity (start, elapsed duration, distance) after a preview the server computes
 server-owned `source: gpx`. Elapsed time is never called moving time. Today and the weekly review show imports apart
 from manual activities and GPS runs; they are not AI input and are not compared with GPS runs. No route is stored or
 shown. TCX, FIT, multi-track files and any overlap detection remain open.
+
+The **activity history** is [ADR-0087](adr/0087-unified-activity-history.md): the Activity tab lists the person's manual
+entries, GPX imports and own finished recorded runs in one chronological, owner-only list, read on every request by one
+`UNION ALL` over the existing tables in one snapshot, with nothing stored. Each item states its source and names its
+measure (entered duration, GPX elapsed time, or a recorded run's observed duration from a summary current for its data;
+a missing or stale summary stays unknown). Sources are never added together or deduplicated, and there are no totals.
+A run shared by someone else never appears. Recorded runs open the existing run details. Whether device GPS or the
+simulator recorded a run is not stored on the server, so it is shown as not recorded; storing it is a separate decision.
 
 **HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
 built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the

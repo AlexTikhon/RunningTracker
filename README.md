@@ -33,7 +33,8 @@ and grows one vertical slice at a time. Package names, database identifiers, coo
 - **Movement**: steps and active energy entered by hand, stored with `manual` provenance.
 - **Activities**: manual entries (run, walk, ride, hike, swim, strength, other), or one GPX 1.1 track imported after a
   preview and an explicit type choice: start, elapsed time and distance only, labelled as a GPX import. The file and
-  its route are not kept, and an import is not compared with GPS runs recorded here.
+  its route are not kept, and an import is not compared with GPS runs recorded here. The Activity tab lists them with
+  your own finished GPS runs in one history, each labelled with its source and its own measure, never added together.
 - **Meal log**: meals and snacks with optional user-reported energy and macronutrients. Nothing is estimated or looked up.
 
 ### Views
@@ -87,7 +88,7 @@ Details and the roadmap: [docs/product-direction.md](docs/product-direction.md).
 | `infra/` | Compose files (development, loopback TLS, production, iPhone pilot), nginx proxy, API images |
 | `scripts/` | setup, demo, profile verification, pilot tooling, and their tests |
 | `tests/e2e` | Playwright browser suite (Chromium, an OpenID Connect project, a Firefox core gate) |
-| `docs/` | design, 85 decision records, runbooks, reports and the progress log |
+| `docs/` | design, 87 decision records, runbooks, reports and the progress log |
 
 ## Quick start
 
@@ -168,7 +169,7 @@ Firefox gate, on pushes to `main`, on pull requests and on demand. It reads no s
 |---|---|
 | [docs/reference.md](docs/reference.md) | the detailed reference: API behaviour, data rules, configuration and verification for every feature |
 | [docs/SDD.md](docs/SDD.md) | the system design |
-| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0085) |
+| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0087) |
 | [docs/product-direction.md](docs/product-direction.md) | roadmap, principles and the next milestone |
 | [docs/progress.md](docs/progress.md) | what was built and how it was verified, entry by entry |
 | [docs/runbooks/](docs/runbooks/) | how to run, demo, deploy, back up and pilot it |
