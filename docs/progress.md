@@ -4217,3 +4217,34 @@ date. OpenAPI (two parameters, description), reference, product direction, READM
 
 **Not established.** No `EXPLAIN` or load run for the day range. Chromium only (desktop and a 375 px viewport); no Firefox,
 WebKit or iPhone run. No totals in the history by design.
+
+## Frontend cleanup: the retired activity-list client and controller removed (2026-11-12)
+
+**What changed.** The web app no longer contains the pre-ADR-0087 listing path, which only tests still used:
+`ActivityListController` with its options, loader, snapshot/status types and loading state (`activity-controller.ts`),
+and the `listActivities` client (`runner-api.ts`). The Activity screen keeps using `ActivityHistoryController` and
+`loadActivityHistory`. `ActivitySubmissionController`, `ActivityDeletionController`, creation, GPX import, read and delete
+are unchanged. The backend `GET /activities` route and service, the shared contracts, OpenAPI and the API integration
+tests stay: this is a frontend cleanup, not an API removal. ADR-0087's "Not established" note is updated.
+
+Tests: the list controller's spec and the two client tests for the list call are gone. Checks they held that the history
+controller's spec lacked were moved there: no request once the last page arrived, 401 as well as 403 while paging clears
+the shown pages and a retry starts at page one, no request from `refresh`/`loadMore`/`retry` after disposal, and nothing
+loaded under a session that had already ended. The shared 401-announcement test now uses `readActivity`.
+`controller-disposal.spec.ts` covers `ActivityHistoryController` in place of the list controller (listener removed on
+dispose, repeated dispose, a live controller released when the session ends).
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Symbol search | no `ActivityListController`, its types, `loadingActivityList`, `ActivityLoader` or a web `listActivities` anywhere; `listActivities` remains only in the API service and route |
+| Mutation checks (history controller, restored after each) | keeping shown pages on lost access, `start()` ignoring disposal, `refresh()` ignoring disposal, `loadMore()` ignoring a missing cursor: each fails at least one moved check |
+| `npm test --workspace=@running-tracker/web` | 99 files, 1,257 tests passed (net 9 fewer: 11 removed, 2 added) |
+| `npm run lint`, `npm run typecheck --workspace=@running-tracker/web`, `npm run build --workspace=@running-tracker/web` | pass |
+| Test database identity | the three `TEST_*` URLs in `.env` connect to `running_tracker_test` as the owner, runtime and maintenance roles, in the local Compose container on 127.0.0.1:5433 |
+| `npx playwright test --project=chromium` (activity, activity history, GPX import, Today, Today → history, run details) | 24 passed |
+
+**Not established.** No full `npm run test:e2e`, no API integration run (no backend change). Vitest on Windows fails to
+load specs ("failed to find the current suite") when the shell's working directory has a lowercase drive letter
+(`c:\…`); run it from `C:\…`.

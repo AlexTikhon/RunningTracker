@@ -146,7 +146,9 @@ Refresh, access lost.
 
 - No load measurement or `EXPLAIN` on a large table. With a `source` or `type` filter, a branch may read past
   non-matching rows of its owner index before it fills a page (bounded by the person's own rows, not by the page size).
-- `GET /activities` and its client remain (no screen uses the client any more); removing them is not part of this slice.
+- `GET /activities` remains an API endpoint (contract, OpenAPI, integration tests) that no screen calls; retiring it is not
+  part of this decision. Its unused web client (`listActivities` in `runner-api.ts`) and `ActivityListController` were
+  removed on 2026-11-12.
 - Capture provenance for recorded runs is unknown (section 6).
 - Browser evidence is Chromium (desktop and a 375 px viewport) only; no Firefox, WebKit or iPhone run.
 - No run deletion from the history; no edit; no totals, trends, goals or training load.
