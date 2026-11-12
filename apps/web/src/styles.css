@@ -509,3 +509,17 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .trends-table__value { display: block; font-weight: 700; font-variant-numeric: tabular-nums; }
 .trends-table__detail { display: block; color: #8b968e; font-size: 0.76rem; }
 .trends-table__missing .trends-table__value { color: #8b968e; font-weight: 500; }
+/* Activity section of Trends (ADR-0089): the same surface, accent and table, with bars for daily totals. */
+.activity-trends { margin-top: 0.5rem; }
+.activity-trends > p { margin: 0; }
+.activity-trends-content { display: grid; gap: 1rem; min-width: 0; }
+.activity-trends-content > p { margin: 0; }
+.activity-trends__filters select { min-height: 2.75rem; max-width: 100%; }
+.activity-chart { display: grid; gap: 0.4rem; min-width: 0; margin: 0; }
+.activity-chart svg { display: block; width: 100%; height: auto; }
+.activity-chart__bar { fill: #b8f264; }
+.activity-chart__zero { fill: #b8f264; stroke: #151c17; stroke-width: 2; }
+.activity-chart__unknown { fill: #151c17; stroke: #a9b5ad; stroke-width: 2; }
+.activity-trends-table td:last-child { width: auto; text-align: left; }
+.activity-trends-table th, .activity-trends-table td { padding-inline: 0.25rem; }
+@media (max-width: 420px) { .activity-trends-table { font-size: 0.82rem; } }

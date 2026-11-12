@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ActivityDeletionController, ActivitySubmissionController } from './activity-controller.js';
 import { ActivityHistoryController, noHistoryFilters } from './activity-history-controller.js';
+import { ActivityTrendsController } from './activity-trends-controller.js';
 import { CheckInDayController, CheckInHistoryController } from './daily-checkin-controller.js';
 import { MovementDayController, MovementHistoryController } from './daily-movement-controller.js';
 import { DailyOverviewController } from './daily-overview-controller.js';
@@ -69,6 +70,18 @@ const controllers: Record<string, (signal: AbortSignal) => Disposable> = {
   },
   DailyTrendsController: (signal) => {
     const controller = new DailyTrendsController({ endDate: DAY, onChange: noop, orgId: ORG, read: never, signal, timeZone: ZONE });
+    controller.start();
+    return controller;
+  },
+  ActivityTrendsController: (signal) => {
+    const controller = new ActivityTrendsController({
+      filters: { endDate: DAY, source: 'manual', type: 'ride' },
+      onChange: noop,
+      orgId: ORG,
+      read: never,
+      signal,
+      timeZone: ZONE,
+    });
     controller.start();
     return controller;
   },

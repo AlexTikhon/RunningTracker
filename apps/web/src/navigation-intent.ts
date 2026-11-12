@@ -1,5 +1,6 @@
-import type { DailyTrendsMetric } from '@running-tracker/contracts';
+import type { ActivityHistorySource, ActivityType, DailyTrendsMetric } from '@running-tracker/contracts';
 
+import type { ActivityTrendMeasure } from './activity-trends.js';
 import type { TodayAction } from './daily-overview.js';
 
 // Which view the application shows, and the two small pieces of navigation state Today needs (ADR-0082). No routing
@@ -26,6 +27,14 @@ export interface KeptDate {
 export interface KeptMetric {
   metric: DailyTrendsMetric;
   scope: string;
+}
+
+/** The source, type and measure of Trends' Activity section (ADR-0089), kept like its series. */
+export interface KeptActivitySelection {
+  measure: ActivityTrendMeasure;
+  scope: string;
+  source: ActivityHistorySource;
+  type: ActivityType;
 }
 
 /**

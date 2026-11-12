@@ -19,6 +19,7 @@ import {
   type AppView,
   type EditorIntent,
   type HistoryIntent,
+  type KeptActivitySelection,
   type KeptDate,
   type KeptMetric,
 } from './navigation-intent.js';
@@ -142,6 +143,7 @@ export function App() {
   // The Trends range (its end date) and series, kept like Today's date (ADR-0084).
   const [trendsEnd, setTrendsEnd] = useState<KeptDate | null>(null);
   const [trendsMetric, setTrendsMetric] = useState<KeptMetric | null>(null);
+  const [trendsActivity, setTrendsActivity] = useState<KeptActivitySelection | null>(null);
   const [runnerResult, setRunnerResult] = useState<{ orgId: string; runId: string; signal: AbortSignal; userId: string } | null>(null);
   const resultTimeZone = useMemo(() => defaultTimeZone(), []);
   const captureController = useRef<CaptureController | null>(null);
@@ -186,6 +188,7 @@ export function App() {
     setHistoryIntent(null);
     setTrendsEnd(null);
     setTrendsMetric(null);
+    setTrendsActivity(null);
   }, []);
   const { session, refreshSession, signOut, signOutState, verification } = useRunnerSession(suspendRunner, forgetSignedOutIdentity);
   const { choose: chooseOrganization, discovery, prefer: preferOrganization, reload: reloadOrganizations, selectedOrgId } =
@@ -1017,7 +1020,9 @@ export function App() {
           // series are kept here, for this scope only.
           <TrendsScreen
             key={viewScope}
+            initialActivity={inScope(trendsActivity, viewScope) ?? { measure: 'count', source: 'manual', type: 'run' }}
             initialMetric={inScope(trendsMetric, viewScope)?.metric ?? 'weightKg'}
+            onChooseActivity={(selection) => setTrendsActivity({ ...selection, scope: viewScope })}
             onChooseMetric={(metric) => setTrendsMetric({ metric, scope: viewScope })}
             onOpenDay={backToToday}
             onSelectEndDate={(localDate) => setTrendsEnd({ localDate, scope: viewScope })}

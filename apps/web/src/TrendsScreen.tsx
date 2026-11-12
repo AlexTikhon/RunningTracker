@@ -1,5 +1,5 @@
 import { DAILY_METRICS_LOCAL_DATE_MIN, DAILY_TRENDS_RANGE_DAYS, dailyTrendsRangeOf, isEmptyDailyTrends, type DailyTrends, type DailyTrendsMetric } from '@running-tracker/contracts';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { checkInDateProblem, localDateIn } from './daily-checkin.js';
 import {
@@ -15,8 +15,18 @@ import {
   trendMetricSpecs,
   type TrendChartGeometry,
 } from './daily-trends.js';
+import { ActivityTrendsView } from './ActivityTrendsSection.js';
+import type { ActivityTrendMeasure } from './activity-trends.js';
+import {
+  ActivityTrendsController,
+  loadingActivityTrends,
+  normalizeActivityTrendsFilters,
+  type ActivityTrendsReader,
+  type ActivityTrendsSnapshot,
+} from './activity-trends-controller.js';
 import { DailyTrendsController, loadingTrends, type TrendsReader, type TrendsSnapshot } from './daily-trends-controller.js';
-import { readDailyTrends } from './runner-api.js';
+import { readActivityTrends, readDailyTrends } from './runner-api.js';
+import type { ActivityHistorySource, ActivityType } from '@running-tracker/contracts';
 
 // The Trends screen (ADR-0084): 28 calendar dates of four of the person's own daily series, recomputed by the server on
 // every read. It shows what was recorded and how much of the range that covers, and nothing else: no target, judgement,
@@ -144,6 +154,8 @@ export function TrendsContent({
 }
 
 export interface TrendsViewProps {
+  /** The Activity section (ADR-0089), shown under the health series. */
+  activity?: ReactNode;
   endInput: string;
   metric: DailyTrendsMetric;
   onChooseEnd: (value: string) => void;
@@ -156,7 +168,7 @@ export interface TrendsViewProps {
 }
 
 /** Everything the screen shows, from one snapshot. Pure, so every state is testable without a DOM. */
-export function TrendsView({ endInput, metric, onChooseEnd, onChooseMetric, onOpenDay, onRefresh, snapshot, timeZone, today }: TrendsViewProps) {
+export function TrendsView({ activity, endInput, metric, onChooseEnd, onChooseMetric, onOpenDay, onRefresh, snapshot, timeZone, today }: TrendsViewProps) {
   const { load } = snapshot;
   const busy = load.kind === 'loading' || (load.kind === 'ready' && load.refreshing);
   const state = load.kind === 'ready' && load.refreshing ? 'refreshing' : load.kind;
@@ -169,9 +181,10 @@ export function TrendsView({ endInput, metric, onChooseEnd, onChooseMetric, onOp
         <p className="eyebrow">28-day view</p>
         <h1 id="trends-title" tabIndex={-1}>Trends</h1>
         <p>
-          Your recorded weight, sleep duration, steps and food energy for the 28 calendar dates ending on the date you choose,
-          read again each time you open this view or press Refresh. It shows what was recorded and how much of the range that
-          covers; it sets no targets, makes no predictions and gives no advice. Only you can see it.
+          Your recorded weight, sleep duration, steps and food energy, and the activity you logged, for the 28 calendar dates
+          ending on the date you choose, read again each time you open this view or press Refresh. It shows what was recorded
+          and how much of the range that covers; it sets no targets, makes no predictions and gives no advice. Only you can see
+          it.
         </p>
       </div>
 
@@ -212,11 +225,25 @@ export function TrendsView({ endInput, metric, onChooseEnd, onChooseMetric, onOp
         )}
         {load.kind === 'ready' && <TrendsContent metric={metric} onOpenDay={onOpenDay} timeZone={timeZone} trends={load.trends} />}
       </div>
+      {activity}
     </section>
   );
 }
 
+/** The Activity section's choices, kept by the parent like the series. */
+export interface ActivitySelection {
+  measure: ActivityTrendMeasure;
+  source: ActivityHistorySource;
+  type: ActivityType;
+}
+
+const defaultActivitySelection: ActivitySelection = { measure: 'count', source: 'manual', type: 'run' };
+
 export interface TrendsScreenProps {
+  /** The Activity section's source, type and measure to show first (kept by the parent). */
+  initialActivity?: ActivitySelection;
+  /** Called with every Activity choice, so the parent can keep it during ordinary navigation. */
+  onChooseActivity?: (selection: ActivitySelection) => void;
   /** The series to show first (kept by the parent). */
   initialMetric: DailyTrendsMetric;
   /** Called with every series the person selects, so the parent can keep it during ordinary navigation. */
@@ -234,18 +261,22 @@ export interface TrendsScreenProps {
   // For tests: the instant whose date in `timeZone` is "today". Defaults to the time the screen opens.
   nowMs?: number;
   read?: TrendsReader;
+  readActivity?: ActivityTrendsReader;
 }
 
 // The parent keys this screen by session, person and organization and mounts it only while Trends is open, so each
 // opening reads the range again (after an edit or a deletion elsewhere too) and no answer crosses a change of scope.
 export function TrendsScreen({
+  initialActivity = defaultActivitySelection,
   initialMetric,
   nowMs,
+  onChooseActivity = () => undefined,
   onChooseMetric,
   onOpenDay,
   onSelectEndDate,
   orgId,
   read = readDailyTrends,
+  readActivity = readActivityTrends,
   selectedEndDate,
   signal,
   timeZone,
@@ -258,6 +289,15 @@ export function TrendsScreen({
   const [metric, setMetric] = useState<DailyTrendsMetric>(initialMetric);
   const [snapshot, setSnapshot] = useState<TrendsSnapshot>(() => loadingTrends(initialEnd));
   const controller = useRef<DailyTrendsController | null>(null);
+  // The Activity section has its own controller with the same lifetime: one per session, organization and zone, its
+  // request aborted when a filter changes, the screen unmounts or the session ends (ADR-0089).
+  const initialActivityRef = useRef(normalizeActivityTrendsFilters({ endDate: initialEnd, source: initialActivity.source, type: initialActivity.type }));
+  const readActivityRef = useRef(readActivity);
+  const [activity, setActivity] = useState<ActivitySelection>({ ...initialActivity, ...initialActivityRef.current });
+  const [activitySnapshot, setActivitySnapshot] = useState<ActivityTrendsSnapshot>(() => loadingActivityTrends(initialActivityRef.current));
+  const activityController = useRef<ActivityTrendsController | null>(null);
+  // The last type chosen for manual entries and GPX imports: recorded runs force `run`, and leaving them restores it.
+  const otherTypeRef = useRef<ActivityType>(initialActivity.type);
 
   useEffect(() => {
     const next = new DailyTrendsController({ endDate: initialRef.current, onChange: setSnapshot, orgId, read: readRef.current, signal, timeZone });
@@ -270,11 +310,44 @@ export function TrendsScreen({
     };
   }, [orgId, signal, timeZone]);
 
+  useEffect(() => {
+    const next = new ActivityTrendsController({
+      filters: initialActivityRef.current,
+      onChange: setActivitySnapshot,
+      orgId,
+      read: readActivityRef.current,
+      signal,
+      timeZone,
+    });
+    activityController.current = next;
+    setActivitySnapshot(next.snapshot);
+    next.start();
+    return () => {
+      next.dispose();
+      if (activityController.current === next) activityController.current = null;
+    };
+  }, [orgId, signal, timeZone]);
+
+  const chooseActivity = (change: Partial<ActivitySelection>) => {
+    const source = change.source ?? activity.source;
+    if (change.type !== undefined && source !== 'recorded_run') otherTypeRef.current = change.type;
+    const type = change.type ?? (change.source !== undefined && source !== 'recorded_run' ? otherTypeRef.current : activity.type);
+    const filters = normalizeActivityTrendsFilters({ endDate: activitySnapshot.filters.endDate, source, type });
+    const selection = { measure: change.measure ?? activity.measure, source: filters.source, type: filters.type };
+    // Kept for the next selection and the next mount, so a filter chosen while a request is in flight is not lost.
+    initialActivityRef.current = { ...initialActivityRef.current, source: filters.source, type: filters.type };
+    setActivity(selection);
+    onChooseActivity(selection);
+    activityController.current?.select(filters);
+  };
+
   const chooseEnd = (value: string) => {
     setEndInput(value);
     if (checkInDateProblem(value, today) !== null) return;
     onSelectEndDate(value);
     controller.current?.select(value);
+    initialActivityRef.current = { ...initialActivityRef.current, endDate: value };
+    activityController.current?.select({ endDate: value, source: activity.source, type: activity.type });
   };
 
   const chooseMetric = (next: DailyTrendsMetric) => {
@@ -284,12 +357,26 @@ export function TrendsScreen({
 
   return (
     <TrendsView
+      activity={
+        <ActivityTrendsView
+          measure={activity.measure}
+          onChooseMeasure={(measure) => chooseActivity({ measure })}
+          onChooseSource={(source) => chooseActivity({ source })}
+          onChooseType={(type) => chooseActivity({ type })}
+          onRetry={() => activityController.current?.refresh()}
+          snapshot={activitySnapshot}
+          timeZone={timeZone}
+        />
+      }
       endInput={endInput}
       metric={metric}
       onChooseEnd={chooseEnd}
       onChooseMetric={chooseMetric}
       onOpenDay={onOpenDay}
-      onRefresh={() => controller.current?.refresh()}
+      onRefresh={() => {
+        controller.current?.refresh();
+        activityController.current?.refresh();
+      }}
       snapshot={snapshot}
       timeZone={timeZone}
       today={today}
