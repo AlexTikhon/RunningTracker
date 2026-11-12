@@ -25,7 +25,9 @@ commitment to dates or to every item below.
    - Meal log: manual entries with optional user-reported nutrition totals ([ADR-0083](adr/0083-manual-meal-log.md)).
 2. **Deterministic analytics.** SQL, with versioned snapshots: weekly volume, pace trends, training load, personal
    bests. A unified read model over `runs` and `activities` (a view or a union) belongs here; its first, read-only
-   form is the activity history ([ADR-0087](adr/0087-unified-activity-history.md)), a list without totals.
+   form is the activity history ([ADR-0087](adr/0087-unified-activity-history.md)), a list without totals. The first
+   activity totals are the 28-day activity trends ([ADR-0089](adr/0089-activity-trends.md)): one source and one type at a
+   time, per local date, computed in SQL on every read.
 3. **AI layer.**
    - An asynchronous weekly review written from a facts bundle that SQL produced.
    - Food text parsing against a JSON schema, which the person confirms before anything is stored.
@@ -102,7 +104,7 @@ decides "today"); a missing value is null and never counts as zero; each series 
 range; food energy keeps day and entry coverage apart and is never called a complete diary. The summary is modest and
 defined once (weight change only with two recorded dates, sleep average over recorded dates, recorded totals with their
 coverage). The chart never joins values across a missing date. No predictions, correlations, targets or advice; no
-activities, GPS, active energy or macronutrients yet.
+active energy or macronutrients. Activities and GPS runs have their own section since ADR-0089 (below).
 
 **Immediate next milestone: the iPhone web pilot** ([ADR-0085](adr/0085-iphone-lan-pilot.md)). The setup is a Windows
 computer and an iPhone, without a Mac, so the next step uses the existing web app in Safari rather than a native client.
@@ -129,6 +131,15 @@ A run shared by someone else never appears. Recorded runs open the existing run 
 simulator recorded a run is not stored on the server, so it is shown as not recorded; storing it is a separate decision.
 [ADR-0088](adr/0088-activity-history-local-day.md) filters the history to one local calendar day by Today's start-time
 rule, and Today's activity cards open it on their own date, zone and source; still no totals in the history.
+
+**Activity trends** are [ADR-0089](adr/0089-activity-trends.md): an Activity section on Trends for one source (manual
+entries, GPX imports or recorded runs) and one activity type over the same 28 local dates, read by one owner-only SQL
+range statement in one snapshot and never stored. An item counts on the date it started in the viewer's zone (Today's
+rule, 23/25-hour dates included). Per date and for the range: the number of items, the source's own duration (entered,
+GPX elapsed, or a recorded run's observed duration from a current summary only) and distance, each with how many items
+record it; a pending or stale run summary counts the run and never a value. No entries, an unknown value and a recorded
+zero stay apart, and a date with nothing logged is not called inactive. Sources are never combined; shared runs never
+count. No pace, load, goals, comparisons or AI input.
 
 **HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
 built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the

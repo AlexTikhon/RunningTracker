@@ -3,6 +3,7 @@
 - Status: accepted; implemented and verified locally (unit, real PostgreSQL integration, Chromium end-to-end including a
   375 px viewport). Hosted CI: see the final report of the change.
 - Date: 2026-11-09
+- Extended by: ADR-0089 (an Activity section on the Trends screen, read by its own endpoint).
 - Relates to: ADR-0074 (a day is a local calendar date with the zone of its first write; "today" by the server clock in
   the client's zone), ADR-0078/0079 (manual movement, server-owned provenance; recorded totals with explicit
   denominators), ADR-0082 (Today: one snapshot, stored-date attribution, scoped navigation state), ADR-0083 (meal entries
@@ -136,6 +137,8 @@ response never contains note text, titles or other free text, so a cache or a lo
   reopened. The zone is the client's word, at most one day ahead of UTC (ADR-0074).
 - The range length is fixed at 28; no other windows, comparisons between ranges, moving averages or baselines.
 - No activities, GPS runs, active energy or macronutrients in the trends; movement and meals are the manual source only.
+  (Later: activities and GPS runs got their own read and an Activity section on this screen in ADR-0089; this endpoint is
+  unchanged.)
   A source-precedence read model for a later import (ADR-0078) does not exist yet.
 - The chart's tooltips are the browser's native titles (pointer only); keyboard and screen-reader users read the table.
 - HealthKit or any import: not started (Windows and an iPhone, no Mac/Xcode).

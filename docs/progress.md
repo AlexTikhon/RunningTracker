@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-11-08 (Today, the daily overview, ADR-0082, is the last section; before it: bounded session cleanup, migration 0038; durable pending OIDC logins, ADR-0081; durable PostgreSQL sessions, ADR-0080; manual daily movement in the weekly review, ADR-0079, and manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
+Last updated: 2026-11-12 (activity trends, ADR-0089, and its review corrections are the last two sections; the sections from Today, the daily overview, ADR-0082, through ADR-0088 and a frontend cleanup precede it; before them: bounded session cleanup, migration 0038; durable pending OIDC logins, ADR-0081; durable PostgreSQL sessions, ADR-0080; manual daily movement in the weekly review, ADR-0079, and manual daily movement, ADR-0078; resumed with a new product direction; step 1, owner-only manual activities, its integrity follow-up, ADR-0073, and step 2, daily check-in metrics, ADR-0074, are the last three sections; direction: `docs/product-direction.md`, handoff: `docs/pause-handoff.md`). The paragraphs
 below are the 2026-10-05/06 summary, kept as history.
 
 Review corrections (ADR-0048): runner lifecycle and data revisions now merge independently in
@@ -4248,3 +4248,94 @@ dispose, repeated dispose, a live controller released when the session ends).
 **Not established.** No full `npm run test:e2e`, no API integration run (no backend change). Vitest on Windows fails to
 load specs ("failed to find the current suite") when the shell's working directory has a lowercase drive letter
 (`c:\…`); run it from `C:\…`.
+
+## Activity trends for one source and type over 28 local dates (ADR-0089) (2026-11-12)
+
+**What exists.** `GET /api/orgs/{orgId}/activity-trends?endDate=&timeZone=&source=&type=`: owner-only, strict query
+(all four required and single-valued; `recorded_run` only with `type=run`), `Cache-Control: no-store`, the Trends range
+rules (28 dates, shortened and disclosed by 2000-01-01, `endDate` not after today in the zone by the server clock). An
+item counts on the local date it started on in the zone; the service computes every date's start with `startOfLocalDate`
+(23/25-hour dates) and PostgreSQL buckets rows with `width_bucket` over those instants inside the range bounds. One
+aggregate statement for the requested source (`activity-trends:activities` or `activity-trends:recorded-runs`) with the
+membership check in one REPEATABLE READ READ ONLY transaction, organization and owner stated in SQL besides RLS. Per date
+and for the range: `count`, the source's own duration (`enteredDuration`, `elapsedDuration`, `observedDuration` from
+summaries whose source revision equals the run's data revision), `distance`, each `{ withValue, total }`, and run summary
+states (current, pending, stale). Distances and observed durations rounded once per date; range totals add the daily
+totals; `summarize*TrendDays` in the contract defines them and the schema refuses anything else (since the review
+corrections below, PostgreSQL computes the range figures and the contract checks them). Echo: `applied`, `range`
+(with UTC bounds), `provenance.policyVersion: activity-trends-1`. Web: an **Activity** section on Trends (Source, Activity
+type, Measure, coverage sentences, duration explanation, 23/25-hour notes, bar chart with distinct marks for a recorded
+0, an unknown value and nothing logged, a table of every date), `ActivityTrendsController` with the Trends controller's
+lifetime rules, the selection kept per scope in `App.tsx`. OpenAPI, reference, product direction, README, ADR-0089, and
+forward notes in ADR-0084/0087. No migration, stored aggregate, job, model call or AI-input change.
+
+**Plan evidence and the one optimization.** `activity-trends-explain.integration.test.ts` (150,000 activities and 15,000
+runs over five members, `ANALYZE`, `EXPLAIN (ANALYZE, BUFFERS)` as `running_tracker_runtime` with the tenant context):
+activities read through `activities_owner_started_idx` bounded by the range (manual/ride: 54 of the person's 567 rows in
+range kept, under 2 ms). The run statement as first written (`LEFT JOIN run_summaries`) hashed a sequential scan of the
+whole `run_summaries` table (13,483 rows of every organization, 704 buffers, about 3.3 ms). It now looks the summary up
+with `LEFT JOIN LATERAL (… OFFSET 0)`: 59 `run_summaries_pkey` probes for the 59 runs of the range (about 1.8 ms). The test
+asserts index names and a bounded row count, not timings.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Test database identity | the three `TEST_*` URLs in `.env` point to `127.0.0.1:5433/running_tracker_test`; both new integration files assert `current_database()` and `current_user` (`running_tracker_owner`, `running_tracker_runtime`, database ending in `_test`) before any write, and the shared fixture checks the owner connection again; no migration in this change |
+| `npm run verify` | lint, typecheck, build pass; scripts 115, API 1,795, web 1,280, contracts 282, fixtures 14, simulator 3. An earlier run had one timeout in `run-search-evaluation-cli.spec.ts` (5 s, unrelated); it passed alone (27 of 27) and in the final full run |
+| New unit tests | contracts `activity-trends.spec.ts` 10 (four required parameters, recorded run only as run, the three states, run metrics only from current summaries, summary and tiling refinements with a 25-hour date, shortened range, OpenAPI parameters); API `activity-trends.spec.ts` 12 (owner and range in both statements, no zone in SQL, Warsaw 23/25-hour intervals, Kiritimati at the lower bound, rounding once per date, bucket outside the range refused, one statement after the membership check, future end refused before any database work); web 23 (presentation 8, controller 6, client 3, section 4, disposal 2) |
+| `activity-trends-http.integration.test.ts` | 15 passed: owner counts their finished runs and a grantee with history and live grants, a coach and another organization count none; activities owner-only; non-member and inactive 403, anonymous 401, all `no-store`; midnight edges at the microsecond and an item past midnight on its start date; Warsaw 2026-10-25 (25 h) agreeing with Today's figure and the day history; 2026-03-29 (23 h); range edges and a 10-date range from 2000-01-01; no entries, unknown and recorded-zero distances; current, stale and pending summaries and a summary made stale by a revision bump; 130 manual rides (more than two history pages of 50) equal to PostgreSQL's own `AT TIME ZONE` grouping and to the paged history; deletions over HTTP; snapshot hook; no row count changed; parameter and future-date refusals |
+| Mutation checks | run statement without `run.user_id = $2`: the shared-run test fails; transaction without the read-only snapshot (READ COMMITTED): the snapshot test fails. The service file was restored from a copy after each |
+| `npm run test:integration` | 76 files, 1,048 of 1,060: the 12 `backup-restore` tests stopped at `prepare` because `BACKUP_ENCRYPTION_KEY_FILE` in `.env` names a file that does not exist here (as for ADR-0086 to 0088). With a throwaway key generated in the session scratchpad, set in the process environment only and deleted afterwards: that file 12 of 12 |
+| `npx playwright test --project=chromium activity-trends.spec.ts trends.spec.ts` | 5 passed: the 2 new specs (filters and labelled durations per source, coverage sentences, recorded runs fixed to run, the coach's shared run and activity absent, exactly four query parameters per request, end date and selection kept across navigation; at 375 px with a wide font no horizontal scroll and controls, chart and table inside the viewport, a held GPX answer dropped after choosing recorded runs, a 503 with Retry while the health series stay ready, sign-out while a request is held) and the 3 existing Trends specs (two row counts now scoped to the health table) |
+| `npx playwright test --project=chromium` (Today, Today → history, activity history, sign-out) | 18 passed |
+
+**Not established.** No full `npm run test:e2e`; Chromium only (desktop and a 375 px viewport), no Firefox, WebKit or
+iPhone run. One synthetic dataset for the plans, no load run. No weekly buckets, comparisons, pace, load or goals.
+
+## Activity trends: review corrections (ADR-0089), 2026-11-12
+
+Three review findings fixed in one change, without changing the response shape, the statement count or the metric
+policy. No period comparisons, import formats, stored aggregates, jobs or AI changes.
+
+**Skipped local dates.** The contract required `startsAt < endsAt` for every date, so
+`GET …/activity-trends?endDate=2012-01-05&timeZone=Pacific/Apia&source=manual&type=run` was a `500 INTERNAL_ERROR`:
+Pacific/Apia skipped 2011-12-30, which `startOfLocalDate` correctly gives as an empty interval. The contract now accepts an
+empty interval only with `count: 0` and still refuses a reversed interval, a gap or an overlap; the skipped date stays one
+of the 28 dates, with zero entries and `null` totals. `width_bucket` sends an item at the repeated bound to the date after
+the skip (the last date starting at that instant), and the service refuses a bucket of an empty date. The web section
+says the date "did not happen in Pacific/Apia … had no hours", shows "Date skipped" in the table and chart label, and adds
+"1 of them did not happen in this time zone" to the coverage sentence, instead of a clock-change note. Warsaw's 23/25-hour
+dates are unchanged and still tested.
+
+**Zone identity in the web client.** `readActivityTrends` compared the echoed `applied.timeZone` with the raw requested
+string, so `europe/warsaw` was refused when the server answered `Europe/Warsaw`. It now uses `sameTimeZone`
+(`apps/web/src/time-zone.ts`): both names canonicalized with the API's convention (`Intl` `resolvedOptions().timeZone`), with
+Temporal's zone equality as a fallback where an engine keeps aliases as spelled; an invalid name matches nothing and never
+throws. Other filter mismatches and genuinely different zones are still refused.
+
+**Range figures from PostgreSQL.** The range summary was built in TypeScript (`summarize*TrendDays`). Each statement now
+returns the date rows and, after them, one range row (`UNION ALL` over the materialized per-date CTE; an aggregate without
+`GROUP BY`, so it exists for an empty range), in the same read-only snapshot and still one statement per read. Daily
+floating-point sums are rounded once per date halves up with `floor(x) + (x - floor(x) >= 0.5)`, exact for a non-negative
+double and equal to `Math.round`; `round(double precision)` (halves to even) and `::numeric` (15 significant digits) are not
+used. Range totals add the rounded daily integers. The contract helpers remain the definition the schema checks the range
+row against.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Test database identity | unchanged: both activity-trends integration files assert `current_database()` (ending in `_test`) and `current_user` (`running_tracker_owner`, `running_tracker_runtime`) in `beforeAll`, before the first fixture write |
+| Unit tests (changed files) | contracts `activity-trends.spec.ts` 11 (new: the Apia range with items on both neighbours accepted; an item on the empty date, a reversed interval and an overlap refused); API `activity-trends.spec.ts` 16 (new: no `round(`/`::numeric` and the half-up expression in both statements, the range row as the source of the summary, an empty range from the range row alone, a range row that disagrees with the dates refused, missing or repeated range rows and impossible totals refused, the Apia interval and a bucket of the skipped date refused); web `time-zone.spec.ts` 4 (new), `runner-api.activity-trends.spec.ts` 6 (new: `europe/warsaw`, `EUROPE/WARSAW`, `US/Eastern`↔`America/New_York` and `Asia/Kolkata`↔`Asia/Calcutta` accepted; `Europe/Berlin` and `America/Chicago` refused; an invalid zone gives the server's `RunnerApiError`, an invalid echo the mismatch error, never a `RangeError`), `activity-trends.spec.ts` 9 (new: skipped-date note, row, chart label and coverage sentence) |
+| `npm run verify` | exit 0: lint, typecheck, build pass; scripts 115, API 1,799, web 1,288, contracts 283, fixtures 14, simulator 3 |
+| `activity-trends-http.integration.test.ts` | 17 passed, among them 2 new: Pacific/Apia ending 2012-01-05 (28 dates, 2011-12-30 empty with `null` totals; records at 29 Dec 00:00, the last microsecond before the skip, the first instant after it, 1 µs later, 31 Dec 23:59:59.999999 and 1 Jan 00:00 land on 29 Dec ×2, 31 Dec ×3, 1 Jan ×1, equal to PostgreSQL's own `AT TIME ZONE` grouping; recorded runs on the same boundary; the skipped date as the end date); rounding (two current summaries of 0.25 → 1, 2.5 → 3, 3,599.5 s → 3,600, 1000.4999999999999 → 1000, range 1,004 m and 4,601 s as the sum of the rounded dates, a stale and a pending run counted without values, manual distances 0.5 → 1 and 2.5 → 3 with partial coverage, an empty range) |
+| Mutation checks | half-up expression replaced by `round(x)::bigint`: the rounding test fails (0 instead of 1); by `round(x::numeric)::bigint`: it fails (1001 instead of 1000). The service file was restored from a copy after each |
+| `activity-trends-explain.integration.test.ts` | 2 passed. Under `running_tracker_runtime` the per-date part is unchanged (`activities_owner_started_idx`, 54 activity rows for manual/ride; `runs_owner_started_idx`, 59 `run_summaries_pkey` probes); the range row is one `Aggregate` over a second `CTE Scan` of the 27–28 date rows with no table access (83, 56 and 411 shared buffer hits; about 0.9, 0.5 and 2.8 ms) |
+| `npx playwright test --project=chromium activity-trends.spec.ts trends.spec.ts` | 5 passed, after the build in `npm run verify` had finished |
+
+The full integration suite and the full browser suite were not rerun for this change.
+
+**Not established.** No browser test with a skipped date or a lowercase zone (unit and API-level only). The Temporal
+fallback in `sameTimeZone` is tested with a stub, not in an engine without alias resolution. Chromium only; one
+synthetic dataset for the plans.

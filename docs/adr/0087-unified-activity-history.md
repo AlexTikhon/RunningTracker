@@ -151,4 +151,5 @@ Refresh, access lost.
   removed on 2026-11-12.
 - Capture provenance for recorded runs is unknown (section 6).
 - Browser evidence is Chromium (desktop and a 375 px viewport) only; no Firefox, WebKit or iPhone run.
-- No run deletion from the history; no edit; no totals, trends, goals or training load.
+- No run deletion from the history; no edit; no totals, trends, goals or training load. (Later: per-source activity
+  totals over 28 dates are ADR-0089, a separate read on Trends; the history itself still has no totals.)

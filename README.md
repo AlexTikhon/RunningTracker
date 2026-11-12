@@ -42,7 +42,8 @@ and grows one vertical slice at a time. Package names, database identifiers, coo
 - **Today**: one day across all of the above, with actions that open each editor on that date and the day's
   activities and runs in the activity history.
 - **Trends**: the 28 dates ending on a chosen date (weight, sleep, steps, food energy), each with its coverage. Gaps
-  stay gaps; a missing value never counts as zero.
+  stay gaps; a missing value never counts as zero. Its Activity section shows one source and one activity type over the
+  same dates (count, the source's own duration, distance, with coverage); sources are never added together.
 - **Weekly review**: one week's coverage, values and limitations, worded by code on every read.
 
 ### Optional AI, off by default
@@ -170,7 +171,7 @@ Firefox gate, on pushes to `main`, on pull requests and on demand. It reads no s
 |---|---|
 | [docs/reference.md](docs/reference.md) | the detailed reference: API behaviour, data rules, configuration and verification for every feature |
 | [docs/SDD.md](docs/SDD.md) | the system design |
-| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0088) |
+| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0089) |
 | [docs/product-direction.md](docs/product-direction.md) | roadmap, principles and the next milestone |
 | [docs/progress.md](docs/progress.md) | what was built and how it was verified, entry by entry |
 | [docs/runbooks/](docs/runbooks/) | how to run, demo, deploy, back up and pilot it |
