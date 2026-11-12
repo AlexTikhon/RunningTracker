@@ -20,6 +20,7 @@ import {
   putDailyMovementRequestSchema,
 } from './daily-movement.js';
 import { dailyOverviewSchema } from './daily-overview.js';
+import { activityTrendsSchema } from './activity-trends.js';
 import { dailyTrendsSchema } from './daily-trends.js';
 import {
   createMealRequestSchema,
@@ -562,6 +563,22 @@ export const openApiDocument = {
         responses: { '200': jsonResponse('The trends of the range.', 'DailyTrends'), ...defaultErrors },
       },
     },
+    '/api/orgs/{orgId}/activity-trends': {
+      get: {
+        tags: ['Daily trends'],
+        summary: "Compute the signed-in person's 28-day activity trends for one source and one activity type",
+        description:
+          "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Answers `Cache-Control: no-store`, errors included.",
+        parameters: [
+          parameterRef('OrgId'),
+          parameterRef('TrendsEndDate'),
+          parameterRef('ActivityTrendsTimeZone'),
+          parameterRef('ActivityTrendsSource'),
+          parameterRef('ActivityTrendsType'),
+        ],
+        responses: { '200': jsonResponse('The activity trends of the range.', 'ActivityTrends'), ...defaultErrors },
+      },
+    },
     '/api/orgs/{orgId}/weekly-review': {
       get: {
         tags: ['Insights'],
@@ -894,6 +911,27 @@ export const openApiDocument = {
         description: 'IANA time zone name, for example Europe/Warsaw. Decides "today" (the latest allowed end date) only; every record keeps its stored date.',
         schema: { type: 'string', minLength: 1, maxLength: 64 },
       },
+      ActivityTrendsTimeZone: {
+        name: 'timeZone',
+        in: 'query',
+        required: true,
+        description: 'IANA time zone name, for example Europe/Warsaw. Decides "today" and the local date every item started on.',
+        schema: { type: 'string', minLength: 1, maxLength: 64 },
+      },
+      ActivityTrendsSource: {
+        name: 'source',
+        in: 'query',
+        required: true,
+        description: 'The one source to aggregate; sources are never combined.',
+        schema: { enum: [...ACTIVITY_HISTORY_SOURCES], type: 'string' },
+      },
+      ActivityTrendsType: {
+        name: 'type',
+        in: 'query',
+        required: true,
+        description: 'The one activity type to aggregate. With `source=recorded_run` only `run`.',
+        schema: { enum: [...ACTIVITY_TYPES], type: 'string' },
+      },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
       CsrfToken: { name: 'x-csrf-token', in: 'header', required: true, schema: { type: 'string' } },
@@ -1025,6 +1063,7 @@ export const openApiDocument = {
       WeeklyInsightView: jsonSchema(weeklyInsightViewSchema),
       WeeklyReview: jsonSchema(weeklyReviewSchema),
       DailyOverview: jsonSchema(dailyOverviewSchema),
+      ActivityTrends: jsonSchema(activityTrendsSchema),
       DailyTrends: jsonSchema(dailyTrendsSchema),
       RunSearchResponse: jsonSchema(runSearchResponseSchema),
       RunSearchInterpretationRequest: jsonSchema(runSearchInterpretationRequestSchema),

@@ -1466,6 +1466,47 @@
         }
       }
     },
+    "/api/orgs/{orgId}/activity-trends": {
+      "get": {
+        "tags": [
+          "Daily trends"
+        ],
+        "summary": "Compute the signed-in person's 28-day activity trends for one source and one activity type",
+        "description": "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Answers `Cache-Control: no-store`, errors included.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/TrendsEndDate"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityTrendsTimeZone"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityTrendsSource"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityTrendsType"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityTrends"
+                }
+              }
+            },
+            "description": "The activity trends of the range."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/weekly-review": {
       "get": {
         "tags": [
@@ -2340,6 +2381,49 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 64
+        }
+      },
+      "ActivityTrendsTimeZone": {
+        "name": "timeZone",
+        "in": "query",
+        "required": true,
+        "description": "IANA time zone name, for example Europe/Warsaw. Decides \"today\" and the local date every item started on.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "ActivityTrendsSource": {
+        "name": "source",
+        "in": "query",
+        "required": true,
+        "description": "The one source to aggregate; sources are never combined.",
+        "schema": {
+          "enum": [
+            "manual",
+            "gpx",
+            "recorded_run"
+          ],
+          "type": "string"
+        }
+      },
+      "ActivityTrendsType": {
+        "name": "type",
+        "in": "query",
+        "required": true,
+        "description": "The one activity type to aggregate. With `source=recorded_run` only `run`.",
+        "schema": {
+          "enum": [
+            "run",
+            "walk",
+            "ride",
+            "hike",
+            "swim",
+            "strength",
+            "other"
+          ],
+          "type": "string"
         }
       },
       "UserId": {
@@ -7195,6 +7279,1010 @@
           "provenance"
         ],
         "additionalProperties": false
+      },
+      "ActivityTrends": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "manual"
+              },
+              "applied": {
+                "type": "object",
+                "properties": {
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "manual"
+                  },
+                  "timeZone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "run",
+                      "walk",
+                      "ride",
+                      "hike",
+                      "swim",
+                      "strength",
+                      "other"
+                    ]
+                  }
+                },
+                "required": [
+                  "endDate",
+                  "source",
+                  "timeZone",
+                  "type"
+                ],
+                "additionalProperties": false
+              },
+              "range": {
+                "type": "object",
+                "properties": {
+                  "startDate": {
+                    "type": "string"
+                  },
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 28
+                  },
+                  "requestedDays": {
+                    "type": "number",
+                    "const": 28
+                  },
+                  "shortenedByLowerBound": {
+                    "type": "boolean"
+                  },
+                  "startsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "endsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "today": {
+                    "type": "string"
+                  },
+                  "includesToday": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "startDate",
+                  "endDate",
+                  "days",
+                  "requestedDays",
+                  "shortenedByLowerBound",
+                  "startsAt",
+                  "endsAt",
+                  "today",
+                  "includesToday"
+                ],
+                "additionalProperties": false
+              },
+              "days": {
+                "minItems": 1,
+                "maxItems": 28,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "localDate": {
+                      "type": "string"
+                    },
+                    "startsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "endsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "distance": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalM": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalM"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "enteredDuration": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalS": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalS"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "localDate",
+                    "startsAt",
+                    "endsAt",
+                    "count",
+                    "distance",
+                    "enteredDuration"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "summary": {
+                "type": "object",
+                "properties": {
+                  "daysWithEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 28
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "distance": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalM": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalM",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "enteredDuration": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalS": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalS",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "daysWithEntries",
+                  "count",
+                  "distance",
+                  "enteredDuration"
+                ],
+                "additionalProperties": false
+              },
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "computedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-1"
+                  },
+                  "persisted": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "snapshot": {
+                    "type": "string",
+                    "const": "single_read_only_transaction"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "computed_by_app"
+                  }
+                },
+                "required": [
+                  "computedAt",
+                  "policyVersion",
+                  "persisted",
+                  "snapshot",
+                  "source"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "source",
+              "applied",
+              "range",
+              "days",
+              "summary",
+              "provenance"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "gpx"
+              },
+              "applied": {
+                "type": "object",
+                "properties": {
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "gpx"
+                  },
+                  "timeZone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "run",
+                      "walk",
+                      "ride",
+                      "hike",
+                      "swim",
+                      "strength",
+                      "other"
+                    ]
+                  }
+                },
+                "required": [
+                  "endDate",
+                  "source",
+                  "timeZone",
+                  "type"
+                ],
+                "additionalProperties": false
+              },
+              "range": {
+                "type": "object",
+                "properties": {
+                  "startDate": {
+                    "type": "string"
+                  },
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 28
+                  },
+                  "requestedDays": {
+                    "type": "number",
+                    "const": 28
+                  },
+                  "shortenedByLowerBound": {
+                    "type": "boolean"
+                  },
+                  "startsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "endsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "today": {
+                    "type": "string"
+                  },
+                  "includesToday": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "startDate",
+                  "endDate",
+                  "days",
+                  "requestedDays",
+                  "shortenedByLowerBound",
+                  "startsAt",
+                  "endsAt",
+                  "today",
+                  "includesToday"
+                ],
+                "additionalProperties": false
+              },
+              "days": {
+                "minItems": 1,
+                "maxItems": 28,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "localDate": {
+                      "type": "string"
+                    },
+                    "startsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "endsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "distance": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalM": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalM"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "elapsedDuration": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalS": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalS"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "localDate",
+                    "startsAt",
+                    "endsAt",
+                    "count",
+                    "distance",
+                    "elapsedDuration"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "summary": {
+                "type": "object",
+                "properties": {
+                  "daysWithEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 28
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "distance": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalM": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalM",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "elapsedDuration": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalS": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalS",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "daysWithEntries",
+                  "count",
+                  "distance",
+                  "elapsedDuration"
+                ],
+                "additionalProperties": false
+              },
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "computedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-1"
+                  },
+                  "persisted": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "snapshot": {
+                    "type": "string",
+                    "const": "single_read_only_transaction"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "computed_by_app"
+                  }
+                },
+                "required": [
+                  "computedAt",
+                  "policyVersion",
+                  "persisted",
+                  "snapshot",
+                  "source"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "source",
+              "applied",
+              "range",
+              "days",
+              "summary",
+              "provenance"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "recorded_run"
+              },
+              "applied": {
+                "type": "object",
+                "properties": {
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "recorded_run"
+                  },
+                  "timeZone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "run"
+                  }
+                },
+                "required": [
+                  "endDate",
+                  "source",
+                  "timeZone",
+                  "type"
+                ],
+                "additionalProperties": false
+              },
+              "range": {
+                "type": "object",
+                "properties": {
+                  "startDate": {
+                    "type": "string"
+                  },
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 28
+                  },
+                  "requestedDays": {
+                    "type": "number",
+                    "const": 28
+                  },
+                  "shortenedByLowerBound": {
+                    "type": "boolean"
+                  },
+                  "startsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "endsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "today": {
+                    "type": "string"
+                  },
+                  "includesToday": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "startDate",
+                  "endDate",
+                  "days",
+                  "requestedDays",
+                  "shortenedByLowerBound",
+                  "startsAt",
+                  "endsAt",
+                  "today",
+                  "includesToday"
+                ],
+                "additionalProperties": false
+              },
+              "days": {
+                "minItems": 1,
+                "maxItems": 28,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "localDate": {
+                      "type": "string"
+                    },
+                    "startsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "endsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "distance": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalM": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalM"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "observedDuration": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalS": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalS"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "summaries": {
+                      "type": "object",
+                      "properties": {
+                        "current": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "pending": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "stale": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "current",
+                        "pending",
+                        "stale"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "localDate",
+                    "startsAt",
+                    "endsAt",
+                    "count",
+                    "distance",
+                    "observedDuration",
+                    "summaries"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "summary": {
+                "type": "object",
+                "properties": {
+                  "daysWithEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 28
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "distance": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalM": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalM",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "observedDuration": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalS": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalS",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "summaries": {
+                    "type": "object",
+                    "properties": {
+                      "current": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "pending": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "stale": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "current",
+                      "pending",
+                      "stale"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "daysWithEntries",
+                  "count",
+                  "distance",
+                  "observedDuration",
+                  "summaries"
+                ],
+                "additionalProperties": false
+              },
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "computedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-1"
+                  },
+                  "persisted": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "snapshot": {
+                    "type": "string",
+                    "const": "single_read_only_transaction"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "computed_by_app"
+                  }
+                },
+                "required": [
+                  "computedAt",
+                  "policyVersion",
+                  "persisted",
+                  "snapshot",
+                  "source"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "source",
+              "applied",
+              "range",
+              "days",
+              "summary",
+              "provenance"
+            ],
+            "additionalProperties": false
+          }
+        ]
       },
       "DailyTrends": {
         "type": "object",
