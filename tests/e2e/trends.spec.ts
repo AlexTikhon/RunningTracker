@@ -44,6 +44,8 @@ function trendsScreen(page: Page) {
   const screen = page.getByRole('region', { exact: true, name: 'Trends' });
   return {
     chart: screen.locator('.trends-chart svg'),
+    // The health series' table ("Every date"); the Activity section (ADR-0089) has its own table below it.
+    healthRows: screen.getByRole('region', { exact: true, name: 'Every date' }).locator('tbody tr'),
     row: (localDate: string) => screen.locator(`tr[data-date="${localDate}"]`),
     screen,
     series: screen.locator('.trends-card').first(),
@@ -134,7 +136,7 @@ test('Trends: values recorded through the editors, coverage and gaps, a day open
   await expect(trends.chart.locator('circle')).toHaveCount(2);
   await expect(trends.chart.locator('polyline')).toHaveCount(0);
   await expect(trends.chart.locator('[data-missing-date]')).toHaveCount(26);
-  await expect(trends.screen.locator('tbody tr')).toHaveCount(28);
+  await expect(trends.healthRows).toHaveCount(28);
 
   // Weight: two recorded dates give a difference; sleep: one recorded date, averaged over it alone.
   await trends.screen.getByRole('radio', { name: 'Weight' }).check();
@@ -268,7 +270,7 @@ test('Trends at 375 px: usable without horizontal scrolling, and a late answer f
   await page.waitForTimeout(500); // give a late answer every chance to be (wrongly) applied
   await expect(trends.screen.getByLabel('End date')).toHaveValue(chosen);
   await expect(trends.state).toHaveAttribute('data-trends-state', 'ready');
-  await expect(trends.screen.locator('tbody tr').first()).toHaveAttribute('data-date', chosen);
+  await expect(trends.healthRows.first()).toHaveAttribute('data-date', chosen);
   await expect(trends.row(today)).toHaveCount(0);
   expect(await fits(page)).toBe(true);
 });
