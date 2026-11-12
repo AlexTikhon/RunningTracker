@@ -4,6 +4,8 @@ import type { Pool } from 'pg';
 import { createActivityRouter } from './activities/activity.routes.js';
 import { ActivityHistoryService, type ActivityHistoryTestHooks } from './activity-history/activity-history-service.js';
 import { activityHistoryNoStore, createActivityHistoryRouter } from './activity-history/activity-history.routes.js';
+import { ActivityTrendsService, type ActivityTrendsTestHooks } from './activity-trends/activity-trends-service.js';
+import { activityTrendsNoStore, createActivityTrendsRouter } from './activity-trends/activity-trends.routes.js';
 import { createDailyMetricsRouter } from './daily-metrics/daily-metrics.routes.js';
 import { createDailyMovementRouter, dailyMovementNoStore } from './daily-movement/daily-movement.routes.js';
 import { DailyOverviewService, type DailyOverviewTestHooks } from './daily-overview/daily-overview-service.js';
@@ -74,6 +76,8 @@ export interface AppDependencies {
   archiveTileScheduler?: ArchiveTileGenerationScheduler;
   /** Barriers inside the activity history's read transaction, for snapshot tests. */
   testOnlyActivityHistoryHooks?: ActivityHistoryTestHooks;
+  /** Barriers inside the activity trends' read transaction, for snapshot tests. */
+  testOnlyActivityTrendsHooks?: ActivityTrendsTestHooks;
   /** Barriers inside the daily overview's read transaction, for snapshot tests. */
   testOnlyDailyOverviewHooks?: DailyOverviewTestHooks;
   testOnlyDailyTrendsHooks?: DailyTrendsTestHooks;
@@ -102,6 +106,7 @@ export function createApp({
   archiveTilePipeline,
   archiveTileScheduler,
   testOnlyActivityHistoryHooks,
+  testOnlyActivityTrendsHooks,
   testOnlyDailyOverviewHooks,
   testOnlyDailyTrendsHooks,
   testOnlyFaultInjector,
@@ -113,6 +118,7 @@ export function createApp({
 }: AppDependencies): Express {
   if (
     (testOnlyActivityHistoryHooks ||
+      testOnlyActivityTrendsHooks ||
       testOnlyDailyOverviewHooks ||
       testOnlyDailyTrendsHooks ||
       testOnlyFaultInjector ||
@@ -176,6 +182,7 @@ export function createApp({
   // Before the body parser, so that a malformed or oversized body's error answer is not cacheable either (ADR-0078).
   app.use('/api/orgs/:orgId/daily-movement', dailyMovementNoStore);
   app.use('/api/orgs/:orgId/activity-history', activityHistoryNoStore);
+  app.use('/api/orgs/:orgId/activity-trends', activityTrendsNoStore);
   app.use('/api/orgs/:orgId/daily-overview', dailyOverviewNoStore);
   app.use('/api/orgs/:orgId/daily-trends', dailyTrendsNoStore);
   app.use('/api/orgs/:orgId/meals', mealsNoStore);
@@ -288,6 +295,18 @@ export function createApp({
         ...(testOnlyDailyOverviewHooks ? { hooks: testOnlyDailyOverviewHooks } : {}),
       }),
       sessionManager: sessions,
+    })),
+  );
+  // Activity trends (ADR-0089): read-only, aggregated on every read from the person's own activities or runs.
+  app.use(
+    '/api/orgs/:orgId/activity-trends',
+    routePrefix('/api/orgs/:orgId/activity-trends', createActivityTrendsRouter({
+      sessionManager: sessions,
+      trends: new ActivityTrendsService({
+        clock,
+        pool: pool as Pick<Pool, 'connect'>,
+        ...(testOnlyActivityTrendsHooks ? { hooks: testOnlyActivityTrendsHooks } : {}),
+      }),
     })),
   );
   // 28-day trends (ADR-0084): read-only, derived on every read from the person's own daily records.
