@@ -30,8 +30,9 @@ export interface KeptMetric {
 
 /**
  * Opens the Activity tab's history on one Today card's items (ADR-0088): the overview's date and zone, and the card's
- * source. The Activity screen reads it once when it mounts, as its starting filters and as the date "Back to Today"
- * returns to. Any ordinary navigation clears it, so opening Activity from the view switcher shows the whole history.
+ * source. Single-use: the Activity screen reads it once when it mounts, as its starting filters and as the date "Back to
+ * Today" returns to, and then reports it applied, which consumes it. Any ordinary navigation clears it too, so neither
+ * the view switcher nor a later remount of the screen (another organization and back) ever applies it again.
  */
 export interface HistoryIntent {
   localDate: string;
@@ -80,6 +81,15 @@ export function checkInIntentOf(intent: EditorIntent | null): { localDate: strin
 /** The date a Meal log intent opens, or null. */
 export function mealIntentDateOf(intent: EditorIntent | null): string | null {
   return intent !== null && intent.section === 'meals' ? intent.localDate : null;
+}
+
+/**
+ * What remains once `applied` has been applied: nothing if it is still the current intent, otherwise the current one
+ * untouched. Compared by identity, since every Today action makes a new intent: a late report from a screen that
+ * applied an earlier intent never consumes a newer one, even for the same day.
+ */
+export function afterHistoryIntentApplied(current: HistoryIntent | null, applied: HistoryIntent): HistoryIntent | null {
+  return current === applied ? null : current;
 }
 
 /** The intent or kept date, only under the scope it was made in. */

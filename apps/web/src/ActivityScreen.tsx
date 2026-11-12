@@ -44,6 +44,9 @@ export interface ActivityScreenProps {
   // that date. Read once when the screen mounts; the parent passes it only under the scope it was made in.
   historyIntent?: { localDate: string; source: 'gpx' | 'manual' | 'recorded_run'; timeZone: string } | null;
   onBackToToday?: (localDate: string) => void;
+  // Called once the screen has applied `historyIntent`, so the parent consumes it and a later remount (another
+  // organization and back) never applies it again. The screen keeps its own copy for its filters and Back to Today.
+  onHistoryIntentApplied?: (() => void) | undefined;
   orgId: string;
   // The session's signal: ending or replacing the session silences every request of this screen.
   signal: AbortSignal;
@@ -71,6 +74,7 @@ export function ActivityScreen({
   csrf,
   historyIntent = null,
   onBackToToday,
+  onHistoryIntentApplied,
   orgId,
   signal,
   userId,
@@ -81,7 +85,9 @@ export function ActivityScreen({
   const [draft, setDraft] = useState<ActivityDraft>(() => defaultActivityDraft(new Date()));
   const [showErrors, setShowErrors] = useState(false);
   // The Today intent is read once, here: later prop changes never re-apply it, and the person's own filter changes win.
+  // The report that consumes it is the one handed over with it, so it names exactly the intent this screen applied.
   const [origin] = useState(historyIntent);
+  const [reportApplied] = useState(() => (historyIntent === null ? undefined : onHistoryIntentApplied));
   const [filters, setFilters] = useState<ActivityHistoryFilters>(() =>
     origin === null
       ? noHistoryFilters
@@ -196,6 +202,12 @@ export function ActivityScreen({
   useEffect(() => {
     if (origin !== null) document.getElementById('activity-history-title')?.focus();
   }, [origin]);
+
+  // Applied: the parent's intent is consumed. Repeating it (StrictMode's second effect run) changes nothing, and the
+  // screen's own copy above keeps the filters and Back to Today for as long as it stays mounted.
+  useEffect(() => {
+    reportApplied?.();
+  }, [reportApplied]);
 
   useEffect(() => {
     const next = new ActivitySubmissionController({

@@ -70,7 +70,9 @@ is set**. Consequences:
 ### 5. Web: a day filter, and history actions on Today's cards
 
 - **History.** A **Day** date input and an explicit **All dates** button in the filter form. The input applies only a
-  complete, valid date, so typing never resets the list. With a day: "Showing what started on Sun, 29 Mar 2026 in the time
+  complete, valid date, so typing never resets the list. It follows a day applied elsewhere (All dates, a Today action)
+  by updating its value, never by remounting, so keyboard focus stays on it after a date is applied and consecutive
+  keyboard edits keep working. With a day: "Showing what started on Sun, 29 Mar 2026 in the time
   zone Europe/Warsaw, from its midnight to the next midnight there", the 23/25-hour note from the server's interval,
   empty-state wording that names the day, and every time (cards and run details) in **that** zone. A day chosen in the
   history keeps the current day's zone, otherwise the device's. The day is part of the controller's filters and its key:
@@ -81,8 +83,13 @@ is set**. Consequences:
   card's source. "Open Activities" and "Open Runner" stay.
 - **Navigation intent.** `HistoryIntent { localDate, timeZone, source, scope }` sits next to the editor intent: scoped by
   session generation, person and organization, ignored under any other scope, cleared on sign-out and by **every
-  ordinary navigation** (the view switcher), so opening Activity from the switcher shows the whole history. The Activity
-  screen reads it once, when it mounts, as its starting filters; focus moves to the history heading.
+  ordinary navigation** (the view switcher), so opening Activity from the switcher shows the whole history. It is
+  **single-use**: the Activity screen reads it when it mounts, keeps its own copy as its starting filters and as the
+  Back to Today date, and then reports it applied, which removes it from `App`. A later remount of the screen (another
+  organization and back while staying on Activity) therefore starts with the whole history, not the consumed day. The
+  report names the intent it applied (compared by identity), so a late or repeated report (StrictMode's second effect
+  run) never consumes a newer intent, and every new Show in history action applies, even for the same day. Focus moves
+  to the history heading.
 - **Back to Today** appears in the history when it was opened from Today and returns to Today on the originating date
   (the kept Today date mechanism of ADR-0082), whatever day or filter the person chose since.
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { checkInIntentOf, inScope, mealIntentDateOf, navigationFor } from './navigation-intent.js';
+import { afterHistoryIntentApplied, checkInIntentOf, inScope, mealIntentDateOf, navigationFor } from './navigation-intent.js';
 
 const SCOPE = '0|user-a|org-a';
 
@@ -65,5 +65,17 @@ describe('Today navigation', () => {
       expect(inScope(kept, other), String(other)).toBeNull();
     }
     expect(inScope(null, SCOPE)).toBeNull();
+  });
+
+  it('consumes a history intent once applied, and never a newer one, even for the same day (ADR-0088)', () => {
+    const action = { kind: 'history', localDate: '2026-03-29', source: 'manual', timeZone: 'Europe/Warsaw' } as const;
+    const first = navigationFor(action, SCOPE).history!;
+    expect(afterHistoryIntentApplied(first, first)).toBeNull();
+    // Reported twice (StrictMode's second effect run): still consumed.
+    expect(afterHistoryIntentApplied(afterHistoryIntentApplied(first, first), first)).toBeNull();
+    // A late report of the first application after a new Today action leaves the new intent in place.
+    const second = navigationFor(action, SCOPE).history!;
+    expect(afterHistoryIntentApplied(second, first)).toBe(second);
+    expect(afterHistoryIntentApplied(null, first)).toBeNull();
   });
 });

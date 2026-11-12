@@ -11,6 +11,7 @@ import { CoachScreen } from './CoachScreen.js';
 import type { TodayAction } from './daily-overview.js';
 import { MealLogScreen } from './MealLogScreen.js';
 import {
+  afterHistoryIntentApplied,
   checkInIntentOf,
   inScope,
   mealIntentDateOf,
@@ -134,8 +135,9 @@ export function App() {
   // tied to the scope they were made in (navigation-intent.ts) and forgotten on sign-out.
   const [todayDate, setTodayDate] = useState<KeptDate | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
-  // The day, zone and source a Today card opens the Activity history on (ADR-0088). Scoped like the editor intent and
-  // cleared by any ordinary navigation, so it is applied only to the opening it was made for.
+  // The day, zone and source a Today card opens the Activity history on (ADR-0088). Scoped like the editor intent,
+  // consumed once the Activity screen has applied it and cleared by any ordinary navigation, so it is applied only to
+  // the opening it was made for: a remount of the screen (another organization and back) starts with the whole history.
   const [historyIntent, setHistoryIntent] = useState<HistoryIntent | null>(null);
   // The Trends range (its end date) and series, kept like Today's date (ADR-0084).
   const [trendsEnd, setTrendsEnd] = useState<KeptDate | null>(null);
@@ -1077,6 +1079,11 @@ export function App() {
                 : { localDate: scopedHistory.localDate, source: scopedHistory.source, timeZone: scopedHistory.timeZone }
             }
             onBackToToday={backToToday}
+            onHistoryIntentApplied={
+              scopedHistory === null
+                ? undefined
+                : () => setHistoryIntent((current) => afterHistoryIntentApplied(current, scopedHistory))
+            }
             orgId={selectedOrgId}
             signal={session.signal}
             userId={session.session.identity.userId}

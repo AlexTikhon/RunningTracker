@@ -47,10 +47,18 @@ export const historyDisplayZone = (filters: ActivityHistoryFilters, deviceTimeZo
 /**
  * The day input. It keeps what is being typed locally and applies only a complete, real date (2000-01-01 or later); an
  * empty or partial value changes nothing, so typing never resets the list. "All dates" is the explicit way back to the
- * whole history. Keyed by the applied day, so a change made elsewhere (All dates, a Today action) shows at once.
+ * whole history. A change of the applied day made elsewhere (All dates, a Today action) replaces what is shown at once,
+ * during render. The input is never remounted for it: a remount would move keyboard focus to the page body each time a
+ * typed date is applied, breaking consecutive keyboard edits.
  */
 function DayFilter({ day, onChoose }: { day: ActivityHistoryFilters['day']; onChoose: (localDate: string) => void }) {
-  const [value, setValue] = useState(day?.localDate ?? '');
+  const appliedDate = day?.localDate ?? '';
+  const [value, setValue] = useState(appliedDate);
+  const [shownFor, setShownFor] = useState(appliedDate);
+  if (shownFor !== appliedDate) {
+    setShownFor(appliedDate);
+    setValue(appliedDate);
+  }
   return (
     <label>
       Day
@@ -209,7 +217,6 @@ export function ActivityHistoryList({
         </label>
         <DayFilter
           day={day}
-          key={day === null ? '*' : `${day.localDate}@${day.timeZone}`}
           onChoose={(localDate) => onFiltersChange({ ...filters, day: { localDate, timeZone: day?.timeZone ?? deviceTimeZone } })}
         />
         <button disabled={day === null} onClick={() => onFiltersChange({ ...filters, day: null })} type="button">All dates</button>

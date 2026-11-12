@@ -4,11 +4,12 @@ import { signIn } from './support/api.js';
 import { createActivities, createFinishedRuns, setArchiveTrackFixture, shareRunHistory } from './support/database.js';
 import type { E2eEnvironment } from './support/environment.js';
 import { expect, test } from './support/fixtures.js';
-import { expectSignedIn } from './support/session.js';
+import { expectOrganizationChosen, expectSignedIn, organizationRegion } from './support/session.js';
 
 // ADR-0088 in Chromium, against the real API and the _test database: Today's manual, GPX and GPS run cards open the
 // activity history on the overview's own day, zone and source; run details and "Back to Today" return on the same date;
-// ordinary navigation never re-applies the Today intent; a late answer for a previous day is never shown. Every row is
+// ordinary navigation never re-applies the Today intent, nor does another organization and back once it was consumed;
+// the Day input keeps keyboard focus as dates are applied; a late answer for a previous day is never shown. Every row is
 // synthetic and removed with the scenario's organization.
 
 test.use({ locale: 'en-GB', timezoneId: 'Europe/Warsaw' });
@@ -220,4 +221,124 @@ test('a late answer for the previous day is never shown once the day has changed
   await expect(history(page)).not.toContainText('DAY-RIDE');
   await expect(history(page)).not.toContainText('LATE-WALK');
   await page.unroute(historyRequest, hold.handler);
+});
+
+test('the day input keeps keyboard focus as dates are applied, takes further keyboard edits and is cleared by All dates', async ({ context, environment, page, scenario }) => {
+  await seedSpringForward(environment, scenario);
+  await signIn(context, environment, scenario.runnerUserId);
+  await page.goto('/');
+  await expectSignedIn(page, scenario.runnerUserId);
+  await navigation(page).getByRole('button', { name: 'Activity', exact: true }).click();
+  await expect(cards(page)).toHaveCount(6);
+
+  // Applying a complete date keeps focus on the input: it is not remounted.
+  await dayInput(page).fill('2026-03-29');
+  await expect(history(page)).toContainText('Showing what started on Sun, 29 Mar 2026 in the time zone Europe/Warsaw');
+  await expect(cards(page)).toHaveCount(4);
+  await expect(dayInput(page)).toBeFocused();
+
+  // Further keyboard edits, with no click in between: the focused segment (whichever it is) steps up and back down, and
+  // each step is applied while the input keeps focus.
+  await page.keyboard.press('ArrowUp');
+  await expect(dayInput(page)).not.toHaveValue('2026-03-29');
+  await expect(history(page)).toContainText('Showing what started on');
+  await expect(history(page)).not.toContainText('Sun, 29 Mar 2026');
+  await expect(dayInput(page)).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(dayInput(page)).toHaveValue('2026-03-29');
+  await expect(history(page)).toContainText('Showing what started on Sun, 29 Mar 2026');
+  await expect(cards(page)).toHaveCount(4);
+  await expect(dayInput(page)).toBeFocused();
+
+  // All dates clears both the input and the filter.
+  await history(page).getByRole('button', { name: 'All dates', exact: true }).click();
+  await expect(dayInput(page)).toHaveValue('');
+  await expect(history(page)).not.toContainText('Showing what started on');
+  await expect(cards(page)).toHaveCount(6);
+  await expect(history(page).getByRole('button', { name: 'All dates', exact: true })).toBeDisabled();
+});
+
+test('a consumed Today intent is not applied again when the person returns to the organization', async ({ context, environment, organizations, page, scenario }) => {
+  const second = await organizations.memberOf(scenario.runnerUserId);
+  await seedSpringForward(environment, scenario);
+  await signIn(context, environment, scenario.runnerUserId);
+  await page.goto('/');
+  await expectSignedIn(page, scenario.runnerUserId);
+  const picker = organizationRegion(page).getByRole('combobox', { name: 'Organization' });
+  await picker.selectOption(scenario.orgId);
+  await expectOrganizationChosen(page, scenario.orgId);
+
+  await openTodayOn(page, '2026-03-29');
+  await todayScreen(page)
+    .getByRole('region', { exact: true, name: 'Manual activities' })
+    .getByRole('button', { name: 'Show in history: your manual activities of Sun, 29 Mar 2026' })
+    .click();
+  await expect(dayInput(page)).toHaveValue('2026-03-29');
+  await expect(filters(page).getByLabel('Source')).toHaveValue('manual');
+  await history(page).getByRole('button', { name: 'All dates', exact: true }).click();
+  await expect(dayInput(page)).toHaveValue('');
+
+  // Another organization, staying on Activity: its own whole history.
+  await picker.selectOption(second);
+  await expectOrganizationChosen(page, second);
+  await expect(dayInput(page)).toHaveValue('');
+  await expect(history(page).getByText('No activities yet.', { exact: false })).toBeVisible();
+
+  // Back to the first: a new screen with the whole history, not the consumed Today day, source or Back to Today.
+  await picker.selectOption(scenario.orgId);
+  await expectOrganizationChosen(page, scenario.orgId);
+  await expect(cards(page)).toHaveCount(6);
+  await expect(dayInput(page)).toHaveValue('');
+  await expect(filters(page).getByLabel('Source')).toHaveValue('');
+  await expect(history(page)).not.toContainText('Showing what started on');
+  await expect(history(page).getByRole('button', { name: /Back to Today/u })).toHaveCount(0);
+});
+
+test('the history keeps its Today origin through a day change and run details, and a new Today action opens its own day', async ({ context, environment, page, scenario }) => {
+  await seedSpringForward(environment, scenario);
+  await signIn(context, environment, scenario.runnerUserId);
+  await page.goto('/');
+  await expectSignedIn(page, scenario.runnerUserId);
+
+  await openTodayOn(page, '2026-03-29');
+  await todayScreen(page)
+    .getByRole('region', { exact: true, name: 'GPS runs' })
+    .getByRole('button', { name: 'Show in history: your GPS runs of Sun, 29 Mar 2026' })
+    .click();
+  await expect(dayInput(page)).toHaveValue('2026-03-29');
+  await expect(cards(page)).toHaveCount(1);
+
+  // Another day chosen in the history, then that day's run details and back.
+  await dayInput(page).fill('2026-03-28');
+  await expect(cards(page)).toHaveCount(1);
+  const trigger = cards(page).first().getByRole('button', { name: 'Run details of your run of 28 Mar 2026, 23:30' });
+  await trigger.click();
+  await expect(details(page).getByRole('heading', { name: 'Run details' })).toBeFocused();
+  await details(page).getByRole('button', { name: 'Back to activity history' }).click();
+  await expect(trigger).toBeFocused();
+  await expect(dayInput(page)).toHaveValue('2026-03-28');
+
+  // Back to Today returns to the originating date, not the day chosen in the history.
+  await history(page).getByRole('button', { name: 'Back to Today on Sun, 29 Mar 2026' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Today' })).toBeVisible();
+  await expect(todayScreen(page).getByLabel('Date')).toHaveValue('2026-03-29');
+
+  // A new explicit action from another Today date opens that date, with Back to Today to it.
+  await todayScreen(page).getByLabel('Date').fill('2026-03-28');
+  await expect(todayScreen(page).locator('[data-overview-state]')).toHaveAttribute('data-overview-state', 'ready');
+  const gpsCard = todayScreen(page).getByRole('region', { exact: true, name: 'GPS runs' });
+  await gpsCard.getByRole('button', { name: 'Show in history: your GPS runs of Sat, 28 Mar 2026' }).click();
+  await expect(dayInput(page)).toHaveValue('2026-03-28');
+  await expect(filters(page).getByLabel('Source')).toHaveValue('recorded_run');
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page).first()).toContainText('28 Mar 2026, 23:30');
+
+  // The same day again, after that intent was consumed and its day cleared: a new intent is applied too.
+  await history(page).getByRole('button', { name: 'All dates', exact: true }).click();
+  await expect(dayInput(page)).toHaveValue('');
+  await history(page).getByRole('button', { name: 'Back to Today on Sat, 28 Mar 2026' }).click();
+  await expect(todayScreen(page).getByLabel('Date')).toHaveValue('2026-03-28');
+  await gpsCard.getByRole('button', { name: 'Show in history: your GPS runs of Sat, 28 Mar 2026' }).click();
+  await expect(dayInput(page)).toHaveValue('2026-03-28');
+  await expect(cards(page)).toHaveCount(1);
 });
