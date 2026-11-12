@@ -1,6 +1,5 @@
 import {
   activityHistoryResponseSchema,
-  activityListResponseSchema,
   activityViewSchema,
   apiErrorResponseSchema,
   archiveMetadataResponseSchema,
@@ -34,7 +33,6 @@ import {
   weeklyReviewSchema,
   type ActivityHistoryResponse,
   type ActivityHistorySource,
-  type ActivityListResponse,
   type ActivityType,
   type ActivityView,
   type GpxImportPreview,
@@ -468,20 +466,6 @@ export async function readActivity(target: ActivityTarget, signal: AbortSignal):
   const activity = activityViewSchema.parse(requireSuccess(response));
   if (activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
   return activity;
-}
-
-export async function listActivities(
-  input: { cursor: string | null; orgId: string },
-  signal: AbortSignal,
-): Promise<ActivityListResponse> {
-  const query = new URLSearchParams(input.cursor === null ? {} : { cursor: input.cursor });
-  const suffix = query.size === 0 ? '' : `?${query.toString()}`;
-  const response = await requestJson(`${activityPath(input.orgId)}${suffix}`, {
-    cache: 'no-store',
-    credentials: 'same-origin',
-    signal,
-  });
-  return activityListResponseSchema.parse(requireSuccess(response));
 }
 
 export interface ActivityHistoryInput {

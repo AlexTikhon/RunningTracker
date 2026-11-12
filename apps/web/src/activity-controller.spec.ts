@@ -1,16 +1,13 @@
-import type { ActivityListResponse, ActivityView } from '@running-tracker/contracts';
+import type { ActivityView } from '@running-tracker/contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ActivityDetails } from './activity-form.js';
 
 import {
   ActivityDeletionController,
-  ActivityListController,
   ActivitySubmissionController,
   type ActivityCreator,
   type ActivityDeletionSnapshot,
-  type ActivityListSnapshot,
-  type ActivityLoader,
   type ActivitySubmissionSnapshot,
 } from './activity-controller.js';
 import { RunnerApiError } from './runner-api.js';
@@ -29,7 +26,6 @@ const activity = (n: number): ActivityView => ({
   startedAt: `2026-10-${String(10 - (n % 9)).padStart(2, '0')}T06:00:00.000Z`,
   type: 'run',
 });
-const page = (items: ActivityView[], nextCursor: string | null = null): ActivityListResponse => ({ items, nextCursor });
 const formKey = (n: number) => `bf000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const request: ActivityDetails = {
   distanceM: 5_000,
@@ -53,154 +49,6 @@ function deferred<T>() {
 }
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-describe('ActivityListController', () => {
-  function harness(load: ActivityLoader, signal?: AbortSignal) {
-    const snapshots: ActivityListSnapshot[] = [];
-    const controller = new ActivityListController({ load, onChange: (s) => snapshots.push(s), orgId, ...(signal ? { signal } : {}) });
-    return { controller, last: () => snapshots.at(-1)!, snapshots };
-  }
-
-  it('loads the first page for its organization without a cursor', async () => {
-    const load = vi.fn<ActivityLoader>().mockResolvedValue(page([activity(1), activity(2)], 'c1'));
-    const { controller, last, snapshots } = harness(load);
-    controller.start();
-    expect(snapshots[0]).toMatchObject({ items: [], status: 'loading' });
-    await flush();
-    expect(load).toHaveBeenCalledWith({ cursor: null, orgId }, expect.any(AbortSignal));
-    expect(last()).toMatchObject({ hasMore: true, message: null, status: 'ready' });
-    expect(last().items.map((item) => item.activityId)).toEqual([id(1), id(2)]);
-  });
-
-  it('asks for the next page with the cursor the server returned, one page at a time, without repeating items', async () => {
-    const second = deferred<ActivityListResponse>();
-    const load = vi
-      .fn<ActivityLoader>()
-      .mockResolvedValueOnce(page([activity(1), activity(2)], 'c1'))
-      .mockReturnValueOnce(second.promise);
-    const { controller, last } = harness(load);
-    controller.start();
-    await flush();
-    controller.loadMore();
-    controller.loadMore();
-    expect(load).toHaveBeenCalledTimes(2);
-    expect(load.mock.calls[1]?.[0]).toEqual({ cursor: 'c1', orgId });
-    expect(last().loadingMore).toBe(true);
-    second.resolve(page([activity(2), activity(3)], null));
-    await flush();
-    expect(last().items.map((item) => item.activityId)).toEqual([id(1), id(2), id(3)]);
-    expect(last()).toMatchObject({ hasMore: false, loadingMore: false });
-    controller.loadMore();
-    expect(load).toHaveBeenCalledTimes(2);
-  });
-
-  it('says why the first page failed, with the reference, and starts over on retry', async () => {
-    const load = vi
-      .fn<ActivityLoader>()
-      .mockRejectedValueOnce(apiError(500, 'INTERNAL_ERROR', 'An unexpected server error occurred'))
-      .mockResolvedValueOnce(page([activity(1)]));
-    const { controller, last } = harness(load);
-    controller.start();
-    await flush();
-    expect(last()).toMatchObject({ status: 'error' });
-    expect(last().message).toBe('An unexpected server error occurred. Reference 22222222-2222-4222-8222-222222222222.');
-    controller.retry();
-    await flush();
-    expect(load.mock.calls[1]?.[0]).toEqual({ cursor: null, orgId });
-    expect(last()).toMatchObject({ message: null, status: 'ready' });
-  });
-
-  it('keeps the shown pages when the next one fails, and offers it again; an invalid cursor starts over', async () => {
-    const load = vi
-      .fn<ActivityLoader>()
-      .mockResolvedValueOnce(page([activity(1)], 'c1'))
-      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
-      .mockRejectedValueOnce(apiError(400, 'INVALID_CURSOR'))
-      .mockResolvedValueOnce(page([activity(4)]));
-    const { controller, last } = harness(load);
-    controller.start();
-    await flush();
-    controller.loadMore();
-    await flush();
-    expect(last().items).toHaveLength(1);
-    expect(last().moreMessage).toBe('More activities could not be loaded. Check your connection and try again.');
-    controller.retry();
-    await flush();
-    expect(load.mock.calls[2]?.[0]).toEqual({ cursor: 'c1', orgId });
-    expect(last().moreMessage).toBe('This list is out of date. Refresh to see your current activities.');
-    controller.retry();
-    await flush();
-    expect(load.mock.calls[3]?.[0]).toEqual({ cursor: null, orgId });
-    expect(last().items.map((item) => item.activityId)).toEqual([id(4)]);
-  });
-
-  it('clears the list and says access was lost on 401 or 403', async () => {
-    for (const error of [apiError(401, 'AUTH_REQUIRED'), apiError(403, 'ORG_ACCESS_DENIED')]) {
-      const load = vi.fn<ActivityLoader>().mockResolvedValueOnce(page([activity(1)], 'c1')).mockRejectedValueOnce(error);
-      const { controller, last } = harness(load);
-      controller.start();
-      await flush();
-      controller.loadMore();
-      await flush();
-      expect(last()).toMatchObject({ hasMore: false, items: [], status: 'access-denied' });
-      expect(last().message).toBe('You no longer have access to your activities in this organization.');
-    }
-  });
-
-  it('drops an answer still on its way when it is disposed, as on an organization or person switch', async () => {
-    const answer = deferred<ActivityListResponse>();
-    const load = vi.fn<ActivityLoader>().mockReturnValue(answer.promise);
-    const { controller, snapshots } = harness(load);
-    controller.start();
-    const signal = load.mock.calls[0]![1];
-    controller.dispose();
-    expect(signal.aborted).toBe(true);
-    const before = snapshots.length;
-    answer.resolve(page([activity(1)]));
-    await flush();
-    expect(snapshots).toHaveLength(before);
-    controller.refresh();
-    controller.loadMore();
-    expect(load).toHaveBeenCalledTimes(1);
-  });
-
-  it('drops an answer still on its way when the session that started it ends', async () => {
-    const session = new AbortController();
-    const answer = deferred<ActivityListResponse>();
-    const load = vi.fn<ActivityLoader>().mockReturnValue(answer.promise);
-    const { controller, snapshots } = harness(load, session.signal);
-    controller.start();
-    session.abort();
-    expect(load.mock.calls[0]![1].aborted).toBe(true);
-    const before = snapshots.length;
-    answer.resolve(page([activity(1)]));
-    await flush();
-    expect(snapshots).toHaveLength(before);
-    controller.refresh();
-    expect(load).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not start at all for a session that has already ended', () => {
-    const session = new AbortController();
-    session.abort();
-    const load = vi.fn<ActivityLoader>();
-    const { controller } = harness(load, session.signal);
-    controller.start();
-    expect(load).not.toHaveBeenCalled();
-  });
-
-  it('starts over on refresh and ignores the answer to the request it replaced', async () => {
-    const stale = deferred<ActivityListResponse>();
-    const load = vi.fn<ActivityLoader>().mockReturnValueOnce(stale.promise).mockResolvedValueOnce(page([activity(2)]));
-    const { controller, last } = harness(load);
-    controller.start();
-    controller.refresh();
-    await flush();
-    stale.resolve(page([activity(1)]));
-    await flush();
-    expect(last().items.map((item) => item.activityId)).toEqual([id(2)]);
-  });
-});
 
 describe('ActivitySubmissionController', () => {
   function harness(create: ActivityCreator, signal?: AbortSignal) {

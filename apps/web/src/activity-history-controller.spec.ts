@@ -118,6 +118,9 @@ describe('ActivityHistoryController', () => {
     await flush();
     expect(last().items.map(historyItemKey)).toEqual([`run:${id(1)}`, `activity:${id(1)}`, `activity:${id(2)}`]);
     expect(last()).toMatchObject({ hasMore: false, loadingMore: false });
+    // The last page carried no cursor: there is nothing more to ask for.
+    controller.loadMore();
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('drops an answer that arrives after disposal (a filter, organization or session change) and aborts its request', async () => {
@@ -135,6 +138,10 @@ describe('ActivityHistoryController', () => {
     await flush();
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]!.status).toBe('loading');
+    controller.refresh();
+    controller.loadMore();
+    controller.retry();
+    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it('is disposed when its session ends', async () => {
@@ -154,6 +161,16 @@ describe('ActivityHistoryController', () => {
     expect(snapshots.every((snapshot) => snapshot.status === 'loading')).toBe(true);
     controller.refresh();
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start at all for a session that has already ended', () => {
+    const session = new AbortController();
+    session.abort();
+    const load = vi.fn<ActivityHistoryLoader>();
+    const { controller, snapshots } = harness(load, noHistoryFilters, session.signal);
+    controller.start();
+    expect(load).not.toHaveBeenCalled();
+    expect(snapshots).toHaveLength(0);
   });
 
   it('lets a refresh replace a page that is still on its way, so the older answer is never shown', async () => {
@@ -257,6 +274,35 @@ describe('ActivityHistoryController', () => {
     await flush();
     expect(last()).toMatchObject({ status: 'ready' });
     expect(load.mock.calls.every(([input]) => input.cursor === null)).toBe(true);
+  });
+
+  it('clears the pages already shown and says access was lost on 401 or 403 while paging', async () => {
+    for (const error of [apiError(401, 'AUTH_REQUIRED'), apiError(403, 'ORG_ACCESS_DENIED')]) {
+      const load = vi
+        .fn<ActivityHistoryLoader>()
+        .mockResolvedValueOnce(page([manual(1)], 'c1'))
+        .mockRejectedValueOnce(error)
+        .mockResolvedValueOnce(page([manual(2)]));
+      const { controller, last } = harness(load);
+      controller.start();
+      await flush();
+      controller.loadMore();
+      await flush();
+      expect(last(), error.code).toMatchObject({
+        hasMore: false,
+        items: [],
+        loadingMore: false,
+        message: 'You no longer have access to your activity history in this organization.',
+        moreMessage: null,
+        status: 'access-denied',
+      });
+      // Retrying after lost access starts over from page one, never with the old cursor.
+      controller.retry();
+      expect(load.mock.calls[2]![0].cursor).toBeNull();
+      await flush();
+      expect(last()).toMatchObject({ message: null, status: 'ready' });
+      expect(last().items.map(historyItemKey)).toEqual([`activity:${id(2)}`]);
+    }
   });
 
   it('keeps shown pages when the next page fails, and marks the list outdated when the cursor is refused', async () => {

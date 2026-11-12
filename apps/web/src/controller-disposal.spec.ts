@@ -2,7 +2,8 @@ import { getEventListeners } from 'node:events';
 
 import { describe, expect, it } from 'vitest';
 
-import { ActivityDeletionController, ActivityListController, ActivitySubmissionController } from './activity-controller.js';
+import { ActivityDeletionController, ActivitySubmissionController } from './activity-controller.js';
+import { ActivityHistoryController, noHistoryFilters } from './activity-history-controller.js';
 import { CheckInDayController, CheckInHistoryController } from './daily-checkin-controller.js';
 import { MovementDayController, MovementHistoryController } from './daily-movement-controller.js';
 import { DailyOverviewController } from './daily-overview-controller.js';
@@ -42,8 +43,8 @@ const controllers: Record<string, (signal: AbortSignal) => Disposable> = {
     controller.confirm();
     return controller;
   },
-  ActivityListController: (signal) => {
-    const controller = new ActivityListController({ load: never, onChange: noop, orgId: ORG, signal });
+  ActivityHistoryController: (signal) => {
+    const controller = new ActivityHistoryController({ filters: noHistoryFilters, load: never, onChange: noop, orgId: ORG, signal });
     controller.start();
     return controller;
   },

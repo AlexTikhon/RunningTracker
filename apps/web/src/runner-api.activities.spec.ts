@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { onAuthenticationRequired } from './request.js';
-import { createActivity, deleteActivity, listActivities, readActivity } from './runner-api.js';
+import { createActivity, deleteActivity, readActivity } from './runner-api.js';
 
 const csrf = { headerName: 'x-csrf-token' as const, token: 'a'.repeat(43) };
 const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -84,24 +84,6 @@ describe('activity API calls', () => {
     await expect(readActivity({ activityId, orgId }, new AbortController().signal)).rejects.toThrow('different activity');
   });
 
-  it('lists without parameters for the first page and with the cursor afterwards, never cached', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(json({ items: [view], nextCursor: 'next' })));
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(listActivities({ cursor: null, orgId }, new AbortController().signal)).resolves.toEqual({ items: [view], nextCursor: 'next' });
-    await listActivities({ cursor: 'abc_-', orgId }, new AbortController().signal);
-    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      `/api/orgs/${orgId}/activities`,
-      `/api/orgs/${orgId}/activities?cursor=abc_-`,
-    ]);
-    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ cache: 'no-store', credentials: 'same-origin' });
-  });
-
-  it('refuses a list outside the contract', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json({ items: [{ ...view, userId: orgId }], nextCursor: null })));
-    await expect(listActivities({ cursor: null, orgId }, new AbortController().signal)).rejects.toThrow();
-  });
-
   it('deletes with a DELETE that carries the CSRF header and accepts the empty 204', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
@@ -127,7 +109,7 @@ describe('activity API calls', () => {
     const announced = vi.fn();
     const unsubscribe = onAuthenticationRequired(announced);
     try {
-      await expect(listActivities({ cursor: null, orgId }, new AbortController().signal)).rejects.toMatchObject({ status: 401 });
+      await expect(readActivity({ activityId, orgId }, new AbortController().signal)).rejects.toMatchObject({ status: 401 });
       expect(announced).toHaveBeenCalledTimes(1);
     } finally {
       unsubscribe();
