@@ -118,7 +118,7 @@ test('activity trends: one source and type per view, labelled durations and cove
   await expect(activity.source).toHaveValue('manual');
   await expect(activity.type).toHaveValue('run');
   await expect(activity.summary).toContainText('1 entry on 1 of 28 days.');
-  await expect(activity.root.locator('tbody tr')).toHaveCount(28);
+  await expect(activity.root.locator('.activity-trends-table tbody tr')).toHaveCount(28);
 
   // Manual rides: entered duration for every entry, a distance for one of two; the coach's ride is absent.
   await activity.type.selectOption('ride');
@@ -162,9 +162,14 @@ test('activity trends: one source and type per view, labelled durations and cove
   expect(sources.filter((value, index, all) => index === 0 || value !== all[index - 1])).toEqual(['manual/run', 'manual/ride', 'gpx/ride', 'recorded_run/run']);
   for (const search of requests) {
     const query = new URLSearchParams(search);
-    expect([...query.keys()].toSorted()).toEqual(['endDate', 'source', 'timeZone', 'type']);
+    expect([...query.keys()].toSorted()).toEqual(['compare', 'endDate', 'source', 'timeZone', 'type']);
+    expect(query.get('compare')).toBe('previous_period');
     expect(query.get('timeZone')).toBe(timeZone);
   }
+  // The range ends today, so the comparison shows both periods without any change.
+  const comparison = activity.root.locator('[data-activity-comparison]');
+  await expect(comparison).toContainText('This period includes today, so it can still change.');
+  await expect(comparison.locator('[data-change-status="available"]')).toHaveCount(0);
 
   // The health series still work beside it.
   await page.getByRole('region', { exact: true, name: 'Trends' }).getByRole('radio', { name: 'Steps' }).check();
@@ -180,6 +185,88 @@ test('activity trends: one source and type per view, labelled durations and cove
   await expect(activity.source).toHaveValue('recorded_run');
   await expect(activity.root.getByRole('radio', { name: 'Distance' })).toBeChecked();
   await expect(activity.summary).toContainText('2 runs on 1 of 28 days.');
+});
+
+test('activity trends comparison: both periods, coverage and signed changes for an ended period, reasons instead of changes, in progress today, 375 px', async ({
+  context,
+  environment,
+  page,
+  scenario,
+}) => {
+  const today = dateIn(timeZone, Date.now());
+  test.skip(dateIn(timeZone, Date.now() + 600_000) !== today, 'Too close to midnight in Warsaw for a stable "today"');
+  // An ended range: the 28 dates ending yesterday, and the 28 dates before them.
+  const end = daysBefore(today, 1);
+  const runner = scenario.runnerUserId;
+  await createActivities(environment, scenario.orgId, [
+    // Rides: 2 entries now (1:30:00, 30 km), 1 before (1:00:00, 24 km).
+    { distanceM: 20_000, durationS: 3_600, source: 'manual', startedAt: middayOf(daysBefore(end, 2)), type: 'ride', userId: runner },
+    { distanceM: 10_000, durationS: 1_800, source: 'manual', startedAt: middayOf(daysBefore(end, 10)), type: 'ride', userId: runner },
+    { distanceM: 24_000, durationS: 3_600, source: 'manual', startedAt: middayOf(daysBefore(end, 30)), type: 'ride', userId: runner },
+    // Walks: the previous walk has no distance, so distances are not compared.
+    { distanceM: 3_000, durationS: 1_200, source: 'manual', startedAt: middayOf(daysBefore(end, 3)), type: 'walk', userId: runner },
+    { distanceM: null, durationS: 1_200, source: 'manual', startedAt: middayOf(daysBefore(end, 40)), type: 'walk', userId: runner },
+    // The coach's ride in the previous period: owner-only, never in the runner's comparison.
+    { distanceM: 99_000, durationS: 9_999, source: 'manual', startedAt: middayOf(daysBefore(end, 30)), type: 'ride', userId: scenario.coachUserId },
+  ]);
+  const searches: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith('/activity-trends')) searches.push(url.search);
+  });
+  await signIn(context, environment, runner);
+  await page.goto('/');
+  await expectSignedIn(page, runner);
+  await openTrends(page);
+  const activity = section(page);
+  const comparison = activity.root.locator('[data-activity-comparison]');
+  const row = (measure: string) => comparison.locator(`tr[data-comparison-measure="${measure}"]`);
+  // The app's fixed English form ("17 Sep 2026"), whatever the browser's month abbreviations.
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const monthDay = (date: string) => `${Number(date.slice(8, 10))} ${months[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)}`;
+
+  await activity.type.selectOption('ride');
+  await page.getByRole('region', { exact: true, name: 'Trends' }).getByLabel('End date').fill(end);
+  await expect(activity.state).toHaveAttribute('data-activity-trends-state', 'ready');
+  await expect(comparison.getByRole('heading', { level: 3 })).toHaveText('Compared with the previous 28 days');
+  await expect(comparison).toContainText(`This period${monthDay(daysBefore(end, 27))} – ${monthDay(end)} (28 dates)`);
+  await expect(comparison).toContainText(`Previous period${monthDay(daysBefore(end, 55))} – ${monthDay(daysBefore(end, 28))} (28 dates)`);
+  await expect(row('count')).toContainText('+1 (+100.0%)');
+  await expect(row('duration')).toContainText('1:30:00');
+  await expect(row('duration')).toContainText('+30:00 (+50.0%)');
+  await expect(row('distance')).toContainText('From all 2 entries');
+  await expect(row('distance')).toContainText('+6.00 km (+25.0%)');
+  await expect(comparison).toContainText('a total from all entries does not mean that every activity was logged');
+  await expect(comparison).not.toContainText('99.00 km');
+
+  // Walks: the count and duration compare; the distance says why it does not.
+  await activity.type.selectOption('walk');
+  await expect(row('count')).toContainText('0 (0.0%)');
+  await expect(row('distance').locator('[data-change-status]')).toHaveAttribute('data-change-status', 'unavailable');
+  await expect(row('distance')).toContainText('Not compared');
+  await expect(row('distance')).toContainText('1 entry does not record it in the previous period.');
+
+  // GPX imports: nothing in either period. Counts compare as 0 without a percentage; totals do not exist.
+  await activity.source.selectOption('gpx');
+  await expect(row('count')).toContainText('No percentage: the previous total is 0.');
+  await expect(row('duration')).toContainText('Nothing was logged in this period, so it has no total.');
+
+  // 375 px: the comparison fits without horizontal scrolling.
+  await activity.source.selectOption('manual');
+  await activity.type.selectOption('ride');
+  await expect(row('count')).toContainText('+1 (+100.0%)');
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.addStyleTag({ content: 'body, body * { font-family: Verdana, sans-serif !important; }' });
+  expect(await fits(page)).toBe(true);
+  const box = await comparison.locator('table').boundingBox();
+  expect(box !== null && box.x >= 0 && box.x + box.width <= 375).toBe(true);
+
+  // Today: the range is in progress, both periods' values stay and no change is shown.
+  await page.getByRole('region', { exact: true, name: 'Trends' }).getByLabel('End date').fill(today);
+  await expect(comparison).toContainText('This period includes today, so it can still change.');
+  await expect(comparison.locator('[data-change-status="unavailable"]')).toHaveCount(3);
+  await expect(row('count')).toContainText('Not compared');
+  expect(searches.every((search) => new URLSearchParams(search).get('compare') === 'previous_period')).toBe(true);
 });
 
 test('activity trends at 375 px: usable without horizontal scrolling; late answers for abandoned filters are dropped; Retry; sign-out silences a request', async ({
@@ -216,7 +303,8 @@ test('activity trends at 375 px: usable without horizontal scrolling; late answe
   await inside(activity.source, 'Source');
   await inside(activity.type, 'Activity type');
   await inside(activity.chart, 'chart');
-  await inside(activity.root.locator('table'), 'table');
+  await inside(activity.root.locator('.activity-trends-table'), 'table');
+  await inside(activity.root.locator('.activity-comparison-table'), 'comparison table');
   await expect(activity.row(daysBefore(today, 1))).toContainText('123.46 km');
   await expect(activity.row(daysBefore(today, 1))).toContainText('10:00:00');
 
@@ -253,7 +341,7 @@ test('activity trends at 375 px: usable without horizontal scrolling; late answe
   await activity.source.selectOption('gpx');
   await expect(activity.state).toHaveAttribute('data-activity-trends-state', 'error');
   await expect(activity.root.getByRole('alert')).toContainText('The database is unavailable. Reference 33333333-3333-4333-8333-333333333333.');
-  await expect(activity.root.locator('table')).toHaveCount(0);
+  await expect(activity.root.locator('table')).toHaveCount(0); // neither the daily nor the comparison table
   await expect(page.locator('[data-trends-state]')).toHaveAttribute('data-trends-state', 'ready');
   expect(await fits(page)).toBe(true);
   fail = false;
