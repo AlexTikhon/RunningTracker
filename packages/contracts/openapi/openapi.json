@@ -1472,7 +1472,7 @@
           "Daily trends"
         ],
         "summary": "Compute the signed-in person's 28-day activity trends for one source and one activity type",
-        "description": "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Answers `Cache-Control: no-store`, errors included.",
+        "description": "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Optional `compare=previous_period` (ADR-0090) adds `comparison`, echoed as `applied.compare`: for end date E the range E-27..E is compared with the previous period E-55..E-28, the 28 local calendar dates immediately before it, for the same source, type and zone, located with the same rules (23/25-hour and skipped dates included). Both periods are read by ONE statement over at most 56 dates in the same REPEATABLE READ, READ ONLY transaction, so they come from one snapshot; the range part of the answer is identical to an answer without `compare`. `comparison.current.period` and `comparison.previous.period` give the actual dates and UTC intervals; the previous period is cut by 2000-01-01 like a range (`previous_period_shortened`) or null when all its dates are before it (`previous_period_out_of_range`, with `requestedStartDate`/`requestedEndDate`). `comparison.previous.summary` has the shape of `summary`. Per metric (`count`, the source's duration name, `distance`): both period totals (null when undefined) and a `change`, computed by PostgreSQL: `available` with the signed `absolute` change and `percent` = (current - previous) / previous * 100 rounded to one decimal, halves away from zero, exactly from the integer totals (period totals add the dates' rounded totals); `percent` null with `percentUnavailableReason: zero_baseline` when the previous total is 0. Otherwise `unavailable` with stable `reasons` (current_period_in_progress, current_period_shortened, previous_period_out_of_range, previous_period_shortened, current_period_no_entries, previous_period_no_entries, current_values_missing, previous_values_missing, current_summaries_pending, previous_summaries_pending, current_summaries_stale, previous_summaries_stale), listed in that order; `periodReasons` repeats those that apply to every metric. Counts describe logged records only and are compared whatever the coverage. A duration or distance is compared only when both periods have items and every item records it (no missing value, no pending or stale run summary). A range that includes today is in progress: its figures are returned, every change is unavailable. Full coverage does not establish that every activity was logged. `comparison.policyVersion` names these rules. Answers `Cache-Control: no-store`, errors included.",
         "parameters": [
           {
             "$ref": "#/components/parameters/OrgId"
@@ -1488,6 +1488,9 @@
           },
           {
             "$ref": "#/components/parameters/ActivityTrendsType"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityTrendsCompare"
           }
         ],
         "responses": {
@@ -2422,6 +2425,18 @@
             "swim",
             "strength",
             "other"
+          ],
+          "type": "string"
+        }
+      },
+      "ActivityTrendsCompare": {
+        "name": "compare",
+        "in": "query",
+        "required": false,
+        "description": "Optional, single-valued (ADR-0090). `previous_period` adds the comparison with the 28 local calendar dates immediately before the range.",
+        "schema": {
+          "enum": [
+            "previous_period"
           ],
           "type": "string"
         }
@@ -7292,6 +7307,12 @@
               "applied": {
                 "type": "object",
                 "properties": {
+                  "compare": {
+                    "type": "string",
+                    "enum": [
+                      "previous_period"
+                    ]
+                  },
                   "endDate": {
                     "type": "string"
                   },
@@ -7555,6 +7576,617 @@
                 ],
                 "additionalProperties": false
               },
+              "comparison": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "previous_period"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-comparison-1"
+                  },
+                  "current": {
+                    "type": "object",
+                    "properties": {
+                      "inProgress": {
+                        "type": "boolean"
+                      },
+                      "period": {
+                        "type": "object",
+                        "properties": {
+                          "startDate": {
+                            "type": "string"
+                          },
+                          "endDate": {
+                            "type": "string"
+                          },
+                          "days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 28
+                          },
+                          "requestedDays": {
+                            "type": "number",
+                            "const": 28
+                          },
+                          "shortenedByLowerBound": {
+                            "type": "boolean"
+                          },
+                          "startsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "endsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "startDate",
+                          "endDate",
+                          "days",
+                          "requestedDays",
+                          "shortenedByLowerBound",
+                          "startsAt",
+                          "endsAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "inProgress",
+                      "period"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "periodReasons": {
+                    "maxItems": 4,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "current_period_in_progress",
+                        "current_period_shortened",
+                        "previous_period_out_of_range",
+                        "previous_period_shortened",
+                        "current_period_no_entries",
+                        "previous_period_no_entries",
+                        "current_values_missing",
+                        "previous_values_missing",
+                        "current_summaries_pending",
+                        "previous_summaries_pending",
+                        "current_summaries_stale",
+                        "previous_summaries_stale"
+                      ]
+                    }
+                  },
+                  "previous": {
+                    "type": "object",
+                    "properties": {
+                      "requestedStartDate": {
+                        "type": "string"
+                      },
+                      "requestedEndDate": {
+                        "type": "string"
+                      },
+                      "period": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "startDate": {
+                                "type": "string"
+                              },
+                              "endDate": {
+                                "type": "string"
+                              },
+                              "days": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 28
+                              },
+                              "requestedDays": {
+                                "type": "number",
+                                "const": 28
+                              },
+                              "shortenedByLowerBound": {
+                                "type": "boolean"
+                              },
+                              "startsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              },
+                              "endsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              }
+                            },
+                            "required": [
+                              "startDate",
+                              "endDate",
+                              "days",
+                              "requestedDays",
+                              "shortenedByLowerBound",
+                              "startsAt",
+                              "endsAt"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "summary": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "daysWithEntries": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 28
+                              },
+                              "count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "distance": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalM": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalM",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "enteredDuration": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalS": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalS",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "daysWithEntries",
+                              "count",
+                              "distance",
+                              "enteredDuration"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "requestedStartDate",
+                      "requestedEndDate",
+                      "period",
+                      "summary"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "metrics": {
+                    "type": "object",
+                    "properties": {
+                      "count": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "enteredDuration": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "distance": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "count",
+                      "enteredDuration",
+                      "distance"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "mode",
+                  "policyVersion",
+                  "current",
+                  "periodReasons",
+                  "previous",
+                  "metrics"
+                ],
+                "additionalProperties": false
+              },
               "provenance": {
                 "type": "object",
                 "properties": {
@@ -7610,6 +8242,12 @@
               "applied": {
                 "type": "object",
                 "properties": {
+                  "compare": {
+                    "type": "string",
+                    "enum": [
+                      "previous_period"
+                    ]
+                  },
                   "endDate": {
                     "type": "string"
                   },
@@ -7873,6 +8511,617 @@
                 ],
                 "additionalProperties": false
               },
+              "comparison": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "previous_period"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-comparison-1"
+                  },
+                  "current": {
+                    "type": "object",
+                    "properties": {
+                      "inProgress": {
+                        "type": "boolean"
+                      },
+                      "period": {
+                        "type": "object",
+                        "properties": {
+                          "startDate": {
+                            "type": "string"
+                          },
+                          "endDate": {
+                            "type": "string"
+                          },
+                          "days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 28
+                          },
+                          "requestedDays": {
+                            "type": "number",
+                            "const": 28
+                          },
+                          "shortenedByLowerBound": {
+                            "type": "boolean"
+                          },
+                          "startsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "endsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "startDate",
+                          "endDate",
+                          "days",
+                          "requestedDays",
+                          "shortenedByLowerBound",
+                          "startsAt",
+                          "endsAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "inProgress",
+                      "period"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "periodReasons": {
+                    "maxItems": 4,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "current_period_in_progress",
+                        "current_period_shortened",
+                        "previous_period_out_of_range",
+                        "previous_period_shortened",
+                        "current_period_no_entries",
+                        "previous_period_no_entries",
+                        "current_values_missing",
+                        "previous_values_missing",
+                        "current_summaries_pending",
+                        "previous_summaries_pending",
+                        "current_summaries_stale",
+                        "previous_summaries_stale"
+                      ]
+                    }
+                  },
+                  "previous": {
+                    "type": "object",
+                    "properties": {
+                      "requestedStartDate": {
+                        "type": "string"
+                      },
+                      "requestedEndDate": {
+                        "type": "string"
+                      },
+                      "period": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "startDate": {
+                                "type": "string"
+                              },
+                              "endDate": {
+                                "type": "string"
+                              },
+                              "days": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 28
+                              },
+                              "requestedDays": {
+                                "type": "number",
+                                "const": 28
+                              },
+                              "shortenedByLowerBound": {
+                                "type": "boolean"
+                              },
+                              "startsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              },
+                              "endsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              }
+                            },
+                            "required": [
+                              "startDate",
+                              "endDate",
+                              "days",
+                              "requestedDays",
+                              "shortenedByLowerBound",
+                              "startsAt",
+                              "endsAt"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "summary": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "daysWithEntries": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 28
+                              },
+                              "count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "distance": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalM": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalM",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "elapsedDuration": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalS": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalS",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "daysWithEntries",
+                              "count",
+                              "distance",
+                              "elapsedDuration"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "requestedStartDate",
+                      "requestedEndDate",
+                      "period",
+                      "summary"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "metrics": {
+                    "type": "object",
+                    "properties": {
+                      "count": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "elapsedDuration": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "distance": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "count",
+                      "elapsedDuration",
+                      "distance"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "mode",
+                  "policyVersion",
+                  "current",
+                  "periodReasons",
+                  "previous",
+                  "metrics"
+                ],
+                "additionalProperties": false
+              },
               "provenance": {
                 "type": "object",
                 "properties": {
@@ -7928,6 +9177,12 @@
               "applied": {
                 "type": "object",
                 "properties": {
+                  "compare": {
+                    "type": "string",
+                    "enum": [
+                      "previous_period"
+                    ]
+                  },
                   "endDate": {
                     "type": "string"
                   },
@@ -8234,6 +9489,644 @@
                   "distance",
                   "observedDuration",
                   "summaries"
+                ],
+                "additionalProperties": false
+              },
+              "comparison": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "previous_period"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-comparison-1"
+                  },
+                  "current": {
+                    "type": "object",
+                    "properties": {
+                      "inProgress": {
+                        "type": "boolean"
+                      },
+                      "period": {
+                        "type": "object",
+                        "properties": {
+                          "startDate": {
+                            "type": "string"
+                          },
+                          "endDate": {
+                            "type": "string"
+                          },
+                          "days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 28
+                          },
+                          "requestedDays": {
+                            "type": "number",
+                            "const": 28
+                          },
+                          "shortenedByLowerBound": {
+                            "type": "boolean"
+                          },
+                          "startsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "endsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "startDate",
+                          "endDate",
+                          "days",
+                          "requestedDays",
+                          "shortenedByLowerBound",
+                          "startsAt",
+                          "endsAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "inProgress",
+                      "period"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "periodReasons": {
+                    "maxItems": 4,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "current_period_in_progress",
+                        "current_period_shortened",
+                        "previous_period_out_of_range",
+                        "previous_period_shortened",
+                        "current_period_no_entries",
+                        "previous_period_no_entries",
+                        "current_values_missing",
+                        "previous_values_missing",
+                        "current_summaries_pending",
+                        "previous_summaries_pending",
+                        "current_summaries_stale",
+                        "previous_summaries_stale"
+                      ]
+                    }
+                  },
+                  "previous": {
+                    "type": "object",
+                    "properties": {
+                      "requestedStartDate": {
+                        "type": "string"
+                      },
+                      "requestedEndDate": {
+                        "type": "string"
+                      },
+                      "period": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "startDate": {
+                                "type": "string"
+                              },
+                              "endDate": {
+                                "type": "string"
+                              },
+                              "days": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 28
+                              },
+                              "requestedDays": {
+                                "type": "number",
+                                "const": 28
+                              },
+                              "shortenedByLowerBound": {
+                                "type": "boolean"
+                              },
+                              "startsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              },
+                              "endsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              }
+                            },
+                            "required": [
+                              "startDate",
+                              "endDate",
+                              "days",
+                              "requestedDays",
+                              "shortenedByLowerBound",
+                              "startsAt",
+                              "endsAt"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "summary": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "daysWithEntries": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 28
+                              },
+                              "count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "distance": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalM": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalM",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "observedDuration": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalS": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalS",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "summaries": {
+                                "type": "object",
+                                "properties": {
+                                  "current": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "pending": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "stale": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  }
+                                },
+                                "required": [
+                                  "current",
+                                  "pending",
+                                  "stale"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "daysWithEntries",
+                              "count",
+                              "distance",
+                              "observedDuration",
+                              "summaries"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "requestedStartDate",
+                      "requestedEndDate",
+                      "period",
+                      "summary"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "metrics": {
+                    "type": "object",
+                    "properties": {
+                      "count": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "observedDuration": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "distance": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "count",
+                      "observedDuration",
+                      "distance"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "mode",
+                  "policyVersion",
+                  "current",
+                  "periodReasons",
+                  "previous",
+                  "metrics"
                 ],
                 "additionalProperties": false
               },

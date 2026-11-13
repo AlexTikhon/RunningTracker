@@ -2,17 +2,24 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ACTIVITY_TRENDS_VERSION,
+  activityTrendsComparisonOf,
+  activityTrendsComparisonReasons,
+  activityTrendsPercentTenths,
+  activityTrendsPeriodReasons,
   activityTrendsQuerySchema,
   activityTrendsSchema,
   dailyTrendsDatesOf,
   dailyTrendsRangeOf,
   manualActivityTrendDaySchema,
   openApiDocument,
+  previousActivityTrendsPeriodOf,
   recordedRunTrendDaySchema,
   summarizeGpxActivityTrendDays,
   summarizeManualActivityTrendDays,
   summarizeRecordedRunTrendDays,
+  type ActivityTrendsComparisonReason,
   type ManualActivityTrendDay,
+  type ManualActivityTrendsComparison,
   type RecordedRunTrendDay,
 } from './index.js';
 
@@ -46,7 +53,7 @@ function runDays(endDate: string, overrides: Record<string, Partial<RecordedRunT
 
 function rangeFor(endDate: string, days: Array<{ endsAt: string; startsAt: string }>, today = endDate) {
   const range = dailyTrendsRangeOf(endDate);
-  return { ...range, endsAt: days.at(-1)!.endsAt, includesToday: endDate === today, requestedDays: 28, startsAt: days[0]!.startsAt, today };
+  return { ...range, endsAt: days.at(-1)!.endsAt, includesToday: endDate === today, requestedDays: 28 as const, startsAt: days[0]!.startsAt, today };
 }
 
 const provenance = {
@@ -279,14 +286,231 @@ describe('activity trends response', () => {
     expect(activityTrendsSchema.safeParse({ ...future, range: { ...future.range, includesToday: false, today: '2026-11-11' } }).success).toBe(false);
   });
 
-  it('is documented in the OpenAPI document with all four parameters required', () => {
-    const operation = (openApiDocument.paths as unknown as Record<string, { get?: { parameters?: Array<{ $ref: string }> } }>)['/api/orgs/{orgId}/activity-trends']?.get;
+  it('is documented in the OpenAPI document with all four parameters required and the comparison optional', () => {
+    const operation = (openApiDocument.paths as unknown as Record<string, { get?: { description?: string; parameters?: Array<{ $ref: string }> } }>)[
+      '/api/orgs/{orgId}/activity-trends'
+    ]?.get;
     expect(operation?.parameters?.map((parameter) => parameter.$ref.split('/').at(-1))).toEqual([
       'OrgId',
       'TrendsEndDate',
       'ActivityTrendsTimeZone',
       'ActivityTrendsSource',
       'ActivityTrendsType',
+      'ActivityTrendsCompare',
     ]);
+    const parameters = (openApiDocument.components as unknown as { parameters: Record<string, { required: boolean; schema: { enum: string[] } }> }).parameters;
+    expect(parameters.ActivityTrendsCompare).toMatchObject({ required: false, schema: { enum: ['previous_period'] } });
+    expect(operation?.description).toContain('ADR-0090');
+    expect(operation?.description).toContain('current_period_in_progress, current_period_shortened, previous_period_out_of_range');
+  });
+});
+
+describe('activity trends comparison with the previous period (ADR-0090)', () => {
+  const valid = { endDate: '2026-11-12', source: 'manual', timeZone: 'Europe/Warsaw', type: 'ride' };
+  const END = '2026-11-11';
+
+  it('accepts compare=previous_period only, once', () => {
+    expect(activityTrendsQuerySchema.parse({ ...valid, compare: 'previous_period' })).toEqual({ ...valid, compare: 'previous_period' });
+    expect(activityTrendsQuerySchema.parse(valid)).toEqual(valid);
+    for (const compare of ['', 'previous', 'previous_year', ['previous_period', 'previous_period']]) {
+      expect(activityTrendsQuerySchema.safeParse({ ...valid, compare }).success, JSON.stringify(compare)).toBe(false);
+    }
+  });
+
+  it('defines the previous period as the 28 dates before the range, cut by 2000-01-01 or out of range', () => {
+    expect(previousActivityTrendsPeriodOf('2026-11-12')).toEqual({
+      period: { days: 28, endDate: '2026-10-15', shortenedByLowerBound: false, startDate: '2026-09-18' },
+      requestedEndDate: '2026-10-15',
+      requestedStartDate: '2026-09-18',
+    });
+    // Across a leap day: E-55..E-28 by calendar arithmetic.
+    expect(previousActivityTrendsPeriodOf('2024-03-28').period).toMatchObject({ endDate: '2024-02-29', startDate: '2024-02-02' });
+    // The earliest end date with two full periods: 2000-02-25 (previous 2000-01-01..2000-01-28).
+    expect(previousActivityTrendsPeriodOf('2000-02-25').period).toEqual({ days: 28, endDate: '2000-01-28', shortenedByLowerBound: false, startDate: '2000-01-01' });
+    expect(previousActivityTrendsPeriodOf('2000-02-24').period).toEqual({ days: 27, endDate: '2000-01-27', shortenedByLowerBound: true, startDate: '2000-01-01' });
+    expect(previousActivityTrendsPeriodOf('2000-01-29').period).toEqual({ days: 1, endDate: '2000-01-01', shortenedByLowerBound: true, startDate: '2000-01-01' });
+    expect(previousActivityTrendsPeriodOf('2000-01-28')).toEqual({ period: null, requestedEndDate: '1999-12-31', requestedStartDate: '1999-12-04' });
+  });
+
+  it('rounds the percentage to one decimal, halves away from zero, exactly from integers', () => {
+    expect(activityTrendsPercentTenths(3, 2)).toBe(500);
+    expect(activityTrendsPercentTenths(2, 2)).toBe(0);
+    expect(activityTrendsPercentTenths(0, 5)).toBe(-1_000);
+    expect(activityTrendsPercentTenths(1, 3)).toBe(-667); // -66.666…
+    expect(activityTrendsPercentTenths(2, 3)).toBe(-333); // -33.333…
+    // Exact halves: 49/400 = 12.25 % → 12.3; -49/400 → -12.3 (half to even would give 12.2).
+    expect(activityTrendsPercentTenths(449, 400)).toBe(123);
+    expect(activityTrendsPercentTenths(351, 400)).toBe(-123);
+    // 1/8000 = 0.0125 % → 0.0; a tiny change is not a negative zero.
+    expect(Object.is(activityTrendsPercentTenths(7_999, 8_000), 0)).toBe(true);
+    expect(activityTrendsPercentTenths(5, 0)).toBeNull();
+    expect(activityTrendsPercentTenths(0, 0)).toBeNull();
+    // Large totals stay exact (no floating point).
+    expect(activityTrendsPercentTenths(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER - 1)).toBe(0);
+    expect(() => activityTrendsPercentTenths(Number.MAX_SAFE_INTEGER, 1)).toThrow(RangeError);
+  });
+
+  it('gives period reasons to every metric and coverage reasons to durations and distances only', () => {
+    const full = { count: 3, pending: 0, stale: 0, withValue: 3 };
+    const reasons = (
+      metric: 'count' | 'distance' | 'duration',
+      current: typeof full,
+      previous: typeof full | null,
+      periodReasons: ActivityTrendsComparisonReason[] = [],
+    ) => activityTrendsComparisonReasons({ current, metric, periodReasons, previous });
+    expect(reasons('distance', full, full)).toEqual([]);
+    expect(reasons('distance', { ...full, withValue: 2 }, full)).toEqual(['current_values_missing']);
+    expect(reasons('distance', full, { ...full, count: 0, withValue: 0 })).toEqual(['previous_period_no_entries']);
+    // Counts describe logged records: coverage never affects them, an empty period is a count of 0.
+    expect(reasons('count', { ...full, withValue: 0 }, { ...full, count: 0, withValue: 0 })).toEqual([]);
+    // Runs: pending and stale summaries are named; a current summary always has its values.
+    expect(reasons('duration', { count: 3, pending: 1, stale: 1, withValue: 1 }, { count: 2, pending: 0, stale: 2, withValue: 0 })).toEqual([
+      'current_summaries_pending',
+      'current_summaries_stale',
+      'previous_summaries_stale',
+    ]);
+    // Every applicable reason is listed, in the defined order, period reasons first.
+    expect(reasons('duration', { ...full, withValue: 0 }, null, ['current_period_in_progress', 'previous_period_out_of_range'])).toEqual([
+      'current_period_in_progress',
+      'previous_period_out_of_range',
+      'current_values_missing',
+    ]);
+    expect(activityTrendsPeriodReasons({ days: 28, includesToday: true }, { days: 28 })).toEqual(['current_period_in_progress']);
+    expect(activityTrendsPeriodReasons({ days: 10, includesToday: false }, null)).toEqual(['current_period_shortened', 'previous_period_out_of_range']);
+    expect(activityTrendsPeriodReasons({ days: 28, includesToday: false }, { days: 13 })).toEqual(['previous_period_shortened']);
+  });
+
+  function previousOf(endDate: string, days: ManualActivityTrendDay[]) {
+    const { period } = previousActivityTrendsPeriodOf(endDate);
+    const bounds = utcBounds(period!.endDate).slice(-period!.days);
+    return {
+      period: { ...period!, endsAt: bounds.at(-1)!.endsAt, requestedDays: 28 as const, startsAt: bounds[0]!.startsAt },
+      summary: summarizeManualActivityTrendDays(days),
+    };
+  }
+
+  function compared(endDate: string, current: ManualActivityTrendDay[], previousDays: ManualActivityTrendDay[] | null, today = '2026-11-12') {
+    const base = manualTrends(endDate, current);
+    const range = { ...base.range, includesToday: endDate === today, today };
+    const previous = previousDays === null ? null : previousOf(endDate, previousDays);
+    const comparison = activityTrendsComparisonOf({ endDate, previous, range, source: 'manual', summary: base.summary });
+    return { ...base, applied: { ...base.applied, compare: 'previous_period' }, comparison: comparison as ManualActivityTrendsComparison, range };
+  }
+
+  const ride = (count: number, durationS: number, distanceM: number | null, withDistance = distanceM === null ? 0 : count) => ({
+    count,
+    distance: { totalM: distanceM, withValue: withDistance },
+    enteredDuration: { totalS: durationS, withValue: count },
+  });
+
+  it('compares counts, durations and distances with signed changes and percentages', () => {
+    const current = manualDays(END, { '2026-11-01': ride(3, 5_400, 30_000) });
+    const previous = manualDays('2026-10-14', { '2026-10-01': ride(2, 3_600, 24_000) });
+    const parsed = activityTrendsSchema.parse(compared(END, current, previous));
+    if (parsed.source !== 'manual' || parsed.comparison === undefined) throw new Error('expected a manual comparison');
+    expect(parsed.comparison.periodReasons).toEqual([]);
+    expect(parsed.comparison.previous.period).toMatchObject({ days: 28, endDate: '2026-10-14', startDate: '2026-09-17' });
+    expect(parsed.comparison.metrics).toEqual({
+      count: { change: { absolute: 1, percent: 50, percentUnavailableReason: null, status: 'available' }, current: 3, previous: 2 },
+      distance: { change: { absolute: 6_000, percent: 25, percentUnavailableReason: null, status: 'available' }, current: 30_000, previous: 24_000 },
+      enteredDuration: { change: { absolute: 1_800, percent: 50, percentUnavailableReason: null, status: 'available' }, current: 5_400, previous: 3_600 },
+    });
+  });
+
+  it('keeps an absolute change for a zero baseline and suppresses only its percentage', () => {
+    const current = manualDays(END, { '2026-11-01': ride(1, 600, 2_000) });
+    const previous = manualDays('2026-10-14', { '2026-10-01': ride(1, 600, 0) }); // a recorded zero distance
+    const parsed = activityTrendsSchema.parse(compared(END, current, previous));
+    if (parsed.source !== 'manual') throw new Error('expected manual');
+    expect(parsed.comparison?.metrics.distance).toEqual({
+      change: { absolute: 2_000, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' },
+      current: 2_000,
+      previous: 0,
+    });
+    expect(parsed.comparison?.metrics.enteredDuration.change).toMatchObject({ absolute: 0, percent: 0 });
+  });
+
+  it('describes empty periods: counts compare as 0, totals are undefined', () => {
+    const parsed = activityTrendsSchema.parse(compared(END, manualDays(END), manualDays('2026-10-14')));
+    if (parsed.source !== 'manual') throw new Error('expected manual');
+    expect(parsed.comparison?.metrics.count).toEqual({
+      change: { absolute: 0, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' },
+      current: 0,
+      previous: 0,
+    });
+    expect(parsed.comparison?.metrics.distance).toEqual({
+      change: { reasons: ['current_period_no_entries', 'previous_period_no_entries'], status: 'unavailable' },
+      current: null,
+      previous: null,
+    });
+  });
+
+  it('suppresses every change while the range includes today, and keeps the values', () => {
+    const today = '2026-11-12';
+    const current = manualDays(today, { '2026-11-01': ride(2, 1_200, 4_000) });
+    const previous = manualDays('2026-10-15', { '2026-10-01': ride(1, 600, 2_000) });
+    const parsed = activityTrendsSchema.parse(compared(today, current, previous, today));
+    if (parsed.source !== 'manual') throw new Error('expected manual');
+    expect(parsed.comparison?.current.inProgress).toBe(true);
+    expect(parsed.comparison?.periodReasons).toEqual(['current_period_in_progress']);
+    expect(parsed.comparison?.metrics.count).toEqual({ change: { reasons: ['current_period_in_progress'], status: 'unavailable' }, current: 2, previous: 1 });
+  });
+
+  it('never compares a shortened or missing previous period as a full one', () => {
+    const shortened = activityTrendsSchema.parse(compared('2000-02-10', manualDays('2000-02-10'), manualDays('2000-01-13')));
+    expect(shortened.comparison?.previous.period).toMatchObject({ days: 13, shortenedByLowerBound: true, startDate: '2000-01-01' });
+    expect(shortened.comparison?.metrics.count.change).toEqual({ reasons: ['previous_period_shortened'], status: 'unavailable' });
+    const missing = activityTrendsSchema.parse(compared('2000-01-10', manualDays('2000-01-10'), null));
+    expect(missing.comparison?.previous).toEqual({ period: null, requestedEndDate: '1999-12-13', requestedStartDate: '1999-11-16', summary: null });
+    expect(missing.comparison?.metrics.count).toEqual({
+      change: { reasons: ['current_period_shortened', 'previous_period_out_of_range'], status: 'unavailable' },
+      current: 0,
+      previous: null,
+    });
+  });
+
+  it('refuses a comparison that disagrees with the contract, or that was not asked for', () => {
+    const current = manualDays(END, { '2026-11-01': ride(3, 5_400, 30_000) });
+    const previous = manualDays('2026-10-14', { '2026-10-01': ride(2, 3_600, 24_000) });
+    const trends = compared(END, current, previous);
+    expect(activityTrendsSchema.safeParse(trends).success).toBe(true);
+    const { metrics } = trends.comparison;
+    const withCount = (count: object) => ({ ...trends, comparison: { ...trends.comparison, metrics: { ...metrics, count } } });
+    const tampered = (change: object) => withCount({ ...metrics.count, change: { ...metrics.count.change, ...change } });
+    expect(activityTrendsSchema.safeParse(tampered({ absolute: 2 })).success).toBe(false);
+    expect(activityTrendsSchema.safeParse(tampered({ percent: 50.1 })).success).toBe(false);
+    expect(activityTrendsSchema.safeParse(tampered({ percent: 50.05 })).success).toBe(false);
+    expect(activityTrendsSchema.safeParse(tampered({ percent: null, percentUnavailableReason: 'zero_baseline' })).success).toBe(false);
+    // An unavailable change where the contract gives one.
+    expect(activityTrendsSchema.safeParse(withCount({ ...metrics.count, change: { reasons: ['current_values_missing'], status: 'unavailable' } })).success).toBe(false);
+    // Present without `compare` in applied, or asked for and missing.
+    expect(activityTrendsSchema.safeParse({ ...trends, applied: manualTrends(END, current).applied }).success).toBe(false);
+    const withoutComparison: Record<string, unknown> = { ...trends };
+    delete withoutComparison.comparison;
+    expect(activityTrendsSchema.safeParse(withoutComparison).success).toBe(false);
+    // A previous period that does not end where the range starts, or a summary inconsistent with itself.
+    const previousBlock = trends.comparison.previous;
+    expect(
+      activityTrendsSchema.safeParse({ ...trends, comparison: { ...trends.comparison, previous: { ...previousBlock, period: { ...previousBlock.period!, endsAt: '2026-10-14T00:00:00.000Z' } } } })
+        .success,
+    ).toBe(false);
+    expect(activityTrendsSchema.safeParse({ ...trends, comparison: { ...trends.comparison, previous: { ...previousBlock, summary: { ...previousBlock.summary!, count: 9 } } } }).success).toBe(
+      false,
+    );
+    // The ordinary answer without a comparison is unchanged.
+    expect(activityTrendsSchema.safeParse(manualTrends(END, current)).success).toBe(true);
+  });
+
+  it('keeps the source’s duration name in the comparison', () => {
+    const days = runDays(END, {
+      '2026-11-02': { count: 2, distance: { totalM: 5_000, withValue: 1 }, observedDuration: { totalS: 1_800, withValue: 1 }, summaries: { current: 1, pending: 1, stale: 0 } },
+    });
+    const range = { ...rangeFor(END, utcBounds(END)), includesToday: false, today: '2026-11-12' };
+    const comparison = activityTrendsComparisonOf({ endDate: END, previous: null, range, source: 'recorded_run', summary: summarizeRecordedRunTrendDays(days) });
+    expect(Object.keys(comparison.metrics).toSorted()).toEqual(['count', 'distance', 'observedDuration']);
+    expect((comparison.metrics as { observedDuration: { change: unknown } }).observedDuration.change).toEqual({
+      reasons: ['previous_period_out_of_range', 'current_summaries_pending'],
+      status: 'unavailable',
+    });
   });
 });

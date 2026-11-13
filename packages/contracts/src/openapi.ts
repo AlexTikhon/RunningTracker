@@ -20,7 +20,7 @@ import {
   putDailyMovementRequestSchema,
 } from './daily-movement.js';
 import { dailyOverviewSchema } from './daily-overview.js';
-import { activityTrendsSchema } from './activity-trends.js';
+import { ACTIVITY_TRENDS_COMPARISON_MODES, ACTIVITY_TRENDS_COMPARISON_REASONS, activityTrendsSchema } from './activity-trends.js';
 import { dailyTrendsSchema } from './daily-trends.js';
 import {
   createMealRequestSchema,
@@ -568,13 +568,16 @@ export const openApiDocument = {
         tags: ['Daily trends'],
         summary: "Compute the signed-in person's 28-day activity trends for one source and one activity type",
         description:
-          "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Answers `Cache-Control: no-store`, errors included.",
+          "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Optional `compare=previous_period` (ADR-0090) adds `comparison`, echoed as `applied.compare`: for end date E the range E-27..E is compared with the previous period E-55..E-28, the 28 local calendar dates immediately before it, for the same source, type and zone, located with the same rules (23/25-hour and skipped dates included). Both periods are read by ONE statement over at most 56 dates in the same REPEATABLE READ, READ ONLY transaction, so they come from one snapshot; the range part of the answer is identical to an answer without `compare`. `comparison.current.period` and `comparison.previous.period` give the actual dates and UTC intervals; the previous period is cut by 2000-01-01 like a range (`previous_period_shortened`) or null when all its dates are before it (`previous_period_out_of_range`, with `requestedStartDate`/`requestedEndDate`). `comparison.previous.summary` has the shape of `summary`. Per metric (`count`, the source's duration name, `distance`): both period totals (null when undefined) and a `change`, computed by PostgreSQL: `available` with the signed `absolute` change and `percent` = (current - previous) / previous * 100 rounded to one decimal, halves away from zero, exactly from the integer totals (period totals add the dates' rounded totals); `percent` null with `percentUnavailableReason: zero_baseline` when the previous total is 0. Otherwise `unavailable` with stable `reasons` (" +
+          ACTIVITY_TRENDS_COMPARISON_REASONS.join(', ') +
+          "), listed in that order; `periodReasons` repeats those that apply to every metric. Counts describe logged records only and are compared whatever the coverage. A duration or distance is compared only when both periods have items and every item records it (no missing value, no pending or stale run summary). A range that includes today is in progress: its figures are returned, every change is unavailable. Full coverage does not establish that every activity was logged. `comparison.policyVersion` names these rules. Answers `Cache-Control: no-store`, errors included.",
         parameters: [
           parameterRef('OrgId'),
           parameterRef('TrendsEndDate'),
           parameterRef('ActivityTrendsTimeZone'),
           parameterRef('ActivityTrendsSource'),
           parameterRef('ActivityTrendsType'),
+          parameterRef('ActivityTrendsCompare'),
         ],
         responses: { '200': jsonResponse('The activity trends of the range.', 'ActivityTrends'), ...defaultErrors },
       },
@@ -931,6 +934,14 @@ export const openApiDocument = {
         required: true,
         description: 'The one activity type to aggregate. With `source=recorded_run` only `run`.',
         schema: { enum: [...ACTIVITY_TYPES], type: 'string' },
+      },
+      ActivityTrendsCompare: {
+        name: 'compare',
+        in: 'query',
+        required: false,
+        description:
+          'Optional, single-valued (ADR-0090). `previous_period` adds the comparison with the 28 local calendar dates immediately before the range.',
+        schema: { enum: [...ACTIVITY_TRENDS_COMPARISON_MODES], type: 'string' },
       },
       UserId: { name: 'userId', in: 'path', required: true, schema: schemaRef('UUID') },
       Origin: { name: 'Origin', in: 'header', required: true, schema: { type: 'string', format: 'uri' } },
