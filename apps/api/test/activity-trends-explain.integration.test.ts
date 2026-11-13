@@ -1,7 +1,14 @@
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { activityTrendsActivitiesSql, activityTrendsIntervalOf, activityTrendsRecordedRunsSql } from '../src/activity-trends/activity-trends-service.js';
+import {
+  activityTrendsActivitiesComparisonSql,
+  activityTrendsActivitiesSql,
+  activityTrendsComparisonWindowOf,
+  activityTrendsIntervalOf,
+  activityTrendsRecordedRunsComparisonSql,
+  activityTrendsRecordedRunsSql,
+} from '../src/activity-trends/activity-trends-service.js';
 import { loadIntegrationTestConfiguration } from '../src/config/environment.js';
 import { prepareTenantIsolationFixtures, tenantIsolationIds as ids } from './tenant-isolation-fixtures.js';
 
@@ -132,5 +139,32 @@ describe('activity trends EXPLAIN under the runtime role (synthetic data)', () =
     expect(summaries.map((node) => node['Index Name'])).toEqual(['run_summaries_pkey']);
     const runRows = all.filter((node) => node['Relation Name'] === 'runs').reduce((sum, node) => sum + (node['Actual Rows'] ?? 0), 0);
     expect(runRows).toBeLessThan(200);
+  });
+
+  // ADR-0090: the comparison statements read the 56-date window (previous period and range) with the same indexes.
+  const window = activityTrendsComparisonWindowOf('2026-11-12', 'Europe/Warsaw');
+  const windowBounds = [ids.orgA, ids.userOrgA, window.starts, window.startsAt, window.endsAt];
+
+  it('compares two periods of activities through the owner index, reading the window once', async () => {
+    expect(window.starts).toHaveLength(56);
+    for (const [source, type] of [['manual', 'ride'], ['gpx', 'hike']] as const) {
+      const result = await explain(activityTrendsActivitiesComparisonSql, [...windowBounds, source, type, window.previousDays]);
+      console.info(`activity-trends:activities-comparison ${source}/${type} (${result.executionMs.toFixed(2)} ms)\n${result.text}`);
+      const scans = nodes(result.plan).filter((node) => node['Relation Name'] === 'activities');
+      expect(scans.length).toBe(1);
+      expect(scans.every((node) => node['Node Type'] !== 'Seq Scan')).toBe(true);
+      // About twice the range's rows (one every 70 minutes for 56 days), not the table.
+      expect(scans.reduce((sum, node) => sum + (node['Actual Rows'] ?? 0), 0)).toBeLessThan(2_000);
+    }
+  });
+
+  it('compares two periods of runs through the owner index and one summary probe per run', async () => {
+    const result = await explain(activityTrendsRecordedRunsComparisonSql, [...windowBounds, window.previousDays]);
+    console.info(`activity-trends:recorded-runs-comparison (${result.executionMs.toFixed(2)} ms)\n${result.text}`);
+    const all = nodes(result.plan);
+    expect(all.filter((node) => node['Relation Name'] === 'runs').map((node) => node['Index Name'])).toEqual(['runs_owner_started_idx']);
+    expect(all.filter((node) => node['Relation Name'] === 'run_summaries').map((node) => node['Index Name'])).toEqual(['run_summaries_pkey']);
+    const runRows = all.filter((node) => node['Relation Name'] === 'runs').reduce((sum, node) => sum + (node['Actual Rows'] ?? 0), 0);
+    expect(runRows).toBeLessThan(400);
   });
 });

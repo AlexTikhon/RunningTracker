@@ -1,11 +1,18 @@
 import {
+  ACTIVITY_TRENDS_COMPARISON_VERSION,
   ACTIVITY_TRENDS_VERSION,
+  activityTrendsComparisonReasons,
+  activityTrendsPeriodReasons,
   activityTrendsSchema,
   addLocalDays,
   dailyTrendsDatesOf,
   dailyTrendsRangeOf,
   DAILY_TRENDS_RANGE_DAYS,
+  previousActivityTrendsPeriodOf,
   type ActivityTrends,
+  type ActivityTrendsChange,
+  type ActivityTrendsComparisonReason,
+  type ActivityTrendsPeriodDates,
   type ActivityTrendsQuery,
   type GpxActivityTrendDay,
   type GpxActivityTrendsSummary,
@@ -311,20 +318,39 @@ export function manualOrGpxTrendsOf(
       duration: { totalS: sqlTotal(row.count, row.duration_s, 'duration sum'), withValue: row.count },
     };
   });
+  return { days, summary: activitySummaryOf(range) };
+}
+
+/** A range row of the activity statement (the range, or in a comparison the previous period) as a summary. */
+function activitySummaryOf(range: ActivityTrendsActivityRow): GenericSummary {
   const daysWithEntries = rangeCount(range.days_with_entries, 'days with entries');
   return {
-    days,
-    summary: {
-      count: range.count,
-      daysWithEntries,
-      distance: {
-        daysWithValue: rangeCount(range.days_with_distance, 'days with a distance'),
-        totalM: sqlTotal(range.with_distance, range.distance_m, 'range distance'),
-        withValue: range.with_distance,
-      },
-      // Every activity records its duration, so the dates with a duration are the dates with entries.
-      duration: { daysWithValue: daysWithEntries, totalS: sqlTotal(range.count, range.duration_s, 'range duration'), withValue: range.count },
+    count: range.count,
+    daysWithEntries,
+    distance: {
+      daysWithValue: rangeCount(range.days_with_distance, 'days with a distance'),
+      totalM: sqlTotal(range.with_distance, range.distance_m, 'range distance'),
+      withValue: range.with_distance,
     },
+    // Every activity records its duration, so the dates with a duration are the dates with entries.
+    duration: { daysWithValue: daysWithEntries, totalS: sqlTotal(range.count, range.duration_s, 'range duration'), withValue: range.count },
+  };
+}
+
+/** A range row of the recorded-run statement as a summary. */
+function recordedRunSummaryOf(range: ActivityTrendsRunRow): RecordedRunTrendsSummary {
+  // Distance and observed duration come from the same current summaries, so they have the same dates with a value.
+  const daysWithValue = rangeCount(range.days_with_value, 'days with a current summary');
+  return {
+    count: range.count,
+    daysWithEntries: rangeCount(range.days_with_entries, 'days with entries'),
+    distance: { daysWithValue, totalM: sqlTotal(range.current, range.distance_m, 'range distance'), withValue: range.current },
+    observedDuration: {
+      daysWithValue,
+      totalS: sqlTotal(range.current, range.observed_duration_s, 'range observed duration'),
+      withValue: range.current,
+    },
+    summaries: { current: range.current, pending: range.pending, stale: range.stale },
   };
 }
 
@@ -353,22 +379,7 @@ export function recordedRunTrendsOf(
       summaries: { current: row.current, pending: row.pending, stale: row.stale },
     };
   });
-  // Distance and observed duration come from the same current summaries, so they have the same dates with a value.
-  const daysWithValue = rangeCount(range.days_with_value, 'days with a current summary');
-  return {
-    days,
-    summary: {
-      count: range.count,
-      daysWithEntries: rangeCount(range.days_with_entries, 'days with entries'),
-      distance: { daysWithValue, totalM: sqlTotal(range.current, range.distance_m, 'range distance'), withValue: range.current },
-      observedDuration: {
-        daysWithValue,
-        totalS: sqlTotal(range.current, range.observed_duration_s, 'range observed duration'),
-        withValue: range.current,
-      },
-      summaries: { current: range.current, pending: range.pending, stale: range.stale },
-    },
-  };
+  return { days, summary: recordedRunSummaryOf(range) };
 }
 
 /**
@@ -383,6 +394,18 @@ export function buildActivityTrends(input: {
   timeZone: string;
   today: string;
 }): ActivityTrends {
+  return activityTrendsSchema.parse(assembleActivityTrends(input));
+}
+
+/** The unchecked answer of an ordinary read: `buildActivityTrends` and the comparison builder parse it. */
+function assembleActivityTrends(input: {
+  computedAt: string;
+  interval: ActivityTrendsInterval;
+  query: ActivityTrendsQuery;
+  rows: { activities: ActivityTrendsActivityRow[] } | { runs: ActivityTrendsRunRow[] };
+  timeZone: string;
+  today: string;
+}) {
   const { interval, query } = input;
   const common = {
     applied: { endDate: query.endDate, source: query.source, timeZone: input.timeZone, type: query.type },
@@ -408,19 +431,430 @@ export function buildActivityTrends(input: {
   if (query.source === 'recorded_run') {
     if (!('runs' in input.rows)) throw new Error('Recorded-run trends need the recorded-run statement');
     const { days, summary } = recordedRunTrendsOf(interval, input.rows.runs);
-    return activityTrendsSchema.parse({ ...common, days, source: 'recorded_run', summary });
+    return { ...common, days, source: 'recorded_run' as const, summary };
   }
   if (!('activities' in input.rows)) throw new Error('Activity trends need the activity statement');
+  const source = query.source;
   const generic = manualOrGpxTrendsOf(interval, input.rows.activities);
-  const { duration: rangeDuration, ...rangeBase } = generic.summary;
-  if (query.source === 'manual') {
-    const days: ManualActivityTrendDay[] = generic.days.map(({ duration, ...day }) => ({ ...day, enteredDuration: duration }));
-    const summary: ManualActivityTrendsSummary = { ...rangeBase, enteredDuration: rangeDuration };
-    return activityTrendsSchema.parse({ ...common, days, source: 'manual', summary });
+  const days = generic.days.map(({ duration, ...day }) => ({ ...day, [durationKeyOf(source)]: duration })) as ManualActivityTrendDay[] | GpxActivityTrendDay[];
+  return { ...common, days, source, summary: namedSummary(source, generic.summary) };
+}
+
+const durationKeyOf = (source: 'gpx' | 'manual') => (source === 'gpx' ? 'elapsedDuration' : 'enteredDuration');
+
+/** A manual or GPX summary under its source's duration name. */
+function namedSummary(source: 'gpx' | 'manual', generic: GenericSummary): ManualActivityTrendsSummary | GpxActivityTrendsSummary {
+  const { duration, ...base } = generic;
+  return source === 'gpx' ? { ...base, elapsedDuration: duration } : { ...base, enteredDuration: duration };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Comparison with the previous period (ADR-0090)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * The window a comparison reads: the previous period's dates (E-55..E-28, cut by 2000-01-01, possibly none) followed by
+ * the range's (E-27..E), at most 56 dates, every start located in the zone by startOfLocalDate. The previous period ends
+ * exactly where the range starts, so the two tile the window.
+ */
+export interface ActivityTrendsComparisonWindow {
+  current: ActivityTrendsInterval;
+  /** End of the window (exclusive): the first instant of the date after the range. */
+  endsAt: string;
+  previous: {
+    period: (ActivityTrendsPeriodDates & { endsAt: string; startsAt: string }) | null;
+    requestedEndDate: string;
+    requestedStartDate: string;
+  };
+  /** How many leading bucket bounds belong to the previous period (0..28). */
+  previousDays: number;
+  /** Every date's start, previous period first: the bucket bounds. */
+  starts: string[];
+  /** Start of the window (inclusive): the previous period's first instant, or the range's when it has none. */
+  startsAt: string;
+}
+
+export function activityTrendsComparisonWindowOf(endDate: string, timeZone: string): ActivityTrendsComparisonWindow {
+  const current = activityTrendsIntervalOf(endDate, timeZone);
+  const previous = previousActivityTrendsPeriodOf(endDate);
+  const previousStarts = previous.period === null ? [] : dailyTrendsDatesOf(previous.period).map((localDate) => new Date(startOfLocalDate(localDate, timeZone)).toISOString());
+  if (previous.period !== null && previous.period.endDate !== addLocalDays(current.startDate, -1)) {
+    throw new Error('The previous period must end on the date before the range');
   }
-  const days: GpxActivityTrendDay[] = generic.days.map(({ duration, ...day }) => ({ ...day, elapsedDuration: duration }));
-  const summary: GpxActivityTrendsSummary = { ...rangeBase, elapsedDuration: rangeDuration };
-  return activityTrendsSchema.parse({ ...common, days, source: 'gpx', summary });
+  const starts = [...previousStarts, ...current.days.map((day) => day.startsAt)];
+  if (starts.length > 2 * DAILY_TRENDS_RANGE_DAYS) throw new Error('A comparison reads at most 56 dates');
+  return {
+    current,
+    endsAt: current.endsAt,
+    previous: {
+      period: previous.period === null ? null : { ...previous.period, endsAt: current.startsAt, startsAt: previousStarts[0]! },
+      requestedEndDate: previous.requestedEndDate,
+      requestedStartDate: previous.requestedStartDate,
+    },
+    previousDays: previousStarts.length,
+    starts,
+    startsAt: starts[0]!,
+  };
+}
+
+// The absolute change and the percentage change in tenths of a percent of two period totals, in PostgreSQL: NULL when
+// either total is NULL (undefined), the percentage also NULL for a zero baseline. The percentage is (current - previous) /
+// previous * 100 rounded to one decimal, halves away from zero, by exact numeric integer division (div truncates, both
+// operands are positive, so this is floor(|change| * 1000 / previous + 1/2) with the change's sign). Totals are integers
+// here (sums of the dates' rounded totals), so ::numeric is exact; it only keeps |change| * 2000 from overflowing bigint.
+const percentTenths = (current: string, previous: string) =>
+  `CASE WHEN ${previous} > 0 THEN (sign(${current} - ${previous}) * div(abs(${current} - ${previous})::numeric * 2000 + ${previous}, ${previous}::numeric * 2))::text END`;
+
+// $1 organization, $2 owner, $3 the start of every date of the window (previous period first, then the range), $4 start
+// of the window (inclusive), $5 start of the date after the range (exclusive), $6 source, $7 activity type, $8 how many
+// leading bounds belong to the previous period.
+//
+// The activity statement of ADR-0089 over the window instead of the range: each date is bucketed, filtered and rounded
+// exactly as there, so the range's dates and range row are the same figures as an ordinary read's. A bucket above $8 is a
+// date of the range (`day_number` = bucket - $8, 1..days); one at or below it is a date of the previous period, whose rows
+// are not returned. Rows: `day` (a date of the range with an item), `current` and `previous` (one each, aggregates over
+// the dates of that period, rounded per date then added; they exist when a period has no item), and one `change` row:
+// current minus previous for the count, duration and distance, with each percentage in tenths. The CTEs are read more than
+// once, so PostgreSQL materializes them: every row comes from the same per-date rows of the same statement snapshot.
+export const activityTrendsActivitiesComparisonSql = `/* activity-trends:activities-comparison */
+WITH daily AS (
+  SELECT width_bucket(activity.started_at, $3::timestamptz[]) AS bucket,
+         count(*)::integer AS count,
+         sum(activity.duration_s) AS duration_s,
+         count(activity.distance_m)::integer AS with_distance,
+         sum(activity.distance_m) AS distance_sum
+    FROM activities AS activity
+   WHERE activity.org_id = $1
+     AND activity.user_id = $2
+     AND activity.started_at >= $4::timestamptz
+     AND activity.started_at < $5::timestamptz
+     AND activity.source = $6::text
+     AND activity.type = $7::text
+   GROUP BY 1
+), rounded AS (
+  SELECT bucket > $8::integer AS is_current, bucket - $8::integer AS day_number, count, duration_s, with_distance,
+         CASE WHEN with_distance > 0 THEN ${halfUp('distance_sum')} END AS distance_m
+    FROM daily
+), periods AS (
+  SELECT period.is_current,
+         coalesce(sum(rounded.count), 0)::integer AS count,
+         sum(rounded.duration_s) AS duration_s,
+         coalesce(sum(rounded.with_distance), 0)::integer AS with_distance,
+         sum(rounded.distance_m) AS distance_m,
+         count(rounded.day_number)::integer AS days_with_entries,
+         count(rounded.distance_m)::integer AS days_with_distance
+    FROM (VALUES (false), (true)) AS period(is_current)
+    LEFT JOIN rounded ON rounded.is_current = period.is_current
+   GROUP BY period.is_current
+)
+SELECT 'day' AS row_kind, day_number, count, duration_s::text AS duration_s, with_distance, distance_m::text AS distance_m,
+       NULL::integer AS days_with_entries, NULL::integer AS days_with_distance, NULL::text AS count_percent_tenths,
+       NULL::text AS duration_percent_tenths, NULL::text AS distance_percent_tenths
+  FROM rounded
+ WHERE is_current
+UNION ALL
+SELECT CASE WHEN is_current THEN 'current' ELSE 'previous' END, NULL, count, duration_s::text, with_distance, distance_m::text,
+       days_with_entries, days_with_distance, NULL, NULL, NULL
+  FROM periods
+UNION ALL
+SELECT 'change', NULL, cur.count - prev.count, (cur.duration_s - prev.duration_s)::text, NULL,
+       (cur.distance_m - prev.distance_m)::text, NULL, NULL, ${percentTenths('cur.count', 'prev.count')},
+       ${percentTenths('cur.duration_s', 'prev.duration_s')}, ${percentTenths('cur.distance_m', 'prev.distance_m')}
+  FROM periods AS cur
+  JOIN periods AS prev ON cur.is_current AND NOT prev.is_current
+ ORDER BY row_kind, day_number`;
+
+// $1 organization, $2 owner, $3 the start of every date of the window, $4 its start, $5 its exclusive end, $6 how many
+// leading bounds belong to the previous period.
+//
+// The recorded-run statement of ADR-0089 over the window, with the rows of the activity comparison: the owner's finished
+// runs, each summary looked up by key (LATERAL ... OFFSET 0) and used only when it is current for the run's data; per
+// date counts by summary state and the current summaries' observed durations and distances rounded once per date. The
+// `change` row's count is runs (whatever their summary state); its duration and distance changes are NULL when either
+// period has no current summary.
+export const activityTrendsRecordedRunsComparisonSql = `/* activity-trends:recorded-runs-comparison */
+WITH daily AS (
+  SELECT width_bucket(run.started_at, $3::timestamptz[]) AS bucket,
+         count(*)::integer AS count,
+         (count(*) FILTER (WHERE summary.source_revision = run.data_revision))::integer AS current,
+         (count(*) FILTER (WHERE summary.run_id IS NULL))::integer AS pending,
+         (count(*) FILTER (WHERE summary.source_revision <> run.data_revision))::integer AS stale,
+         sum(summary.observed_duration_s) FILTER (WHERE summary.source_revision = run.data_revision) AS observed_sum,
+         sum(summary.distance_m) FILTER (WHERE summary.source_revision = run.data_revision) AS distance_sum
+    FROM runs AS run
+    LEFT JOIN LATERAL (
+          SELECT found.run_id, found.source_revision, found.observed_duration_s, found.distance_m
+            FROM run_summaries AS found
+           WHERE found.org_id = $1 AND found.org_id = run.org_id AND found.run_id = run.id
+          OFFSET 0) AS summary ON true
+   WHERE run.org_id = $1
+     AND run.user_id = $2
+     AND run.status = 'finished'
+     AND run.started_at >= $4::timestamptz
+     AND run.started_at < $5::timestamptz
+   GROUP BY 1
+), rounded AS (
+  SELECT bucket > $6::integer AS is_current, bucket - $6::integer AS day_number, count, current, pending, stale,
+         CASE WHEN current > 0 THEN ${halfUp('observed_sum')} END AS observed_duration_s,
+         CASE WHEN current > 0 THEN ${halfUp('distance_sum')} END AS distance_m
+    FROM daily
+), periods AS (
+  SELECT period.is_current,
+         coalesce(sum(rounded.count), 0)::integer AS count,
+         coalesce(sum(rounded.current), 0)::integer AS current,
+         coalesce(sum(rounded.pending), 0)::integer AS pending,
+         coalesce(sum(rounded.stale), 0)::integer AS stale,
+         sum(rounded.observed_duration_s) AS observed_duration_s,
+         sum(rounded.distance_m) AS distance_m,
+         count(rounded.day_number)::integer AS days_with_entries,
+         count(rounded.observed_duration_s)::integer AS days_with_value
+    FROM (VALUES (false), (true)) AS period(is_current)
+    LEFT JOIN rounded ON rounded.is_current = period.is_current
+   GROUP BY period.is_current
+)
+SELECT 'day' AS row_kind, day_number, count, current, pending, stale, observed_duration_s::text AS observed_duration_s,
+       distance_m::text AS distance_m, NULL::integer AS days_with_entries, NULL::integer AS days_with_value,
+       NULL::text AS count_percent_tenths, NULL::text AS duration_percent_tenths, NULL::text AS distance_percent_tenths
+  FROM rounded
+ WHERE is_current
+UNION ALL
+SELECT CASE WHEN is_current THEN 'current' ELSE 'previous' END, NULL, count, current, pending, stale,
+       observed_duration_s::text, distance_m::text, days_with_entries, days_with_value, NULL, NULL, NULL
+  FROM periods
+UNION ALL
+SELECT 'change', NULL, cur.count - prev.count, NULL, NULL, NULL, (cur.observed_duration_s - prev.observed_duration_s)::text,
+       (cur.distance_m - prev.distance_m)::text, NULL, NULL, ${percentTenths('cur.count', 'prev.count')},
+       ${percentTenths('cur.observed_duration_s', 'prev.observed_duration_s')}, ${percentTenths('cur.distance_m', 'prev.distance_m')}
+  FROM periods AS cur
+  JOIN periods AS prev ON cur.is_current AND NOT prev.is_current
+ ORDER BY row_kind, day_number`;
+
+type RowKind = 'change' | 'current' | 'day' | 'previous';
+
+interface PercentColumns {
+  count_percent_tenths: string | null;
+  distance_percent_tenths: string | null;
+  duration_percent_tenths: string | null;
+}
+
+/**
+ * A row of the activity comparison statement. `day`, `current` and `previous` rows carry the columns of the ordinary
+ * statement (`current` and `previous` as its range row). The `change` row carries signed differences: `count` (items),
+ * `duration_s` and `distance_m` (text, NULL when either total is undefined), and the three percentages in tenths.
+ */
+export type ActivityTrendsActivityComparisonRow = Omit<ActivityTrendsActivityRow, 'count' | 'with_distance'> &
+  PercentColumns & { count: number | null; row_kind: RowKind; with_distance: number | null };
+
+/** A row of the recorded-run comparison statement; the `change` row has NULL run-state columns. */
+export type ActivityTrendsRunComparisonRow = Omit<ActivityTrendsRunRow, 'count' | 'current' | 'pending' | 'stale'> &
+  PercentColumns & { count: number | null; current: number | null; pending: number | null; stale: number | null; row_kind: RowKind };
+
+function signedInteger(text: string, what: string): number {
+  const value = Number(text);
+  if (!/^-?\d+$/u.test(text) || !Number.isSafeInteger(value)) throw new Error(`PostgreSQL returned a ${what} that is not a safe integer`);
+  return value;
+}
+
+/** The statement's rows by kind: the range's dates, and exactly one `current`, `previous` and `change` row. */
+function splitComparisonRows<Row extends { row_kind: RowKind }>(rows: readonly Row[]): { change: Row; current: Row; days: Row[]; previous: Row } {
+  const byKind = (kind: RowKind) => rows.filter((row) => row.row_kind === kind);
+  const single = (kind: RowKind) => {
+    const found = byKind(kind);
+    if (found.length !== 1) throw new Error(`The activity trends comparison returned ${found.length} ${kind} rows`);
+    return found[0]!;
+  };
+  if (rows.some((row) => !['change', 'current', 'day', 'previous'].includes(row.row_kind))) throw new Error('The activity trends comparison returned an unknown row');
+  return { change: single('change'), current: single('current'), days: byKind('day'), previous: single('previous') };
+}
+
+const nonNull = (value: number | null, what: string): number => {
+  if (value === null) throw new Error(`PostgreSQL returned no ${what}`);
+  return value;
+};
+
+interface PeriodSide {
+  count: number;
+  distance: number;
+  duration: number;
+  pending: number;
+  stale: number;
+}
+
+/** What a summary records, per metric, for the contract's availability rules. */
+function sideOfSummary(summary: GenericSummary & { summaries?: { pending: number; stale: number } }): PeriodSide {
+  return {
+    count: summary.count,
+    distance: summary.distance.withValue,
+    duration: summary.duration.withValue,
+    pending: summary.summaries?.pending ?? 0,
+    stale: summary.summaries?.stale ?? 0,
+  };
+}
+
+/**
+ * One metric's change: unavailable with the contract's reasons, or available with PostgreSQL's absolute change and
+ * percentage (tenths / 10; none for a zero baseline). The schema then checks both numbers against the contract's arithmetic.
+ */
+function changeFromSql(reasons: ActivityTrendsComparisonReason[], absolute: number | string | null, tenths: string | null, previousTotal: number | null, what: string): ActivityTrendsChange {
+  if (reasons.length > 0) return { reasons, status: 'unavailable' };
+  if (absolute === null || previousTotal === null) throw new Error(`PostgreSQL returned no ${what} change for comparable periods`);
+  const change = typeof absolute === 'number' ? absolute : signedInteger(absolute, `${what} change`);
+  if (previousTotal === 0) {
+    if (tenths !== null) throw new Error(`PostgreSQL returned a ${what} percentage for a zero baseline`);
+    return { absolute: change, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' };
+  }
+  if (tenths === null) throw new Error(`PostgreSQL returned no ${what} percentage`);
+  return { absolute: change, percent: signedInteger(tenths, `${what} percentage`) / 10, percentUnavailableReason: null, status: 'available' };
+}
+
+/** The comparison object from the two period summaries and PostgreSQL's change row; availability is the contract's rule. */
+function comparisonFrom(input: {
+  change: PercentColumns & { count: number | null; distance: string | null; duration: string | null };
+  current: GenericSummary & { summaries?: { pending: number; stale: number } };
+  durationKey: 'elapsedDuration' | 'enteredDuration' | 'observedDuration';
+  includesToday: boolean;
+  previous: (GenericSummary & { summaries?: { pending: number; stale: number } }) | null;
+  previousSummary: unknown;
+  range: { days: number };
+  window: ActivityTrendsComparisonWindow;
+}) {
+  const { current, previous, window } = input;
+  const periodReasons = activityTrendsPeriodReasons({ days: input.range.days, includesToday: input.includesToday }, window.previous.period);
+  const currentSide = sideOfSummary(current);
+  const previousSide = previous === null ? null : sideOfSummary(previous);
+  const reasonsFor = (metric: 'count' | 'distance' | 'duration') =>
+    activityTrendsComparisonReasons({
+      current: { count: currentSide.count, pending: currentSide.pending, stale: currentSide.stale, withValue: metric === 'count' ? currentSide.count : currentSide[metric] },
+      metric,
+      periodReasons,
+      previous:
+        previousSide === null
+          ? null
+          : { count: previousSide.count, pending: previousSide.pending, stale: previousSide.stale, withValue: metric === 'count' ? previousSide.count : previousSide[metric] },
+    });
+  const previousDuration = previous === null ? null : previous.duration.totalS;
+  const previousDistance = previous === null ? null : previous.distance.totalM;
+  return {
+    current: {
+      inProgress: input.includesToday,
+      period: {
+        days: window.current.days.length,
+        endDate: window.current.endDate,
+        endsAt: window.current.endsAt,
+        requestedDays: DAILY_TRENDS_RANGE_DAYS,
+        shortenedByLowerBound: window.current.shortenedByLowerBound,
+        startDate: window.current.startDate,
+        startsAt: window.current.startsAt,
+      },
+    },
+    metrics: {
+      count: {
+        change: changeFromSql(reasonsFor('count'), input.change.count, input.change.count_percent_tenths, previous === null ? null : previous.count, 'count'),
+        current: current.count,
+        previous: previous === null ? null : previous.count,
+      },
+      distance: {
+        change: changeFromSql(reasonsFor('distance'), input.change.distance, input.change.distance_percent_tenths, previousDistance, 'distance'),
+        current: current.distance.totalM,
+        previous: previousDistance,
+      },
+      [input.durationKey]: {
+        change: changeFromSql(reasonsFor('duration'), input.change.duration, input.change.duration_percent_tenths, previousDuration, 'duration'),
+        current: current.duration.totalS,
+        previous: previousDuration,
+      },
+    },
+    mode: 'previous_period' as const,
+    periodReasons,
+    policyVersion: ACTIVITY_TRENDS_COMPARISON_VERSION,
+    previous: {
+      period: window.previous.period === null ? null : { ...window.previous.period, requestedDays: DAILY_TRENDS_RANGE_DAYS },
+      requestedEndDate: window.previous.requestedEndDate,
+      requestedStartDate: window.previous.requestedStartDate,
+      summary: input.previousSummary,
+    },
+  };
+}
+
+/** An empty previous row is all a window without a previous period can give; anything else is a statement defect. */
+function assertEmptyPrevious(row: { count: number | null }, window: ActivityTrendsComparisonWindow): void {
+  if (window.previous.period === null && row.count !== 0) throw new Error('PostgreSQL returned items for a previous period that does not exist');
+}
+
+/**
+ * The response of a comparison read: the range exactly as an ordinary read builds it (from the statement's `day` and
+ * `current` rows), the previous period's summary from its `previous` row, and each metric's change from the `change` row
+ * when the contract's rules allow it. The schema then checks the whole answer, the comparison included, against the
+ * contract and refuses it if anything disagrees.
+ */
+export function buildActivityTrendsComparison(input: {
+  computedAt: string;
+  query: ActivityTrendsQuery;
+  rows: { activities: ActivityTrendsActivityComparisonRow[] } | { runs: ActivityTrendsRunComparisonRow[] };
+  timeZone: string;
+  today: string;
+  window: ActivityTrendsComparisonWindow;
+}): ActivityTrends {
+  const { query, window } = input;
+  const interval = window.current;
+  const ordinary = { computedAt: input.computedAt, interval, query, timeZone: input.timeZone, today: input.today };
+  const includesToday = interval.endDate === input.today;
+  if (query.source === 'recorded_run') {
+    if (!('runs' in input.rows)) throw new Error('Recorded-run trends need the recorded-run comparison statement');
+    const split = splitComparisonRows(input.rows.runs);
+    const asRunRow = (row: ActivityTrendsRunComparisonRow): ActivityTrendsRunRow => ({
+      count: nonNull(row.count, 'run count'),
+      current: nonNull(row.current, 'current summaries'),
+      day_number: row.row_kind === 'day' ? row.day_number : null,
+      days_with_entries: row.days_with_entries,
+      days_with_value: row.days_with_value,
+      distance_m: row.distance_m,
+      observed_duration_s: row.observed_duration_s,
+      pending: nonNull(row.pending, 'pending summaries'),
+      stale: nonNull(row.stale, 'stale summaries'),
+    });
+    const base = assembleActivityTrends({ ...ordinary, rows: { runs: [...split.days.map(asRunRow), asRunRow(split.current)] } });
+    assertEmptyPrevious(split.previous, window);
+    const previousSummary = window.previous.period === null ? null : recordedRunSummaryOf(asRunRow(split.previous));
+    const asGeneric = (summary: RecordedRunTrendsSummary) => ({ ...summary, duration: summary.observedDuration });
+    const comparison = comparisonFrom({
+      change: { ...split.change, distance: split.change.distance_m, duration: split.change.observed_duration_s },
+      current: asGeneric(base.summary as RecordedRunTrendsSummary),
+      durationKey: 'observedDuration',
+      includesToday,
+      previous: previousSummary === null ? null : asGeneric(previousSummary),
+      previousSummary,
+      range: { days: interval.days.length },
+      window,
+    });
+    return activityTrendsSchema.parse({ ...base, applied: { ...base.applied, compare: 'previous_period' }, comparison });
+  }
+  if (!('activities' in input.rows)) throw new Error('Activity trends need the activity comparison statement');
+  const split = splitComparisonRows(input.rows.activities);
+  const asActivityRow = (row: ActivityTrendsActivityComparisonRow): ActivityTrendsActivityRow => ({
+    count: nonNull(row.count, 'item count'),
+    day_number: row.row_kind === 'day' ? row.day_number : null,
+    days_with_distance: row.days_with_distance,
+    days_with_entries: row.days_with_entries,
+    distance_m: row.distance_m,
+    duration_s: row.duration_s,
+    with_distance: nonNull(row.with_distance, 'items with a distance'),
+  });
+  const base = assembleActivityTrends({ ...ordinary, rows: { activities: [...split.days.map(asActivityRow), asActivityRow(split.current)] } });
+  assertEmptyPrevious(split.previous, window);
+  const current = activitySummaryOf(asActivityRow(split.current));
+  const previous = window.previous.period === null ? null : activitySummaryOf(asActivityRow(split.previous));
+  const comparison = comparisonFrom({
+    change: { ...split.change, distance: split.change.distance_m, duration: split.change.duration_s },
+    current,
+    durationKey: durationKeyOf(query.source),
+    includesToday,
+    previous,
+    previousSummary: previous === null ? null : namedSummary(query.source, previous),
+    range: { days: interval.days.length },
+    window,
+  });
+  return activityTrendsSchema.parse({ ...base, applied: { ...base.applied, compare: 'previous_period' }, comparison });
 }
 
 export class ActivityTrendsService {
@@ -438,6 +872,7 @@ export class ActivityTrendsService {
     const timeZone = canonicalTimeZone(query.timeZone);
     const now = this.#clock.utcNow();
     const today = assertEndNotAfterToday(query.endDate, timeZone, now.getTime());
+    if (query.compare === 'previous_period') return this.#readComparison(session, orgId, query, timeZone, today, now);
     const interval = activityTrendsIntervalOf(query.endDate, timeZone);
     const bounds = [orgId, session.userId, interval.days.map((day) => day.startsAt), interval.startsAt, interval.endsAt];
     const rows = await withAuthenticatedTenantTransaction(
@@ -456,5 +891,39 @@ export class ActivityTrendsService {
       { snapshot: 'read-only snapshot' },
     );
     return buildActivityTrends({ computedAt: now.toISOString(), interval, query, rows, timeZone, today });
+  }
+
+  /**
+   * Both periods in the same transaction and the same statement: the membership check and ONE comparison statement for
+   * the source over at most 56 dates, so the previous period, the range and the changes come from one snapshot.
+   */
+  async #readComparison(
+    session: Pick<StoredSession, 'userId'>,
+    orgId: string,
+    query: ActivityTrendsQuery,
+    timeZone: string,
+    today: string,
+    now: Date,
+  ): Promise<ActivityTrends> {
+    const window = activityTrendsComparisonWindowOf(query.endDate, timeZone);
+    const bounds = [orgId, session.userId, window.starts, window.startsAt, window.endsAt];
+    const rows = await withAuthenticatedTenantTransaction(
+      this.#pool,
+      session,
+      orgId,
+      async (client) => {
+        await this.#hooks?.beforeAggregateRead?.();
+        if (query.source === 'recorded_run') {
+          return { runs: (await client.query<ActivityTrendsRunComparisonRow>(activityTrendsRecordedRunsComparisonSql, [...bounds, window.previousDays])).rows };
+        }
+        return {
+          activities: (
+            await client.query<ActivityTrendsActivityComparisonRow>(activityTrendsActivitiesComparisonSql, [...bounds, query.source, query.type, window.previousDays])
+          ).rows,
+        };
+      },
+      { snapshot: 'read-only snapshot' },
+    );
+    return buildActivityTrendsComparison({ computedAt: now.toISOString(), query, rows, timeZone, today, window });
   }
 }

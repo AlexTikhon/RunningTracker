@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  ACTIVITY_TRENDS_COMPARISON_VERSION,
   ACTIVITY_TRENDS_VERSION,
   activityHistoryResponseSchema,
   activityTrendsSchema,
@@ -612,6 +613,324 @@ describe('activity trends HTTP API', () => {
       await gpx('2026-11-12');
       await runs('2026-11-12');
       expect(await countRows()).toBe(before);
+    });
+  });
+
+  describe('comparison with the previous period (ADR-0090)', () => {
+    // A finished range: 2026-10-15..2026-11-11 in Warsaw; the previous period 2026-09-17..2026-10-14.
+    const END = '2026-11-11';
+    const compare = async (endDate: string, values: { auth?: Authentication; orgId?: string; source?: string; timeZone?: string; type?: string } = {}) =>
+      read(
+        { compare: 'previous_period', endDate, source: values.source ?? 'manual', timeZone: values.timeZone ?? WARSAW, type: values.type ?? (values.source === 'recorded_run' ? 'run' : 'ride') },
+        values.auth ?? owner,
+        values.orgId === undefined ? {} : { orgId: values.orgId },
+      );
+    const metricsOf = (trends: ActivityTrends) => {
+      const metrics = trends.comparison!.metrics;
+      const duration = 'enteredDuration' in metrics ? metrics.enteredDuration : 'elapsedDuration' in metrics ? metrics.elapsedDuration : metrics.observedDuration;
+      return { count: metrics.count, distance: metrics.distance, duration };
+    };
+    const previousOf = (trends: ActivityTrends) => trends.comparison!.previous.summary!;
+
+    it('compares the two periods from one read: the same figures as two ordinary reads, and no change for equal periods', async () => {
+      await withoutFixtureRuns();
+      for (const startedAt of ['2026-09-20T08:00:00.000Z', '2026-10-10T08:00:00.000Z', '2026-10-20T08:00:00.000Z', '2026-11-05T08:00:00.000Z']) {
+        await activity(startedAt, { distanceM: 5_000.5, durationS: 1_800 });
+      }
+      const compared = await compare(END);
+      const current = await manual(END);
+      const previous = await manual('2026-10-14');
+      // The range part is exactly the ordinary answer; the previous period is exactly the ordinary answer ending on E-28.
+      expect(compared.days).toEqual(current.days);
+      expect(compared.summary).toEqual(current.summary);
+      expect(compared.applied).toEqual({ ...current.applied, compare: 'previous_period' });
+      expect(previousOf(compared)).toEqual(previous.summary);
+      expect(compared.comparison!.previous.period).toEqual({
+        days: 28,
+        endDate: '2026-10-14',
+        endsAt: previous.range.endsAt,
+        requestedDays: 28,
+        shortenedByLowerBound: false,
+        startDate: '2026-09-17',
+        startsAt: previous.range.startsAt,
+      });
+      expect(compared.comparison!.previous.period!.endsAt).toBe(compared.range.startsAt);
+      expect(compared.comparison).toMatchObject({ mode: 'previous_period', periodReasons: [], policyVersion: ACTIVITY_TRENDS_COMPARISON_VERSION });
+      const equal = { absolute: 0, percent: 0, percentUnavailableReason: null, status: 'available' };
+      expect(metricsOf(compared)).toEqual({
+        count: { change: equal, current: 2, previous: 2 },
+        distance: { change: equal, current: 10_002, previous: 10_002 },
+        duration: { change: equal, current: 3_600, previous: 3_600 },
+      });
+      // Without `compare` the answer is the ordinary one, unchanged.
+      expect('comparison' in current).toBe(false);
+      expect('compare' in current.applied).toBe(false);
+    });
+
+    it('adds each period’s rounded dates and rounds the percentage halves away from zero, in PostgreSQL', async () => {
+      await withoutFixtureRuns();
+      // Previous: two dates of 199.5 m, each rounded up to 200 (the raw sum 399 would round to 399), and 200 s each.
+      await activity('2026-09-20T08:00:00.000Z', { distanceM: 199.5, durationS: 200 });
+      await activity('2026-09-21T08:00:00.000Z', { distanceM: 199.5, durationS: 200 });
+      // Current: 449.4 m → 449 and 351 s.
+      await activity('2026-10-20T08:00:00.000Z', { distanceM: 449.4, durationS: 351 });
+      const compared = await compare(END);
+      // 49 / 400 = +12.25 % → +12.3; -49 / 400 = -12.25 % → -12.3 (half to even would give ±12.2; 50/399 would give 12.5).
+      expect(metricsOf(compared)).toEqual({
+        count: { change: { absolute: -1, percent: -50, percentUnavailableReason: null, status: 'available' }, current: 1, previous: 2 },
+        distance: { change: { absolute: 49, percent: 12.3, percentUnavailableReason: null, status: 'available' }, current: 449, previous: 400 },
+        duration: { change: { absolute: -49, percent: -12.3, percentUnavailableReason: null, status: 'available' }, current: 351, previous: 400 },
+      });
+      expect(previousOf(compared)).toMatchObject({ distance: { daysWithValue: 2, totalM: 400, withValue: 2 } });
+    });
+
+    it('keeps empty periods, a zero baseline, a recorded zero and partial coverage apart', async () => {
+      await withoutFixtureRuns();
+      // Walks: a recorded zero distance before, 1 km now: the absolute change stands, the percentage has no baseline.
+      await activity('2026-09-20T08:00:00.000Z', { distanceM: 0, durationS: 600, type: 'walk' });
+      await activity('2026-10-20T08:00:00.000Z', { distanceM: 1_000, durationS: 600, type: 'walk' });
+      // Runs: one of the previous entries has no distance.
+      await activity('2026-09-20T09:00:00.000Z', { distanceM: null, durationS: 900, type: 'run' });
+      await activity('2026-09-21T09:00:00.000Z', { distanceM: 3_000, durationS: 900, type: 'run' });
+      await activity('2026-10-20T09:00:00.000Z', { distanceM: 3_000, durationS: 900, type: 'run' });
+      // Hikes: logged only in the current period.
+      await activity('2026-10-20T10:00:00.000Z', { distanceM: 8_000, durationS: 7_200, type: 'hike' });
+
+      const swims = metricsOf(await compare(END, { type: 'swim' }));
+      expect(swims.count).toEqual({ change: { absolute: 0, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' }, current: 0, previous: 0 });
+      expect(swims.distance).toEqual({ change: { reasons: ['current_period_no_entries', 'previous_period_no_entries'], status: 'unavailable' }, current: null, previous: null });
+
+      const walks = metricsOf(await compare(END, { type: 'walk' }));
+      expect(walks.distance).toEqual({ change: { absolute: 1_000, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' }, current: 1_000, previous: 0 });
+      expect(walks.duration.change).toEqual({ absolute: 0, percent: 0, percentUnavailableReason: null, status: 'available' });
+
+      const runEntries = await compare(END, { type: 'run' });
+      expect(metricsOf(runEntries).distance).toEqual({ change: { reasons: ['previous_values_missing'], status: 'unavailable' }, current: 3_000, previous: 3_000 });
+      expect(metricsOf(runEntries).count.change).toEqual({ absolute: -1, percent: -50, percentUnavailableReason: null, status: 'available' });
+      expect(previousOf(runEntries)).toMatchObject({ count: 2, distance: { totalM: 3_000, withValue: 1 } });
+
+      const hikes = metricsOf(await compare(END, { type: 'hike' }));
+      expect(hikes.count.change).toEqual({ absolute: 1, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' });
+      expect(hikes.duration.change).toEqual({ reasons: ['previous_period_no_entries'], status: 'unavailable' });
+    });
+
+    it('takes run values from current summaries only: pending and stale runs block durations and distances, never counts', async () => {
+      await withoutFixtureRuns();
+      await run('2026-09-20T06:00:00.000Z', { distanceM: 5_000, observedS: 1_800, summary: 2 }); // previous, current
+      await run('2026-09-21T06:00:00.000Z', { distanceM: 6_000, summary: 1 }); // previous, stale
+      await run('2026-10-20T06:00:00.000Z', { distanceM: 5_500, observedS: 1_900, summary: 2 }); // range, current
+      await run('2026-10-21T06:00:00.000Z', { summary: null }); // range, pending
+      const compared = await compare(END, { source: 'recorded_run' });
+      const metrics = metricsOf(compared);
+      expect(metrics.count).toEqual({ change: { absolute: 0, percent: 0, percentUnavailableReason: null, status: 'available' }, current: 2, previous: 2 });
+      expect(metrics.duration).toEqual({ change: { reasons: ['current_summaries_pending', 'previous_summaries_stale'], status: 'unavailable' }, current: 1_900, previous: 1_800 });
+      expect(previousOf(compared)).toMatchObject({ summaries: { current: 1, pending: 0, stale: 1 } });
+      expect(Object.keys(compared.comparison!.metrics).toSorted()).toEqual(['count', 'distance', 'observedDuration']);
+    });
+
+    it('keeps the ordinary figures of a range that includes today and suppresses every change', async () => {
+      await withoutFixtureRuns();
+      await activity('2026-09-20T08:00:00.000Z');
+      await activity('2026-11-12T08:00:00.000Z');
+      const compared = await compare('2026-11-12');
+      expect(compared.range.includesToday).toBe(true);
+      expect(compared.days).toEqual((await manual('2026-11-12')).days);
+      expect(compared.comparison).toMatchObject({ current: { inProgress: true }, periodReasons: ['current_period_in_progress'] });
+      expect(metricsOf(compared).count).toEqual({ change: { reasons: ['current_period_in_progress'], status: 'unavailable' }, current: 1, previous: 1 });
+    });
+
+    it('compares full periods only, at the 2000-01-01 boundary', async () => {
+      await withoutFixtureRuns();
+      for (const startedAt of ['2000-01-01T00:00:00.000Z', '2000-01-28T12:00:00.000Z', '2000-01-29T12:00:00.000Z']) await activity(startedAt);
+      // 2000-02-25: the earliest end date with two full periods (2000-01-01..01-28 and 01-29..02-25).
+      const full = await compare('2000-02-25', { timeZone: 'UTC' });
+      expect(full.comparison!.previous.period).toMatchObject({ days: 28, shortenedByLowerBound: false, startDate: '2000-01-01', startsAt: '2000-01-01T00:00:00.000Z' });
+      expect(metricsOf(full).count).toEqual({ change: { absolute: -1, percent: -50, percentUnavailableReason: null, status: 'available' }, current: 1, previous: 2 });
+      // One date earlier, the previous period has 27 dates: its figures are given, its changes are not.
+      const shortened = await compare('2000-02-24', { timeZone: 'UTC' });
+      expect(shortened.comparison!.previous.period).toMatchObject({ days: 27, shortenedByLowerBound: true });
+      expect(previousOf(shortened).count).toBe(1);
+      expect(metricsOf(shortened).count).toEqual({ change: { reasons: ['previous_period_shortened'], status: 'unavailable' }, current: 2, previous: 1 });
+      // A full range whose previous dates are all before 2000-01-01, and a range cut short itself.
+      const outOfRange = await compare('2000-01-28', { timeZone: 'UTC' });
+      expect(outOfRange.comparison!.previous).toEqual({ period: null, requestedEndDate: '1999-12-31', requestedStartDate: '1999-12-04', summary: null });
+      expect(metricsOf(outOfRange).count).toEqual({ change: { reasons: ['previous_period_out_of_range'], status: 'unavailable' }, current: 2, previous: null });
+      const early = await compare('2000-01-10', { timeZone: 'UTC' });
+      expect(early.comparison!.periodReasons).toEqual(['current_period_shortened', 'previous_period_out_of_range']);
+      expect(early.summary.count).toBe(1);
+    });
+
+    it('locates both periods in the zone across a daylight saving change and at their shared boundary', async () => {
+      await withoutFixtureRuns();
+      // E = 2026-04-30 in Warsaw: previous 2026-03-06..04-02 (with the 23-hour 2026-03-29), range 04-03..04-30.
+      const instants = [
+        '2026-03-05T22:59:59.999999Z', // 5 Mar 23:59:59 CET: before the previous period
+        '2026-03-05T23:00:00.000000Z', // 6 Mar 00:00 CET: its first instant
+        '2026-03-28T23:00:00.000000Z', // 29 Mar 00:00 CET
+        '2026-03-29T21:59:59.999999Z', // 29 Mar 23:59:59 CEST
+        '2026-04-02T21:59:59.999999Z', // 2 Apr 23:59:59 CEST: the previous period's last instant
+        '2026-04-02T22:00:00.000000Z', // 3 Apr 00:00 CEST: the range's first instant
+      ];
+      for (const startedAt of instants) await activity(startedAt, { distanceM: 1_000, durationS: 600 });
+      const compared = await compare('2026-04-30');
+      expect(compared.comparison!.previous.period).toMatchObject({ endsAt: '2026-04-02T22:00:00.000Z', startsAt: '2026-03-05T23:00:00.000Z' });
+      expect(compared.range.startsAt).toBe('2026-04-02T22:00:00.000Z');
+      expect(previousOf(compared).count).toBe(4);
+      expect(compared.summary.count).toBe(1);
+      // The same previous figures as an ordinary read ending on E-28, which shows the 23-hour date with both items.
+      const previous = await manual('2026-04-02');
+      expect(previousOf(compared)).toEqual(previous.summary);
+      const short = dayOf(previous, '2026-03-29');
+      expect([short.count, Date.parse(short.endsAt) - Date.parse(short.startsAt)]).toEqual([2, 23 * 3_600_000]);
+      // PostgreSQL's own zone rules agree on the previous period's count.
+      const grouped = await ownerPool.query<{ count: number }>(
+        `SELECT count(*)::integer AS count FROM activities
+          WHERE org_id = $1 AND user_id = $2 AND (started_at AT TIME ZONE 'Europe/Warsaw')::date BETWEEN '2026-03-06' AND '2026-04-02'`,
+        [ids.orgA, ids.userOrgA],
+      );
+      expect(grouped.rows[0]!.count).toBe(4);
+    });
+
+    it('keeps a date the zone skipped in either period (Pacific/Apia, 2011-12-30)', async () => {
+      await withoutFixtureRuns();
+      await activity('2011-12-30T09:59:59.999999Z'); // 29 Dec 23:59:59.999999, the last instant before the skip
+      await activity('2011-12-30T10:00:00.000000Z'); // 31 Dec 00:00, the first instant after it
+      // E = 2012-01-26: the range starts on the skipped date, so the previous period ends where 2011-12-31 starts.
+      const startsSkipped = await compare('2012-01-26', { timeZone: 'Pacific/Apia' });
+      expect(startsSkipped.days[0]).toMatchObject({ count: 0, endsAt: '2011-12-30T10:00:00.000Z', localDate: '2011-12-30', startsAt: '2011-12-30T10:00:00.000Z' });
+      expect(startsSkipped.comparison!.previous.period).toMatchObject({ endDate: '2011-12-29', endsAt: '2011-12-30T10:00:00.000Z' });
+      expect([previousOf(startsSkipped).count, startsSkipped.summary.count]).toEqual([1, 1]);
+      expect(counts(startsSkipped)).toEqual({ '2011-12-31': 1 });
+      // E = 2012-01-28: the skipped date lies inside the previous period; both items belong to it, none is lost.
+      const insidePrevious = await compare('2012-01-28', { timeZone: 'Pacific/Apia' });
+      expect(insidePrevious.comparison!.previous.period).toMatchObject({ days: 28, endDate: '2011-12-31', startDate: '2011-12-04' });
+      expect([previousOf(insidePrevious).count, insidePrevious.summary.count]).toEqual([2, 0]);
+      expect(previousOf(insidePrevious).daysWithEntries).toBe(2);
+    });
+
+    it('reflects deletions in either period on the next read', async () => {
+      await withoutFixtureRuns();
+      const before = await activity('2026-09-20T08:00:00.000Z', { durationS: 600 });
+      await activity('2026-10-20T08:00:00.000Z', { durationS: 600 });
+      const runBefore = await run('2026-09-20T09:00:00.000Z', { summary: 2 });
+      expect(metricsOf(await compare(END)).count).toMatchObject({ current: 1, previous: 1 });
+      expect(metricsOf(await compare(END, { source: 'recorded_run' })).count.previous).toBe(1);
+      await remove(`/api/orgs/${ids.orgA}/activities/${before}`).expect(204);
+      await remove(`/api/orgs/${ids.orgA}/runs/${runBefore}`).expect(204);
+      const after = await compare(END);
+      expect(metricsOf(after).count).toEqual({ change: { absolute: 1, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' }, current: 1, previous: 0 });
+      expect(metricsOf(after).duration.change).toEqual({ reasons: ['previous_period_no_entries'], status: 'unavailable' });
+      expect(metricsOf(await compare(END, { source: 'recorded_run' })).count.previous).toBe(0);
+    });
+
+    it('reads both periods in one snapshot: writes committed after the transaction began reach neither period', async () => {
+      await withoutFixtureRuns();
+      const moving = await activity('2026-09-20T08:00:00.000Z', { durationS: 600 }); // previous
+      const deleted = await activity('2026-10-20T08:00:00.000Z', { durationS: 900 }); // range
+      const hooked = createApp({
+        clock,
+        config,
+        logger: silent,
+        pool: runtimePool,
+        sessionManager: sessions,
+        testOnlyActivityTrendsHooks: {
+          beforeAggregateRead: async () => {
+            // Committed after the snapshot: an item moves from the previous period into the range, an item of the range is
+            // deleted, and a new item enters the previous period.
+            await ownerPool.query('UPDATE activities SET started_at = $2 WHERE id = $1', [moving, '2026-10-21T08:00:00.000Z']);
+            await ownerPool.query('DELETE FROM activities WHERE id = $1', [deleted]);
+            await activity('2026-09-25T08:00:00.000Z', { durationS: 1_200 });
+          },
+        },
+      });
+      const during = await read({ compare: 'previous_period', endDate: END, source: 'manual', timeZone: WARSAW, type: 'ride' }, owner, { target: hooked });
+      // Both periods are the state before the writes.
+      expect([previousOf(during).count, metricsOf(during).duration.previous, during.summary.count, metricsOf(during).duration.current]).toEqual([1, 600, 1, 900]);
+      const after = await compare(END);
+      expect([previousOf(after).count, metricsOf(after).duration.previous, after.summary.count, metricsOf(after).duration.current]).toEqual([1, 1_200, 1, 600]);
+    });
+
+    it('never mixes snapshots under concurrent writes: the two periods always add up to the same totals', async () => {
+      await withoutFixtureRuns();
+      const PREVIOUS = '2026-09-20T08:00:00.000Z';
+      const CURRENT = '2026-10-20T08:00:00.000Z';
+      for (const [startedAt, durationS] of [
+        ['2026-09-18T08:00:00.000Z', 100],
+        ['2026-09-30T08:00:00.000Z', 200],
+        ['2026-10-16T08:00:00.000Z', 300],
+        ['2026-11-01T08:00:00.000Z', 400],
+      ] as const) {
+        await activity(startedAt, { durationS });
+      }
+      const mover = await activity(PREVIOUS, { durationS: 1_000 });
+      // A writer moves one item between the periods as fast as it can, each move one committed UPDATE; readers compare
+      // concurrently. Two reads of the periods in different snapshots would sometimes count the item twice or not at all.
+      let stop = false;
+      let moves = 0;
+      const writer = (async () => {
+        const client = await ownerPool.connect();
+        try {
+          while (!stop) {
+            await client.query(
+              'UPDATE activities SET started_at = CASE WHEN started_at = $2::timestamptz THEN $3::timestamptz ELSE $2::timestamptz END WHERE id = $1',
+              [mover, PREVIOUS, CURRENT],
+            );
+            moves += 1;
+          }
+        } finally {
+          client.release();
+        }
+      })();
+      const splits = new Set<string>();
+      let answers = 0;
+      try {
+        // At least 100 answers, more until both sides were seen (at most 400).
+        for (let round = 0; round < 80 && (splits.size < 2 || round < 20); round += 1) {
+          for (const trends of await Promise.all(Array.from({ length: 5 }, () => compare(END)))) {
+            const metrics = metricsOf(trends);
+            expect(metrics.count.previous! + metrics.count.current).toBe(5);
+            expect(metrics.duration.previous! + metrics.duration.current!).toBe(2_000);
+            // The change row agrees with the totals of the same answer.
+            expect(metrics.count.change).toMatchObject({ absolute: metrics.count.current - metrics.count.previous! });
+            splits.add(`${metrics.count.previous}/${metrics.count.current}`);
+            answers += 1;
+          }
+        }
+      } finally {
+        stop = true;
+        await writer;
+      }
+      // The race was real: the writer moved the item many times while the readers ran, and they saw it on both sides.
+      expect(splits).toEqual(new Set(['3/2', '2/3']));
+      expect(answers).toBeGreaterThanOrEqual(100);
+      expect(moves).toBeGreaterThanOrEqual(20);
+      console.info(`activity trends comparison race: ${answers} answers, ${moves} committed moves, splits ${[...splits].join(', ')}`);
+    }, 60_000);
+
+    it('stays owner-only and never counts a run shared with the caller, in either period', async () => {
+      // The fixture's three finished runs of the owner (2026-09-20, shared with the grantee for history) lie in the
+      // previous period of 2026-10-20; one more owner run lies in the range.
+      await run('2026-10-01T08:00:00.000Z', { summary: 2 });
+      const own = await compare('2026-10-20', { source: 'recorded_run', timeZone: 'UTC' });
+      expect(metricsOf(own).count).toMatchObject({ current: 1, previous: 3 });
+      for (const auth of [grantee, coach]) {
+        const other = await compare('2026-10-20', { auth, source: 'recorded_run', timeZone: 'UTC' });
+        expect(metricsOf(other).count).toMatchObject({ current: 0, previous: 0 });
+      }
+      expect(metricsOf(await compare('2026-10-20', { auth: outsider, orgId: ids.orgB, source: 'recorded_run', timeZone: 'UTC' })).count.previous).toBe(2);
+      await activity('2026-09-20T08:00:00.000Z', { userId: ids.userDual });
+      expect(metricsOf(await compare(END)).count.previous).toBe(0);
+      expect(metricsOf(await compare(END, { auth: grantee })).count.previous).toBe(1);
+      expect(errorCode(await get(outsider, { compare: 'previous_period', endDate: END, source: 'manual', timeZone: WARSAW, type: 'ride' }).expect(403))).toBe('ORG_ACCESS_DENIED');
+    });
+
+    it('refuses an unknown or repeated comparison mode', async () => {
+      const valid = { endDate: END, source: 'manual', timeZone: WARSAW, type: 'ride' };
+      for (const compareMode of ['', 'previous', 'previous_year', ['previous_period', 'previous_period']]) {
+        const response = await get(owner, { ...valid, compare: compareMode }).expect(400);
+        expect(errorCode(response), JSON.stringify(compareMode)).toBe('INVALID_REQUEST');
+        expect(response.headers['cache-control']).toBe('no-store');
+      }
     });
   });
 

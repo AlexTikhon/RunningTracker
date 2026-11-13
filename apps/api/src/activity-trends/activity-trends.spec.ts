@@ -1,16 +1,22 @@
-import { ACTIVITY_TRENDS_VERSION, activityTrendsSchema, type ActivityTrendsQuery } from '@running-tracker/contracts';
+import { ACTIVITY_TRENDS_COMPARISON_VERSION, ACTIVITY_TRENDS_VERSION, activityTrendsSchema, type ActivityTrendsQuery } from '@running-tracker/contracts';
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
 
 import type { Clock } from '../clock.js';
 import { ApiError } from '../http/errors.js';
 import {
+  activityTrendsActivitiesComparisonSql,
   activityTrendsActivitiesSql,
+  activityTrendsComparisonWindowOf,
   activityTrendsIntervalOf,
+  activityTrendsRecordedRunsComparisonSql,
   activityTrendsRecordedRunsSql,
   ActivityTrendsService,
   buildActivityTrends,
+  buildActivityTrendsComparison,
+  type ActivityTrendsActivityComparisonRow,
   type ActivityTrendsActivityRow,
+  type ActivityTrendsRunComparisonRow,
   type ActivityTrendsRunRow,
 } from './activity-trends-service.js';
 
@@ -54,6 +60,19 @@ const EMPTY_RUN_RANGE: ActivityTrendsRunRow = {
   stale: 0,
 };
 
+const NO_PERCENT = { count_percent_tenths: null, distance_percent_tenths: null, duration_percent_tenths: null };
+// Both periods without an item: the statement still returns one row per period and the change row.
+const EMPTY_ACTIVITY_COMPARISON = [
+  { ...EMPTY_ACTIVITY_RANGE, ...NO_PERCENT, row_kind: 'current' },
+  { ...EMPTY_ACTIVITY_RANGE, ...NO_PERCENT, row_kind: 'previous' },
+  { ...EMPTY_ACTIVITY_RANGE, ...NO_PERCENT, days_with_distance: null, days_with_entries: null, row_kind: 'change', with_distance: null },
+];
+const EMPTY_RUN_COMPARISON = [
+  { ...EMPTY_RUN_RANGE, ...NO_PERCENT, row_kind: 'current' },
+  { ...EMPTY_RUN_RANGE, ...NO_PERCENT, row_kind: 'previous' },
+  { ...EMPTY_RUN_RANGE, ...NO_PERCENT, current: null, days_with_entries: null, days_with_value: null, pending: null, row_kind: 'change', stale: null },
+];
+
 /** A pool whose one client answers the membership check, records every statement and returns the given rows. */
 function recordingPool(rows: { activities?: ActivityTrendsActivityRow[]; runs?: ActivityTrendsRunRow[] } = {}) {
   const statements: Array<{ parameters: unknown[] | undefined; text: string }> = [];
@@ -63,6 +82,8 @@ function recordingPool(rows: { activities?: ActivityTrendsActivityRow[]; runs?: 
       if (text.includes('FROM memberships')) return Promise.resolve({ rows: [{ allowed: true }] });
       if (text === activityTrendsActivitiesSql) return Promise.resolve({ rows: rows.activities ?? [EMPTY_ACTIVITY_RANGE] });
       if (text === activityTrendsRecordedRunsSql) return Promise.resolve({ rows: rows.runs ?? [EMPTY_RUN_RANGE] });
+      if (text === activityTrendsActivitiesComparisonSql) return Promise.resolve({ rows: EMPTY_ACTIVITY_COMPARISON });
+      if (text === activityTrendsRecordedRunsComparisonSql) return Promise.resolve({ rows: EMPTY_RUN_COMPARISON });
       if (text === 'COMMIT') return Promise.resolve({ command: 'COMMIT', rows: [] });
       return Promise.resolve({ rows: [] });
     },
@@ -327,5 +348,262 @@ describe('activity trends service', () => {
     expect((error as ApiError).code).toBe('INVALID_REQUEST');
     expect((error as ApiError).message).toContain('2026-11-11 in UTC');
     expect(statements).toHaveLength(0);
+  });
+});
+
+describe('activity trends comparison window (ADR-0090)', () => {
+  it('reads the 28 dates before the range and the range, at most 56 dates, tiling the window in the zone', () => {
+    const window = activityTrendsComparisonWindowOf('2026-11-30', WARSAW);
+    expect(window.starts).toHaveLength(56);
+    expect(window.previousDays).toBe(28);
+    expect(window.previous).toEqual({
+      period: { days: 28, endDate: '2026-11-02', endsAt: '2026-11-02T23:00:00.000Z', shortenedByLowerBound: false, startDate: '2026-10-06', startsAt: '2026-10-05T22:00:00.000Z' },
+      requestedEndDate: '2026-11-02',
+      requestedStartDate: '2026-10-06',
+    });
+    // The previous period ends where the range starts; the window spans both.
+    expect(window.previous.period!.endsAt).toBe(window.current.startsAt);
+    expect(window.starts[28]).toBe(window.current.startsAt);
+    expect(window.startsAt).toBe(window.starts[0]);
+    expect(window.endsAt).toBe(window.current.endsAt);
+    // The 25-hour date 2026-10-25 lies in the previous period: its bound and the next are 25 hours apart.
+    const index = 25 - 6; // 2026-10-06 is the first bound
+    expect(Date.parse(window.starts[index + 1]!) - Date.parse(window.starts[index]!)).toBe(25 * 3_600_000);
+  });
+
+  it('keeps a date the zone skipped in the previous period as a repeated bound (Pacific/Apia, 2011-12-30)', () => {
+    const window = activityTrendsComparisonWindowOf('2012-01-28', 'Pacific/Apia');
+    expect(window.previous.period).toMatchObject({ endDate: '2011-12-31', startDate: '2011-12-04' });
+    const skipped = window.starts.indexOf('2011-12-30T10:00:00.000Z');
+    expect(skipped).toBe(26); // 2011-12-30 is the 27th date of the previous period
+    expect(window.starts[skipped + 1]).toBe('2011-12-30T10:00:00.000Z'); // 2011-12-31 starts at the same instant
+    expect(window.starts[28]).toBe(window.current.startsAt);
+  });
+
+  it('reads fewer dates when 2000-01-01 cuts the previous period, and none of it when it is out of range', () => {
+    const shortened = activityTrendsComparisonWindowOf('2000-02-10', 'UTC');
+    expect(shortened.previousDays).toBe(13);
+    expect(shortened.starts).toHaveLength(41);
+    expect(shortened.startsAt).toBe('2000-01-01T00:00:00.000Z');
+    const missing = activityTrendsComparisonWindowOf('2000-01-10', 'UTC');
+    expect(missing.previousDays).toBe(0);
+    expect(missing.previous.period).toBeNull();
+    expect(missing.starts).toHaveLength(10);
+    expect(missing.startsAt).toBe(missing.current.startsAt);
+  });
+});
+
+describe('activity trends comparison statements', () => {
+  const statements = [activityTrendsActivitiesComparisonSql, activityTrendsRecordedRunsComparisonSql];
+
+  it('name the organization and the owner, bound the window and split it at the previous period’s last bucket', () => {
+    for (const sql of statements) {
+      expect(sql).toMatch(/\.org_id = \$1/u);
+      expect(sql).toMatch(/\.user_id = \$2/u);
+      expect(sql).toMatch(/started_at >= \$4::timestamptz/u);
+      expect(sql).toMatch(/started_at < \$5::timestamptz/u);
+      expect(sql).toMatch(/width_bucket\(\w+\.started_at, \$3::timestamptz\[\]\)/u);
+      expect(sql).not.toMatch(/AT TIME ZONE|time_zone|interval '1 day'/u);
+      expect(sql).toContain("'change'");
+      expect(sql).toContain("CASE WHEN is_current THEN 'current' ELSE 'previous' END");
+    }
+    expect(activityTrendsActivitiesComparisonSql).toContain('bucket > $8::integer AS is_current');
+    expect(activityTrendsActivitiesComparisonSql).toContain('activity.source = $6::text');
+    expect(activityTrendsActivitiesComparisonSql).toContain('activity.type = $7::text');
+    expect(activityTrendsRecordedRunsComparisonSql).toContain('bucket > $6::integer AS is_current');
+    expect(activityTrendsRecordedRunsComparisonSql).toContain("run.status = 'finished'");
+    expect(activityTrendsRecordedRunsComparisonSql).toMatch(/LEFT JOIN LATERAL \([\s\S]*OFFSET 0\) AS summary ON true/u);
+    expect(activityTrendsRecordedRunsComparisonSql).not.toMatch(/run_shares|run_points|display_geom/u);
+  });
+
+  it('round each date once, halves up, add the rounded dates per period, and compute the percentage by integer division', () => {
+    for (const sql of statements) {
+      expect(sql).not.toMatch(/\bround\(/u);
+      expect(sql).toContain('(floor(distance_sum) + CASE WHEN distance_sum - floor(distance_sum) >= 0.5 THEN 1 ELSE 0 END)::bigint');
+      expect(sql).toContain('sum(rounded.distance_m) AS distance_m');
+      // ::numeric appears only in the exact integer division of the percentage.
+      expect(sql.match(/::numeric/gu)).toHaveLength(6);
+      expect(sql).toContain('sign(cur.count - prev.count) * div(abs(cur.count - prev.count)::numeric * 2000 + prev.count, prev.count::numeric * 2)');
+      expect(sql).toContain('CASE WHEN prev.count > 0 THEN');
+    }
+  });
+});
+
+describe('building a comparison', () => {
+  const window = activityTrendsComparisonWindowOf('2026-11-11', WARSAW);
+  const base = { computedAt: '2026-11-12T10:00:00.000Z', timeZone: WARSAW, today: '2026-11-12', window };
+  const q = query({ compare: 'previous_period', endDate: '2026-11-11' });
+  type Row = ActivityTrendsActivityComparisonRow;
+  const none = { count_percent_tenths: null, distance_percent_tenths: null, duration_percent_tenths: null };
+  const dayRow = (day_number: number, count: number, duration: string, distance: string | null, withDistance: number): Row => ({
+    ...none,
+    count,
+    day_number,
+    days_with_distance: null,
+    days_with_entries: null,
+    distance_m: distance,
+    duration_s: duration,
+    row_kind: 'day',
+    with_distance: withDistance,
+  });
+  const periodRow = (kind: 'current' | 'previous', count: number, duration: string | null, distance: string | null, withDistance: number, days: number): Row => ({
+    ...none,
+    count,
+    day_number: null,
+    days_with_distance: distance === null ? 0 : days,
+    days_with_entries: days,
+    distance_m: distance,
+    duration_s: duration,
+    row_kind: kind,
+    with_distance: withDistance,
+  });
+  const changeRow = (values: Partial<Row>): Row => ({
+    ...none,
+    count: null,
+    day_number: null,
+    days_with_distance: null,
+    days_with_entries: null,
+    distance_m: null,
+    duration_s: null,
+    row_kind: 'change',
+    with_distance: null,
+    ...values,
+  });
+
+  const comparable = (change: Partial<Row>): Row[] => [
+    dayRow(3, 3, '5400', '30000', 3),
+    periodRow('current', 3, '5400', '30000', 3, 1),
+    periodRow('previous', 2, '3600', '24000', 2, 1),
+    changeRow(change),
+  ];
+  const rightChange = { count: 1, count_percent_tenths: '500', distance_m: '6000', distance_percent_tenths: '250', duration_percent_tenths: '500', duration_s: '1800' };
+
+  it('takes changes and percentages from the statement for comparable periods', () => {
+    const trends = buildActivityTrendsComparison({ ...base, query: q, rows: { activities: comparable(rightChange) } });
+    if (trends.source !== 'manual' || trends.comparison === undefined) throw new Error('expected a manual comparison');
+    expect(trends.applied.compare).toBe('previous_period');
+    expect(trends.summary.count).toBe(3);
+    expect(trends.comparison.previous.summary).toMatchObject({ count: 2, enteredDuration: { totalS: 3_600, withValue: 2 } });
+    expect(trends.comparison.metrics.enteredDuration).toEqual({
+      change: { absolute: 1_800, percent: 50, percentUnavailableReason: null, status: 'available' },
+      current: 5_400,
+      previous: 3_600,
+    });
+    expect(trends.comparison.metrics.distance.change).toMatchObject({ absolute: 6_000, percent: 25 });
+    expect(trends.comparison.policyVersion).toBe(ACTIVITY_TRENDS_COMPARISON_VERSION);
+  });
+
+  it('refuses a change or a percentage that disagrees with the contract instead of correcting it', () => {
+    expect(() => buildActivityTrendsComparison({ ...base, query: q, rows: { activities: comparable({ ...rightChange, duration_s: '1801' }) } })).toThrow(/comparison/u);
+    expect(() => buildActivityTrendsComparison({ ...base, query: q, rows: { activities: comparable({ ...rightChange, count_percent_tenths: '501' }) } })).toThrow(/comparison/u);
+    expect(() => buildActivityTrendsComparison({ ...base, query: q, rows: { activities: comparable({ ...rightChange, distance_percent_tenths: null }) } })).toThrow(/no distance percentage/u);
+    expect(() => buildActivityTrendsComparison({ ...base, query: q, rows: { activities: comparable({ ...rightChange, count: null }) } })).toThrow(/no count change/u);
+    expect(() => buildActivityTrendsComparison({ ...base, query: q, rows: { activities: comparable({ ...rightChange, duration_s: '1.5' }) } })).toThrow(/safe integer/u);
+  });
+
+  it('refuses a missing or repeated period or change row', () => {
+    const rows = comparable(rightChange);
+    expect(() => buildActivityTrendsComparison({ ...base, query: q, rows: { activities: rows.filter((row) => row.row_kind !== 'previous') } })).toThrow(/0 previous rows/u);
+    expect(() => buildActivityTrendsComparison({ ...base, query: q, rows: { activities: [...rows, rows.at(-1)!] } })).toThrow(/2 change rows/u);
+  });
+
+  it('suppresses every change while the range includes today, keeping both periods’ values', () => {
+    const todayWindow = activityTrendsComparisonWindowOf('2026-11-12', WARSAW);
+    const trends = buildActivityTrendsComparison({ ...base, query: { ...q, endDate: '2026-11-12' }, rows: { activities: comparable(rightChange) }, window: todayWindow });
+    if (trends.source !== 'manual') throw new Error('expected manual');
+    expect(trends.comparison?.periodReasons).toEqual(['current_period_in_progress']);
+    expect(trends.comparison?.metrics.count).toEqual({ change: { reasons: ['current_period_in_progress'], status: 'unavailable' }, current: 3, previous: 2 });
+  });
+
+  it('keeps an absolute change for a zero baseline, and names partial coverage', () => {
+    const trends = buildActivityTrendsComparison({
+      ...base,
+      query: q,
+      rows: {
+        activities: [
+          dayRow(3, 2, '1200', '2000', 1),
+          periodRow('current', 2, '1200', '2000', 1, 1),
+          periodRow('previous', 1, '0', '0', 1, 1),
+          changeRow({ count: 1, count_percent_tenths: '1000', distance_m: '2000', duration_percent_tenths: null, duration_s: '1200' }),
+        ],
+      },
+    });
+    if (trends.source !== 'manual') throw new Error('expected manual');
+    expect(trends.comparison?.metrics.enteredDuration.change).toEqual({ absolute: 1_200, percent: null, percentUnavailableReason: 'zero_baseline', status: 'available' });
+    expect(trends.comparison?.metrics.distance).toEqual({ change: { reasons: ['current_values_missing'], status: 'unavailable' }, current: 2_000, previous: 0 });
+  });
+
+  it('gives no previous figures when the previous period is out of range, and refuses items for it', () => {
+    const early = activityTrendsComparisonWindowOf('2000-01-10', 'UTC');
+    const rows: Row[] = [periodRow('current', 0, null, null, 0, 0), periodRow('previous', 0, null, null, 0, 0), changeRow({ count: 0 })];
+    const trends = buildActivityTrendsComparison({ ...base, query: { ...q, endDate: '2000-01-10', timeZone: 'UTC' }, rows: { activities: rows }, timeZone: 'UTC', window: early });
+    expect(trends.comparison?.previous).toEqual({ period: null, requestedEndDate: '1999-12-13', requestedStartDate: '1999-11-16', summary: null });
+    expect(trends.comparison?.metrics.count).toEqual({
+      change: { reasons: ['current_period_shortened', 'previous_period_out_of_range'], status: 'unavailable' },
+      current: 0,
+      previous: null,
+    });
+    const leaked = [periodRow('current', 0, null, null, 0, 0), periodRow('previous', 1, '60', null, 0, 1), changeRow({ count: -1 })];
+    expect(() =>
+      buildActivityTrendsComparison({ ...base, query: { ...q, endDate: '2000-01-10', timeZone: 'UTC' }, rows: { activities: leaked }, timeZone: 'UTC', window: early }),
+    ).toThrow(/previous period that does not exist/u);
+  });
+
+  it('names pending and stale run summaries per period, and compares run counts whatever their summaries', () => {
+    type RunRow = ActivityTrendsRunComparisonRow;
+    const run = (values: Partial<RunRow> & Pick<RunRow, 'row_kind'>): RunRow => ({
+      ...none,
+      count: 0,
+      current: 0,
+      day_number: null,
+      days_with_entries: null,
+      days_with_value: null,
+      distance_m: null,
+      observed_duration_s: null,
+      pending: 0,
+      stale: 0,
+      ...values,
+    });
+    const trends = buildActivityTrendsComparison({
+      ...base,
+      query: { ...q, source: 'recorded_run', type: 'run' },
+      rows: {
+        runs: [
+          run({ count: 2, current: 1, day_number: 4, distance_m: '5000', observed_duration_s: '1800', pending: 1, row_kind: 'day' }),
+          run({ count: 2, current: 1, days_with_entries: 1, days_with_value: 1, distance_m: '5000', observed_duration_s: '1800', pending: 1, row_kind: 'current' }),
+          run({ count: 1, current: 0, days_with_entries: 1, days_with_value: 0, row_kind: 'previous', stale: 1 }),
+          run({ count: 1, count_percent_tenths: '1000', current: null, pending: null, row_kind: 'change', stale: null }),
+        ],
+      },
+    });
+    if (trends.source !== 'recorded_run') throw new Error('expected recorded runs');
+    expect(trends.comparison?.metrics.count.change).toEqual({ absolute: 1, percent: 100, percentUnavailableReason: null, status: 'available' });
+    expect(trends.comparison?.metrics.observedDuration.change).toEqual({
+      reasons: ['current_summaries_pending', 'previous_summaries_stale'],
+      status: 'unavailable',
+    });
+    expect(trends.comparison?.previous.summary).toMatchObject({ count: 1, summaries: { current: 0, pending: 0, stale: 1 } });
+  });
+});
+
+describe('activity trends service with a comparison', () => {
+  it('reads one comparison statement over the window after the membership check, and no ordinary statement', async () => {
+    const { pool, statements } = recordingPool();
+    const service = new ActivityTrendsService({ clock: clockAt('2026-11-12T10:00:00.000Z'), pool });
+    const trends = await service.read({ userId: USER }, ORG, query({ compare: 'previous_period', endDate: '2026-11-11' }));
+    expect(trends.comparison?.previous.period).toMatchObject({ days: 28, endDate: '2026-10-14', startDate: '2026-09-17' });
+    const aggregate = statements.filter((statement) => statement.text.includes('activity-trends:'));
+    expect(aggregate.map((statement) => statement.text)).toEqual([activityTrendsActivitiesComparisonSql]);
+    const [org, user, starts, from, to, source, type, previousDays] = aggregate[0]!.parameters!;
+    expect([org, user, source, type, previousDays]).toEqual([ORG, USER, 'manual', 'ride', 28]);
+    expect(starts).toHaveLength(56);
+    expect((starts as string[])[0]).toBe(from);
+    expect(from).toBe('2026-09-16T22:00:00.000Z'); // 2026-09-17 00:00 CEST
+    expect(to).toBe('2026-11-11T23:00:00.000Z');
+    expect(statements.findIndex((statement) => statement.text.includes('FROM memberships'))).toBeLessThan(statements.indexOf(aggregate[0]!));
+
+    statements.length = 0;
+    await service.read({ userId: USER }, ORG, query({ compare: 'previous_period', source: 'recorded_run', type: 'run' }));
+    expect(statements.filter((statement) => statement.text.includes('activity-trends:')).map((statement) => statement.text)).toEqual([activityTrendsRecordedRunsComparisonSql]);
   });
 });
