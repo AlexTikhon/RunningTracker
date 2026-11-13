@@ -21,7 +21,7 @@ import { ianaTimeZoneSchema, localDateSchema, timestampSchema, uuidSchema } from
 // - A check-in and a movement day belong to the calendar date they were stored for (`local_date`), whatever zone they
 //   were saved in and whatever zone the overview is viewed in. Their stored zone is returned so the screen can say when
 //   it differs from the view zone; the record is never moved to another date.
-// - A manual activity and a GPS run belong to the date on which they STARTED in the requested zone: the half-open
+// - A manual activity, a GPX or TCX import and a GPS run belong to the date on which they STARTED in the requested zone: the half-open
 //   interval from that date's local midnight to the next date's local midnight, located from the zone's own rules (23
 //   or 25 hours around a daylight saving change, never assumed to be 24).
 // - A meal entry belongs to the calendar date it was logged for (`local_date`), like a check-in (ADR-0083).
@@ -33,8 +33,10 @@ import { ianaTimeZoneSchema, localDateSchema, timestampSchema, uuidSchema } from
  *   coverage); every other part is unchanged.
  * - `daily-overview-3`: ADR-0086 adds `importedActivities` (GPX imports, kept apart). `manualActivities` now counts rows
  *   with the manual source only; before ADR-0086 no other source existed, so its meaning is unchanged.
+ * - `daily-overview-4`: ADR-0091 adds `tcxImportedActivities` (TCX imports with their reported duration, kept apart from
+ *   manual entries, GPX imports and GPS runs). `importedActivities` stays GPX imports only; every other part is unchanged.
  */
-export const DAILY_OVERVIEW_VERSION = 'daily-overview-3';
+export const DAILY_OVERVIEW_VERSION = 'daily-overview-4';
 
 const itemCount = z.number().int().min(0).max(10_000);
 // At most 10,000 activities of at most 48 h each.
@@ -169,6 +171,38 @@ export const dailyOverviewImportedActivitiesSchema = z
     { message: 'types are listed once each, in the order of ACTIVITY_TYPES', path: ['byType'] },
   );
 
+export const dailyOverviewTcxImportedActivityTypeSchema = z.strictObject({
+  type: activityTypeSchema,
+  count: itemCount,
+  reportedDurationS: durationSeconds,
+});
+
+/**
+ * The person's TCX-imported activities that STARTED on the date in the requested zone (ADR-0091), kept apart from manual
+ * entries, GPX imports and GPS runs and never added to any of them. `reportedDurationS` is the sum of the imports'
+ * reported durations (each the sum of its laps' TotalTimeSeconds, rounded once at import): neither elapsed time nor moving
+ * time, and the full value also for an import that continued past midnight.
+ */
+export const dailyOverviewTcxImportedActivitiesSchema = z
+  .strictObject({
+    source: z.literal('tcx'),
+    byType: z.array(dailyOverviewTcxImportedActivityTypeSchema).max(ACTIVITY_TYPES.length),
+    count: itemCount,
+    reportedDurationS: durationSeconds,
+  })
+  .refine((activities) => activities.byType.reduce((sum, entry) => sum + entry.count, 0) === activities.count, {
+    message: 'the per-type counts add up to the count',
+    path: ['count'],
+  })
+  .refine((activities) => activities.byType.reduce((sum, entry) => sum + entry.reportedDurationS, 0) === activities.reportedDurationS, {
+    message: 'the per-type durations add up to the duration',
+    path: ['reportedDurationS'],
+  })
+  .refine(
+    (activities) => activities.byType.every((entry, index) => index === 0 || ACTIVITY_TYPES.indexOf(activities.byType[index - 1]!.type) < ACTIVITY_TYPES.indexOf(entry.type)),
+    { message: 'types are listed once each, in the order of ACTIVITY_TYPES', path: ['byType'] },
+  );
+
 /**
  * The person's own finished GPS runs that STARTED on the date in the requested zone. Runs another person shared with
  * them never count. A distance comes only from a summary computed for the run's current data revision:
@@ -252,6 +286,7 @@ export const dailyOverviewSchema = z.strictObject({
   meals: dailyOverviewMealsSchema,
   movement: dailyOverviewMovementSchema,
   provenance: dailyOverviewProvenanceSchema,
+  tcxImportedActivities: dailyOverviewTcxImportedActivitiesSchema,
 });
 
 // The upper bound ("not after today in `timeZone` by the server's clock") is checked by the service.
@@ -265,13 +300,14 @@ export const dailyOverviewQuerySchema = z.strictObject({ timeZone: ianaTimeZoneS
  * (also a title-only one) are records.
  */
 export function isEmptyDailyOverview(
-  overview: Pick<DailyOverview, 'checkIn' | 'gpsRuns' | 'importedActivities' | 'manualActivities' | 'meals' | 'movement'>,
+  overview: Pick<DailyOverview, 'checkIn' | 'gpsRuns' | 'importedActivities' | 'manualActivities' | 'meals' | 'movement' | 'tcxImportedActivities'>,
 ): boolean {
   return (
     !overview.checkIn.recorded &&
     !overview.movement.recorded &&
     overview.manualActivities.count === 0 &&
     overview.importedActivities.count === 0 &&
+    overview.tcxImportedActivities.count === 0 &&
     overview.gpsRuns.count === 0 &&
     overview.meals.count === 0
   );
@@ -283,6 +319,7 @@ export type DailyOverviewCheckIn = z.infer<typeof dailyOverviewCheckInSchema>;
 export type DailyOverviewMovement = z.infer<typeof dailyOverviewMovementSchema>;
 export type DailyOverviewManualActivities = z.infer<typeof dailyOverviewManualActivitiesSchema>;
 export type DailyOverviewImportedActivities = z.infer<typeof dailyOverviewImportedActivitiesSchema>;
+export type DailyOverviewTcxImportedActivities = z.infer<typeof dailyOverviewTcxImportedActivitiesSchema>;
 export type DailyOverviewGpsRuns = z.infer<typeof dailyOverviewGpsRunsSchema>;
 export type DailyOverviewMeals = z.infer<typeof dailyOverviewMealsSchema>;
 export type DailyOverviewMealMetric = z.infer<typeof dailyOverviewMealMetricSchema>;

@@ -25,8 +25,10 @@ import { weeklyInsightDataGapSchema, weeklyInsightFactSchema, weeklyInsightWeekS
  * - `weekly-review-2`: adds `movement` and the `movement.*` statements (ADR-0079). Nothing else changed meaning.
  * - `weekly-review-3`: adds `importedActivities` and the `imported.*` statement (ADR-0086). `manual.*`, the facts and
  *   the coverage count manual activities only, as before: no other source existed until then.
+ * - `weekly-review-4`: adds `tcxImportedActivities` and the `imported.tcx` statement (ADR-0091). `importedActivities`
+ *   and `imported.gpx` stay GPX imports only; `manual.*`, the facts and the coverage are unchanged.
  */
-export const WEEKLY_REVIEW_VERSION = 'weekly-review-3';
+export const WEEKLY_REVIEW_VERSION = 'weekly-review-4';
 
 export const WEEKLY_REVIEW_STATEMENTS_MAX = 40;
 export const WEEKLY_REVIEW_FACTS_MAX = 64;
@@ -43,7 +45,8 @@ export const WEEKLY_REVIEW_STATEMENT_MAX_LENGTH = 240;
  * - `sources.*`: limits of combining sources.
  * - `movement.*`: manual daily movement (steps, active energy), each metric against the 7 calendar days, recorded
  *   totals with their coverage, the manual source, and days saved in other zones. Never added to activity figures.
- * - `imported.*`: activities imported from GPX files (ADR-0086), described apart from manual activities and GPS runs.
+ * - `imported.*`: activities imported from GPX files (ADR-0086) and TCX files (ADR-0091), each format described apart from
+ *   the other, from manual activities and from GPS runs.
  */
 export const weeklyReviewStatementCodes = [
   'week.in_progress',
@@ -87,6 +90,7 @@ export const weeklyReviewStatementCodes = [
   'movement.manual_source',
   'movement.time_zones',
   'imported.gpx',
+  'imported.tcx',
 ] as const;
 export const weeklyReviewStatementCodeSchema = z.enum(weeklyReviewStatementCodes);
 
@@ -304,6 +308,42 @@ export const weeklyReviewImportedActivitiesSchema = z
     if (imported.byType.some((entry) => entry.count === 0)) issue('only types with an import are listed', ['byType']);
   });
 
+export const weeklyReviewTcxImportedTypeSchema = z.strictObject({
+  type: z.enum(ACTIVITY_TYPES),
+  count: itemCount,
+  reportedDurationS: importedSeconds,
+  distanceM: importedMetres,
+});
+
+/**
+ * Activities imported from TCX files that started in the week's range (ADR-0091), in the week's zone like manual
+ * activities. Review-only like GPX imports: not part of `facts`, `coverage` or `dataGaps`, which AI insights share, and
+ * never added to manual activities, GPX imports or GPS runs. `reportedDurationS` is the sum of the imports' reported
+ * durations (each the sum of its laps' TotalTimeSeconds, rounded once at import): neither elapsed time nor moving time.
+ * `distanceM` is the sum of the imports' lap distances. A TCX import is never compared with any other source.
+ */
+export const weeklyReviewTcxImportedActivitiesSchema = z
+  .strictObject({
+    source: z.literal('tcx'),
+    count: itemCount,
+    reportedDurationS: importedSeconds,
+    distanceM: importedMetres,
+    /** Types with at least one import, in the order of ACTIVITY_TYPES. */
+    byType: z.array(weeklyReviewTcxImportedTypeSchema).max(ACTIVITY_TYPES.length),
+  })
+  .superRefine((imported, context) => {
+    const issue = (message: string, path: string[]) => context.addIssue({ code: 'custom', message, path });
+    const sum = (field: 'count' | 'distanceM' | 'reportedDurationS') => imported.byType.reduce((total, entry) => total + entry[field], 0);
+    if (sum('count') !== imported.count) issue('the per-type counts add up to the count', ['count']);
+    if (sum('reportedDurationS') !== imported.reportedDurationS) issue('the per-type durations add up to the duration', ['reportedDurationS']);
+    if (sum('distanceM') !== imported.distanceM) issue('the per-type distances add up to the distance', ['distanceM']);
+    const order = imported.byType.map((entry) => ACTIVITY_TYPES.indexOf(entry.type));
+    if (order.some((position, index) => index > 0 && order[index - 1]! >= position)) {
+      issue('types are listed once each, in the order of ACTIVITY_TYPES', ['byType']);
+    }
+    if (imported.byType.some((entry) => entry.count === 0)) issue('only types with an import are listed', ['byType']);
+  });
+
 export const weeklyReviewSchema = z
   .strictObject({
     coverage: weeklyReviewCoverageSchema,
@@ -318,6 +358,8 @@ export const weeklyReviewSchema = z
     provenance: weeklyReviewProvenanceSchema,
     /** Code-written descriptive sentences, in a stable order. */
     statements: z.array(weeklyReviewStatementSchema).max(WEEKLY_REVIEW_STATEMENTS_MAX),
+    /** TCX imports, review-only: not part of `facts`, `coverage` or `dataGaps`, which AI insights share. */
+    tcxImportedActivities: weeklyReviewTcxImportedActivitiesSchema,
     week: weeklyReviewWeekSchema,
   })
   .refine((review) => review.movement.days.every((day, index) => day.localDate === addLocalDays(review.week.start, index)), {
@@ -342,5 +384,6 @@ export type WeeklyReviewProvenance = z.infer<typeof weeklyReviewProvenanceSchema
 export type WeeklyReviewMovementDay = z.infer<typeof weeklyReviewMovementDaySchema>;
 export type WeeklyReviewMovement = z.infer<typeof weeklyReviewMovementSchema>;
 export type WeeklyReviewImportedActivities = z.infer<typeof weeklyReviewImportedActivitiesSchema>;
+export type WeeklyReviewTcxImportedActivities = z.infer<typeof weeklyReviewTcxImportedActivitiesSchema>;
 export type WeeklyReview = z.infer<typeof weeklyReviewSchema>;
 export type WeeklyReviewQuery = z.infer<typeof weeklyReviewQuerySchema>;

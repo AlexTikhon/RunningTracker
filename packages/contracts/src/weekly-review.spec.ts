@@ -31,6 +31,16 @@ const review = {
     elapsedDurationS: 14_465,
     source: 'gpx',
   },
+  tcxImportedActivities: {
+    byType: [
+      { count: 1, distanceM: 30_000, reportedDurationS: 3_600, type: 'ride' },
+      { count: 1, distanceM: 1_500, reportedDurationS: 2_400, type: 'swim' },
+    ],
+    count: 2,
+    distanceM: 31_500,
+    reportedDurationS: 6_000,
+    source: 'tcx',
+  },
   // The required regression: Monday steps 0, Tuesday both values, Wednesday energy only, the other days missing.
   movement: {
     activeEnergyKcal: { daysRecorded: 2, recordedTotal: 662.5 },
@@ -75,8 +85,21 @@ describe('weekly review contract', () => {
     expect(coverage({ manualActivities: { count: 1, withDistance: 2 } })).toBe(false);
   });
 
-  it('names the version that added GPX imports (after movement)', () => {
-    expect(WEEKLY_REVIEW_VERSION).toBe('weekly-review-3');
+  it('names the version that added TCX imports (after GPX imports)', () => {
+    expect(WEEKLY_REVIEW_VERSION).toBe('weekly-review-4');
+  });
+
+  it('refuses an inconsistent TCX import part, and one named as GPX (ADR-0091)', () => {
+    const tcx = (patch: Record<string, unknown>) =>
+      weeklyReviewSchema.safeParse({ ...review, tcxImportedActivities: { ...review.tcxImportedActivities, ...patch } }).success;
+    expect(tcx({})).toBe(true);
+    expect(tcx({ count: 3 })).toBe(false);
+    expect(tcx({ distanceM: 1 })).toBe(false);
+    expect(tcx({ reportedDurationS: 1 })).toBe(false);
+    expect(tcx({ source: 'gpx' })).toBe(false);
+    expect(tcx({ byType: [...review.tcxImportedActivities.byType].reverse() })).toBe(false);
+    expect(tcx({ byType: [], count: 0, distanceM: 0, reportedDurationS: 0 })).toBe(true);
+    expect(tcx({ byType: [{ count: 1, distanceM: 1, elapsedDurationS: 1, type: 'run' }], count: 1, distanceM: 1, reportedDurationS: 1 })).toBe(false);
   });
 
   it('refuses an inconsistent GPX import part (ADR-0086)', () => {

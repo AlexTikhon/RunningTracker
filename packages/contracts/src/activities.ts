@@ -2,13 +2,16 @@ import { z } from 'zod';
 
 import { canonicalFiniteNumber, cursorSchema, timestampSchema, uuidSchema } from './primitives.js';
 
-// Activities of the signed-in person (ADR-0072): entered manually, or imported from a GPX file (ADR-0086). Owner-only:
+// Activities of the signed-in person (ADR-0072): entered manually, or imported from a GPX (ADR-0086) or TCX (ADR-0091)
+// file. Owner-only:
 // no request carries an owner, an organization or a source; the server takes the owner from the session, the
 // organization from the path and the source from the route that created the activity.
 export const ACTIVITY_TYPES = ['run', 'walk', 'ride', 'hike', 'swim', 'strength', 'other'] as const;
 // `manual`: entered in the form (PUT /activities/{id}). `gpx`: imported from a GPX file (ADR-0086); its `durationS` is the
-// elapsed time from the first to the last point, pauses included, and its `distanceM` was computed by the server.
-export const ACTIVITY_SOURCES = ['manual', 'gpx'] as const;
+// elapsed time from the first to the last point, pauses included, and its `distanceM` was computed by the server. `tcx`:
+// imported from a TCX file (ADR-0091); its `durationS` is the REPORTED duration, the sum of the laps' TotalTimeSeconds
+// rounded once (neither elapsed nor moving time), and its `distanceM` the sum of the laps' DistanceMeters rounded once.
+export const ACTIVITY_SOURCES = ['manual', 'gpx', 'tcx'] as const;
 export const ACTIVITY_DURATION_MAX_S = 172_800;
 export const ACTIVITY_DISTANCE_MAX_M = 1_000_000;
 export const ACTIVITY_NOTES_MAX_LENGTH = 1_000;

@@ -607,7 +607,7 @@
                 }
               }
             },
-            "description": "One page of activities."
+            "description": "One page of activities. `source` is server-owned: `manual` (`durationS` as entered), `gpx` (`durationS` is the GPX elapsed time, ADR-0086) or `tcx` (`durationS` is the reported duration, the sum of the laps' TotalTimeSeconds rounded once, neither elapsed nor moving time, ADR-0091)."
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -701,6 +701,121 @@
             }
           },
           "description": "The GPX file exactly as selected, at most 10 MiB.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityView"
+                }
+              }
+            },
+            "description": "Existing import returned for a retry of the same attempt."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityView"
+                }
+              }
+            },
+            "description": "Activity imported."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/activities/tcx-preview": {
+      "post": {
+        "tags": [
+          "Activities"
+        ],
+        "summary": "Preview what the server reads from a TCX file, writing nothing",
+        "description": "ADR-0091. The request body is the file itself (`Content-Type: application/vnd.garmin.tcx+xml`, no `Content-Encoding`; the GPX media type is 415 here), at most 10 MiB; a larger body is 413 TCX_FILE_TOO_LARGE and is never truncated. Session, Origin and CSRF are checked before the body is read. Supported subset (`tcx-summary-1`), read with the hardened namespace-aware reader of the GPX import: UTF-8; no DOCTYPE or other declaration (entities are never expanded and nothing referenced by the file is fetched); root `TrainingCenterDatabase` in the Training Center Database v2 namespace (any prefix); element depth at most 32 and at most 500000 elements; at most one `Activities` with exactly one `Activity` and no `MultiSportSession`; exactly one `Id` with a zone (checked, not stored); 1 to 1000 `Lap` children, each with a `StartTime` with a zone and at most millisecond precision, strictly increasing, and exactly one `TotalTimeSeconds` and one `DistanceMeters` in non-negative decimal notation (no sign, exponent, NaN or INF), every read value at most 64 characters. GPS positions are never needed or read; tracks, heart rate, calories, notes, creator, author, courses, workouts, folders and extensions are not read. Anything else is 422 TCX_UNSUPPORTED with `details.reason`; the message names a lap by position and never quotes the file. The summary: `startedAt` is the first lap's start; `lapTotals` are the exact decimal sums of the laps' reported total times and distances; `reportedDurationS` and `distanceM` are those sums rounded once to the nearest second and metre, halves up (1 s to 48 h, at most 1000 km). The reported duration is what the laps report: not GPX elapsed time, not a recorded run's observed duration, not moving time. `duplicateOf` names an activity of this person in this organization imported from a TCX file with the same laps (starts, totals and distances), advisory only; a TCX import is never compared with GPX imports, manual activities or GPS runs. Runs in a REPEATABLE READ, READ ONLY transaction: nothing is written. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/vnd.garmin.tcx+xml": {
+              "schema": {
+                "format": "binary",
+                "maxLength": 10485760,
+                "type": "string"
+              }
+            }
+          },
+          "description": "The TCX (Training Center Database v2) file exactly as selected, at most 10 MiB.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TcxImportPreview"
+                }
+              }
+            },
+            "description": "The server's summary of the file."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/api/orgs/{orgId}/activities/{activityId}/tcx-import": {
+      "put": {
+        "tags": [
+          "Activities"
+        ],
+        "summary": "Import a TCX file as an owner-only, summary-only activity",
+        "description": "ADR-0091. The body is the same file as for the preview (same media type and limits); the server parses it and computes every value again and never accepts a total, a time or a source. The query holds exactly `type` (the person's choice; the file's Sport is never used) and `idempotencyKey` (one client UUID per import attempt); anything else is 400. Stores `source: tcx`, the start, `durationS` = the reported duration and `distanceM`; no file, lap, trackpoint, position, heart rate, calories, creator or notes. In one transaction: the same id with the same laps, type and key answers 200 with the stored activity, the same id with anything else (also a manual or GPX activity's id) is 409 ACTIVITY_CONFLICT; the same key under another id answers 200 with the stored activity for the same laps and type, otherwise 409 ACTIVITY_ALREADY_SAVED naming it (also when the key belongs to a GPX import); laps this person already imported from a TCX file in this organization are 409 TCX_ALREADY_IMPORTED with `details.activityId`; another member's id is 404 ACTIVITY_NOT_FOUND. Concurrent confirmations are settled by unique constraints (the fingerprint is unique per owner, organization and source). Deleting an imported activity frees its laps for a new import. Never creates or changes a GPS run. Answers `Cache-Control: no-store`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityId"
+          },
+          {
+            "$ref": "#/components/parameters/TcxImportType"
+          },
+          {
+            "$ref": "#/components/parameters/TcxImportKey"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/vnd.garmin.tcx+xml": {
+              "schema": {
+                "format": "binary",
+                "maxLength": 10485760,
+                "type": "string"
+              }
+            }
+          },
+          "description": "The TCX (Training Center Database v2) file exactly as selected, at most 10 MiB.",
           "required": true
         },
         "responses": {
@@ -1355,7 +1470,7 @@
           "Activities"
         ],
         "summary": "List the signed-in person's own activities and finished recorded runs in one chronological history",
-        "description": "Owner-only, read-only (ADR-0087). One page of the person's manual activities (`source: manual`), GPX-imported activities (`source: gpx`) and own finished recorded GPS runs (`source: recorded_run`), read on every request from the existing `activities`, `runs` and `run_summaries` tables by one UNION ALL statement in one REPEATABLE READ, READ ONLY transaction; nothing is copied, stored, queued or written. Every branch states the organization and the owner (the session's identity) in addition to row-level security, so a run that another person shared with the caller never appears, whatever sharing grants exist; another organization's rows never appear; a person who is not an active member gets 403 ORG_ACCESS_DENIED. Order: `startedAt` descending, then a recorded run before an activity at the same instant, then id descending; the order is total, also across an activity and a run that share an id. `limit` 1 to 50, default 20. `source` (one of the three) and `type` (an activity type; a recorded run has type `run`) are optional single-valued filters; a repeated or unknown parameter is 400 INVALID_REQUEST. `localDate` and `timeZone` (ADR-0088) are an optional pair, both or neither (one alone is 400 INVALID_REQUEST, as are an impossible or pre-2000 date and a zone that is not a supported IANA name): with them the page holds only the items that started in [start of `localDate`, start of the next calendar date) in `timeZone`, Today's attribution rule, so a date is 23 or 25 hours long around a daylight saving change and an item that continued past midnight belongs to the date it started on; without them, the whole history. The applied day, its canonical zone and its UTC interval are echoed as `applied.day` (null without the filter). The keyset cursor is bound to the person, the organization, both filters and the day filter (date and canonical zone): a tampered cursor, or one from another person, organization, filter, date or zone, is 400 INVALID_CURSOR. A cursor issued before the day filter existed remains valid for the whole history only. Each source names its duration for what it is: `enteredDurationS` (entered by the person), `elapsedDurationS` (GPX: first to last point, pauses included, not moving time) and, for a recorded run, `summary.observedDurationS` (accepted GPS edges only). Recorded-run metrics come only from a summary whose source revision equals the run's current data revision (`summary.state: current`); a missing summary is `pending` and one made for an older revision is `stale`, and both carry no metric. `captureSource` is null: the server does not record whether device GPS or the simulator captured a run. Items are never merged, deduplicated or added together across sources, and no total is returned. A deleted activity or run is absent from the next read. Answers `Cache-Control: no-store`, errors included.",
+        "description": "Owner-only, read-only (ADR-0087). One page of the person's manual activities (`source: manual`), GPX-imported activities (`source: gpx`), TCX-imported activities (`source: tcx`, ADR-0091; `activity-history-3`) and own finished recorded GPS runs (`source: recorded_run`), read on every request from the existing `activities`, `runs` and `run_summaries` tables by one UNION ALL statement in one REPEATABLE READ, READ ONLY transaction; nothing is copied, stored, queued or written. Every branch states the organization and the owner (the session's identity) in addition to row-level security, so a run that another person shared with the caller never appears, whatever sharing grants exist; another organization's rows never appear; a person who is not an active member gets 403 ORG_ACCESS_DENIED. Order: `startedAt` descending, then a recorded run before an activity at the same instant, then id descending; the order is total, also across an activity and a run that share an id. `limit` 1 to 50, default 20. `source` (one of the three) and `type` (an activity type; a recorded run has type `run`) are optional single-valued filters; a repeated or unknown parameter is 400 INVALID_REQUEST. `localDate` and `timeZone` (ADR-0088) are an optional pair, both or neither (one alone is 400 INVALID_REQUEST, as are an impossible or pre-2000 date and a zone that is not a supported IANA name): with them the page holds only the items that started in [start of `localDate`, start of the next calendar date) in `timeZone`, Today's attribution rule, so a date is 23 or 25 hours long around a daylight saving change and an item that continued past midnight belongs to the date it started on; without them, the whole history. The applied day, its canonical zone and its UTC interval are echoed as `applied.day` (null without the filter). The keyset cursor is bound to the person, the organization, both filters and the day filter (date and canonical zone): a tampered cursor, or one from another person, organization, filter, date or zone, is 400 INVALID_CURSOR. A cursor issued before the day filter existed remains valid for the whole history only. Each source names its duration for what it is: `enteredDurationS` (entered by the person), `elapsedDurationS` (GPX: first to last point, pauses included, not moving time), `reportedDurationS` (TCX: the laps' reported total times, rounded once; neither elapsed nor moving time) and, for a recorded run, `summary.observedDurationS` (accepted GPS edges only). Recorded-run metrics come only from a summary whose source revision equals the run's current data revision (`summary.state: current`); a missing summary is `pending` and one made for an older revision is `stale`, and both carry no metric. `captureSource` is null: the server does not record whether device GPS or the simulator captured a run. Items are never merged, deduplicated or added together across sources, and no total is returned. A deleted activity or run is absent from the next read. Answers `Cache-Control: no-store`, errors included.",
         "parameters": [
           {
             "$ref": "#/components/parameters/OrgId"
@@ -1402,7 +1517,7 @@
           "Daily overview"
         ],
         "summary": "Compute the signed-in person's overview of one local date (Today)",
-        "description": "Owner-only derived health data (ADR-0082), computed by the app on every read and never stored; no language model is called, nothing is queued and nothing is written. Every source is read in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates; run sharing never adds another person's data. `localDate` must not be before 2000-01-01 nor after today in `timeZone` by server time (400 INVALID_REQUEST). Attribution: the check-in and the manually entered movement are those stored for `localDate` (their own calendar date), whatever zone they were saved in; their stored zone is returned and they are never moved to another date. Manual activities and GPS runs count on the date on which they started in `timeZone`: from that date's local midnight up to, not including, the next date's local midnight (23 or 25 hours around a daylight saving change). The response holds the check-in's values, whether it exists (a note-only check-in exists; the note text is never returned) and its stored zone; the movement values, whether they exist, their source (`manual`) and stored zone; manual activity counts and the full entered duration of the activities that started on the date (also of one that continued past midnight), by type; and the person's own finished GPS runs: their count, how many have a distance from a summary current for the run's data, and the sum of those distances only (a partial total covers exactly the `withCurrentDistance` runs). Manual activities and GPS runs are reported separately (they may describe the same session) and movement is never added to either. A value that was not recorded is null, never zero. No raw GPS points, notes or other free text. Answers `Cache-Control: no-store`, errors included.",
+        "description": "Owner-only derived health data (ADR-0082; `daily-overview-4` adds `tcxImportedActivities`, ADR-0091: TCX imports that started on the date, with their count and reported duration by type, kept apart from manual activities, GPX imports (`importedActivities`) and GPS runs and never added to them), computed by the app on every read and never stored; no language model is called, nothing is queued and nothing is written. Every source is read in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates; run sharing never adds another person's data. `localDate` must not be before 2000-01-01 nor after today in `timeZone` by server time (400 INVALID_REQUEST). Attribution: the check-in and the manually entered movement are those stored for `localDate` (their own calendar date), whatever zone they were saved in; their stored zone is returned and they are never moved to another date. Manual activities and GPS runs count on the date on which they started in `timeZone`: from that date's local midnight up to, not including, the next date's local midnight (23 or 25 hours around a daylight saving change). The response holds the check-in's values, whether it exists (a note-only check-in exists; the note text is never returned) and its stored zone; the movement values, whether they exist, their source (`manual`) and stored zone; manual activity counts and the full entered duration of the activities that started on the date (also of one that continued past midnight), by type; and the person's own finished GPS runs: their count, how many have a distance from a summary current for the run's data, and the sum of those distances only (a partial total covers exactly the `withCurrentDistance` runs). Manual activities and GPS runs are reported separately (they may describe the same session) and movement is never added to either. A value that was not recorded is null, never zero. No raw GPS points, notes or other free text. Answers `Cache-Control: no-store`, errors included.",
         "parameters": [
           {
             "$ref": "#/components/parameters/OrgId"
@@ -1472,7 +1587,7 @@
           "Daily trends"
         ],
         "summary": "Compute the signed-in person's 28-day activity trends for one source and one activity type",
-        "description": "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Optional `compare=previous_period` (ADR-0090) adds `comparison`, echoed as `applied.compare`: for end date E the range E-27..E is compared with the previous period E-55..E-28, the 28 local calendar dates immediately before it, for the same source, type and zone, located with the same rules (23/25-hour and skipped dates included). Both periods are read by ONE statement over at most 56 dates in the same REPEATABLE READ, READ ONLY transaction, so they come from one snapshot; the range part of the answer is identical to an answer without `compare`. `comparison.current.period` and `comparison.previous.period` give the actual dates and UTC intervals; the previous period is cut by 2000-01-01 like a range (`previous_period_shortened`) or null when all its dates are before it (`previous_period_out_of_range`, with `requestedStartDate`/`requestedEndDate`). `comparison.previous.summary` has the shape of `summary`. Per metric (`count`, the source's duration name, `distance`): both period totals (null when undefined) and a `change`, computed by PostgreSQL: `available` with the signed `absolute` change and `percent` = (current - previous) / previous * 100 rounded to one decimal, halves away from zero, exactly from the integer totals (period totals add the dates' rounded totals); `percent` null with `percentUnavailableReason: zero_baseline` when the previous total is 0. Otherwise `unavailable` with stable `reasons` (current_period_in_progress, current_period_shortened, previous_period_out_of_range, previous_period_shortened, current_period_no_entries, previous_period_no_entries, current_values_missing, previous_values_missing, current_summaries_pending, previous_summaries_pending, current_summaries_stale, previous_summaries_stale), listed in that order; `periodReasons` repeats those that apply to every metric. Counts describe logged records only and are compared whatever the coverage. A duration or distance is compared only when both periods have items and every item records it (no missing value, no pending or stale run summary). A range that includes today is in progress: its figures are returned, every change is unavailable. Full coverage does not establish that every activity was logged. `comparison.policyVersion` names these rules. Answers `Cache-Control: no-store`, errors included.",
+        "description": "Owner-only derived health data (ADR-0089), aggregated by PostgreSQL on every read and never stored; no language model is called, nothing is queued and nothing is written. All four parameters are required and single-valued: one `source` (`manual`, `gpx`, `tcx` or `recorded_run`), one activity `type` (`recorded_run` supports only `run`), `endDate` and the IANA `timeZone`; a repeated, missing, unknown or owner-like parameter is 400 INVALID_REQUEST. The range is the 28 local calendar dates ending on `endDate`; when 2000-01-01 cuts it short, `range.days` is the actual number and `shortenedByLowerBound` is true. `endDate` must not be after today in `timeZone` by server time (400 INVALID_REQUEST). An item belongs to the date on which it STARTED in `timeZone`, from that date's local midnight up to, not including, the next date's (Today's and the activity history's rule): a date is 23 or 25 hours long around a daylight saving change, and every date's UTC interval is returned. One range statement for the requested source, together with the membership check, in one REPEATABLE READ, READ ONLY transaction with row-level security and explicit organization and owner predicates, so a run another person shared never counts. Per date and for the range: the number of items, the duration under its source's name (`enteredDuration` for manual entries, `elapsedDuration` for GPX imports, pauses included, `reportedDuration` for TCX imports (the laps' reported total times, ADR-0091), `observedDuration` for recorded runs, from a summary whose source revision equals the run's data revision), the distance, and for each metric how many items record it (`withValue`) and the total over exactly those (null when none). Recorded runs also give `summaries` (current, pending, stale): a pending or stale summary counts the run and adds to missing coverage, never an old or zero value. Distances and observed durations are rounded once per date to whole metres and seconds; range totals add the dates' totals. No entries, unknown metrics and a recorded zero stay distinguishable; zero entries does not mean inactivity. Sources are never combined. `applied` echoes the canonical filters and `provenance.policyVersion` the rules. Optional `compare=previous_period` (ADR-0090) adds `comparison`, echoed as `applied.compare`: for end date E the range E-27..E is compared with the previous period E-55..E-28, the 28 local calendar dates immediately before it, for the same source, type and zone, located with the same rules (23/25-hour and skipped dates included). Both periods are read by ONE statement over at most 56 dates in the same REPEATABLE READ, READ ONLY transaction, so they come from one snapshot; the range part of the answer is identical to an answer without `compare`. `comparison.current.period` and `comparison.previous.period` give the actual dates and UTC intervals; the previous period is cut by 2000-01-01 like a range (`previous_period_shortened`) or null when all its dates are before it (`previous_period_out_of_range`, with `requestedStartDate`/`requestedEndDate`). `comparison.previous.summary` has the shape of `summary`. Per metric (`count`, the source's duration name, `distance`): both period totals (null when undefined) and a `change`, computed by PostgreSQL: `available` with the signed `absolute` change and `percent` = (current - previous) / previous * 100 rounded to one decimal, halves away from zero, exactly from the integer totals (period totals add the dates' rounded totals); `percent` null with `percentUnavailableReason: zero_baseline` when the previous total is 0. Otherwise `unavailable` with stable `reasons` (current_period_in_progress, current_period_shortened, previous_period_out_of_range, previous_period_shortened, current_period_no_entries, previous_period_no_entries, current_values_missing, previous_values_missing, current_summaries_pending, previous_summaries_pending, current_summaries_stale, previous_summaries_stale), listed in that order; `periodReasons` repeats those that apply to every metric. Counts describe logged records only and are compared whatever the coverage. A duration or distance is compared only when both periods have items and every item records it (no missing value, no pending or stale run summary). A range that includes today is in progress: its figures are returned, every change is unavailable. Full coverage does not establish that every activity was logged. `comparison.policyVersion` names these rules. Answers `Cache-Control: no-store`, errors included.",
         "parameters": [
           {
             "$ref": "#/components/parameters/OrgId"
@@ -1516,7 +1631,7 @@
           "Insights"
         ],
         "summary": "Compute the signed-in person's weekly review",
-        "description": "Owner-only derived health data, computed by the app on every read and never stored. No language model is called and nothing is queued: the review works whether AI generation (WEEKLY_INSIGHTS_PROVIDER) is on or off and whether or not an AI insight exists for the week. Every source of the week (the person's own check-ins, manual activities and finished GPS runs; never anyone else's runs, even when run sharing makes them readable) is read in one statement of one REPEATABLE READ, READ ONLY transaction, so a source deleted before the read began is absent. The week runs Monday to Sunday in the time zone stored on the person's check-ins in that week (the most frequent one), or in `timeZone` when there are none; a week starting after today in `timeZone` is refused (400 INVALID_REQUEST). The response carries the week and its effective zone; per-metric coverage with explicit denominators (days in the week, days with numeric check-in values, days with each metric; a note-only check-in is not a day with values, and a sleep-quality rating never counts as a recorded sleep duration); the facts (a value that was not recorded has no fact, never a zero; a GPS distance only from summaries current for the run's data, with the runs it covers); code-written descriptive statements with stable codes; data gaps and source limitations; and provenance (`source: computed_by_app`, `persisted: false`, the review and aggregation policy versions and the computation time), which distinguishes it from a stored AI insight (that has a model, a prompt version, an id and a creation time). Manual runs and GPS runs are never added together. Answers `Cache-Control: no-store`.",
+        "description": "Owner-only derived health data, computed by the app on every read and never stored (`weekly-review-4` adds the review-only `tcxImportedActivities` and the `imported.tcx` statement, ADR-0091: TCX imports of the week with their reported duration and distance, apart from GPX imports, manual activities and GPS runs, and outside the facts, coverage and data gaps that AI insights share). No language model is called and nothing is queued: the review works whether AI generation (WEEKLY_INSIGHTS_PROVIDER) is on or off and whether or not an AI insight exists for the week. Every source of the week (the person's own check-ins, manual activities and finished GPS runs; never anyone else's runs, even when run sharing makes them readable) is read in one statement of one REPEATABLE READ, READ ONLY transaction, so a source deleted before the read began is absent. The week runs Monday to Sunday in the time zone stored on the person's check-ins in that week (the most frequent one), or in `timeZone` when there are none; a week starting after today in `timeZone` is refused (400 INVALID_REQUEST). The response carries the week and its effective zone; per-metric coverage with explicit denominators (days in the week, days with numeric check-in values, days with each metric; a note-only check-in is not a day with values, and a sleep-quality rating never counts as a recorded sleep duration); the facts (a value that was not recorded has no fact, never a zero; a GPS distance only from summaries current for the run's data, with the runs it covers); code-written descriptive statements with stable codes; data gaps and source limitations; and provenance (`source: computed_by_app`, `persisted: false`, the review and aggregation policy versions and the computation time), which distinguishes it from a stored AI insight (that has a model, a prompt version, an id and a creation time). Manual runs and GPS runs are never added together. Answers `Cache-Control: no-store`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/OrgId"
@@ -2232,6 +2347,33 @@
           "$ref": "#/components/schemas/UUID"
         }
       },
+      "TcxImportType": {
+        "name": "type",
+        "in": "query",
+        "required": true,
+        "description": "The activity type the person chose for the imported TCX file (its Sport is never used).",
+        "schema": {
+          "enum": [
+            "run",
+            "walk",
+            "ride",
+            "hike",
+            "swim",
+            "strength",
+            "other"
+          ],
+          "type": "string"
+        }
+      },
+      "TcxImportKey": {
+        "name": "idempotencyKey",
+        "in": "query",
+        "required": true,
+        "description": "One client-generated UUID per import attempt, kept until a confirmed outcome (ADR-0073, ADR-0091).",
+        "schema": {
+          "$ref": "#/components/schemas/UUID"
+        }
+      },
       "HistorySource": {
         "name": "source",
         "in": "query",
@@ -2241,6 +2383,7 @@
           "enum": [
             "manual",
             "gpx",
+            "tcx",
             "recorded_run"
           ],
           "type": "string"
@@ -2406,6 +2549,7 @@
           "enum": [
             "manual",
             "gpx",
+            "tcx",
             "recorded_run"
           ],
           "type": "string"
@@ -4064,7 +4208,8 @@
             "type": "string",
             "enum": [
               "manual",
-              "gpx"
+              "gpx",
+              "tcx"
             ]
           },
           "startedAt": {
@@ -4178,6 +4323,95 @@
         ],
         "additionalProperties": false
       },
+      "TcxImportPreview": {
+        "type": "object",
+        "properties": {
+          "duplicateOf": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "activityId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "activityId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "distanceM": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "lapCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+              },
+              "lapTotals": {
+                "type": "object",
+                "properties": {
+                  "distanceMeters": {
+                    "type": "string",
+                    "maxLength": 96,
+                    "pattern": "^(?:0|[1-9]\\d*)(?:\\.\\d*[1-9])?$"
+                  },
+                  "totalTimeSeconds": {
+                    "type": "string",
+                    "maxLength": 96,
+                    "pattern": "^(?:0|[1-9]\\d*)(?:\\.\\d*[1-9])?$"
+                  }
+                },
+                "required": [
+                  "distanceMeters",
+                  "totalTimeSeconds"
+                ],
+                "additionalProperties": false
+              },
+              "metricsVersion": {
+                "type": "string",
+                "const": "tcx-summary-1"
+              },
+              "reportedDurationS": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 172800
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              }
+            },
+            "required": [
+              "distanceM",
+              "lapCount",
+              "lapTotals",
+              "metricsVersion",
+              "reportedDurationS",
+              "startedAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "duplicateOf",
+          "summary"
+        ],
+        "additionalProperties": false
+      },
       "ActivityListResponse": {
         "type": "object",
         "properties": {
@@ -4242,7 +4476,8 @@
                   "type": "string",
                   "enum": [
                     "manual",
-                    "gpx"
+                    "gpx",
+                    "tcx"
                   ]
                 },
                 "startedAt": {
@@ -4346,6 +4581,7 @@
                     "enum": [
                       "manual",
                       "gpx",
+                      "tcx",
                       "recorded_run"
                     ]
                   },
@@ -4529,6 +4765,56 @@
                 {
                   "type": "object",
                   "properties": {
+                    "activityId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "distanceM": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "reportedDurationS": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 172800
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "tcx"
+                    },
+                    "startedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "activityId",
+                    "distanceM",
+                    "reportedDurationS",
+                    "source",
+                    "startedAt",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
                     "captureSource": {
                       "type": "null"
                     },
@@ -4639,7 +4925,7 @@
             "properties": {
               "historyVersion": {
                 "type": "string",
-                "const": "activity-history-2"
+                "const": "activity-history-3"
               },
               "persisted": {
                 "type": "boolean",
@@ -6670,7 +6956,8 @@
                     "movement.active_energy_not_recorded",
                     "movement.manual_source",
                     "movement.time_zones",
-                    "imported.gpx"
+                    "imported.gpx",
+                    "imported.tcx"
                   ]
                 },
                 "text": {
@@ -6685,6 +6972,81 @@
               ],
               "additionalProperties": false
             }
+          },
+          "tcxImportedActivities": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "tcx"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "reportedDurationS": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1728000000
+              },
+              "distanceM": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000000000
+              },
+              "byType": {
+                "maxItems": 7,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    },
+                    "reportedDurationS": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1728000000
+                    },
+                    "distanceM": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000000000
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "count",
+                    "reportedDurationS",
+                    "distanceM"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "source",
+              "count",
+              "reportedDurationS",
+              "distanceM",
+              "byType"
+            ],
+            "additionalProperties": false
           },
           "week": {
             "type": "object",
@@ -6739,6 +7101,7 @@
           "movement",
           "provenance",
           "statements",
+          "tcxImportedActivities",
           "week"
         ],
         "additionalProperties": false
@@ -7281,6 +7644,69 @@
               "source"
             ],
             "additionalProperties": false
+          },
+          "tcxImportedActivities": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "tcx"
+              },
+              "byType": {
+                "maxItems": 7,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "run",
+                        "walk",
+                        "ride",
+                        "hike",
+                        "swim",
+                        "strength",
+                        "other"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    },
+                    "reportedDurationS": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1728000000
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "count",
+                    "reportedDurationS"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "reportedDurationS": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1728000000
+              }
+            },
+            "required": [
+              "source",
+              "byType",
+              "count",
+              "reportedDurationS"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -7291,7 +7717,8 @@
           "manualActivities",
           "meals",
           "movement",
-          "provenance"
+          "provenance",
+          "tcxImportedActivities"
         ],
         "additionalProperties": false
       },
@@ -9107,6 +9534,941 @@
                     "required": [
                       "count",
                       "elapsedDuration",
+                      "distance"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "mode",
+                  "policyVersion",
+                  "current",
+                  "periodReasons",
+                  "previous",
+                  "metrics"
+                ],
+                "additionalProperties": false
+              },
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "computedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-1"
+                  },
+                  "persisted": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "snapshot": {
+                    "type": "string",
+                    "const": "single_read_only_transaction"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "computed_by_app"
+                  }
+                },
+                "required": [
+                  "computedAt",
+                  "policyVersion",
+                  "persisted",
+                  "snapshot",
+                  "source"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "source",
+              "applied",
+              "range",
+              "days",
+              "summary",
+              "provenance"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "const": "tcx"
+              },
+              "applied": {
+                "type": "object",
+                "properties": {
+                  "compare": {
+                    "type": "string",
+                    "enum": [
+                      "previous_period"
+                    ]
+                  },
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "tcx"
+                  },
+                  "timeZone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "run",
+                      "walk",
+                      "ride",
+                      "hike",
+                      "swim",
+                      "strength",
+                      "other"
+                    ]
+                  }
+                },
+                "required": [
+                  "endDate",
+                  "source",
+                  "timeZone",
+                  "type"
+                ],
+                "additionalProperties": false
+              },
+              "range": {
+                "type": "object",
+                "properties": {
+                  "startDate": {
+                    "type": "string"
+                  },
+                  "endDate": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 28
+                  },
+                  "requestedDays": {
+                    "type": "number",
+                    "const": 28
+                  },
+                  "shortenedByLowerBound": {
+                    "type": "boolean"
+                  },
+                  "startsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "endsAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "today": {
+                    "type": "string"
+                  },
+                  "includesToday": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "startDate",
+                  "endDate",
+                  "days",
+                  "requestedDays",
+                  "shortenedByLowerBound",
+                  "startsAt",
+                  "endsAt",
+                  "today",
+                  "includesToday"
+                ],
+                "additionalProperties": false
+              },
+              "days": {
+                "minItems": 1,
+                "maxItems": 28,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "localDate": {
+                      "type": "string"
+                    },
+                    "startsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "endsAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "distance": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalM": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalM"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "reportedDuration": {
+                      "type": "object",
+                      "properties": {
+                        "withValue": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "totalS": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "withValue",
+                        "totalS"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "localDate",
+                    "startsAt",
+                    "endsAt",
+                    "count",
+                    "distance",
+                    "reportedDuration"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "summary": {
+                "type": "object",
+                "properties": {
+                  "daysWithEntries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 28
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "distance": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalM": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalM",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "reportedDuration": {
+                    "type": "object",
+                    "properties": {
+                      "withValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalS": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "daysWithValue": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 28
+                      }
+                    },
+                    "required": [
+                      "withValue",
+                      "totalS",
+                      "daysWithValue"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "daysWithEntries",
+                  "count",
+                  "distance",
+                  "reportedDuration"
+                ],
+                "additionalProperties": false
+              },
+              "comparison": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "previous_period"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "const": "activity-trends-comparison-1"
+                  },
+                  "current": {
+                    "type": "object",
+                    "properties": {
+                      "inProgress": {
+                        "type": "boolean"
+                      },
+                      "period": {
+                        "type": "object",
+                        "properties": {
+                          "startDate": {
+                            "type": "string"
+                          },
+                          "endDate": {
+                            "type": "string"
+                          },
+                          "days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 28
+                          },
+                          "requestedDays": {
+                            "type": "number",
+                            "const": 28
+                          },
+                          "shortenedByLowerBound": {
+                            "type": "boolean"
+                          },
+                          "startsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          },
+                          "endsAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                          }
+                        },
+                        "required": [
+                          "startDate",
+                          "endDate",
+                          "days",
+                          "requestedDays",
+                          "shortenedByLowerBound",
+                          "startsAt",
+                          "endsAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "inProgress",
+                      "period"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "periodReasons": {
+                    "maxItems": 4,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "current_period_in_progress",
+                        "current_period_shortened",
+                        "previous_period_out_of_range",
+                        "previous_period_shortened",
+                        "current_period_no_entries",
+                        "previous_period_no_entries",
+                        "current_values_missing",
+                        "previous_values_missing",
+                        "current_summaries_pending",
+                        "previous_summaries_pending",
+                        "current_summaries_stale",
+                        "previous_summaries_stale"
+                      ]
+                    }
+                  },
+                  "previous": {
+                    "type": "object",
+                    "properties": {
+                      "requestedStartDate": {
+                        "type": "string"
+                      },
+                      "requestedEndDate": {
+                        "type": "string"
+                      },
+                      "period": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "startDate": {
+                                "type": "string"
+                              },
+                              "endDate": {
+                                "type": "string"
+                              },
+                              "days": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 28
+                              },
+                              "requestedDays": {
+                                "type": "number",
+                                "const": 28
+                              },
+                              "shortenedByLowerBound": {
+                                "type": "boolean"
+                              },
+                              "startsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              },
+                              "endsAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                              }
+                            },
+                            "required": [
+                              "startDate",
+                              "endDate",
+                              "days",
+                              "requestedDays",
+                              "shortenedByLowerBound",
+                              "startsAt",
+                              "endsAt"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "summary": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "daysWithEntries": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 28
+                              },
+                              "count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "distance": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalM": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalM",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "reportedDuration": {
+                                "type": "object",
+                                "properties": {
+                                  "withValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "totalS": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daysWithValue": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 28
+                                  }
+                                },
+                                "required": [
+                                  "withValue",
+                                  "totalS",
+                                  "daysWithValue"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "daysWithEntries",
+                              "count",
+                              "distance",
+                              "reportedDuration"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "requestedStartDate",
+                      "requestedEndDate",
+                      "period",
+                      "summary"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "metrics": {
+                    "type": "object",
+                    "properties": {
+                      "count": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "reportedDuration": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "distance": {
+                        "type": "object",
+                        "properties": {
+                          "current": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "previous": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "change": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "available"
+                                  },
+                                  "absolute": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "percent": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "percentUnavailableReason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "zero_baseline"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "absolute",
+                                  "percent",
+                                  "percentUnavailableReason"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "status": {
+                                    "type": "string",
+                                    "const": "unavailable"
+                                  },
+                                  "reasons": {
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "current_period_in_progress",
+                                        "current_period_shortened",
+                                        "previous_period_out_of_range",
+                                        "previous_period_shortened",
+                                        "current_period_no_entries",
+                                        "previous_period_no_entries",
+                                        "current_values_missing",
+                                        "previous_values_missing",
+                                        "current_summaries_pending",
+                                        "previous_summaries_pending",
+                                        "current_summaries_stale",
+                                        "previous_summaries_stale"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "reasons"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "current",
+                          "previous",
+                          "change"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "count",
+                      "reportedDuration",
                       "distance"
                     ],
                     "additionalProperties": false

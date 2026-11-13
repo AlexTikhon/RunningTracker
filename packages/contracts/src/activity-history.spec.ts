@@ -151,7 +151,7 @@ describe('activity history items', () => {
     expect(activityHistoryResponseSchema.safeParse({ ...response, applied: { source: null, type: null } }).success).toBe(false);
     expect(activityHistoryResponseSchema.safeParse({ ...response, applied: { ...response.applied, day: { ...day, endsAt: '2026-03-28T22:00:00.000Z' } } }).success).toBe(false);
     expect(activityHistoryResponseSchema.safeParse({ ...response, applied: { ...response.applied, day: { ...day, localDate: '2026-02-30' } } }).success).toBe(false);
-    expect(ACTIVITY_HISTORY_VERSION).toBe('activity-history-2');
+    expect(ACTIVITY_HISTORY_VERSION).toBe('activity-history-3');
   });
 });
 

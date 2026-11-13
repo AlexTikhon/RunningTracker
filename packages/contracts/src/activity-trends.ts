@@ -16,9 +16,11 @@ import { ianaTimeZoneSchema, localDateSchema, timestampSchema } from './primitiv
 // date it started on, with its whole duration.
 //
 // Sources are never combined: one request, one source. Each source names its duration for what it is, as the history
-// does, so the three cannot be added together by accident:
+// does, so the four cannot be added together by accident:
 // - `manual`: `enteredDuration`, what the person typed;
 // - `gpx`: `elapsedDuration`, first to last point of the file, pauses included, not moving time (ADR-0086);
+// - `tcx`: `reportedDuration`, the sum of each file's lap total times rounded once per file; neither elapsed nor moving
+//   time (ADR-0091);
 // - `recorded_run`: `observedDuration`, the accepted GPS edges of a summary whose source revision equals the run's data
 //   revision (ADR-0013/0015). A pending or stale summary counts the run and adds to missing coverage, never a metric.
 //
@@ -124,6 +126,14 @@ export const gpxActivityTrendDaySchema = z
     path: ['elapsedDuration'],
   });
 
+export const tcxActivityTrendDaySchema = z
+  .strictObject({ ...dayBase, reportedDuration: activityTrendDurationSchema })
+  .refine(withinCount, { message: 'more distances than items', path: ['distance'] })
+  .refine((day) => day.reportedDuration.withValue === day.count, {
+    message: 'every TCX import records its reported duration',
+    path: ['reportedDuration'],
+  });
+
 export const recordedRunTrendDaySchema = z
   .strictObject({ ...dayBase, observedDuration: activityTrendDurationSchema, summaries: activityTrendSummaryStatesSchema })
   .refine((day) => day.summaries.current + day.summaries.pending + day.summaries.stale === day.count, {
@@ -148,6 +158,7 @@ const summaryBase = {
 
 export const manualActivityTrendsSummarySchema = z.strictObject({ ...summaryBase, enteredDuration: rangeDuration });
 export const gpxActivityTrendsSummarySchema = z.strictObject({ ...summaryBase, elapsedDuration: rangeDuration });
+export const tcxActivityTrendsSummarySchema = z.strictObject({ ...summaryBase, reportedDuration: rangeDuration });
 export const recordedRunTrendsSummarySchema = z.strictObject({
   ...summaryBase,
   observedDuration: rangeDuration,
@@ -156,10 +167,12 @@ export const recordedRunTrendsSummarySchema = z.strictObject({
 
 export type ManualActivityTrendDay = z.infer<typeof manualActivityTrendDaySchema>;
 export type GpxActivityTrendDay = z.infer<typeof gpxActivityTrendDaySchema>;
+export type TcxActivityTrendDay = z.infer<typeof tcxActivityTrendDaySchema>;
 export type RecordedRunTrendDay = z.infer<typeof recordedRunTrendDaySchema>;
-export type ActivityTrendDay = ManualActivityTrendDay | GpxActivityTrendDay | RecordedRunTrendDay;
+export type ActivityTrendDay = ManualActivityTrendDay | GpxActivityTrendDay | TcxActivityTrendDay | RecordedRunTrendDay;
 export type ManualActivityTrendsSummary = z.infer<typeof manualActivityTrendsSummarySchema>;
 export type GpxActivityTrendsSummary = z.infer<typeof gpxActivityTrendsSummarySchema>;
+export type TcxActivityTrendsSummary = z.infer<typeof tcxActivityTrendsSummarySchema>;
 export type RecordedRunTrendsSummary = z.infer<typeof recordedRunTrendsSummarySchema>;
 
 type DurationOf = { withValue: number; totalS: number | null };
@@ -193,6 +206,10 @@ export function summarizeManualActivityTrendDays(days: readonly ManualActivityTr
 
 export function summarizeGpxActivityTrendDays(days: readonly GpxActivityTrendDay[]): GpxActivityTrendsSummary {
   return { ...summaryBaseOf(days), elapsedDuration: summarizeMetric(days, (day) => day.elapsedDuration) };
+}
+
+export function summarizeTcxActivityTrendDays(days: readonly TcxActivityTrendDay[]): TcxActivityTrendsSummary {
+  return { ...summaryBaseOf(days), reportedDuration: summarizeMetric(days, (day) => day.reportedDuration) };
 }
 
 export function summarizeRecordedRunTrendDays(days: readonly RecordedRunTrendDay[]): RecordedRunTrendsSummary {
@@ -503,7 +520,7 @@ export const activityTrendsComparisonPeriodSchema = z
     { message: 'a period is the 28 dates ending on endDate, cut only by 2000-01-01, with an ordered interval', path: ['startDate'] },
   );
 
-type RangeSummary = ManualActivityTrendsSummary | GpxActivityTrendsSummary | RecordedRunTrendsSummary;
+type RangeSummary = ManualActivityTrendsSummary | GpxActivityTrendsSummary | TcxActivityTrendsSummary | RecordedRunTrendsSummary;
 
 /** A range summary that is internally consistent (the previous period has no days to recompute it from). */
 function consistentSummary(summary: RangeSummary, days: number): boolean {
@@ -525,8 +542,13 @@ function consistentSummary(summary: RangeSummary, days: number): boolean {
   );
 }
 
+// Every source's duration is named explicitly: no source falls through to another's (ADR-0091 audit).
 function durationOfSummary(summary: RangeSummary): { daysWithValue: number; totalS: number | null; withValue: number } {
-  return 'enteredDuration' in summary ? summary.enteredDuration : 'elapsedDuration' in summary ? summary.elapsedDuration : summary.observedDuration;
+  if ('enteredDuration' in summary) return summary.enteredDuration;
+  if ('elapsedDuration' in summary) return summary.elapsedDuration;
+  if ('reportedDuration' in summary) return summary.reportedDuration;
+  if ('observedDuration' in summary) return summary.observedDuration;
+  throw new Error('A trends summary without a named duration');
 }
 
 const sideOf = (summary: RangeSummary, metric: 'distance' | 'duration'): ActivityTrendsComparisonSide => ({
@@ -633,6 +655,14 @@ export const gpxActivityTrendsComparisonSchema = z.strictObject({
     .refine(consistentPrevious, previousConsistent),
   metrics: z.strictObject({ count: activityTrendsCountComparisonSchema, elapsedDuration: activityTrendsMetricComparisonSchema, distance: activityTrendsMetricComparisonSchema }),
 });
+export const tcxActivityTrendsComparisonSchema = z.strictObject({
+  ...comparisonPeriodsBase,
+  previous: z
+    .strictObject({ ...previousShape, summary: tcxActivityTrendsSummarySchema.nullable() })
+    .refine(existsExactly, previousExists)
+    .refine(consistentPrevious, previousConsistent),
+  metrics: z.strictObject({ count: activityTrendsCountComparisonSchema, reportedDuration: activityTrendsMetricComparisonSchema, distance: activityTrendsMetricComparisonSchema }),
+});
 export const recordedRunTrendsComparisonSchema = z.strictObject({
   ...comparisonPeriodsBase,
   previous: z
@@ -644,14 +674,38 @@ export const recordedRunTrendsComparisonSchema = z.strictObject({
 
 export type ManualActivityTrendsComparison = z.infer<typeof manualActivityTrendsComparisonSchema>;
 export type GpxActivityTrendsComparison = z.infer<typeof gpxActivityTrendsComparisonSchema>;
+export type TcxActivityTrendsComparison = z.infer<typeof tcxActivityTrendsComparisonSchema>;
 export type RecordedRunTrendsComparison = z.infer<typeof recordedRunTrendsComparisonSchema>;
-export type ActivityTrendsComparison = ManualActivityTrendsComparison | GpxActivityTrendsComparison | RecordedRunTrendsComparison;
+export type ActivityTrendsComparison =
+  | ManualActivityTrendsComparison
+  | GpxActivityTrendsComparison
+  | TcxActivityTrendsComparison
+  | RecordedRunTrendsComparison;
 export type ActivityTrendsChange = z.infer<typeof activityTrendsChangeSchema>;
 export type ActivityTrendsComparisonPeriod = z.infer<typeof activityTrendsComparisonPeriodSchema>;
 
-/** The source's duration name, which a comparison's metrics keep (ADR-0087's names). */
-export function activityTrendsDurationKeyOf(source: z.infer<typeof activityHistorySourceSchema>): 'elapsedDuration' | 'enteredDuration' | 'observedDuration' {
-  return source === 'recorded_run' ? 'observedDuration' : source === 'gpx' ? 'elapsedDuration' : 'enteredDuration';
+/** The name each source gives its duration (ADR-0087/0091). */
+export type ActivityTrendsDurationKey = 'elapsedDuration' | 'enteredDuration' | 'observedDuration' | 'reportedDuration';
+
+/**
+ * The source's duration name, which its days, summaries and a comparison's metrics keep (ADR-0087's names, ADR-0091's
+ * `reportedDuration`). Exhaustive: a new source fails to compile here instead of borrowing another source's name.
+ */
+export function activityTrendsDurationKeyOf(source: z.infer<typeof activityHistorySourceSchema>): ActivityTrendsDurationKey {
+  switch (source) {
+    case 'manual':
+      return 'enteredDuration';
+    case 'gpx':
+      return 'elapsedDuration';
+    case 'tcx':
+      return 'reportedDuration';
+    case 'recorded_run':
+      return 'observedDuration';
+    default: {
+      const unknown: never = source;
+      throw new Error(`Unknown activity trends source: ${String(unknown)}`);
+    }
+  }
 }
 
 /**
@@ -711,7 +765,7 @@ interface ComparedTrends {
  * the range; its previous period is the one this contract defines for the end date, ends where the range starts, and its
  * metrics and reasons are the ones activityTrendsComparisonFiguresOf gives for these summaries.
  */
-function comparisonAgrees(trends: ComparedTrends, durationKey: 'elapsedDuration' | 'enteredDuration' | 'observedDuration'): boolean {
+function comparisonAgrees(trends: ComparedTrends, durationKey: ActivityTrendsDurationKey): boolean {
   const { comparison, range } = trends;
   if (comparison === undefined || trends.applied.compare === undefined) return comparison === undefined && trends.applied.compare === undefined;
   const current = comparison.current;
@@ -782,6 +836,20 @@ export const gpxActivityTrendsSchema = z
   .refine((trends) => canonical(trends.summary) === canonical(summarizeGpxActivityTrendDays(trends.days)), summaryMessage)
   .refine((trends) => comparisonAgrees(trends, 'elapsedDuration'), comparisonMessage);
 
+export const tcxActivityTrendsSchema = z
+  .strictObject({
+    source: z.literal('tcx'),
+    applied: appliedOf(z.literal('tcx'), activityTypeSchema),
+    range: activityTrendsRangeSchema,
+    days: z.array(tcxActivityTrendDaySchema).min(1).max(DAILY_TRENDS_RANGE_DAYS),
+    summary: tcxActivityTrendsSummarySchema,
+    comparison: tcxActivityTrendsComparisonSchema.optional(),
+    provenance: activityTrendsProvenanceSchema,
+  })
+  .refine((trends) => daysTileRange(trends.range, trends.days), daysMessage)
+  .refine((trends) => canonical(trends.summary) === canonical(summarizeTcxActivityTrendDays(trends.days)), summaryMessage)
+  .refine((trends) => comparisonAgrees(trends, 'reportedDuration'), comparisonMessage);
+
 export const recordedRunTrendsSchema = z
   .strictObject({
     source: z.literal('recorded_run'),
@@ -797,12 +865,18 @@ export const recordedRunTrendsSchema = z
   .refine((trends) => comparisonAgrees(trends, 'observedDuration'), comparisonMessage);
 
 /** The answer for one source: `source` (also echoed in `applied`) says which day and summary shape it carries. */
-export const activityTrendsSchema = z.discriminatedUnion('source', [manualActivityTrendsSchema, gpxActivityTrendsSchema, recordedRunTrendsSchema]);
+export const activityTrendsSchema = z.discriminatedUnion('source', [
+  manualActivityTrendsSchema,
+  gpxActivityTrendsSchema,
+  tcxActivityTrendsSchema,
+  recordedRunTrendsSchema,
+]);
 
 export type ActivityTrendsQuery = z.infer<typeof activityTrendsQuerySchema>;
 export type ActivityTrendsSource = z.infer<typeof activityHistorySourceSchema>;
 export type ActivityTrends = z.infer<typeof activityTrendsSchema>;
 export type ManualActivityTrends = z.infer<typeof manualActivityTrendsSchema>;
 export type GpxActivityTrends = z.infer<typeof gpxActivityTrendsSchema>;
+export type TcxActivityTrends = z.infer<typeof tcxActivityTrendsSchema>;
 export type RecordedRunTrends = z.infer<typeof recordedRunTrendsSchema>;
 export type ActivityTrendsRange = z.infer<typeof activityTrendsRangeSchema>;

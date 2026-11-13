@@ -12,13 +12,15 @@ import { gpsQualitySchema } from './http.js';
 import { cursorSchema, ianaTimeZoneSchema, timestampSchema, uuidSchema } from './primitives.js';
 
 // The unified activity history (ADR-0087): one chronological, read-only list of the signed-in person's own manual
-// activities, GPX-imported activities and finished recorded (GPS) runs. It is read from the existing tables on every
+// activities, GPX- and TCX-imported activities and finished recorded (GPS) runs. It is read from the existing tables on every
 // request and never stored. Owner-only: no request carries an owner, and a run another person shared never appears.
 //
-// Each item says where it came from (`source`), and each source names its duration for what it is, so the three
+// Each item says where it came from (`source`), and each source names its duration for what it is, so the four
 // cannot be confused or added together by accident:
 // - `manual`: `enteredDurationS`, what the person typed;
 // - `gpx`: `elapsedDurationS`, first to last point of the file, pauses included (ADR-0086);
+// - `tcx`: `reportedDurationS`, the sum of the laps' reported total times, rounded once (ADR-0091): neither elapsed nor
+//   moving time;
 // - `recorded_run`: `observedDurationS`, the sum of accepted GPS edges, from a summary current for the run's data
 //   (ADR-0013, ADR-0056), or no metric at all when that summary is missing or stale.
 //
@@ -26,8 +28,10 @@ import { cursorSchema, ianaTimeZoneSchema, timestampSchema, uuidSchema } from '.
 // - `activity-history-1`: ADR-0087.
 // - `activity-history-2`: ADR-0088 adds the optional local calendar day filter (`localDate` with `timeZone`) and echoes
 //   it, with its UTC interval, as `applied.day` (null without the filter). Every item keeps its meaning.
-export const ACTIVITY_HISTORY_VERSION = 'activity-history-2';
-export const ACTIVITY_HISTORY_SOURCES = ['manual', 'gpx', 'recorded_run'] as const;
+// - `activity-history-3`: ADR-0091 adds TCX imports: items with `source: tcx` and `reportedDurationS`, and the `tcx` source
+//   filter. Every earlier item keeps its meaning; a client that knows only version 2 does not know the new item shape.
+export const ACTIVITY_HISTORY_VERSION = 'activity-history-3';
+export const ACTIVITY_HISTORY_SOURCES = ['manual', 'gpx', 'tcx', 'recorded_run'] as const;
 export const ACTIVITY_HISTORY_PAGE_MAX = 50;
 export const ACTIVITY_HISTORY_PAGE_DEFAULT = 20;
 
@@ -101,6 +105,17 @@ export const gpxHistoryItemSchema = z.strictObject({
   type: activityTypeSchema,
 });
 
+export const tcxHistoryItemSchema = z.strictObject({
+  activityId: uuidSchema,
+  // The sum of the laps' DistanceMeters, rounded once to the metre at import (tcx-summary-1); every TCX import has one.
+  distanceM: activityDistanceSchema,
+  // The sum of the laps' TotalTimeSeconds, rounded once to the second: what the laps report, not elapsed or moving time.
+  reportedDurationS: activityDurationSchema,
+  source: z.literal('tcx'),
+  startedAt: timestampSchema,
+  type: activityTypeSchema,
+});
+
 // A published summary whose source revision equals the run's current data revision (the check of ADR-0015 used by
 // run search, run details and Today). Only then are metrics returned.
 export const currentRunSummarySchema = z.strictObject({
@@ -130,6 +145,7 @@ export const recordedRunHistoryItemSchema = z.strictObject({
 export const activityHistoryItemSchema = z.discriminatedUnion('source', [
   manualHistoryItemSchema,
   gpxHistoryItemSchema,
+  tcxHistoryItemSchema,
   recordedRunHistoryItemSchema,
 ]);
 
@@ -177,6 +193,7 @@ export type ActivityHistoryQuery = z.infer<typeof activityHistoryQuerySchema>;
 export type ActivityHistoryItem = z.infer<typeof activityHistoryItemSchema>;
 export type ManualHistoryItem = z.infer<typeof manualHistoryItemSchema>;
 export type GpxHistoryItem = z.infer<typeof gpxHistoryItemSchema>;
+export type TcxHistoryItem = z.infer<typeof tcxHistoryItemSchema>;
 export type RecordedRunHistoryItem = z.infer<typeof recordedRunHistoryItemSchema>;
 export type ActivityHistoryDay = z.infer<typeof activityHistoryDaySchema>;
 export type ActivityHistoryResponse = z.infer<typeof activityHistoryResponseSchema>;

@@ -21,6 +21,7 @@ const overview: DailyOverview = {
   },
   gpsRuns: { count: 2, currentDistanceM: 5012, withCurrentDistance: 1, withoutCurrentDistance: 1 },
   importedActivities: { byType: [{ count: 1, elapsedDurationS: 3_605, type: 'ride' }], count: 1, elapsedDurationS: 3_605, source: 'gpx' },
+  tcxImportedActivities: { byType: [{ count: 1, reportedDurationS: 1_800, type: 'swim' }], count: 1, reportedDurationS: 1_800, source: 'tcx' },
   manualActivities: {
     byType: [
       { count: 2, enteredDurationS: 5400, type: 'run' },
@@ -52,6 +53,7 @@ const empty: DailyOverview = {
   checkIn: { recorded: false },
   gpsRuns: { count: 0, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 0 },
   importedActivities: { byType: [], count: 0, elapsedDurationS: 0, source: 'gpx' },
+  tcxImportedActivities: { byType: [], count: 0, reportedDurationS: 0, source: 'tcx' },
   manualActivities: { byType: [], count: 0, enteredDurationS: 0 },
   meals: {
     carbohydrateG: { recordedEntries: 0, total: null },
@@ -120,7 +122,7 @@ describe('daily overview contract', () => {
   });
 
   it('gives each meal metric its own coverage: a total exactly when an entry records it, recorded zeros as 0, one decimal', () => {
-    expect(DAILY_OVERVIEW_VERSION).toBe('daily-overview-3');
+    expect(DAILY_OVERVIEW_VERSION).toBe('daily-overview-4');
     const meals = overview.meals;
     expect(dailyOverviewSchema.parse(overview).meals).toEqual(meals);
     expect(dailyOverviewSchema.parse({ ...empty, meals: { ...empty.meals, count: 1 } }).meals.count).toBe(1);
@@ -169,7 +171,25 @@ describe('daily overview contract', () => {
     ).toBe(false);
   });
 
+  it('keeps TCX imports in their own consistent part with their reported duration (ADR-0091)', () => {
+    const tcx = (patch: Record<string, unknown>) =>
+      dailyOverviewSchema.safeParse({ ...overview, tcxImportedActivities: { ...overview.tcxImportedActivities, ...patch } }).success;
+    expect(tcx({})).toBe(true);
+    expect(tcx({ count: 2 })).toBe(false);
+    expect(tcx({ reportedDurationS: 1 })).toBe(false);
+    expect(tcx({ source: 'gpx' })).toBe(false);
+    // A TCX duration is never an elapsed duration.
+    expect(tcx({ byType: [{ count: 1, elapsedDurationS: 1_800, type: 'swim' }] })).toBe(false);
+    expect(
+      tcx({ byType: [{ count: 1, reportedDurationS: 5, type: 'swim' }, { count: 1, reportedDurationS: 5, type: 'run' }], count: 2, reportedDurationS: 10 }),
+    ).toBe(false);
+    const withoutTcx: Partial<typeof overview> = { ...overview };
+    delete withoutTcx.tcxImportedActivities;
+    expect(dailyOverviewSchema.safeParse(withoutTcx).success).toBe(false);
+  });
+
   it('calls a day empty only when nothing at all is recorded', () => {
+    expect(isEmptyDailyOverview({ ...empty, tcxImportedActivities: overview.tcxImportedActivities })).toBe(false);
     expect(isEmptyDailyOverview(empty)).toBe(true);
     expect(isEmptyDailyOverview({ ...empty, checkIn: overview.checkIn })).toBe(false);
     expect(isEmptyDailyOverview({ ...empty, movement: { activeEnergyKcal: null, recorded: true, source: 'manual', steps: 0, timeZone: 'UTC' } })).toBe(false);
