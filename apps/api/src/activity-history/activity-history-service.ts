@@ -42,8 +42,8 @@ export interface ActivityHistoryServiceOptions {
 }
 
 // The two entity kinds, ranked for the total order. At an equal start a recorded run (1) comes before an activity (0);
-// the rank, not the id, separates an activity and a run that share an id. Manual and GPX rows are one kind: they live in
-// one table whose primary key makes the id unique within the organization.
+// the rank, not the id, separates an activity and a run that share an id. Manual, GPX and TCX rows are one kind: they
+// live in one table whose primary key makes the id unique within the organization.
 const KIND_RANK = { activity: 0, run: 1 } as const;
 type Kind = keyof typeof KIND_RANK;
 
@@ -66,7 +66,7 @@ const utcMicroseconds = (column: string) => `to_char(${column} AT TIME ZONE 'UTC
 // substituted: at an equal start an activity (rank 0) follows a run cursor ($6 = 1) or a lower id; a run (rank 1) follows
 // only a run cursor with a higher id. `started_at <= $5` keeps it an index range.
 //
-// Filters: an activity row matches a source filter equal to its stored, server-owned source ('manual' or 'gpx'), so
+// Filters: an activity row matches a source filter equal to its stored, server-owned source ('manual', 'gpx' or 'tcx'), so
 // 'recorded_run' excludes every activity; a run matches only 'recorded_run'. A recorded run's type is 'run'.
 //
 // Run metrics come only from a summary whose source revision equals the run's current data revision (ADR-0015; the
@@ -148,7 +148,7 @@ export interface ActivityHistoryRow {
   observed_duration_s: number | null;
   quality_stats: unknown;
   rpe: number | null;
-  source: 'gpx' | 'manual' | 'recorded_run';
+  source: 'gpx' | 'manual' | 'recorded_run' | 'tcx';
   started_at_us: string;
   summary_state: 'current' | 'pending' | 'stale' | null;
   type: string;
@@ -169,48 +169,66 @@ function required<Value>(value: Value | null, column: string): Value {
   return value;
 }
 
+// Each source maps to its own item shape and duration name. The switch is exhaustive (ADR-0091 audit): a source the code
+// does not know is an error, never mapped as another source.
 export function mapActivityHistoryRow(row: ActivityHistoryRow): ActivityHistoryItem {
   const startedAt = transportTimestamp(row.started_at_us);
-  if (row.source === 'manual') {
-    return {
-      activityId: row.entry_id,
-      distanceM: row.distance_m,
-      enteredDurationS: required(row.duration_s, 'duration'),
-      notes: row.notes,
-      rpe: row.rpe,
-      source: 'manual',
-      startedAt,
-      type: row.type,
-    } as ActivityHistoryItem;
+  const source = row.source;
+  switch (source) {
+    case 'manual':
+      return {
+        activityId: row.entry_id,
+        distanceM: row.distance_m,
+        enteredDurationS: required(row.duration_s, 'duration'),
+        notes: row.notes,
+        rpe: row.rpe,
+        source: 'manual',
+        startedAt,
+        type: row.type,
+      } as ActivityHistoryItem;
+    case 'gpx':
+      return {
+        activityId: row.entry_id,
+        distanceM: row.distance_m,
+        elapsedDurationS: required(row.duration_s, 'duration'),
+        source: 'gpx',
+        startedAt,
+        type: row.type,
+      } as ActivityHistoryItem;
+    case 'tcx':
+      return {
+        activityId: row.entry_id,
+        distanceM: required(row.distance_m, 'distance'),
+        reportedDurationS: required(row.duration_s, 'duration'),
+        source: 'tcx',
+        startedAt,
+        type: row.type,
+      } as ActivityHistoryItem;
+    case 'recorded_run': {
+      const state = required(row.summary_state, 'summary state');
+      return {
+        captureSource: null,
+        finishedAt: transportTimestamp(required(row.finished_at_us, 'finish time')),
+        runId: row.entry_id,
+        source: 'recorded_run',
+        startedAt,
+        summary:
+          state === 'current'
+            ? {
+                distanceM: required(row.distance_m, 'distance'),
+                gpsQuality: classifyGpsQuality(qualityStatsSchema.parse(row.quality_stats)),
+                observedDurationS: required(row.observed_duration_s, 'observed duration'),
+                state,
+              }
+            : { state },
+        type: 'run',
+      };
+    }
+    default: {
+      const unknown: never = source;
+      throw new Error(`The activity history statement returned an unknown source: ${String(unknown)}`);
+    }
   }
-  if (row.source === 'gpx') {
-    return {
-      activityId: row.entry_id,
-      distanceM: row.distance_m,
-      elapsedDurationS: required(row.duration_s, 'duration'),
-      source: 'gpx',
-      startedAt,
-      type: row.type,
-    } as ActivityHistoryItem;
-  }
-  const state = required(row.summary_state, 'summary state');
-  return {
-    captureSource: null,
-    finishedAt: transportTimestamp(required(row.finished_at_us, 'finish time')),
-    runId: row.entry_id,
-    source: 'recorded_run',
-    startedAt,
-    summary:
-      state === 'current'
-        ? {
-            distanceM: required(row.distance_m, 'distance'),
-            gpsQuality: classifyGpsQuality(qualityStatsSchema.parse(row.quality_stats)),
-            observedDurationS: required(row.observed_duration_s, 'observed duration'),
-            state,
-          }
-        : { state },
-    type: 'run',
-  };
 }
 
 const kindOfRank = (rank: number): Kind => (rank === KIND_RANK.run ? 'run' : 'activity');

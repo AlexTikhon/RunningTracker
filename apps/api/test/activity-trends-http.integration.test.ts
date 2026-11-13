@@ -627,7 +627,7 @@ describe('activity trends HTTP API', () => {
       );
     const metricsOf = (trends: ActivityTrends) => {
       const metrics = trends.comparison!.metrics;
-      const duration = 'enteredDuration' in metrics ? metrics.enteredDuration : 'elapsedDuration' in metrics ? metrics.elapsedDuration : metrics.observedDuration;
+      const duration = 'enteredDuration' in metrics ? metrics.enteredDuration : 'elapsedDuration' in metrics ? metrics.elapsedDuration : 'reportedDuration' in metrics ? metrics.reportedDuration : metrics.observedDuration;
       return { count: metrics.count, distance: metrics.distance, duration };
     };
     const previousOf = (trends: ActivityTrends) => trends.comparison!.previous.summary!;

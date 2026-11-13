@@ -20,6 +20,9 @@ import {
   type ManualActivityTrendsSummary,
   type RecordedRunTrendDay,
   type RecordedRunTrendsSummary,
+  type ActivityTrendsDurationKey,
+  type TcxActivityTrendDay,
+  type TcxActivityTrendsSummary,
 } from '@running-tracker/contracts';
 import type { Pool } from 'pg';
 
@@ -65,10 +68,11 @@ const halfUp = (sum: string) => `(floor(${sum}) + CASE WHEN ${sum} - floor(${sum
 
 // $1 organization, $2 owner, $3 the start of every date of the range (ascending bucket lower bounds; a date the zone
 // skipped repeats the next date's start), $4 start of the range (inclusive), $5 start of the date after the range
-// (exclusive), $6 source ('manual' or 'gpx'), $7 activity type.
+// (exclusive), $6 source ('manual', 'gpx' or 'tcx'), $7 activity type.
 //
 // `daily`: one row per date with at least one item: how many started, the sum of their stored durations (every activity
-// has one: entered for a manual entry, elapsed for a GPX import), how many record a distance and the sum over exactly those
+// has one: entered for a manual entry, elapsed for a GPX import, reported for a TCX import), how many record a distance and
+// the sum over exactly those
 // (count(col) and sum(col) skip NULL, so a missing distance adds nothing and a recorded 0 counts). The range predicate
 // together with the owner predicates is a range of activities_owner_started_idx (org_id, user_id, started_at DESC, id
 // DESC); source and type are filters on it. No note, effort, id or single row is selected.
@@ -300,7 +304,7 @@ interface GenericSummary {
   duration: { daysWithValue: number; totalS: number | null; withValue: number };
 }
 
-/** Manual or GPX dates and the range, every figure as PostgreSQL returned it. */
+/** Manual, GPX or TCX dates and the range, every figure as PostgreSQL returned it. */
 export function manualOrGpxTrendsOf(
   interval: ActivityTrendsInterval,
   rows: readonly ActivityTrendsActivityRow[],
@@ -436,16 +440,53 @@ function assembleActivityTrends(input: {
   if (!('activities' in input.rows)) throw new Error('Activity trends need the activity statement');
   const source = query.source;
   const generic = manualOrGpxTrendsOf(interval, input.rows.activities);
-  const days = generic.days.map(({ duration, ...day }) => ({ ...day, [durationKeyOf(source)]: duration })) as ManualActivityTrendDay[] | GpxActivityTrendDay[];
+  const days = generic.days.map(({ duration, ...day }) => ({ ...day, [durationKeyOf(source)]: duration })) as
+    | ManualActivityTrendDay[]
+    | GpxActivityTrendDay[]
+    | TcxActivityTrendDay[];
   return { ...common, days, source, summary: namedSummary(source, generic.summary) };
 }
 
-const durationKeyOf = (source: 'gpx' | 'manual') => (source === 'gpx' ? 'elapsedDuration' : 'enteredDuration');
+/** The sources whose items live in `activities` and share the activity statements. */
+type ActivityTableSource = 'gpx' | 'manual' | 'tcx';
 
-/** A manual or GPX summary under its source's duration name. */
-function namedSummary(source: 'gpx' | 'manual', generic: GenericSummary): ManualActivityTrendsSummary | GpxActivityTrendsSummary {
+/**
+ * The duration name of a source of the activities table (ADR-0087/0091). Exhaustive: a TCX import's reported duration is
+ * never named as a GPX elapsed time or a manual entered duration, and an unknown source is an error.
+ */
+function durationKeyOf(source: ActivityTableSource): Exclude<ActivityTrendsDurationKey, 'observedDuration'> {
+  switch (source) {
+    case 'manual':
+      return 'enteredDuration';
+    case 'gpx':
+      return 'elapsedDuration';
+    case 'tcx':
+      return 'reportedDuration';
+    default: {
+      const unknown: never = source;
+      throw new Error(`Unknown activity source: ${String(unknown)}`);
+    }
+  }
+}
+
+/** A manual, GPX or TCX summary under its source's duration name. */
+function namedSummary(
+  source: ActivityTableSource,
+  generic: GenericSummary,
+): ManualActivityTrendsSummary | GpxActivityTrendsSummary | TcxActivityTrendsSummary {
   const { duration, ...base } = generic;
-  return source === 'gpx' ? { ...base, elapsedDuration: duration } : { ...base, enteredDuration: duration };
+  switch (source) {
+    case 'manual':
+      return { ...base, enteredDuration: duration };
+    case 'gpx':
+      return { ...base, elapsedDuration: duration };
+    case 'tcx':
+      return { ...base, reportedDuration: duration };
+    default: {
+      const unknown: never = source;
+      throw new Error(`Unknown activity source: ${String(unknown)}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -711,7 +752,7 @@ function changeFromSql(reasons: ActivityTrendsComparisonReason[], absolute: numb
 function comparisonFrom(input: {
   change: PercentColumns & { count: number | null; distance: string | null; duration: string | null };
   current: GenericSummary & { summaries?: { pending: number; stale: number } };
-  durationKey: 'elapsedDuration' | 'enteredDuration' | 'observedDuration';
+  durationKey: ActivityTrendsDurationKey;
   includesToday: boolean;
   previous: (GenericSummary & { summaries?: { pending: number; stale: number } }) | null;
   previousSummary: unknown;

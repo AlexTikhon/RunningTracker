@@ -1,4 +1,4 @@
-import { DAILY_OVERVIEW_VERSION } from '@running-tracker/contracts';
+import { DAILY_OVERVIEW_VERSION, isEmptyDailyOverview } from '@running-tracker/contracts';
 import { describe, expect, it } from 'vitest';
 
 import { buildDailyOverview, localDayInterval } from './daily-overview-service.js';
@@ -45,7 +45,7 @@ describe('localDayInterval: the half-open interval of a local date', () => {
 });
 
 const emptyRecords = { check_in: null, movement: null };
-const emptyStarted = { activities: [], gpx_activities: [], gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 } };
+const emptyStarted = { activities: [], gpx_activities: [], tcx_activities: [], gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 } };
 const noMetric = { recorded: 0, total: null };
 const emptyMeals = { carbohydrate_g: noMetric, count: 0, energy_kcal: noMetric, fat_g: noMetric, protein_g: noMetric };
 const base = {
@@ -83,6 +83,7 @@ describe('buildDailyOverview', () => {
         snapshot: 'single_read_only_transaction',
         source: 'computed_by_app',
       },
+      tcxImportedActivities: { byType: [], count: 0, reportedDurationS: 0, source: 'tcx' },
     });
     expect(buildDailyOverview({ ...base, today: '2026-11-09' }).day.inProgress).toBe(false);
   });
@@ -119,6 +120,7 @@ describe('buildDailyOverview', () => {
           { count: 1, enteredDurationS: 600, type: 'walk' },
         ],
         gpx_activities: [],
+        tcx_activities: [],
         gps_runs: { count: 3, currentDistanceM: 5012.4999, withCurrentDistance: 2 },
       },
     });
@@ -144,6 +146,7 @@ describe('buildDailyOverview', () => {
           { count: 1, elapsedDurationS: 5400, type: 'ride' },
           { count: 2, elapsedDurationS: 3700, type: 'run' },
         ],
+        tcx_activities: [],
         gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 },
       },
     });
@@ -157,10 +160,40 @@ describe('buildDailyOverview', () => {
       source: 'gpx',
     });
     expect(overview.manualActivities).toEqual({ byType: [{ count: 1, enteredDurationS: 600, type: 'walk' }], count: 1, enteredDurationS: 600 });
+    expect(overview.tcxImportedActivities).toEqual({ byType: [], count: 0, reportedDurationS: 0, source: 'tcx' });
+  });
+
+  it('keeps TCX imports in their own part with their reported duration, never in the GPX or manual figures (ADR-0091)', () => {
+    const overview = buildDailyOverview({
+      ...base,
+      started: {
+        activities: [],
+        gpx_activities: [{ count: 1, elapsedDurationS: 5400, type: 'ride' }],
+        tcx_activities: [
+          { count: 1, reportedDurationS: 1800, type: 'swim' },
+          { count: 2, reportedDurationS: 4000, type: 'ride' },
+        ],
+        gps_runs: { count: 0, currentDistanceM: null, withCurrentDistance: 0 },
+      },
+    });
+    expect(overview.tcxImportedActivities).toEqual({
+      byType: [
+        { count: 2, reportedDurationS: 4000, type: 'ride' },
+        { count: 1, reportedDurationS: 1800, type: 'swim' },
+      ],
+      count: 3,
+      reportedDurationS: 5800,
+      source: 'tcx',
+    });
+    expect(overview.importedActivities).toEqual({ byType: [{ count: 1, elapsedDurationS: 5400, type: 'ride' }], count: 1, elapsedDurationS: 5400, source: 'gpx' });
+    expect(overview.manualActivities.count).toBe(0);
+    expect(overview.provenance.overviewVersion).toBe('daily-overview-4');
+    // A day with only a TCX import is not empty.
+    expect(isEmptyDailyOverview(overview)).toBe(false);
   });
 
   it('gives no distance when no run has a current summary, never zero', () => {
-    const overview = buildDailyOverview({ ...base, started: { activities: [], gpx_activities: [], gps_runs: { count: 2, currentDistanceM: null, withCurrentDistance: 0 } } });
+    const overview = buildDailyOverview({ ...base, started: { activities: [], gpx_activities: [], tcx_activities: [], gps_runs: { count: 2, currentDistanceM: null, withCurrentDistance: 0 } } });
     expect(overview.gpsRuns).toEqual({ count: 2, currentDistanceM: null, withCurrentDistance: 0, withoutCurrentDistance: 2 });
   });
 

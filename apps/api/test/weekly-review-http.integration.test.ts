@@ -371,7 +371,7 @@ describe('weekly review HTTP API (deterministic, no model)', () => {
       await putMovement(owner, '2026-11-03', { activeEnergyKcal: 412.5, steps: 8042 }).expect(201);
       await putMovement(owner, '2026-11-04', { activeEnergyKcal: 250, steps: null }).expect(201);
       const review = await readReview();
-      expect(review.provenance.reviewVersion).toBe('weekly-review-3');
+      expect(review.provenance.reviewVersion).toBe('weekly-review-4');
       expect(review.movement).toMatchObject({
         activeEnergyKcal: { daysRecorded: 2, recordedTotal: 662.5 },
         daysInWeek: 7,

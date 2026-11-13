@@ -27,7 +27,8 @@ import { localDateOf, startOfLocalDate } from '../runs/run-search-period.js';
 // The statements follow the two attribution rules:
 // - day records: the check-in and the manual movement stored for the calendar date itself (`local_date`), whatever
 //   zone they were saved in. The requested zone plays no part, so a record is never moved to another date.
-// - timestamped sources: manual activities, GPX-imported activities (kept apart, ADR-0086) and finished GPS runs whose
+// - timestamped sources: manual activities, GPX-imported (ADR-0086) and TCX-imported (ADR-0091) activities, each kept
+//   apart, and finished GPS runs whose
 //   start lies in [start of the date, start of the next date) in the requested zone. The bounds are computed from the zone's own rules (startOfLocalDate), so a day is
 //   23 or 25 hours long around a daylight saving change.
 // - meals (ADR-0083): entries logged for the calendar date itself, like a check-in. Their own statement, read last, in
@@ -70,6 +71,7 @@ interface DayRecordsRow {
 interface StartedRow {
   activities: Array<{ count: number; enteredDurationS: number; type: ActivityType }>;
   gpx_activities: Array<{ count: number; elapsedDurationS: number; type: ActivityType }>;
+  tcx_activities: Array<{ count: number; reportedDurationS: number; type: ActivityType }>;
   gps_runs: { count: number; currentDistanceM: number | null; withCurrentDistance: number };
 }
 
@@ -114,7 +116,8 @@ SELECT
 // $1 organization, $2 owner, $3 first instant of the date, $4 first instant of the next date (exclusive). An activity
 // counts with its full stored duration on the date it started, also when it continues past midnight. Manual and
 // GPX-imported activities are grouped separately by their server-owned source (ADR-0086): an import is never counted as
-// a manual entry, and its duration is the elapsed time of the file. A GPS run is the person's own, finished, and has a
+// a manual entry, and its duration is the elapsed time of the file. TCX imports are grouped apart again (ADR-0091): their
+// duration is the reported duration (the laps' total times, rounded once at import). A GPS run is the person's own, finished, and has a
 // distance only from a summary computed for its current data revision; the distance total is the sum over exactly those
 // runs. No point, note, distance of an activity or effort is selected.
 export const dailyOverviewStartedSql = `/* daily-overview:started-in-day */
@@ -137,6 +140,15 @@ SELECT
             WHERE activity.org_id = $1 AND activity.user_id = $2 AND activity.source = 'gpx'
               AND activity.started_at >= $3::timestamptz AND activity.started_at < $4::timestamptz
             GROUP BY activity.type) AS grouped) AS gpx_activities,
+  (SELECT coalesce(json_agg(json_build_object(
+            'type', grouped.type,
+            'count', grouped.count,
+            'reportedDurationS', grouped.reported_duration_s)), '[]'::json)
+     FROM (SELECT activity.type, count(*)::integer AS count, sum(activity.duration_s)::bigint AS reported_duration_s
+             FROM activities AS activity
+            WHERE activity.org_id = $1 AND activity.user_id = $2 AND activity.source = 'tcx'
+              AND activity.started_at >= $3::timestamptz AND activity.started_at < $4::timestamptz
+            GROUP BY activity.type) AS grouped) AS tcx_activities,
   (SELECT json_build_object(
             'count', count(*)::integer,
             'withCurrentDistance', (count(*) FILTER (WHERE summary.source_revision = run.data_revision))::integer,
@@ -197,6 +209,9 @@ export function buildDailyOverview(input: {
   const importedByType = input.started.gpx_activities
     .map((entry) => ({ count: entry.count, elapsedDurationS: Number(entry.elapsedDurationS), type: entry.type }))
     .toSorted((left, right) => ACTIVITY_TYPES.indexOf(left.type) - ACTIVITY_TYPES.indexOf(right.type));
+  const tcxByType = input.started.tcx_activities
+    .map((entry) => ({ count: entry.count, reportedDurationS: Number(entry.reportedDurationS), type: entry.type }))
+    .toSorted((left, right) => ACTIVITY_TYPES.indexOf(left.type) - ACTIVITY_TYPES.indexOf(right.type));
   const gps = input.started.gps_runs;
   return dailyOverviewSchema.parse({
     checkIn: checkIn === null ? { recorded: false } : { recorded: true, ...checkIn },
@@ -232,6 +247,12 @@ export function buildDailyOverview(input: {
       fatG: mealMetric(input.meals.fat_g),
       proteinG: mealMetric(input.meals.protein_g),
       source: 'manual',
+    },
+    tcxImportedActivities: {
+      byType: tcxByType,
+      count: tcxByType.reduce((sum, entry) => sum + entry.count, 0),
+      reportedDurationS: tcxByType.reduce((sum, entry) => sum + entry.reportedDurationS, 0),
+      source: 'tcx',
     },
     movement:
       movement === null

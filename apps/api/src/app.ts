@@ -186,8 +186,9 @@ export function createApp({
   app.use('/api/orgs/:orgId/daily-overview', dailyOverviewNoStore);
   app.use('/api/orgs/:orgId/daily-trends', dailyTrendsNoStore);
   app.use('/api/orgs/:orgId/meals', mealsNoStore);
-  // The global body limit. It reads application/json only; the two GPX upload routes (ADR-0086) read their own, larger
-  // application/gpx+xml body inside the activity router, after the session, Origin and CSRF checks.
+  // The global body limit. It reads application/json only; the GPX (ADR-0086) and TCX (ADR-0091) upload routes read their own,
+  // larger application/gpx+xml or application/vnd.garmin.tcx+xml body inside the activity router, after the session, Origin
+  // and CSRF checks.
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/session', routePrefix('/api/session', createSessionRouter(config, sessions)));
   if (config.OIDC && oidcLoginStore) {

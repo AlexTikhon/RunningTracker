@@ -403,10 +403,13 @@ describe('ADR-0072 activities ACL (migration 0025)', () => {
       ['activities_rpe_range', { rpe: 11 }],
       ['activities_notes_length', { notes: '' }],
       ['activities_notes_length', { notes: 'x'.repeat(1_001) }],
-      ['activities_source_known', { source: 'tcx' }],
+      ['activities_source_known', { source: 'fit' }],
       ['activities_source_known', { source: 'GPX' }],
+      ['activities_source_known', { source: 'TCX' }],
       // Migration 0041 (ADR-0086): a gpx row needs its import attempt's key (and its fingerprint, checked below).
       ['activities_gpx_idempotency_key_present', { source: 'gpx' }],
+      // Migration 0042 (ADR-0091): a tcx row needs its fingerprint (and its key and a distance, checked below).
+      ['activities_import_fingerprint_matches_source', { source: 'tcx' }],
       ['activities_created_at_finite', { created_at: 'infinity' }],
     ] as const)('%s rejects %j', async (constraint, overrides) => {
       await expect(insertRow(overrides)).rejects.toEqual(violates(constraint));
@@ -450,7 +453,7 @@ describe('ADR-0072 activities ACL (migration 0025)', () => {
         await insertImport();
         await expect(insertImport({ id: activityIds.forged, key: 'bf000000-0000-4000-8000-0000000000c2' })).rejects.toMatchObject({
           code: '23505',
-          constraint: 'activities_owner_import_fingerprint_unique',
+          constraint: 'activities_owner_source_import_fingerprint_unique',
         });
         // Another member of the organization, and the same track in another organization, are independent.
         await insertImport({ id: activityIds.forged, userId: ids.userStranger });
@@ -471,22 +474,93 @@ describe('ADR-0072 activities ACL (migration 0025)', () => {
         expect(await storedIds()).toContain(activityIds.inserted);
       });
 
-      it('declares the new constraints exactly', async () => {
+      it('declares the import constraints exactly (migrations 0041 and 0042)', async () => {
         const definitions = await ownerPool.query<{ conname: string; definition: string }>(
           `SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint
            WHERE conrelid = 'public.activities'::regclass
-             AND conname IN ('activities_source_known', 'activities_import_fingerprint_length',
-                             'activities_import_fingerprint_matches_source', 'activities_gpx_idempotency_key_present',
-                             'activities_owner_import_fingerprint_unique')
+             AND (conname LIKE '%import%' OR conname LIKE '%idempotency_key_present' OR conname LIKE 'activities_tcx_%'
+                  OR conname = 'activities_source_known')
            ORDER BY conname`,
         );
         expect(definitions.rows).toEqual([
           { conname: 'activities_gpx_idempotency_key_present', definition: "CHECK (((source <> 'gpx'::text) OR (idempotency_key IS NOT NULL)))" },
           { conname: 'activities_import_fingerprint_length', definition: 'CHECK (((import_fingerprint IS NULL) OR (octet_length(import_fingerprint) = 32)))' },
-          { conname: 'activities_import_fingerprint_matches_source', definition: "CHECK (((source = 'gpx'::text) = (import_fingerprint IS NOT NULL)))" },
-          { conname: 'activities_owner_import_fingerprint_unique', definition: 'UNIQUE (org_id, user_id, import_fingerprint)' },
-          { conname: 'activities_source_known', definition: "CHECK ((source = ANY (ARRAY['manual'::text, 'gpx'::text])))" },
+          {
+            conname: 'activities_import_fingerprint_matches_source',
+            definition: "CHECK (((source = ANY (ARRAY['gpx'::text, 'tcx'::text])) = (import_fingerprint IS NOT NULL)))",
+          },
+          { conname: 'activities_owner_source_import_fingerprint_unique', definition: 'UNIQUE (org_id, user_id, source, import_fingerprint)' },
+          { conname: 'activities_source_known', definition: "CHECK ((source = ANY (ARRAY['manual'::text, 'gpx'::text, 'tcx'::text])))" },
+          { conname: 'activities_tcx_idempotency_key_present', definition: "CHECK (((source <> 'tcx'::text) OR (idempotency_key IS NOT NULL)))" },
+          {
+            conname: 'activities_tcx_summary_only',
+            definition: "CHECK (((source <> 'tcx'::text) OR ((distance_m IS NOT NULL) AND (rpe IS NULL) AND (notes IS NULL))))",
+          },
         ]);
+      });
+    });
+
+    describe('TCX imports (migration 0042, ADR-0091)', () => {
+      const fingerprint = Buffer.alloc(32, 9);
+      const insertTcx = (
+        values: {
+          distance?: number | null;
+          fingerprint?: Buffer | null;
+          id?: string;
+          key?: string | null;
+          notes?: string | null;
+          orgId?: string;
+          rpe?: number | null;
+          source?: string;
+          userId?: string;
+        } = {},
+      ) =>
+        ownerPool.query(
+          `INSERT INTO activities (org_id, id, user_id, type, started_at, duration_s, distance_m, rpe, notes, idempotency_key, source, import_fingerprint, created_at)
+           VALUES ($1, $2, $3, 'swim', $4, 1800, $5, $6, $7, $8, $9, $10, $11)`,
+          [
+            values.orgId ?? ids.orgA,
+            values.id ?? activityIds.inserted,
+            values.userId ?? ids.userOrgA,
+            startedAt,
+            values.distance === undefined ? 1500 : values.distance,
+            values.rpe ?? null,
+            values.notes ?? null,
+            values.key === undefined ? 'bf000000-0000-4000-8000-0000000000d1' : values.key,
+            values.source ?? 'tcx',
+            values.fingerprint === undefined ? fingerprint : values.fingerprint,
+            createdAt,
+          ],
+        );
+      const other = { id: activityIds.forged, key: 'bf000000-0000-4000-8000-0000000000d2' };
+
+      it('accepts a summary-only tcx row with a fingerprint and a key, and refuses every other shape', async () => {
+        await insertTcx();
+        await expect(insertTcx({ ...other, fingerprint: null })).rejects.toEqual(violates('activities_import_fingerprint_matches_source'));
+        await expect(insertTcx({ ...other, key: null })).rejects.toEqual(violates('activities_tcx_idempotency_key_present'));
+        await expect(insertTcx({ ...other, distance: null })).rejects.toEqual(violates('activities_tcx_summary_only'));
+        await expect(insertTcx({ ...other, rpe: 5 })).rejects.toEqual(violates('activities_tcx_summary_only'));
+        await expect(insertTcx({ ...other, notes: 'x' })).rejects.toEqual(violates('activities_tcx_summary_only'));
+      });
+
+      it('makes a fingerprint unique per owner, organization and source, never across GPX and TCX', async () => {
+        await insertTcx();
+        await expect(insertTcx(other)).rejects.toMatchObject({ code: '23505', constraint: 'activities_owner_source_import_fingerprint_unique' });
+        // The same 32 bytes on a GPX row of the same owner is another source: no collision (the digests are
+        // domain-separated anyway; the constraint makes the per-format scope a database fact).
+        await insertTcx({ ...other, source: 'gpx' });
+        await insertTcx({ id: 'ac000000-0000-4000-8000-0000000000d4', key: 'bf000000-0000-4000-8000-0000000000d4', userId: ids.userStranger });
+        await insertTcx({ id: 'ac000000-0000-4000-8000-0000000000d5', orgId: ids.orgB, userId: ids.userOrgB });
+      });
+
+      it('shows a tcx row only to its owner through the runtime role', async () => {
+        await insertTcx();
+        expect(await readActivities(ids.orgA, ids.userOrgA)).toContain(activityIds.inserted);
+        for (const [orgId, userId] of [[ids.orgA, ids.userStranger], [ids.orgA, ids.userDual], [ids.orgA, ids.userInactive], [ids.orgB, ids.userDual]] as const) {
+          expect(await readActivities(orgId, userId)).not.toContain(activityIds.inserted);
+          await asRuntime(orgId, userId, (client) => client.query('DELETE FROM activities WHERE id = $1', [activityIds.inserted])).catch(() => undefined);
+        }
+        expect(await storedIds()).toContain(activityIds.inserted);
       });
     });
 

@@ -8,6 +8,11 @@ import {
   GPX_UNSUPPORTED,
   gpxImportConfirmQuerySchema,
   organizationPathSchema,
+  TCX_FILE_TOO_LARGE,
+  TCX_IMPORT_CONTENT_TYPE,
+  TCX_IMPORT_MAX_BYTES,
+  TCX_UNSUPPORTED,
+  tcxImportConfirmQuerySchema,
 } from '@running-tracker/contracts';
 import type { Request, RequestHandler, Router } from 'express';
 import express, { Router as createRouter } from 'express';
@@ -32,6 +37,8 @@ import {
 } from './activity-service.js';
 import { GpxImportError, readGpxActivity, type GpxActivity } from './gpx-activity.js';
 import { confirmGpxImport, previewGpxImport } from './gpx-import-service.js';
+import { readTcxActivity, TcxImportError, type TcxActivity } from './tcx-activity.js';
+import { confirmTcxImport, previewTcxImport } from './tcx-import-service.js';
 
 interface ActivityRouterDependencies {
   clock: Clock;
@@ -97,6 +104,52 @@ const boundedGpxBody: RequestHandler = (request, response, next) => {
   });
 };
 
+// The TCX upload routes (ADR-0091) follow exactly the GPX boundary above, with their own media type: session, Origin and
+// CSRF before a byte of the body is read, then the one media type (the GPX type is a 415 here, and the TCX type is a 415
+// on the GPX routes), no content encoding, and at most TCX_IMPORT_MAX_BYTES of body, refused with 413, never truncated.
+const requireTcx: RequestHandler = (request, _response, next) => {
+  if (!request.is(TCX_IMPORT_CONTENT_TYPE)) {
+    next(new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', `Content-Type must be ${TCX_IMPORT_CONTENT_TYPE}`));
+    return;
+  }
+  next();
+};
+
+const rawTcxBody = express.raw({ inflate: false, limit: TCX_IMPORT_MAX_BYTES, type: TCX_IMPORT_CONTENT_TYPE });
+
+const boundedTcxBody: RequestHandler = (request, response, next) => {
+  rawTcxBody(request, response, (error?: unknown) => {
+    const type = (error as { type?: unknown } | undefined)?.type;
+    if (type === 'entity.too.large') {
+      next(
+        new ApiError(413, TCX_FILE_TOO_LARGE, `The TCX file exceeds ${String(TCX_IMPORT_MAX_BYTES)} bytes`, {
+          maxBytes: TCX_IMPORT_MAX_BYTES,
+        }),
+      );
+    } else if (type === 'encoding.unsupported') {
+      next(new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'A TCX upload must not use a Content-Encoding'));
+    } else if (error !== undefined) {
+      next(error);
+    } else if (!Buffer.isBuffer(request.body)) {
+      next(new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', `Content-Type must be ${TCX_IMPORT_CONTENT_TYPE}`));
+    } else {
+      next();
+    }
+  });
+};
+
+function readUploadedTcx(request: Request, clock: Clock): TcxActivity {
+  try {
+    return readTcxActivity(request.body as Buffer, clock.utcNow().getTime());
+  } catch (error) {
+    if (error instanceof TcxImportError) {
+      // The message names a reason and a lap by position only; it never quotes the file.
+      throw new ApiError(422, TCX_UNSUPPORTED, error.message, { reason: error.reason });
+    }
+    throw error;
+  }
+}
+
 function readUploadedGpx(request: Request, clock: Clock): GpxActivity {
   try {
     return readGpxActivity(request.body as Buffer, clock.utcNow().getTime());
@@ -113,7 +166,10 @@ function routeInput(request: Request): { activityId: string; orgId: string } {
   return { activityId: path.activityId.toLowerCase(), orgId: path.orgId.toLowerCase() };
 }
 
-/** Owner-only activities under /api/orgs/:orgId/activities: manual entries (ADR-0072) and GPX imports (ADR-0086). */
+/**
+ * Owner-only activities under /api/orgs/:orgId/activities: manual entries (ADR-0072), GPX imports (ADR-0086) and TCX
+ * imports (ADR-0091).
+ */
 export function createActivityRouter({ clock, config, pool, sessionManager }: ActivityRouterDependencies): Router {
   const router = createRouter({ mergeParams: true });
   const authenticate = createSessionAuthentication(sessionManager);
@@ -201,6 +257,45 @@ export function createActivityRouter({ clock, config, pool, sessionManager }: Ac
       const session = getAuthenticatedSession(request);
       const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
         confirmGpxImport(client, session, orgId, activityId, choice, parsed),
+      );
+      response.status(result.created ? 201 : 200).json(result.activity);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // TCX preview (ADR-0091): parses and summarises the uploaded file and reports an existing TCX import with the same laps.
+  // It writes nothing: the transaction is REPEATABLE READ, READ ONLY. Origin and CSRF are checked before the body is read.
+  router.post('/tcx-preview', ...mutationProtection, requireTcx, boundedTcxBody, async (request, response, next) => {
+    try {
+      const path = parseContract(organizationPathSchema, request.params, 'organization path');
+      parseContract(noQuerySchema, request.query, 'TCX preview query');
+      const parsed = readUploadedTcx(request, clock);
+      const session = getAuthenticatedSession(request);
+      const orgId = path.orgId.toLowerCase();
+      const preview = await withAuthenticatedTenantTransaction(
+        pool,
+        session,
+        orgId,
+        (client) => previewTcxImport(client, session, orgId, parsed),
+        { snapshot: 'read-only snapshot' },
+      );
+      response.status(200).json(preview);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // TCX confirmation (ADR-0091): the body is the same file again, parsed and summarised again here; the query carries only
+  // the person's type choice and the import attempt's idempotency key.
+  router.put('/:activityId/tcx-import', ...mutationProtection, requireTcx, boundedTcxBody, async (request, response, next) => {
+    try {
+      const { activityId, orgId } = routeInput(request);
+      const choice = parseContract(tcxImportConfirmQuerySchema, request.query, 'TCX import query');
+      const parsed = readUploadedTcx(request, clock);
+      const session = getAuthenticatedSession(request);
+      const result = await withAuthenticatedTenantTransaction(pool, session, orgId, (client) =>
+        confirmTcxImport(client, session, orgId, activityId, choice, parsed),
       );
       response.status(result.created ? 201 : 200).json(result.activity);
     } catch (error) {

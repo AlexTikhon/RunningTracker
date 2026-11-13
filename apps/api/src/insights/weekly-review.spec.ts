@@ -20,6 +20,7 @@ import {
   movementOf,
   reviewDetailOf,
   type ImportedActivityRecord,
+  type TcxImportedActivityRecord,
   type MovementDayRecord,
   type ReviewDetail,
 } from './weekly-review.js';
@@ -52,6 +53,7 @@ function review(input: {
   gpsRuns?: GpsRunRecord[];
   imported?: ImportedActivityRecord[];
   movement?: MovementDayRecord[];
+  tcxImported?: TcxImportedActivityRecord[];
   requestTimeZone?: string;
   today?: string;
   weekStart?: string;
@@ -66,6 +68,7 @@ function review(input: {
     detail: reviewDetailOf({ activities, checkIns, window }),
     imported: input.imported ?? [],
     movement: input.movement ?? [],
+    tcxImported: input.tcxImported ?? [],
   });
 }
 
@@ -352,6 +355,7 @@ describe('weekly review: contract, provenance and wording', () => {
       detail: reviewDetailOf({ activities: [], checkIns, window }),
       imported: [{ distanceM: 10_000, durationS: 3_600, type: 'ride' }],
       movement: [moved(day(0), 8042, '412.5'), moved(day(1), 0, null)],
+      tcxImported: [{ distanceM: 12_000, reportedDurationS: 2_400, type: 'swim' }],
     });
     expect(built.movement.daysWithRecord).toBe(2);
     expect(aggregate).toEqual(snapshot);
@@ -363,11 +367,15 @@ describe('weekly review: contract, provenance and wording', () => {
       detail: reviewDetailOf({ activities: [], checkIns, window }),
       imported: [],
       movement: [],
+      tcxImported: [],
     });
     expect([built.facts, built.dataGaps, built.coverage]).toEqual([without.facts, without.dataGaps, without.coverage]);
     expect(JSON.stringify(built.facts)).not.toMatch(/step|energy|kcal|movement/iu);
     // Neither do GPX imports (ADR-0086).
     expect(built.importedActivities.count).toBe(1);
+    // Nor do TCX imports (ADR-0091).
+    expect(built.tcxImportedActivities.count).toBe(1);
+    expect(JSON.stringify([built.facts, built.dataGaps, built.coverage])).not.toMatch(/tcx|swim|reportedDuration/iu);
     expect(JSON.stringify([built.facts, built.dataGaps, built.coverage])).not.toMatch(/gpx|import|ride/iu);
   });
 
@@ -548,6 +556,43 @@ describe('weekly review: manual daily movement (ADR-0079)', () => {
     expect(text(review({ imported: [{ distanceM: 0, durationS: 30, type: 'strength' }] }), 'imported.gpx')).toMatch(
       /^1 activity was imported from GPX files: 1 min elapsed, 0\.0 km\./u,
     );
+  });
+
+  it('describes TCX imports on their own with their reported duration, apart from GPX imports and manual activities (ADR-0091)', () => {
+    const activities = [activity('2026-11-17T06:00:00Z')];
+    const none = review({ activities, imported: [{ distanceM: 5_000, durationS: 1_800, type: 'run' }] });
+    expect(none.tcxImportedActivities).toEqual({ byType: [], count: 0, distanceM: 0, reportedDurationS: 0, source: 'tcx' });
+    expect(codes(none)).not.toContain('imported.tcx');
+
+    const built = review({
+      activities,
+      imported: [{ distanceM: 5_000, durationS: 1_800, type: 'run' }],
+      tcxImported: [
+        { distanceM: 1_500, reportedDurationS: 2_400, type: 'swim' },
+        { distanceM: 30_000, reportedDurationS: 3_600, type: 'ride' },
+        { distanceM: 0, reportedDurationS: 1_200, type: 'ride' },
+      ],
+    });
+    expect(built.tcxImportedActivities).toEqual({
+      byType: [
+        { count: 2, distanceM: 30_000, reportedDurationS: 4_800, type: 'ride' },
+        { count: 1, distanceM: 1_500, reportedDurationS: 2_400, type: 'swim' },
+      ],
+      count: 3,
+      distanceM: 31_500,
+      reportedDurationS: 7_200,
+      source: 'tcx',
+    });
+    // GPX imports, manual figures and the AI-shared parts are unchanged by TCX imports.
+    expect(built.importedActivities).toEqual(none.importedActivities);
+    expect(built.coverage).toEqual(none.coverage);
+    expect(built.facts).toEqual(none.facts);
+    expect(built.dataGaps).toEqual(none.dataGaps);
+    expect(text(built, 'imported.tcx')).toBe(
+      '3 activities were imported from TCX files: 2 h reported by their laps, 31.5 km. Shown on their own, not added to manual activities, GPX imports or GPS runs, and not checked against them.',
+    );
+    expect(codes(built).indexOf('imported.tcx')).toBe(codes(built).indexOf('imported.gpx') + 1);
+    expect(built.provenance.reviewVersion).toBe('weekly-review-4');
   });
 
   it('keeps the in-progress notice first, and movement statements after every other statement', () => {

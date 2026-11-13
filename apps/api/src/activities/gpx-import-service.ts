@@ -25,11 +25,12 @@ import type { GpxActivity } from './gpx-activity.js';
 // server from the uploaded file in this request (gpx-activity.ts); nothing here accepts a total, a time or a source from
 // the client.
 
-// $1 organization, $2 owner, $3 fingerprint. The unique constraint (org_id, user_id, import_fingerprint) guarantees at
-// most one row.
+// $1 organization, $2 owner, $3 fingerprint. The unique constraint (org_id, user_id, source, import_fingerprint,
+// migration 0042) guarantees at most one row. `source = 'gpx'` keeps a GPX lookup from ever naming a TCX import
+// (ADR-0091); the digests are domain-separated as well, so no answer of this statement changed.
 export const fingerprintActivitySql = `SELECT ${activityProjection}, false AS payload_matches
   FROM activities AS activity
-  WHERE activity.org_id = $1 AND activity.user_id = $2 AND activity.import_fingerprint = $3::bytea`;
+  WHERE activity.org_id = $1 AND activity.user_id = $2 AND activity.source = 'gpx' AND activity.import_fingerprint = $3::bytea`;
 
 // What an imported activity is bound to: its source, the person's type choice and the track. The start, duration and
 // distance are functions of the track under one metrics version, so they are not compared separately.

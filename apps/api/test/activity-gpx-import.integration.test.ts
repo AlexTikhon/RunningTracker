@@ -639,7 +639,7 @@ describe('ADR-0086 GPX activity import', () => {
       );
       expect(today.manualActivities).toEqual({ byType: [{ count: 1, enteredDurationS: 1_200, type: 'walk' }], count: 1, enteredDurationS: 1_200 });
       expect(today.importedActivities).toEqual({ byType: [{ count: 1, elapsedDurationS: 370, type: 'ride' }], count: 1, elapsedDurationS: 370, source: 'gpx' });
-      expect(today.provenance.overviewVersion).toBe('daily-overview-3');
+      expect(today.provenance.overviewVersion).toBe('daily-overview-4');
 
       const review = weeklyReviewSchema.parse(
         (await request(app).get(`/api/orgs/${ids.orgA}/weekly-review`).query({ timeZone: ZONE, weekStart: '2026-11-09' }).set('Cookie', owner.cookie).expect(200)).body,

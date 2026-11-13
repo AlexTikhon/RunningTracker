@@ -220,6 +220,7 @@ describe('daily overview HTTP API', () => {
         meals: noMeals,
         movement: { recorded: false },
         provenance: { computedAt: now, overviewVersion: DAILY_OVERVIEW_VERSION, persisted: false, snapshot: 'single_read_only_transaction', source: 'computed_by_app' },
+        tcxImportedActivities: { byType: [], count: 0, reportedDurationS: 0, source: 'tcx' },
       });
       expect((await read('2026-11-20')).day.inProgress).toBe(true);
     });

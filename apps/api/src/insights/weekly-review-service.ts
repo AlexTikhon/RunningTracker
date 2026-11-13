@@ -12,6 +12,7 @@ import {
   kcalTenthsOf,
   reviewDetailOf,
   type ImportedActivityRecord,
+  type TcxImportedActivityRecord,
   type MovementDayRecord,
 } from './weekly-review.js';
 
@@ -113,6 +114,39 @@ export async function readWeekImports(
   });
 }
 
+// $1 organization, $2 owner, $3/$4 the week's range as for GPX imports. TCX imports only (ADR-0091), in their own
+// statement outside the AI-shared source statement, so a TCX import never becomes model input and is never mixed with GPX
+// imports. Every TCX row has a distance (migration 0042). No note, effort, fingerprint or id is selected.
+export const weekTcxImportsSql = `/* weekly-review:tcx-imports */
+SELECT activity.type,
+       activity.duration_s,
+       activity.distance_m
+  FROM activities AS activity
+ WHERE activity.org_id = $1
+   AND activity.user_id = $2
+   AND activity.source = 'tcx'
+   AND activity.started_at >= $3::timestamptz
+   AND activity.started_at < $4::timestamptz
+ ORDER BY activity.started_at, activity.id`;
+
+export async function readWeekTcxImports(
+  client: PoolClient,
+  owner: { orgId: string; userId: string },
+  rangeStart: string,
+  rangeEnd: string,
+): Promise<TcxImportedActivityRecord[]> {
+  const result = await client.query<{ distance_m: number | null; duration_s: number; type: ActivityType }>(weekTcxImportsSql, [
+    owner.orgId,
+    owner.userId,
+    rangeStart,
+    rangeEnd,
+  ]);
+  return result.rows.map((row) => {
+    if (row.distance_m === null) throw new Error('A TCX-imported activity has no distance');
+    return { distanceM: row.distance_m, reportedDurationS: row.duration_s, type: row.type };
+  });
+}
+
 export class WeeklyReviewService {
   readonly #clock: Clock;
   readonly #hooks: WeeklyReviewTestHooks | undefined;
@@ -135,7 +169,7 @@ export class WeeklyReviewService {
       });
     }
     const owner = { orgId, userId: session.userId };
-    const { imported, movement, week } = await withAuthenticatedTenantTransaction(
+    const { imported, movement, tcxImported, week } = await withAuthenticatedTenantTransaction(
       this.#pool,
       session,
       orgId,
@@ -145,12 +179,13 @@ export class WeeklyReviewService {
         return {
           imported: await readWeekImports(client, owner, computed.rangeStart, computed.rangeEnd),
           movement: await readWeekMovement(client, owner, query.weekStart),
+          tcxImported: await readWeekTcxImports(client, owner, computed.rangeStart, computed.rangeEnd),
           week: computed,
         };
       },
       { snapshot: 'read-only snapshot' },
     );
     const detail = reviewDetailOf({ activities: week.sources.activities, checkIns: week.sources.checkIns, window: week.window });
-    return buildWeeklyReview({ aggregate: week.aggregate, computedAt: now.toISOString(), detail, imported, movement });
+    return buildWeeklyReview({ aggregate: week.aggregate, computedAt: now.toISOString(), detail, imported, movement, tcxImported });
   }
 }

@@ -26,6 +26,9 @@ import { systemClock } from '../src/clock.js';
 import { validateEnvironment } from '../src/config/environment.js';
 import { withAuthenticatedTenantTransaction } from '../src/database/authenticated-tenant-transaction.js';
 import { createMeal, deleteMeal } from '../src/meals/meal-service.js';
+import { deleteActivity } from '../src/activities/activity-service.js';
+import { readTcxActivity } from '../src/activities/tcx-activity.js';
+import { confirmTcxImport } from '../src/activities/tcx-import-service.js';
 import { startTestProvider } from './oidc-test-provider.js';
 
 // These tests create, restore into, and drop throwaway *_restore_drill_* databases on the local
@@ -826,6 +829,97 @@ describe.skipIf(!configured)('P12.3/P12.4 backup, restore, deletion and access r
       const second = await operations.reapplyErasures();
       expect(second.outcomes).toEqual({ absent: 5, erased: 0, skipped_different_record: 0 });
       expect(await meals(databases.target.ownerUrl)).toEqual(afterFirst);
+    },
+    drillTimeout,
+  );
+
+  // ADR-0091: a deleted TCX import stays deleted through a real pg_dump/pg_restore of an older backup and the erasure
+  // replay, through the same activity erasure-ledger path as every activity. The imports are written and deleted by the
+  // application's TCX import service as the runtime role, from synthetic files.
+  it(
+    'keeps a TCX import deleted after a real backup and restore, sparing a re-imported version and a surviving import',
+    async () => {
+      const { databases, operations } = await harness('current');
+      await operations.prepare();
+      await operations.createSourceDatabase();
+      await operations.seedScenario();
+
+      const owner = await withAdmin(databases.source.ownerUrl, async (client) => {
+        const result = await client.query<{ org_id: string; user_id: string }>(
+          `SELECT org_id, user_id FROM memberships WHERE role = 'runner' AND active ORDER BY user_id LIMIT 1`,
+        );
+        return result.rows[0]!;
+      });
+      const runtime = new Pool({ connectionString: databases.source.runtimeUrl, max: 1 });
+      runtime.on('error', () => undefined);
+      cleanups.push(() => runtime.end());
+      const session = { userId: owner.user_id };
+      const asOwner = <Result>(work: Parameters<typeof withAuthenticatedTenantTransaction<Result>>[3]) =>
+        withAuthenticatedTenantTransaction(runtime, session, owner.org_id, work);
+      const tcx = (start: string) =>
+        readTcxActivity(
+          Buffer.from(
+            `<?xml version="1.0" encoding="UTF-8"?><TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"><Activities><Activity Sport="Other"><Id>${start}</Id><Lap StartTime="${start}"><TotalTimeSeconds>1800.5</TotalTimeSeconds><DistanceMeters>1500</DistanceMeters></Lap></Activity></Activities></TrainingCenterDatabase>`,
+          ),
+          Date.now(),
+        );
+      const ids = {
+        deleted: 'e2000000-0000-4000-8000-000000000001',
+        reimported: 'e2000000-0000-4000-8000-000000000002',
+        survivor: 'e2000000-0000-4000-8000-000000000003',
+      };
+      const save = (id: string, start: string, key: string) =>
+        asOwner((client) => confirmTcxImport(client, session, owner.org_id, id, { idempotencyKey: key, type: 'swim' }, tcx(start)));
+
+      // Before the backup: K (deleted after it), L (survives), and R imported, deleted and imported again under the same
+      // id, so the backup holds R's newer version and the ledger the erasure of its older one.
+      expect((await save(ids.deleted, '2020-01-20T06:00:00Z', 'f2000000-0000-4000-8000-000000000001')).created).toBe(true);
+      expect((await save(ids.survivor, '2020-01-21T06:00:00Z', 'f2000000-0000-4000-8000-000000000002')).created).toBe(true);
+      await save(ids.reimported, '2020-01-22T06:00:00Z', 'f2000000-0000-4000-8000-000000000003');
+      await asOwner((client) => deleteActivity(client, session, owner.org_id, ids.reimported));
+      expect((await save(ids.reimported, '2020-01-22T06:00:00Z', 'f2000000-0000-4000-8000-000000000004')).created).toBe(true);
+
+      const imports = (url: string) =>
+        withAdmin(url, async (client) => {
+          const result = await client.query<{ digest: string; duration_s: number; id: string; source: string }>(
+            `SELECT id, source, duration_s, md5(activity::text) AS digest FROM activities AS activity WHERE source = 'tcx' ORDER BY id`,
+          );
+          return result.rows;
+        });
+      const atBackup = await imports(databases.source.ownerUrl);
+      expect(atBackup.map((row) => [row.id, row.source, row.duration_s])).toEqual([
+        [ids.deleted, 'tcx', 1801],
+        [ids.reimported, 'tcx', 1801],
+        [ids.survivor, 'tcx', 1801],
+      ]);
+      await operations.takeBackup();
+
+      // After the backup: the drill's own deletions, then K through the service.
+      await operations.deleteAfterBackup();
+      await asOwner((client) => deleteActivity(client, session, owner.org_id, ids.deleted));
+      const exported = await operations.exportJournal();
+      // The drill's activity, check-in and movement erasures, R's older version and K.
+      expect(exported.erasureEntries).toBe(5);
+      await operations.copyJournalReadOnly();
+      await runtime.end();
+      cleanups.pop();
+
+      await operations.createTargetDatabase();
+      await operations.bootstrapTarget();
+      await operations.restoreBackup();
+      expect((await operations.migrate()).applied).toBe(0);
+      // The restored older backup brought K back, exactly as it was.
+      expect(await imports(databases.target.ownerUrl)).toEqual(atBackup);
+
+      const first = await operations.reapplyErasures();
+      // Erased: the drill's three and K. Skipped: R's older version, whose id now holds the newer version (other creation instant).
+      expect(first.outcomes).toEqual({ absent: 0, erased: 4, skipped_different_record: 1 });
+      const afterFirst = await imports(databases.target.ownerUrl);
+      expect(afterFirst).toEqual(atBackup.filter((row) => row.id !== ids.deleted));
+
+      const second = await operations.reapplyErasures();
+      expect(second.outcomes).toEqual({ absent: 4, erased: 0, skipped_different_record: 1 });
+      expect(await imports(databases.target.ownerUrl)).toEqual(afterFirst);
     },
     drillTimeout,
   );
