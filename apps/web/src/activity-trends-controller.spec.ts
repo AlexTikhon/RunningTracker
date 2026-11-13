@@ -124,6 +124,11 @@ describe('activity trends controller', () => {
     reader.calls[1]!.resolve(answer({ ...FILTERS, type: 'swim' }));
     await flush();
     expect(last().load).toMatchObject({ kind: 'error' });
+    // An answer without the comparison with the previous period (ADR-0090) is not the answer asked for either.
+    controller.refresh();
+    reader.calls[2]!.resolve(activityTrendsFixture({ ...FILTERS, comparison: false }));
+    await flush();
+    expect(last().load).toEqual({ kind: 'error', message: 'The answer was for other filters, so it is not shown. Try again.' });
   });
 
   it('is silenced by disposal or the end of its session, aborting its request', async () => {

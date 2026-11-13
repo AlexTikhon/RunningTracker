@@ -929,16 +929,31 @@ export interface ActivityTrendsTarget {
 
 /**
  * The activity trends of one source and one type over the 28 dates ending on `endDate` (ADR-0089), each item on the
- * date it started in `timeZone`. The server echoes the filters it applied, the zone in its canonical spelling; an answer
- * for any other filter or another zone is refused (a different spelling or an alias of the same zone is not another zone).
+ * date it started in `timeZone`, compared with the 28 dates before them (ADR-0090: always asked for, so the screen shows
+ * both periods from one snapshot). The server echoes the filters it applied, the zone in its canonical spelling; an answer
+ * for any other filter or another zone, or without the comparison, is refused (a different spelling or an alias of the
+ * same zone is not another zone).
  */
 export async function readActivityTrends(target: ActivityTrendsTarget, signal: AbortSignal): Promise<ActivityTrends> {
-  const query = new URLSearchParams({ endDate: target.endDate, source: target.source, timeZone: target.timeZone, type: target.type });
+  const query = new URLSearchParams({
+    compare: 'previous_period',
+    endDate: target.endDate,
+    source: target.source,
+    timeZone: target.timeZone,
+    type: target.type,
+  });
   const path = `/api/orgs/${encodeURIComponent(target.orgId)}/activity-trends?${query.toString()}`;
   const response = await requestJson(path, { cache: 'no-store', credentials: 'same-origin', signal });
   const trends = activityTrendsSchema.parse(requireSuccess(response));
   const { applied } = trends;
-  if (applied.endDate !== target.endDate || applied.source !== target.source || applied.type !== target.type || !sameTimeZone(applied.timeZone, target.timeZone)) {
+  if (
+    applied.endDate !== target.endDate ||
+    applied.source !== target.source ||
+    applied.type !== target.type ||
+    applied.compare !== 'previous_period' ||
+    trends.comparison === undefined ||
+    !sameTimeZone(applied.timeZone, target.timeZone)
+  ) {
     throw new Error('The server returned activity trends for other filters');
   }
   return trends;

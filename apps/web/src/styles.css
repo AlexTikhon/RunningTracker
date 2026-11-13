@@ -523,3 +523,13 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .activity-trends-table td:last-child { width: auto; text-align: left; }
 .activity-trends-table th, .activity-trends-table td { padding-inline: 0.25rem; }
 @media (max-width: 420px) { .activity-trends-table { font-size: 0.82rem; } }
+.activity-comparison { display: grid; gap: 0.5rem; min-width: 0; padding-top: 0.75rem; border-top: 1px solid #2a332d; }
+.activity-comparison h3 { margin: 0; font-size: 1rem; }
+.activity-comparison > p { margin: 0; }
+.activity-comparison__periods { display: grid; gap: 0.25rem 1rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); margin: 0; }
+.activity-comparison__periods div { display: flex; flex-wrap: wrap; gap: 0 0.4rem; min-width: 0; }
+.activity-comparison__periods dt { color: #8b968e; }
+.activity-comparison__periods dd { margin: 0; font-variant-numeric: tabular-nums; }
+.activity-comparison-table td:last-child { width: auto; text-align: left; }
+.activity-comparison-table th, .activity-comparison-table td { padding-inline: 0.25rem; }
+@media (max-width: 420px) { .activity-comparison-table { font-size: 0.82rem; } }

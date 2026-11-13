@@ -2,6 +2,7 @@ import {
   ACTIVITY_TYPES,
   type ActivityHistorySource,
   type ActivityTrends,
+  type ActivityTrendsComparisonReason,
   type ActivityType,
 } from '@running-tracker/contracts';
 
@@ -314,4 +315,175 @@ export function activityChartDescription(trends: ActivityTrends, measure: Activi
 export function activityComputedLine(trends: ActivityTrends): string {
   const at = new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: trends.applied.timeZone }).format(new Date(trends.provenance.computedAt));
   return `Computed ${at} from your own records in one consistent read (${trends.provenance.policyVersion}); nothing is stored.`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Comparison with the previous 28 dates (ADR-0090). The server computes every total, change and percentage and says, per
+// metric, whether a change is given and why not; the browser only formats those values and words the reasons. A change
+// is never computed here.
+// ---------------------------------------------------------------------------------------------------------------------
+
+type Comparison = NonNullable<ActivityTrends['comparison']>;
+type ComparisonSummary = NonNullable<Comparison['previous']['summary']>;
+type AnySummary = ComparisonSummary | ActivityTrends['summary'];
+type Change = Comparison['metrics']['count']['change'];
+
+export interface ActivityComparisonCell {
+  detail: string | null;
+  value: string;
+}
+
+export interface ActivityComparisonRow {
+  change: ActivityComparisonCell & { status: Change['status'] };
+  current: ActivityComparisonCell;
+  label: string;
+  measure: ActivityTrendMeasure;
+  previous: ActivityComparisonCell;
+}
+
+export interface ActivityComparisonView {
+  /** Sentences that apply to every measure (an unfinished or shortened period), then the coverage caveat. */
+  notes: string[];
+  /** "16 Oct 2026 – 12 Nov 2026 (28 dates)" for each period; the previous one may be out of range. */
+  periods: { current: string; previous: string };
+  rows: ActivityComparisonRow[];
+}
+
+/** U+2212 MINUS SIGN for a negative change, "+" for a positive one, nothing for zero. */
+const signOf = (value: number) => (value > 0 ? '+' : value < 0 ? '−' : '');
+
+/** A signed change in a measure's own format: "+2", "−30:00", "+6.00 km", "0". */
+export function formatSignedChange(measure: ActivityTrendMeasure, value: number): string {
+  return `${signOf(value)}${formatMeasure(measure, Math.abs(value))}`;
+}
+
+/** A server-computed percentage with its one decimal: "+50.0%", "−12.3%", "0.0%". */
+export function formatPercentChange(percent: number): string {
+  return `${signOf(percent)}${Math.abs(percent).toFixed(1)}%`;
+}
+
+const shortLongDate = (localDate: string) => `${shortDate(localDate)} ${localDate.slice(0, 4)}`;
+const periodLabel = (period: { days: number; endDate: string; startDate: string }) =>
+  `${shortLongDate(period.startDate)} – ${shortLongDate(period.endDate)} (${period.days === 1 ? '1 date' : `${period.days} dates`})`;
+
+function durationOf(summary: AnySummary) {
+  return 'enteredDuration' in summary ? summary.enteredDuration : 'elapsedDuration' in summary ? summary.elapsedDuration : summary.observedDuration;
+}
+
+function metricOf(comparison: Comparison, measure: ActivityTrendMeasure) {
+  const { metrics } = comparison;
+  if (measure === 'count') return metrics.count;
+  if (measure === 'distance') return metrics.distance;
+  return 'enteredDuration' in metrics ? metrics.enteredDuration : 'elapsedDuration' in metrics ? metrics.elapsedDuration : metrics.observedDuration;
+}
+
+const statesOf = (summary: AnySummary | null) => (summary !== null && 'summaries' in summary ? summary.summaries : { current: 0, pending: 0, stale: 0 });
+
+/** A period's value of a measure with its coverage: how many of its items record it. */
+function valueCell(source: ActivityHistorySource, measure: ActivityTrendMeasure, summary: AnySummary): ActivityComparisonCell {
+  if (measure === 'count') return { detail: summary.count === 0 ? NONE_LOGGED : null, value: String(summary.count) };
+  if (summary.count === 0) return { detail: NONE_LOGGED, value: '–' };
+  const metric = measure === 'duration' ? { total: durationOf(summary).totalS, withValue: durationOf(summary).withValue } : { total: summary.distance.totalM, withValue: summary.distance.withValue };
+  const states = statesOf(summary);
+  const waiting = [states.pending > 0 ? `${states.pending} being prepared` : null, states.stale > 0 ? `${states.stale} being updated` : null].filter((part) => part !== null);
+  const suffix = waiting.length === 0 ? '' : ` (summary ${waiting.join(', ')})`;
+  if (metric.withValue === 0 || metric.total === null) return { detail: `None of ${items(source, summary.count)} records it${suffix}`, value: UNKNOWN };
+  const coverage =
+    metric.withValue === summary.count
+      ? summary.count === 1
+        ? `From the 1 ${itemNoun(source, 1)}`
+        : `From all ${items(source, summary.count)}`
+      : `From ${metric.withValue} of ${items(source, summary.count)}`;
+  return { detail: `${coverage}${suffix}`, value: formatMeasure(measure, metric.total) };
+}
+
+/** The reasons particular to one measure (the period reasons are said once, as notes). */
+function metricReasonSentences(
+  reasons: readonly ActivityTrendsComparisonReason[],
+  source: ActivityHistorySource,
+  current: AnySummary,
+  previous: AnySummary | null,
+  measure: ActivityTrendMeasure,
+): string[] {
+  const missing = (summary: AnySummary) =>
+    summary.count - (measure === 'duration' ? durationOf(summary).withValue : summary.distance.withValue) - statesOf(summary).pending - statesOf(summary).stale;
+  const verb = (count: number, one: string, many: string) => `${count} ${itemNoun(source, count)} ${count === 1 ? one : many}`;
+  return reasons.flatMap((reason): string[] => {
+    switch (reason) {
+      case 'current_period_no_entries':
+        return ['Nothing was logged in this period, so it has no total.'];
+      case 'previous_period_no_entries':
+        return ['Nothing was logged in the previous period, so it has no total.'];
+      case 'current_values_missing':
+        return [`${verb(missing(current), 'does', 'do')} not record it in this period.`];
+      case 'previous_values_missing':
+        return previous === null ? [] : [`${verb(missing(previous), 'does', 'do')} not record it in the previous period.`];
+      case 'current_summaries_pending':
+        return [`${verb(statesOf(current).pending, 'has', 'have')} a GPS summary still being prepared in this period.`];
+      case 'previous_summaries_pending':
+        return [`${verb(statesOf(previous).pending, 'has', 'have')} a GPS summary still being prepared in the previous period.`];
+      case 'current_summaries_stale':
+        return [`${verb(statesOf(current).stale, 'has', 'have')} a GPS summary being updated after new data in this period.`];
+      case 'previous_summaries_stale':
+        return [`${verb(statesOf(previous).stale, 'has', 'have')} a GPS summary being updated after new data in the previous period.`];
+      default:
+        return [];
+    }
+  });
+}
+
+function changeCell(change: Change, measure: ActivityTrendMeasure, sentences: string[]): ActivityComparisonCell & { status: Change['status'] } {
+  if (change.status === 'unavailable') return { detail: sentences.length === 0 ? null : sentences.join(' '), status: 'unavailable', value: 'Not compared' };
+  const absolute = formatSignedChange(measure, change.absolute);
+  if (change.percent === null) return { detail: 'No percentage: the previous total is 0.', status: 'available', value: absolute };
+  return { detail: null, status: 'available', value: `${absolute} (${formatPercentChange(change.percent)})` };
+}
+
+/** The period notes: why nothing or only part is compared, then what coverage can and cannot say. */
+function periodNotes(comparison: Comparison): string[] {
+  const notes = comparison.periodReasons.flatMap((reason): string[] => {
+    switch (reason) {
+      case 'current_period_in_progress':
+        return ['This period includes today, so it can still change. Changes are shown only for periods that have ended: choose an end date before today to compare.'];
+      case 'current_period_shortened':
+        return [`This period starts on 1 Jan 2000, the earliest date, so it has ${comparison.current.period.days} of 28 dates and is not compared.`];
+      case 'previous_period_out_of_range':
+        return [
+          `The previous 28 dates (${shortLongDate(comparison.previous.requestedStartDate)} – ${shortLongDate(comparison.previous.requestedEndDate)}) are before 1 Jan 2000, the earliest date, so there is nothing to compare with.`,
+        ];
+      case 'previous_period_shortened':
+        return [`The previous period is cut short by 1 Jan 2000 (${comparison.previous.period?.days ?? 0} of 28 dates), so it is not compared as a full period.`];
+      default:
+        return [];
+    }
+  });
+  return [...notes, 'Coverage counts only what was logged: a total from all entries does not mean that every activity was logged.'];
+}
+
+/** The comparison section: both periods, each measure's values with coverage, and a signed change or why there is none. */
+export function activityComparisonView(trends: ActivityTrends): ActivityComparisonView | null {
+  const comparison = trends.comparison;
+  if (comparison === undefined) return null;
+  const source = trends.source;
+  const labels = activityTrendMeasureLabels(source);
+  const previous = comparison.previous.summary;
+  const rows = ACTIVITY_TREND_MEASURES.map((measure): ActivityComparisonRow => {
+    const { change } = metricOf(comparison, measure);
+    const sentences = change.status === 'unavailable' ? metricReasonSentences(change.reasons, source, trends.summary, previous, measure) : [];
+    return {
+      change: changeCell(change, measure, sentences),
+      current: valueCell(source, measure, trends.summary),
+      label: labels[measure],
+      measure,
+      previous: previous === null ? { detail: 'Before 1 Jan 2000', value: '–' } : valueCell(source, measure, previous),
+    };
+  });
+  return {
+    notes: periodNotes(comparison),
+    periods: {
+      current: periodLabel(comparison.current.period),
+      previous: comparison.previous.period === null ? 'none (before 1 Jan 2000)' : periodLabel(comparison.previous.period),
+    },
+    rows,
+  };
 }

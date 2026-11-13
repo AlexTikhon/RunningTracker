@@ -72,4 +72,23 @@ describe('Activity section of Trends', () => {
     expect(html).toContain('it does not mean you were inactive');
     expect(html).not.toMatch(/\b(goal|target|should|recommend|predict|streak|lazy|healthy)\w*/iu);
   });
+
+  it('renders the comparison with the previous 28 days: both periods, values, coverage and signed changes', () => {
+    const trends = activityTrendsFixture({
+      days: { '2026-11-01': { count: 3, distance: { totalM: 30_000, withValue: 2 } } },
+      endDate: '2026-11-11',
+      previous: { '2026-10-01': { count: 2, distance: { totalM: 24_000, withValue: 2 } } },
+      today: '2026-11-12',
+    });
+    const html = render({ filters: { ...filters, endDate: '2026-11-11' }, load: { kind: 'ready', refreshing: false, trends } });
+    expect(html).toContain('<h3 id="activity-comparison-title">Compared with the previous 28 days</h3>');
+    expect(html).toContain('<dt>This period</dt><dd>15 Oct 2026 – 11 Nov 2026 (28 dates)</dd>');
+    expect(html).toContain('<dt>Previous period</dt><dd>17 Sep 2026 – 14 Oct 2026 (28 dates)</dd>');
+    expect(html.match(/data-comparison-measure=/gu)).toHaveLength(3);
+    expect(html).toMatch(/data-comparison-measure="count">.*?data-change-status="available"><span class="trends-table__value">\+1 \(\+50\.0%\)</u);
+    expect(html).toMatch(/data-comparison-measure="distance">.*?From 2 of 3 entries.*?data-change-status="unavailable"><span class="trends-table__value">Not compared/u);
+    expect(html).toContain('1 entry does not record it in this period.');
+    expect(html).toContain('a total from all entries does not mean that every activity was logged');
+    expect(html).not.toMatch(/\b(goal|target|should|recommend|predict|streak|lazy|healthy|better|worse)\w*/iu);
+  });
 });

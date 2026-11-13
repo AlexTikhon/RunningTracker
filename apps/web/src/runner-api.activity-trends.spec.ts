@@ -14,24 +14,32 @@ afterEach(() => {
 });
 
 describe('activity trends API call', () => {
-  it('sends all four filters once each, without caching', async () => {
+  it('sends all four filters and the comparison with the previous period once each, without caching', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(json(fixture()));
     vi.stubGlobal('fetch', fetchMock);
     await expect(readActivityTrends(target, new AbortController().signal)).resolves.toEqual(fixture());
-    expect(fetchMock).toHaveBeenCalledWith(`/api/orgs/${orgId}/activity-trends?endDate=2026-11-12&source=gpx&timeZone=Europe%2FWarsaw&type=hike`, {
-      cache: 'no-store',
-      credentials: 'same-origin',
-      signal: expect.any(AbortSignal) as AbortSignal,
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/orgs/${orgId}/activity-trends?compare=previous_period&endDate=2026-11-12&source=gpx&timeZone=Europe%2FWarsaw&type=hike`,
+      { cache: 'no-store', credentials: 'same-origin', signal: expect.any(AbortSignal) as AbortSignal },
+    );
   });
 
-  it('refuses an answer echoing other filters, or one outside the contract', async () => {
-    for (const other of [fixture({ type: 'walk' }), fixture({ source: 'manual' }), fixture({ endDate: '2026-11-11', today: '2026-11-12' }), fixture({ timeZone: 'UTC' })]) {
+  it('refuses an answer echoing other filters, without the comparison, or outside the contract', async () => {
+    for (const other of [
+      fixture({ type: 'walk' }),
+      fixture({ source: 'manual' }),
+      fixture({ endDate: '2026-11-11', today: '2026-11-12' }),
+      fixture({ timeZone: 'UTC' }),
+      fixture({ comparison: false }),
+    ]) {
       vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json(other)));
       await expect(readActivityTrends(target, new AbortController().signal)).rejects.toThrow('The server returned activity trends for other filters');
     }
     const answer = fixture();
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json({ ...answer, summary: { ...answer.summary, count: 3 } })));
+    await expect(readActivityTrends(target, new AbortController().signal)).rejects.toThrow();
+    // A comparison that disagrees with the contract (the range ends today, so nothing may be compared) is refused too.
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(json({ ...answer, comparison: { ...answer.comparison, periodReasons: [] } })));
     await expect(readActivityTrends(target, new AbortController().signal)).rejects.toThrow();
   });
 

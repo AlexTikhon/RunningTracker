@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
   activityChartDescription,
   activityChartGeometry,
+  activityComparisonView,
   activitySummaryLines,
   activityTableRows,
   activityTrendMeasureLabels,
   activityTrendTypesFor,
   dayLengthNotes,
   displayDays,
+  formatPercentChange,
+  formatSignedChange,
   NONE_LOGGED,
   SKIPPED_DATE,
   UNKNOWN,
@@ -149,5 +152,125 @@ describe('activity trends presentation', () => {
       ...activitySummaryLines(activityTrendsFixture({ days: { '2026-11-12': { count: 1 } }, source: 'recorded_run' })),
     ].join(' ');
     expect(text).not.toMatch(/\b(goal|target|should|great|well done|too (little|much)|healthy|lazy|recommend|consider|try to|predict|forecast|streak|improv)\w*/iu);
+  });
+});
+
+describe('activity trends comparison presentation (ADR-0090)', () => {
+  // A finished range: 15 Oct – 11 Nov 2026, the previous period 17 Sep – 14 Oct 2026.
+  const finished = { endDate: '2026-11-11', today: '2026-11-12' };
+  const ride = (count: number, totalS: number, totalM: number | null, withDistance = totalM === null ? 0 : count) => ({
+    count,
+    distance: { totalM, withValue: withDistance },
+    duration: { totalS, withValue: count },
+  });
+
+  it('formats server-computed changes with their sign and one decimal, never computing them', () => {
+    expect(formatSignedChange('count', 2)).toBe('+2');
+    expect(formatSignedChange('count', 0)).toBe('0');
+    expect(formatSignedChange('duration', -1_800)).toBe('−30:00');
+    expect(formatSignedChange('distance', 6_000)).toBe('+6.00 km');
+    expect(formatPercentChange(50)).toBe('+50.0%');
+    expect(formatPercentChange(-12.3)).toBe('−12.3%');
+    expect(formatPercentChange(0)).toBe('0.0%');
+  });
+
+  it('shows both periods, values with coverage, and signed changes with percentages', () => {
+    const trends = activityTrendsFixture({
+      ...finished,
+      days: { '2026-11-01': ride(3, 5_400, 30_000) },
+      previous: { '2026-10-01': ride(2, 7_200, 24_000) },
+    });
+    const view = activityComparisonView(trends)!;
+    expect(view.periods).toEqual({ current: '15 Oct 2026 – 11 Nov 2026 (28 dates)', previous: '17 Sep 2026 – 14 Oct 2026 (28 dates)' });
+    expect(view.notes).toEqual(['Coverage counts only what was logged: a total from all entries does not mean that every activity was logged.']);
+    expect(view.rows).toEqual([
+      {
+        change: { detail: null, status: 'available', value: '+1 (+50.0%)' },
+        current: { detail: null, value: '3' },
+        label: 'Entries',
+        measure: 'count',
+        previous: { detail: null, value: '2' },
+      },
+      {
+        change: { detail: null, status: 'available', value: '−30:00 (−25.0%)' },
+        current: { detail: 'From all 3 entries', value: '1:30:00' },
+        label: 'Entered duration',
+        measure: 'duration',
+        previous: { detail: 'From all 2 entries', value: '2:00:00' },
+      },
+      {
+        change: { detail: null, status: 'available', value: '+6.00 km (+25.0%)' },
+        current: { detail: 'From all 3 entries', value: '30.00 km' },
+        label: 'Distance',
+        measure: 'distance',
+        previous: { detail: 'From all 2 entries', value: '24.00 km' },
+      },
+    ]);
+  });
+
+  it('keeps an absolute change for a zero baseline and explains partial coverage instead of a change', () => {
+    const trends = activityTrendsFixture({
+      ...finished,
+      days: { '2026-11-01': ride(2, 1_200, 2_000, 1) },
+      previous: { '2026-10-01': ride(1, 0, 0) },
+    });
+    const [, duration, distance] = activityComparisonView(trends)!.rows;
+    expect(duration!.change).toEqual({ detail: 'No percentage: the previous total is 0.', status: 'available', value: '+20:00' });
+    expect(distance!.current).toEqual({ detail: 'From 1 of 2 entries', value: '2.00 km' });
+    expect(distance!.change).toEqual({ detail: '1 entry does not record it in this period.', status: 'unavailable', value: 'Not compared' });
+  });
+
+  it('describes empty periods without calling them zero', () => {
+    const [count, duration] = activityComparisonView(activityTrendsFixture(finished))!.rows;
+    expect(count!.change).toEqual({ detail: 'No percentage: the previous total is 0.', status: 'available', value: '0' });
+    expect(count!.current).toEqual({ detail: NONE_LOGGED, value: '0' });
+    expect(duration!.current).toEqual({ detail: NONE_LOGGED, value: '–' });
+    expect(duration!.change.detail).toBe('Nothing was logged in this period, so it has no total. Nothing was logged in the previous period, so it has no total.');
+  });
+
+  it('says a range ending today is in progress and compares nothing, keeping both periods’ values', () => {
+    const trends = activityTrendsFixture({ days: { '2026-11-12': ride(1, 600, 1_000) }, previous: { '2026-10-01': ride(1, 600, 1_000) } });
+    const view = activityComparisonView(trends)!;
+    expect(view.notes[0]).toBe(
+      'This period includes today, so it can still change. Changes are shown only for periods that have ended: choose an end date before today to compare.',
+    );
+    expect(view.rows.map((row) => row.change.value)).toEqual(['Not compared', 'Not compared', 'Not compared']);
+    // The period reason is said once, as a note, not in every row.
+    expect(view.rows.map((row) => row.change.detail)).toEqual([null, null, null]);
+    expect(view.rows[0]!.previous.value).toBe('1');
+  });
+
+  it('never presents a shortened or missing previous period as a full one', () => {
+    const shortened = activityComparisonView(activityTrendsFixture({ endDate: '2000-02-10', today: '2026-11-12' }))!;
+    expect(shortened.periods.previous).toBe('1 Jan 2000 – 13 Jan 2000 (13 dates)');
+    expect(shortened.notes[0]).toBe('The previous period is cut short by 1 Jan 2000 (13 of 28 dates), so it is not compared as a full period.');
+    const missing = activityComparisonView(activityTrendsFixture({ endDate: '2000-01-10', today: '2026-11-12' }))!;
+    expect(missing.periods.previous).toBe('none (before 1 Jan 2000)');
+    expect(missing.notes.slice(0, 2)).toEqual([
+      'This period starts on 1 Jan 2000, the earliest date, so it has 10 of 28 dates and is not compared.',
+      'The previous 28 dates (16 Nov 1999 – 13 Dec 1999) are before 1 Jan 2000, the earliest date, so there is nothing to compare with.',
+    ]);
+    expect(missing.rows[0]!.previous).toEqual({ detail: 'Before 1 Jan 2000', value: '–' });
+  });
+
+  it('names pending and stale run summaries in each period', () => {
+    const trends = activityTrendsFixture({
+      ...finished,
+      days: { '2026-11-02': { count: 2, distance: { totalM: 5_000, withValue: 1 }, duration: { totalS: 1_800, withValue: 1 }, summaries: { current: 1, pending: 1, stale: 0 } } },
+      previous: { '2026-10-02': { count: 1, summaries: { current: 0, pending: 0, stale: 1 } } },
+      source: 'recorded_run',
+    });
+    const [count, duration] = activityComparisonView(trends)!.rows;
+    expect(count!.change.value).toBe('+1 (+100.0%)');
+    expect(duration!.label).toBe('Observed duration');
+    expect(duration!.current.detail).toBe('From 1 of 2 runs (summary 1 being prepared)');
+    expect(duration!.previous).toEqual({ detail: 'None of 1 run records it (summary 1 being updated)', value: UNKNOWN });
+    expect(duration!.change.detail).toBe(
+      '1 run has a GPS summary still being prepared in this period. 1 run has a GPS summary being updated after new data in the previous period.',
+    );
+  });
+
+  it('is absent from an answer without a comparison', () => {
+    expect(activityComparisonView(activityTrendsFixture({ comparison: false }))).toBeNull();
   });
 });

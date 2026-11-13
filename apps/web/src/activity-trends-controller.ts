@@ -161,7 +161,12 @@ export class ActivityTrendsController {
     if (!current()) return;
     this.#inFlight = null;
     // readActivityTrends already refuses an answer for other filters; a reader that does not is not trusted either.
-    if (trends.applied.endDate !== filters.endDate || trends.applied.source !== filters.source || trends.applied.type !== filters.type) {
+    if (
+      trends.applied.endDate !== filters.endDate ||
+      trends.applied.source !== filters.source ||
+      trends.applied.type !== filters.type ||
+      trends.applied.compare !== 'previous_period'
+    ) {
       this.#emit({ filters, load: { kind: 'error', message: 'The answer was for other filters, so it is not shown. Try again.' } });
       return;
     }

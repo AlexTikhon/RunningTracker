@@ -4,6 +4,7 @@ import { activityTypeLabels } from './activity-form.js';
 import {
   ACTIVITY_TREND_MEASURES,
   activityChartDescription,
+  activityComparisonView,
   activityChartGeometry,
   activityComputedLine,
   activitySummaryLines,
@@ -77,6 +78,63 @@ export function ActivityTrendChart({ description, geometry }: { description: str
   );
 }
 
+/**
+ * The comparison with the previous 28 dates (ADR-0090): both periods, each measure's server-computed values with their
+ * coverage, and a signed change with its percentage, or "Not compared" with the reasons. Nothing here computes a number.
+ */
+export function ActivityTrendsComparison({ trends }: { trends: ActivityTrends }) {
+  const view = activityComparisonView(trends);
+  if (view === null) return null;
+  return (
+    <section aria-labelledby="activity-comparison-title" className="activity-comparison" data-activity-comparison="">
+      <h3 id="activity-comparison-title">Compared with the previous 28 days</h3>
+      <dl className="activity-comparison__periods">
+        <div>
+          <dt>This period</dt>
+          <dd>{view.periods.current}</dd>
+        </div>
+        <div>
+          <dt>Previous period</dt>
+          <dd>{view.periods.previous}</dd>
+        </div>
+      </dl>
+      {view.notes.map((note) => (
+        <p className="today-note" key={note}>{note}</p>
+      ))}
+      <table className="trends-table activity-comparison-table">
+        <caption className="visually-hidden">Each measure in this period and the previous one, and the change between them</caption>
+        <thead>
+          <tr>
+            <th scope="col">Measure</th>
+            <th scope="col">This period</th>
+            <th scope="col">Previous</th>
+            <th scope="col">Change</th>
+          </tr>
+        </thead>
+        <tbody>
+          {view.rows.map((row) => (
+            <tr data-comparison-measure={row.measure} key={row.measure}>
+              <th scope="row">{row.label}</th>
+              <td>
+                <span className="trends-table__value">{row.current.value}</span>
+                {row.current.detail !== null && <span className="trends-table__detail">{row.current.detail}</span>}
+              </td>
+              <td>
+                <span className="trends-table__value">{row.previous.value}</span>
+                {row.previous.detail !== null && <span className="trends-table__detail">{row.previous.detail}</span>}
+              </td>
+              <td data-change-status={row.change.status}>
+                <span className="trends-table__value">{row.change.value}</span>
+                {row.change.detail !== null && <span className="trends-table__detail">{row.change.detail}</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
 function ActivityTrendsContent({ measure, trends }: { measure: ActivityTrendMeasure; trends: ActivityTrends }) {
   const source = trends.source;
   const labels = activityTrendMeasureLabels(source);
@@ -93,6 +151,7 @@ function ActivityTrendsContent({ measure, trends }: { measure: ActivityTrendMeas
       {dayLengthNotes(trends).map((note) => (
         <p className="today-note" key={note}>{note}</p>
       ))}
+      <ActivityTrendsComparison trends={trends} />
       {drawable ? (
         <ActivityTrendChart description={activityChartDescription(trends, measure)} geometry={geometry} />
       ) : (
