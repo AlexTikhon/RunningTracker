@@ -81,7 +81,7 @@ test('previews a GPX file without saving, imports it once with the chosen type, 
   await expect(preview).toContainText('it is not moving time');
   await expect(preview).toContainText('not compared with GPS runs recorded in SomaLane');
   await expect(preview.getByRole('button', { name: 'Import activity' })).toBeDisabled();
-  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 0, manual: 0, runs: 0 });
+  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 0, manual: 0, runs: 0, tcx: 0 });
   await expect(list.getByText('No activities yet.')).toBeVisible();
 
   // 2. Confirm with an explicit type. The first answer is lost after the server stored it: the retry repeats the same
@@ -108,7 +108,7 @@ test('previews a GPX file without saving, imports it once with the chosen type, 
   const query = new URL(puts[0]!).searchParams;
   expect([...query.keys()].toSorted()).toEqual(['idempotencyKey', 'type']);
   expect(query.get('type')).toBe('ride');
-  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 1, manual: 0, runs: 0 });
+  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 1, manual: 0, runs: 0, tcx: 0 });
 
   // 3. Listed as a GPX import with elapsed time, never as manual, and no GPS run was created.
   const cards = list.getByRole('list', { name: 'Your activity history' }).locator(':scope > li');
@@ -124,7 +124,7 @@ test('previews a GPX file without saving, imports it once with the chosen type, 
   await preview.getByLabel('Activity type').selectOption('run');
   await expect(preview.getByRole('button', { name: 'Import activity' })).toBeDisabled();
   await preview.getByRole('button', { name: 'Cancel' }).click();
-  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 1, manual: 0, runs: 0 });
+  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 1, manual: 0, runs: 0, tcx: 0 });
 
   // 5. Today shows it in its own card on the date it started; the manual card stays empty.
   await page.getByRole('navigation', { name: 'Application view' }).getByRole('button', { name: 'Today' }).click();
@@ -153,7 +153,7 @@ test('explains files it cannot import and stores nothing', async ({ demoScenario
   await choose(page, Buffer.alloc(0), 'empty.gpx');
   await expect(region.getByRole('alert')).toHaveText('This file is empty, so it cannot be imported.');
 
-  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 0, manual: 0, runs: 0 });
+  expect(await countActivityRows(environment, demoScenario.orgId)).toEqual({ gpx: 0, manual: 0, runs: 0, tcx: 0 });
 });
 
 test('drops a preview and a confirmation answer that arrive after the session changed', async ({ demoScenario, environment, page }) => {

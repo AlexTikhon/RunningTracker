@@ -450,15 +450,15 @@ export interface ActivitySeed {
   readonly durationS: number;
   readonly notes?: string | null;
   readonly rpe?: number | null;
-  readonly source: 'gpx' | 'manual';
+  readonly source: 'gpx' | 'manual' | 'tcx';
   readonly startedAt: string;
   readonly type: string;
   readonly userId: string;
 }
 
 // Activities written directly as the owner role, so a history test (ADR-0087) does not go through the form or a file
-// upload. A GPX row carries what the import route would write: an idempotency key and a 32-byte fingerprint (random
-// here, no route). Removed with the organization (cascades), like every other row here.
+// upload. A GPX or TCX row carries what its import route would write: an idempotency key and a 32-byte fingerprint
+// (random here, no route); a TCX row has no effort or notes (migration 0042). Removed with the organization (cascades).
 export async function createActivities(
   environment: E2eEnvironment,
   orgId: string,
@@ -469,10 +469,10 @@ export async function createActivities(
     for (const activity of activities) {
       const id = randomUUID();
       ids.push(id);
-      const gpx = activity.source === 'gpx';
+      const imported = activity.source !== 'manual';
       await client.query(
         `INSERT INTO activities (org_id, id, user_id, type, started_at, duration_s, distance_m, rpe, notes, source, idempotency_key, import_fingerprint)
-         VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9, $10, $11::uuid, CASE WHEN $10 = 'gpx' THEN sha256(gen_random_uuid()::text::bytea) END)`,
+         VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9, $10, $11::uuid, CASE WHEN $10 IN ('gpx', 'tcx') THEN sha256(gen_random_uuid()::text::bytea) END)`,
         [
           orgId,
           id,
@@ -481,10 +481,10 @@ export async function createActivities(
           activity.startedAt,
           activity.durationS,
           activity.distanceM ?? null,
-          gpx ? null : activity.rpe ?? null,
-          gpx ? null : activity.notes ?? null,
+          imported ? null : activity.rpe ?? null,
+          imported ? null : activity.notes ?? null,
           activity.source,
-          gpx ? randomUUID() : null,
+          imported ? randomUUID() : null,
         ],
       );
     }
@@ -492,16 +492,17 @@ export async function createActivities(
   });
 }
 
-/** The organization's activities by source, and its runs: what a GPX import may and may not have written (ADR-0086). */
+/** The organization's activities by source, and its runs: what a GPX or TCX import may and may not have written (ADR-0086/0091). */
 export async function countActivityRows(
   environment: E2eEnvironment,
   orgId: string,
-): Promise<{ gpx: number; manual: number; runs: number }> {
+): Promise<{ gpx: number; manual: number; runs: number; tcx: number }> {
   return withOwnerClient(environment, async (client) => {
-    const result = await client.query<{ gpx: number; manual: number; runs: number }>(
+    const result = await client.query<{ gpx: number; manual: number; runs: number; tcx: number }>(
       `SELECT (SELECT count(*)::int FROM activities WHERE org_id = $1 AND source = 'gpx') AS gpx,
               (SELECT count(*)::int FROM activities WHERE org_id = $1 AND source = 'manual') AS manual,
-              (SELECT count(*)::int FROM runs WHERE org_id = $1) AS runs`,
+              (SELECT count(*)::int FROM runs WHERE org_id = $1) AS runs,
+              (SELECT count(*)::int FROM activities WHERE org_id = $1 AND source = 'tcx') AS tcx`,
       [orgId],
     );
     const row = result.rows[0];
