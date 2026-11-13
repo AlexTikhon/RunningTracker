@@ -27,7 +27,8 @@ commitment to dates or to every item below.
    bests. A unified read model over `runs` and `activities` (a view or a union) belongs here; its first, read-only
    form is the activity history ([ADR-0087](adr/0087-unified-activity-history.md)), a list without totals. The first
    activity totals are the 28-day activity trends ([ADR-0089](adr/0089-activity-trends.md)): one source and one type at a
-   time, per local date, computed in SQL on every read.
+   time, per local date, computed in SQL on every read. The first comparison is with the previous 28 dates
+   ([ADR-0090](adr/0090-activity-trends-previous-period-comparison.md)), per metric and only where it is defined.
 3. **AI layer.**
    - An asynchronous weekly review written from a facts bundle that SQL produced.
    - Food text parsing against a JSON schema, which the person confirms before anything is stored.
@@ -139,7 +140,17 @@ rule, 23/25-hour dates included). Per date and for the range: the number of item
 GPX elapsed, or a recorded run's observed duration from a current summary only) and distance, each with how many items
 record it; a pending or stale run summary counts the run and never a value. No entries, an unknown value and a recorded
 zero stay apart, and a date with nothing logged is not called inactive. Sources are never combined; shared runs never
-count. No pace, load, goals, comparisons or AI input.
+count. No pace, load, goals or AI input.
+
+The **comparison with the previous 28 days** is [ADR-0090](adr/0090-activity-trends-previous-period-comparison.md): the
+same read with `compare=previous_period` puts the range beside the 28 local dates immediately before it, for the same
+source, type and zone, both from one statement and one snapshot, never stored. PostgreSQL computes both periods' totals
+(sums of rounded daily totals), the signed changes and the percentages (one decimal, halves away from zero). A change is
+given per metric only where it is defined: counts of logged records whenever both periods are full and the range has
+ended; a duration or distance only when every item of both periods records it and no run summary is pending or stale; a
+zero baseline keeps the absolute change without a percentage. Otherwise stable reason codes say why (in progress, a period
+cut by 2000-01-01, no entries, missing values, pending or stale summaries), and the screen words them. Full coverage is
+never presented as complete logging. No scores, judgements, "better" or "worse", advice or AI input.
 
 **HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
 built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the

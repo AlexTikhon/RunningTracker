@@ -171,7 +171,7 @@ Firefox gate, on pushes to `main`, on pull requests and on demand. It reads no s
 |---|---|
 | [docs/reference.md](docs/reference.md) | the detailed reference: API behaviour, data rules, configuration and verification for every feature |
 | [docs/SDD.md](docs/SDD.md) | the system design |
-| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0089) |
+| [docs/adr/](docs/adr/) | one decision record per slice (ADR-0001 to ADR-0090) |
 | [docs/product-direction.md](docs/product-direction.md) | roadmap, principles and the next milestone |
 | [docs/progress.md](docs/progress.md) | what was built and how it was verified, entry by entry |
 | [docs/runbooks/](docs/runbooks/) | how to run, demo, deploy, back up and pilot it |

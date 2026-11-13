@@ -5,6 +5,7 @@
   iPhone, in Safari or in Firefox. Corrected the same day after review: skipped local dates, zone identity in the client,
   and range totals computed by PostgreSQL (see "Corrections after review").
 - Date: 2026-11-12
+- Extended by: ADR-0090 (an optional comparison with the previous 28 local dates, `compare=previous_period`).
 - Relates to: ADR-0082 (Today: an item belongs to the local date it started on, intervals from the zone's rules),
   ADR-0084 (Trends: 28 calendar dates ending on a chosen date, the 2000-01-01 lower bound, "today" by the server clock in
   the client's zone, per-series coverage), ADR-0087/0088 (the unified, owner-only activity history, its source-specific
@@ -192,7 +193,8 @@ holds counts and totals only: no note, effort, id, start time, point or other fr
 
 - Browser evidence is Chromium only (desktop and a 375 px viewport with a wide font); no Firefox, WebKit or iPhone run.
 - The plan evidence is one synthetic dataset on the workstation; no load run, no production-size organization.
-- No weekly or monthly buckets, comparisons between ranges, averages, pace, training load, goals or personal bests.
+- No weekly or monthly buckets, averages, pace, training load, goals or personal bests. (Later: the comparison with the
+  previous 28 dates is ADR-0090.)
 - The chart's tooltips are native titles (pointer only); keyboard and screen-reader users read the table.
 - "Today" is fixed when Trends opens, as in ADR-0084. The zone is the client's word (the device's zone).
 - Activity trends are not an AI input; weekly insights are unchanged.

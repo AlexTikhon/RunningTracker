@@ -4339,3 +4339,42 @@ The full integration suite and the full browser suite were not rerun for this ch
 **Not established.** No browser test with a skipped date or a lowercase zone (unit and API-level only). The Temporal
 fallback in `sameTimeZone` is tested with a stub, not in an engine without alias resolution. Chromium only; one
 synthetic dataset for the plans.
+
+## Activity trends compared with the previous 28 local dates (ADR-0090) (2026-11-12)
+
+**What exists.** An optional, single-valued `compare=previous_period` on `GET /api/orgs/{orgId}/activity-trends`
+(empty, unknown or repeated: `400`). For end date E it compares the range E-27..E with the previous period E-55..E-28 for
+the same source, type and zone; both periods' dates are located with `startOfLocalDate` (23/25-hour and skipped dates). One
+statement per source (`activity-trends:activities-comparison`, `activity-trends:recorded-runs-comparison`) reads a window of
+at most 56 dates with the membership check in the same REPEATABLE READ READ ONLY transaction, owner and organization stated
+in SQL besides RLS; it returns the range's date rows, one row per period and one `change` row. PostgreSQL computes period
+totals (sums of the dates' half-up rounded totals), signed absolute changes and percentages (one decimal, halves away from
+zero, exact numeric integer division). The answer adds `applied.compare`, `comparison.current` (period, `inProgress`),
+`comparison.previous` (requested dates, actual period or `null`, summary), `comparison.metrics` (count, the source's
+duration name, distance: both totals and a `change`), `periodReasons` and `policyVersion: activity-trends-comparison-1`.
+Availability per metric with stable reason codes (in progress, shortened or out-of-range periods, no entries, missing
+values, pending or stale summaries; `zero_baseline` suppresses only the percentage); counts describe logged records only.
+The contract defines the same rules (`previousActivityTrendsPeriodOf`, `activityTrendsComparisonReasons`,
+`activityTrendsPercentTenths`, `activityTrendsComparisonFiguresOf`) and refuses an answer that differs. Without `compare`
+the answer is unchanged. Web: the client always asks for the comparison and refuses an answer without it; a **Compared with
+the previous 28 days** part of the Activity section shows both periods, values with coverage, signed changes with
+percentages or "Not compared" with the reasons in words, and the caveat that full coverage is not complete logging. OpenAPI,
+reference, product direction, README, ADR-0090 and a forward note in ADR-0089. No migration, stored aggregate, job, model
+call, AI-input change, score, judgement or advice.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Test database identity | unchanged and re-checked by the suites themselves: `activity-trends-http.integration.test.ts` asserts `current_database()` for both connections (migration database ending in `_test`) and `current_user` (`running_tracker_owner`, `running_tracker_runtime`) in `beforeAll` before the first fixture write; the explain test asserts the runtime identity and validates the owner connection through the shared fixture before writing; no migration in this change |
+| `npm run verify` | exit 0: lint, typecheck, build pass; scripts 115, API 1,812, web 1,297, contracts 294, fixtures 14, simulator 3. The run before it had one 5 s timeout in `run-search-evaluation-cli.spec.ts` (unrelated, seen before in ADR-0089's entry); that file passed alone (27 of 27) and in the final run |
+| New unit tests | contracts `activity-trends.spec.ts` 11 → 22 (query mode; previous period incl. leap day, 2000-02-25/24, 2000-01-29/28; percentage halves away from zero, no negative zero, large exact totals, overflow refused; reasons per metric and order; signed changes; zero baseline; empty periods; in progress; shortened and missing previous period; refusal of a wrong change, percentage, reasons, a missing or unrequested comparison, a non-adjacent previous period and an inconsistent previous summary; the source's duration name; OpenAPI parameter and description); API `activity-trends.spec.ts` 16 → 29 (56-date window with a 25-hour date and the Apia skip in the previous period, shortened and absent previous windows, statement predicates and rounding, building from rows, a disagreeing change or percentage refused, missing or repeated period/change rows refused, in progress, zero baseline with partial coverage, out-of-range previous period and leaked rows refused, run summary states, one comparison statement after the membership check with 56 bounds); web `activity-trends.spec.ts` 9 → 17, `ActivityTrendsSection.spec.tsx` 4 → 5, and extended client and controller specs (the URL carries `compare`, an answer without the comparison or with a disagreeing one is refused) |
+| `npm run test:integration -- activity-trends` | 2 files, 34 passed. `activity-trends-http` 17 → 30: the 13 new tests cover equal periods equal to two ordinary reads; per-period sums of rounded dates (2 × 199.5 m → 400) and ±12.3 %; empty periods, zero baseline, recorded zero, partial coverage; current/pending/stale run summaries; today in progress; 2000-02-25, 2000-02-24, 2000-01-28, 2000-01-10; Warsaw 2026-03-29 (23 h) in the previous period with microsecond records on both sides of the shared boundary, agreeing with PostgreSQL's `AT TIME ZONE` grouping; Pacific/Apia with 2011-12-30 first in the range and inside the previous period; deletions over HTTP in either period; snapshot hook; concurrent writer; owner isolation and shared-run exclusion in both periods; mode validation. The concurrent test held its invariant on every answer: 100 answers with 73 committed moves in one run and 90 in the final one, both sides observed |
+| Mutation checks | comparison read without the read-only snapshot (READ COMMITTED): the snapshot test fails (`[1, 1200, 1, 600]` instead of `[1, 600, 1, 900]`); run comparison without `run.user_id = $2`: the shared-run test fails (and two others). The service file was restored from a copy after each and compared byte for byte |
+| `activity-trends-explain.integration.test.ts` | 2 → 4 passed. Under `running_tracker_runtime`: activities comparison through `activities_owner_started_idx` once over 56 dates (manual/ride 109 rows kept of 1,143, 363 shared hits, about 1.1–1.3 ms; gpx/hike about 0.7 ms); runs comparison through `runs_owner_started_idx` (123 runs) with 123 `run_summaries_pkey` probes (867 shared hits, about 3.3–3.7 ms); period and change rows from the materialized date rows only |
+| `npx playwright test --project=chromium activity-trends.spec.ts trends.spec.ts` | 6 passed, after the build in `npm run verify` had finished: the new comparison spec (both periods' dates, +1 (+100.0%), +30:00 (+50.0%), +6.00 km (+25.0%), coverage, the coach's ride absent; walks with "Not compared" and its reason; GPX with no entries; 375 px with a wide font without horizontal scroll; today in progress with three unavailable changes; every request with `compare=previous_period`), the two existing activity specs (selectors scoped to the daily table; the default range ending today shows no change) and the three Trends specs |
+
+**Not established.** Chromium only (desktop and 375 px); no Firefox, WebKit or iPhone run. The full integration suite
+and the full browser suite were not rerun for this change. One synthetic dataset for the plans, no load run. The
+concurrent test exercises one writer pattern; the single-snapshot property itself is structural (one statement). No
+week-by-week or year-over-year comparisons, averages, pace, load, goals or advice; not an AI input.
