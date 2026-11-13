@@ -3,6 +3,9 @@
 - Status: accepted; implemented and verified locally: backend (migration 0041, API, contracts) and the web flow
   (Activity tab, Today, weekly review), with Chromium browser tests. Not yet run on an iPhone (pilot checklist step 18).
 - Date: 2026-11-10
+- Amended by: [ADR-0091](0091-tcx-activity-import.md) (TCX import, migration 0042): the import fingerprint is unique per
+  owner, organization and source, and the GPX duplicate lookup names `source = 'gpx'`; GPX parsing, its subset, metrics,
+  fingerprints, refusal reasons and answers are unchanged.
 - Amends: ADR-0072 (a second, server-owned `source`), ADR-0082 (Today gains `importedActivities`,
   `daily-overview-3`), ADR-0077/0079 (the weekly review gains `importedActivities`, `weekly-review-3`). Runs, run
   points, summaries, the GPS edge algorithm and its version, live tracking, tiles, retention, the erasure ledger format

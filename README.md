@@ -33,7 +33,10 @@ and grows one vertical slice at a time. Package names, database identifiers, coo
 - **Movement**: steps and active energy entered by hand, stored with `manual` provenance.
 - **Activities**: manual entries (run, walk, ride, hike, swim, strength, other), or one GPX 1.1 track imported after a
   preview and an explicit type choice: start, elapsed time and distance only, labelled as a GPX import. The file and
-  its route are not kept, and an import is not compared with GPS runs recorded here. The Activity tab lists them with
+  its route are not kept, and an import is not compared with GPS runs recorded here. A TCX v2 file with one activity can
+  be imported the same way (ADR-0091): start, the duration its laps report (the exact sum of their total times, rounded
+  once; neither elapsed nor moving time) and their distance, labelled as a TCX import; no GPS position is needed, and no
+  lap, track, heart rate, calories, notes or device is kept. The Activity tab lists them with
   your own finished GPS runs in one history, each labelled with its source and its own measure, never added together.
 - **Meal log**: meals and snacks with optional user-reported energy and macronutrients. Nothing is estimated or looked up.
 
@@ -188,4 +191,5 @@ Firefox gate, on pushes to `main`, on pull requests and on demand. It reads no s
   ([docs/reports/iphone-lan-pilot.md](docs/reports/iphone-lan-pilot.md)).
 - No real Mapbox basemap was rendered in a test. The AI features are off by default: no model tried so far met their
   quality targets, and OpenAI has never been called.
-- No phone or watch import, no GPX/TCX/FIT import, and no HealthKit.
+- No phone or watch import, no FIT import and no HealthKit. GPX and TCX import cover one documented subset each (one
+  track or one activity, summary only); multi-activity files and overlap detection between sources do not exist.

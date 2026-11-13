@@ -5,7 +5,8 @@
   iPhone, in Safari or in Firefox. Corrected the same day after review: skipped local dates, zone identity in the client,
   and range totals computed by PostgreSQL (see "Corrections after review").
 - Date: 2026-11-12
-- Extended by: ADR-0090 (an optional comparison with the previous 28 local dates, `compare=previous_period`).
+- Extended by: ADR-0090 (an optional comparison with the previous 28 local dates, `compare=previous_period`) and ADR-0091
+  (`source=tcx` with `reportedDuration`; the policy versions are unchanged).
 - Relates to: ADR-0082 (Today: an item belongs to the local date it started on, intervals from the zone's rules),
   ADR-0084 (Trends: 28 calendar dates ending on a chosen date, the 2000-01-01 lower bound, "today" by the server clock in
   the client's zone, per-series coverage), ADR-0087/0088 (the unified, owner-only activity history, its source-specific

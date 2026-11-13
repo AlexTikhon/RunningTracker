@@ -17,8 +17,8 @@ commitment to dates or to every item below.
 
 1. **Data foundation.**
    - Generic activities with manual entry (step 1, [ADR-0072](adr/0072-owner-only-manual-activities.md)).
-   - GPX/TCX/FIT import into activities: a first GPX 1.1 subset exists ([ADR-0086](adr/0086-gpx-activity-import.md));
-     TCX and FIT remain.
+   - GPX/TCX/FIT import into activities: a first GPX 1.1 subset exists ([ADR-0086](adr/0086-gpx-activity-import.md)),
+     and a first TCX v2 subset ([ADR-0091](adr/0091-tcx-activity-import.md)); FIT remains.
    - Daily check-in: weight, sleep, mood (and soreness).
    - Daily movement: steps and active energy, manual entry first ([ADR-0078](adr/0078-manual-daily-movement.md));
      phone/watch import later, under its own provenance.
@@ -121,7 +121,7 @@ synthetic data only; real health data needs real sign-in and the deployment prof
 activity (start, elapsed duration, distance) after a preview the server computes and a type the person chooses, with
 server-owned `source: gpx`. Elapsed time is never called moving time. Today and the weekly review show imports apart
 from manual activities and GPS runs; they are not AI input and are not compared with GPS runs. No route is stored or
-shown. TCX, FIT, multi-track files and any overlap detection remain open.
+shown. FIT, multi-track files and any overlap detection remain open (TCX: ADR-0091, below).
 
 The **activity history** is [ADR-0087](adr/0087-unified-activity-history.md): the Activity tab lists the person's manual
 entries, GPX imports and own finished recorded runs in one chronological, owner-only list, read on every request by one
@@ -151,6 +151,18 @@ ended; a duration or distance only when every item of both periods records it an
 zero baseline keeps the absolute change without a percentage. Otherwise stable reason codes say why (in progress, a period
 cut by 2000-01-01, no entries, missing values, pending or stale summaries), and the screen words them. Full coverage is
 never presented as complete logging. No scores, judgements, "better" or "worse", advice or AI input.
+
+**TCX import** is [ADR-0091](adr/0091-tcx-activity-import.md): one Training Center Database v2 activity becomes an
+owner-only, summary-only activity after a preview the server computes and a type the person chooses, with server-owned
+`source: tcx`. The subset is explicit: exactly one `Activity`, 1 to 1000 laps with zoned, strictly increasing start
+times and exactly one non-negative decimal `TotalTimeSeconds` and `DistanceMeters` each; no GPS position is needed or
+read, and anything else (multisport, TCX v1, DTDs, exponents, NaN, a negative or missing value, unordered laps) is refused,
+never repaired. The duration is the **reported duration**: the exact sum of the laps' own total times, rounded once to the
+second; it is never called elapsed or moving time. The fingerprint is TCX-specific and unique per owner, organization and
+source, so a TCX import is never deduplicated against a GPX import, a manual entry or a recorded run. The history, Today,
+the weekly review and activity trends (with the comparison) show TCX as its own source with its own duration name; it is
+not AI input. No file, lap, trackpoint, heart rate, calories, notes or device identity is stored. FIT, multi-activity files
+and overlap detection remain open.
 
 **HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
 built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the

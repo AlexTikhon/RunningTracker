@@ -4378,3 +4378,62 @@ call, AI-input change, score, judgement or advice.
 and the full browser suite were not rerun for this change. One synthetic dataset for the plans, no load run. The
 concurrent test exercises one writer pattern; the single-snapshot property itself is structural (one statement). No
 week-by-week or year-over-year comparisons, averages, pace, load, goals or advice; not an AI input.
+
+## TCX import into an owner-only, summary-only activity (ADR-0091) (2026-11-13)
+
+**What exists.** One Training Center Database v2 activity can be imported from the Activity tab: choose a file, read the
+server's preview, choose the type, confirm. The subset (`tcx-summary-1`) is defined in ADR-0091 against Garmin's
+`TrainingCenterDatabasev2.xsd`: the TCD v2 namespace (any prefix), at most one `Activities` with exactly one `Activity`
+and no `MultiSportSession`, one zoned `Id`, 1 to 1000 laps with zoned, strictly increasing `StartTime` (at most millisecond
+precision) and exactly one `TotalTimeSeconds` and `DistanceMeters` each in non-negative decimal notation; depth 32,
+500 000 elements and 64 retained characters per value. GPS positions are never needed or read. Everything else is refused
+with one of 25 stable reasons (`422 TCX_UNSUPPORTED`), never repaired, reordered or truncated; messages name a lap by
+position and never quote the file. The start is the first lap's start; the **reported duration** and the distance are the
+exact decimal sums of the laps' values (scaled `BigInt`, no floating point), rounded once, halves up, and the preview
+returns the exact sums so the screen explains the rounding. The duration is labelled "Reported duration" everywhere and is
+never called elapsed or moving time.
+
+`POST /activities/tcx-preview` and `PUT /activities/{id}/tcx-import` follow the GPX boundary with their own media type
+(`application/vnd.garmin.tcx+xml`): session, exact Origin and CSRF before the body is read, no decompression, 10 MiB raw
+body, `413 TCX_FILE_TOO_LARGE` never truncated; the reader is the shared hardened namespace-aware scanner, unchanged, with
+TCX bounds in its own handlers. Migration `0042` adds the server-owned `source = 'tcx'`, requires a key, a fingerprint, a
+distance and no effort or notes on TCX rows, and replaces the fingerprint uniqueness with
+`UNIQUE (org_id, user_id, source, import_fingerprint)` (added before the old constraint is dropped). The fingerprint is
+`somalane-tcx-activity-v1` over each lap's start instant and canonical decimals. Confirmation keeps ADR-0086's retry,
+key-conflict and race semantics with `source = 'tcx'` in every lookup (`409 TCX_ALREADY_IMPORTED`); no deduplication
+across TCX, GPX, manual entries or recorded runs. The GPX duplicate lookup now also names `source = 'gpx'` (same answers).
+
+TCX is its own source in `GET /activities` (`durationS` = reported duration), the history (`activity-history-3`, `tcx`
+items with `reportedDurationS`, `source=tcx` and the day filter), Today (`daily-overview-4`, `tcxImportedActivities`),
+the weekly review (`weekly-review-4`, review-only `tcxImportedActivities` from its own statement and `imported.tcx`) and
+activity trends with the comparison (`reportedDuration`; policy versions unchanged because no existing answer changes).
+Every source dispatch was audited and made exhaustive: the history mapper (it fell through to `recorded_run` for any
+unknown source), the trends contract's duration lookup and duration key (they fell through to `enteredDuration`/
+`observedDuration`), the trends service's key and summary naming, the web trends helpers, labels and the e2e seed helper.
+AI insights still read `source = 'manual'` only. Web: a shared, format-configured `FileImportController` (the GPX
+controller is now a thin configuration of it; its existing 287-line spec passes unchanged), `TcxImportPanel`, TCX labels
+in the history, Today, the weekly review and Trends, and a CSS wrap rule found by the 375 px test. No file, lap,
+trackpoint, position, heart rate, calories, notes, Sport or creator is stored. OpenAPI, reference, product direction,
+README and "amended by" notes in ADR-0072/0086/0087/0089.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Test database identity | the TCX integration file asserts, in `beforeAll` before its first fixture write, the owner connection through `prepareTenantIsolationFixtures` (a `_test` database and the owner role) and `current_database()`/`current_user` for the runtime (`running_tracker_runtime`) and maintenance (`running_tracker_maintenance`) pools; `npm run db:migrate:test` refuses a non-`_test` target and applied only `0042_activity_tcx_import.sql` |
+| New unit tests | API `tcx-activity.spec.ts` 77 (namespace aliases and prefixes, `xmlns=""`, foreign `Lap`/`TotalTimeSeconds`, skipped courses/workouts/folders; DTD/entity, malformed, undeclared prefix, non-UTF-8, NUL; missing/duplicate fields and Id; 16 invalid number spellings; exact half-up rounding including `2.49999999999999999` → 2 and float artefacts; boundaries; 1000/1001 laps, depth 32/33, 500 000/500 001 elements, 64/65 characters, a 10 MiB hostile tag in under 2 s; messages never quote markers); contracts `activity-tcx-import.spec.ts` 8 plus TCX cases in the overview, review, activities and history specs; web `tcx-import.spec.tsx` and `tcx-views.spec.tsx` 14 |
+| `npm run verify` | exit 0: lint, typecheck, build; scripts 115, API 1,893, web 1,311, contracts 304, fixtures 14, simulator 3. The run before it stopped at one 5 s timeout in `run-search-evaluation-cli.spec.ts` (unrelated, seen before); that file passed alone (27/27) and the next full run passed |
+| `activity-tcx-import.integration.test.ts` | 25 passed (runtime role, RLS): preview writes nothing and names only the person's TCX duplicate (never a GPX import); session/Origin/CSRF before the body (an announced 40 MiB body is answered 401 without reading it); media types (GPX type 415 on TCX routes and the reverse, gzip 415); exactly 10 MiB read, one byte more 413; seven refusal reasons without echoing the file; stored row summary-only; exact retries under the same and another id; key conflicts (other type, other file, a GPX import's key); `TCX_ALREADY_IMPORTED` also for a re-export; no id takeover of manual or GPX rows; six concurrent attempts → one row; four concurrent retries → one row; an explicit two-transaction interleaving waiting on the unique index; a key race with different files; owner/organization isolation; erasure ledger without content, export, simulated restore and replay (erased, then absent, then skipped for a re-import); history (all, `source=tcx`, `source=gpx`, day filter), Today, weekly review, trends with comparison (+0 count, +500 m, +600 s = +33.3 %) and deletion absent from all of them |
+| Affected integration files | `activity-access` 43 (the 0041/0042 constraint definitions, TCX shape checks, uniqueness per source, owner-only reads), `activity-gpx-import`, `activity-history-http`, `activity-trends-http`, `daily-overview-http`, `weekly-review-http`, `activities-http`, `activity-integrity`, `weekly-insights-http`/`-erasure`/`-access`: 264 tests; the first run had 2 expected failures (an exact empty-day shape and a CHECK case whose first violated constraint is reported alphabetically), fixed |
+| Real restore drill | `backup-restore.integration.test.ts` new test, real `pg_dump`/`pg_restore` at the current schema with a throwaway key in the session scratchpad (process environment only, deleted afterwards): a TCX import deleted after the backup comes back with the restore and is erased by `reapplyErasures` (`erased: 4` incl. the drill's three, `skipped_different_record: 1` for a version re-imported under the same id, survivor kept); a second replay changes nothing |
+| `npm run test:integration` | exit 0: 77 files, 1,108 passed, none skipped, 387 s, with the throwaway drill key in the process environment only (restore drill included). The TCX file was rerun alone afterwards on unmodified code (25/25), because a mutation was briefly applied and reverted while the suite ran |
+| `npx playwright test --project=chromium activity-tcx-import.spec.ts` | 3 passed: preview without persistence (exact sums and rounding text, no "Elapsed time"), explicit type, a lost first confirmation and an exact retry with the same URL, media type and only `type`/`idempotencyKey`; one row; history card "Reported duration" and "TCX import", source filters; a re-export refused as a duplicate; Today card; Trends source with "Reported duration"; refusals (TCX v1, negative value, GPX file, DTD, empty); at 375 px the preview with a 40-digit exact sum, the history card and Today fit without horizontal scrolling (the first run failed here and found the missing wrap rule); a preview answered after sign-out is dropped |
+| Affected browser specs | `activity-gpx-import`, `activity-history`, `today-activity-history`, `activity-trends`, `today`, `weekly-review`, `trends`, `activity` and the TCX spec in one Chromium run: 25 of 27; the two failures (`today.spec.ts:224` GPS point sequence count while recording, and the weekly-review AI panel text) passed when rerun alone (3/3); treated as timing flakes of the long run, not investigated further |
+| Mutation checks | each applied to a copy-backed file and restored byte-identical (`cmp`), suites green again afterwards: the parser rounding as `Math.round(Number(sum))` fails the exact-rounding unit test; the history mapper emitting a TCX row as a `gpx` item with `elapsedDurationS`, and the trends service naming the TCX duration `elapsedDuration`, fail 3 integration tests (history, trends with comparison, deletion across read models) |
+
+**Not established.** Chromium only; no Firefox, WebKit, Safari or iPhone run, and the iOS Files picker with a `.tcx` file
+is the owner's pilot checklist. Real device exports were not tried (the fixtures are synthetic and follow the XSD). TCX
+v1, FIT, multisport and multi-activity files, courses and workouts are refused or ignored by design; overlap detection
+with GPX imports, manual entries and recorded runs does not exist. 10 MiB holds roughly 8–10 hours of a 1 Hz recording
+with extensions; longer files are refused. Parsing runs on the request thread. The stored start is an instant (the file's
+offset is not kept). The full browser suite was not rerun.
