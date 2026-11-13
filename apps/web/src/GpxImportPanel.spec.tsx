@@ -99,7 +99,7 @@ describe('GPX import view (ADR-0086)', () => {
   });
 
   it('labels provenance and duration by source, so an import is never shown as manually entered', () => {
-    expect(activitySourceLabels).toEqual({ gpx: 'GPX import', manual: 'Entered manually' });
-    expect(activityDurationLabels).toEqual({ gpx: 'Elapsed time', manual: 'Duration' });
+    expect(activitySourceLabels).toEqual({ gpx: 'GPX import', manual: 'Entered manually', tcx: 'TCX import' });
+    expect(activityDurationLabels).toEqual({ gpx: 'Elapsed time', manual: 'Duration', tcx: 'Reported duration' });
   });
 });

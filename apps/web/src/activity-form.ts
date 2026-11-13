@@ -36,16 +36,21 @@ export type ActivityDraftValidation =
   | { ok: true; request: ActivityDetails }
   | { errors: string[]; ok: false };
 
-/** Where an activity came from (server-owned, ADR-0086): never presented as manual when it was imported. */
+/** Where an activity came from (server-owned, ADR-0086/0091): never presented as manual, or as another format, when it was imported. */
 export const activitySourceLabels: Record<ActivitySource, string> = {
   gpx: 'GPX import',
   manual: 'Entered manually',
+  tcx: 'TCX import',
 };
 
-/** A GPX import's duration is the file's elapsed time, pauses included; a manual one is what the person entered. */
+/**
+ * A GPX import's duration is the file's elapsed time, pauses included; a TCX import's is what its laps report (neither
+ * elapsed nor moving time); a manual one is what the person entered.
+ */
 export const activityDurationLabels: Record<ActivitySource, string> = {
   gpx: 'Elapsed time',
   manual: 'Duration',
+  tcx: 'Reported duration',
 };
 
 export const activityTypeLabels: Record<ActivityType, string> = {

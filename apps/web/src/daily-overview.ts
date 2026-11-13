@@ -1,4 +1,11 @@
-import type { DailyOverview, DailyOverviewCheckIn, DailyOverviewDay, DailyOverviewGpsRuns, DailyOverviewMovement } from '@running-tracker/contracts';
+import type {
+  ActivityHistorySource,
+  DailyOverview,
+  DailyOverviewCheckIn,
+  DailyOverviewDay,
+  DailyOverviewGpsRuns,
+  DailyOverviewMovement,
+} from '@running-tracker/contracts';
 
 import { activityTypeLabels } from './activity-form.js';
 import { formatSleep } from './daily-checkin.js';
@@ -22,7 +29,7 @@ export type TodayAction =
    * The activity history filtered to the overview's date, in the overview's zone, and to the source behind one card
    * (ADR-0088): the actual items behind that card's figures.
    */
-  | { kind: 'history'; localDate: string; source: 'gpx' | 'manual' | 'recorded_run'; timeZone: string };
+  | { kind: 'history'; localDate: string; source: ActivityHistorySource; timeZone: string };
 
 export interface LabelledValue {
   label: string;
@@ -95,6 +102,20 @@ export function importedActivityRows(overview: Pick<DailyOverview, 'importedActi
   return overview.importedActivities.byType.map((entry) => ({
     label: activityTypeLabels[entry.type],
     value: `${entry.count} · ${formatEnteredDuration(entry.elapsedDurationS)} elapsed`,
+  }));
+}
+
+/** TCX imports (ADR-0091): their own summary, with the duration their laps report, never "elapsed" or "entered". */
+export function tcxImportedActivitiesSummary(overview: Pick<DailyOverview, 'tcxImportedActivities'>): string {
+  const { count, reportedDurationS } = overview.tcxImportedActivities;
+  if (count === 0) return 'No TCX import started on this day.';
+  return `${plural(count, 'activity', 'activities')} imported from TCX started on this day, ${formatEnteredDuration(reportedDurationS)} reported by their laps in total.`;
+}
+
+export function tcxImportedActivityRows(overview: Pick<DailyOverview, 'tcxImportedActivities'>): LabelledValue[] {
+  return overview.tcxImportedActivities.byType.map((entry) => ({
+    label: activityTypeLabels[entry.type],
+    value: `${entry.count} · ${formatEnteredDuration(entry.reportedDurationS)} reported`,
   }));
 }
 

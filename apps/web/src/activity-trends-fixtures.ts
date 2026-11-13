@@ -8,6 +8,8 @@ import {
   summarizeGpxActivityTrendDays,
   summarizeManualActivityTrendDays,
   summarizeRecordedRunTrendDays,
+  summarizeTcxActivityTrendDays,
+  activityTrendsDurationKeyOf,
   type ActivityHistorySource,
   type ActivityTrends,
   type ActivityType,
@@ -81,18 +83,25 @@ export function activityTrendsFixture(
   };
   type Built = ReturnType<typeof daysOf>;
   const runDays = (days: Built) => days.map(({ duration, ...day }) => ({ ...day, observedDuration: duration }));
-  // Manual and GPX days have no summary states.
+  // Manual, GPX and TCX days have no summary states.
   const strip = (days: Built) =>
     days.map((day) => ({ count: day.count, distance: day.distance, duration: day.duration, endsAt: day.endsAt, localDate: day.localDate, startsAt: day.startsAt }));
   const summaryOf = (days: Built) => {
-    if (source === 'recorded_run') return summarizeRecordedRunTrendDays(runDays(days));
-    if (source === 'gpx') return summarizeGpxActivityTrendDays(strip(days).map(({ duration, ...day }) => ({ ...day, elapsedDuration: duration })));
-    return summarizeManualActivityTrendDays(strip(days).map(({ duration, ...day }) => ({ ...day, enteredDuration: duration })));
+    switch (source) {
+      case 'recorded_run':
+        return summarizeRecordedRunTrendDays(runDays(days));
+      case 'gpx':
+        return summarizeGpxActivityTrendDays(strip(days).map(({ duration, ...day }) => ({ ...day, elapsedDuration: duration })));
+      case 'tcx':
+        return summarizeTcxActivityTrendDays(strip(days).map(({ duration, ...day }) => ({ ...day, reportedDuration: duration })));
+      case 'manual':
+        return summarizeManualActivityTrendDays(strip(days).map(({ duration, ...day }) => ({ ...day, enteredDuration: duration })));
+    }
   };
   const answerDays =
     source === 'recorded_run'
       ? runDays(base)
-      : strip(base).map(({ duration, ...day }) => ({ ...day, [source === 'gpx' ? 'elapsedDuration' : 'enteredDuration']: duration }));
+      : strip(base).map(({ duration, ...day }) => ({ ...day, [activityTrendsDurationKeyOf(source)]: duration }));
   const summary = summaryOf(base);
   if (options.comparison === false) return activityTrendsSchema.parse({ ...common, days: answerDays, source, summary });
   const { period } = previousActivityTrendsPeriodOf(endDate);

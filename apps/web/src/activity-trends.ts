@@ -22,9 +22,10 @@ export const activityTrendSourceLabels: Record<ActivityHistorySource, string> = 
   gpx: 'GPX import',
   manual: 'Entered manually',
   recorded_run: 'Recorded run',
+  tcx: 'TCX import',
 };
 
-export const activityTrendSourceOptions = (['manual', 'gpx', 'recorded_run'] as const).map((source) => ({
+export const activityTrendSourceOptions = (['manual', 'gpx', 'tcx', 'recorded_run'] as const).map((source) => ({
   label: activityTrendSourceLabels[source],
   source,
 }));
@@ -34,11 +35,12 @@ export function activityTrendTypesFor(source: ActivityHistorySource): readonly A
   return source === 'recorded_run' ? ['run'] : ACTIVITY_TYPES;
 }
 
-/** Each source's duration, named for what it is (the history's names, ADR-0087). */
+/** Each source's duration, named for what it is (the history's names, ADR-0087/0091). */
 export const activityTrendDurationLabels: Record<ActivityHistorySource, string> = {
   gpx: 'Elapsed time',
   manual: 'Entered duration',
   recorded_run: 'Observed duration',
+  tcx: 'Reported duration',
 };
 
 export const activityTrendDurationExplanations: Record<ActivityHistorySource, string> = {
@@ -46,13 +48,39 @@ export const activityTrendDurationExplanations: Record<ActivityHistorySource, st
   manual: 'Entered duration is the duration you typed for each entry.',
   recorded_run:
     'Observed duration adds the time between accepted GPS points of each run, from a summary made for its current data; pauses and gaps are left out.',
+  tcx: "Reported duration adds what each TCX file's laps report as their total time, rounded once per file to the nearest second; it is neither elapsed time nor moving time.",
+};
+
+/** What one item of a source is called: [singular, plural, the Measure label]. */
+const itemNames: Record<ActivityHistorySource, readonly [string, string, string]> = {
+  gpx: ['import', 'imports', 'Imports'],
+  manual: ['entry', 'entries', 'Entries'],
+  recorded_run: ['run', 'runs', 'Runs'],
+  tcx: ['import', 'imports', 'Imports'],
 };
 
 export const activityTrendMeasureLabels = (source: ActivityHistorySource): Record<ActivityTrendMeasure, string> => ({
-  count: source === 'recorded_run' ? 'Runs' : source === 'gpx' ? 'Imports' : 'Entries',
+  count: itemNames[source][2],
   distance: 'Distance',
   duration: activityTrendDurationLabels[source],
 });
+
+/**
+ * The duration of a day, summary or comparison under its source's own name. Exhaustive by type: the last branch only
+ * compiles while `observedDuration` is the one name left, so a new source cannot fall through to another's duration.
+ */
+type NamedDuration<Metric> =
+  | { enteredDuration: Metric }
+  | { elapsedDuration: Metric }
+  | { reportedDuration: Metric }
+  | { observedDuration: Metric };
+
+export function namedDuration<Metric>(value: NamedDuration<Metric>): Metric {
+  if ('enteredDuration' in value) return value.enteredDuration;
+  if ('elapsedDuration' in value) return value.elapsedDuration;
+  if ('reportedDuration' in value) return value.reportedDuration;
+  return value.observedDuration;
+}
 
 interface Metric {
   total: number | null;
@@ -74,7 +102,7 @@ export interface ActivityTrendDisplayDay {
 
 export function displayDays(trends: ActivityTrends): ActivityTrendDisplayDay[] {
   return trends.days.map((day) => {
-    const duration = 'enteredDuration' in day ? day.enteredDuration : 'elapsedDuration' in day ? day.elapsedDuration : day.observedDuration;
+    const duration = namedDuration(day);
     return {
       count: day.count,
       distance: { total: day.distance.totalM, withValue: day.distance.withValue },
@@ -93,18 +121,29 @@ const days = (count: number) => plural(count, 'day', 'days');
 
 /** "entry"/"entries", "import"/"imports" or "run"/"runs". */
 export function itemNoun(source: ActivityHistorySource, count: number): string {
-  const [one, many] = source === 'recorded_run' ? ['run', 'runs'] : source === 'gpx' ? ['import', 'imports'] : ['entry', 'entries'];
+  const [one, many] = itemNames[source];
   return count === 1 ? one : many;
 }
 
 const items = (source: ActivityHistorySource, count: number) => `${count} ${itemNoun(source, count)}`;
 
-/** "manual rides", "GPX imports of hikes", "recorded runs". */
+/** "manually entered activities of type ride", "GPX imports of type hike", "TCX imports of type swim", "recorded runs". */
 export function selectionLabel(source: ActivityHistorySource, type: ActivityType): string {
   const typeName = activityTypeLabels[type].toLowerCase();
-  if (source === 'recorded_run') return 'recorded runs';
-  if (source === 'gpx') return `GPX imports of type ${typeName}`;
-  return `manually entered activities of type ${typeName}`;
+  switch (source) {
+    case 'recorded_run':
+      return 'recorded runs';
+    case 'gpx':
+      return `GPX imports of type ${typeName}`;
+    case 'tcx':
+      return `TCX imports of type ${typeName}`;
+    case 'manual':
+      return `manually entered activities of type ${typeName}`;
+    default: {
+      const unknown: never = source;
+      throw new Error(`Unknown activity source: ${String(unknown)}`);
+    }
+  }
 }
 
 export const formatKilometres = (metres: number) => formatDistance(metres, 'km');
@@ -135,7 +174,7 @@ export function activitySummaryLines(trends: ActivityTrends): string[] {
       `No ${selectionLabel(source, trends.applied.type)} on any of these ${days(total)}. That only means nothing of this kind was logged here; it does not mean you were inactive.`,
     ];
   }
-  const durationMetric = 'enteredDuration' in summary ? summary.enteredDuration : 'elapsedDuration' in summary ? summary.elapsedDuration : summary.observedDuration;
+  const durationMetric = namedDuration(summary);
   const lines = [
     `${items(source, summary.count)} on ${summary.daysWithEntries} of ${days(total)}. ${
       summary.daysWithEntries === total ? '' : `On the other ${days(total - summary.daysWithEntries)} none was logged${skippedClause(skippedDates(trends))}, which does not mean you were inactive.`
@@ -367,14 +406,14 @@ const periodLabel = (period: { days: number; endDate: string; startDate: string 
   `${shortLongDate(period.startDate)} – ${shortLongDate(period.endDate)} (${period.days === 1 ? '1 date' : `${period.days} dates`})`;
 
 function durationOf(summary: AnySummary) {
-  return 'enteredDuration' in summary ? summary.enteredDuration : 'elapsedDuration' in summary ? summary.elapsedDuration : summary.observedDuration;
+  return namedDuration(summary);
 }
 
 function metricOf(comparison: Comparison, measure: ActivityTrendMeasure) {
   const { metrics } = comparison;
   if (measure === 'count') return metrics.count;
   if (measure === 'distance') return metrics.distance;
-  return 'enteredDuration' in metrics ? metrics.enteredDuration : 'elapsedDuration' in metrics ? metrics.elapsedDuration : metrics.observedDuration;
+  return namedDuration(metrics);
 }
 
 const statesOf = (summary: AnySummary | null) => (summary !== null && 'summaries' in summary ? summary.summaries : { current: 0, pending: 0, stale: 0 });

@@ -1,4 +1,4 @@
-import { ACTIVITY_NOTES_MAX_LENGTH, ACTIVITY_TYPES } from '@running-tracker/contracts';
+import { ACTIVITY_NOTES_MAX_LENGTH, ACTIVITY_TYPES, type ActivityHistorySource } from '@running-tracker/contracts';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import {
@@ -26,6 +26,7 @@ import {
 import { ActivityAlreadySaved, type SavedActivityView } from './ActivityAlreadySaved.js';
 import { ActivityHistoryList, historyDisplayZone } from './ActivityHistoryList.js';
 import { GpxImportPanel } from './GpxImportPanel.js';
+import { TcxImportPanel } from './TcxImportPanel.js';
 import { RunDetailScreen } from './RunDetailScreen.js';
 import { defaultTimeZone } from './run-search.js';
 import {
@@ -42,7 +43,7 @@ export interface ActivityScreenProps {
   csrf: CsrfCredentials;
   // Opened from a Today card (ADR-0088): the history starts on that date, zone and source, and "Back to Today" returns to
   // that date. Read once when the screen mounts; the parent passes it only under the scope it was made in.
-  historyIntent?: { localDate: string; source: 'gpx' | 'manual' | 'recorded_run'; timeZone: string } | null;
+  historyIntent?: { localDate: string; source: ActivityHistorySource; timeZone: string } | null;
   onBackToToday?: (localDate: string) => void;
   // Called once the screen has applied `historyIntent`, so the parent consumes it and a later remount (another
   // organization and back) never applies it again. The screen keeps its own copy for its filters and Back to Today.
@@ -65,7 +66,7 @@ interface RunDetailSelection {
   session: AbortSignal;
 }
 
-// Activities of the signed-in person: entered by hand (ADR-0072) or imported from a GPX file (ADR-0086), listed with
+// Activities of the signed-in person: entered by hand (ADR-0072) or imported from a GPX (ADR-0086) or TCX (ADR-0091) file, listed with
 // their own finished recorded runs in one history (ADR-0087). The parent keys it by session, person and organization,
 // so a change of any of them starts from a clean form, import, filters and history with no request carried over.
 // Owner-only: nothing here is visible to a coach or another member.
@@ -301,8 +302,8 @@ export function ActivityScreen({
         <p className="eyebrow">Activity log</p>
         <h1 id="activity-title" ref={heading} tabIndex={-1}>Activity</h1>
         <p>
-          Log a ride, a swim, a strength session or any other activity by hand, or import one from a GPX file. Only you can
-          see your activities: coaches and other members cannot, even for runs you share with them.
+          Log a ride, a swim, a strength session or any other activity by hand, or import one from a GPX or TCX file. Only
+          you can see your activities: coaches and other members cannot, even for runs you share with them.
         </p>
       </div>
 
@@ -390,6 +391,18 @@ export function ActivityScreen({
       </form>
 
       <GpxImportPanel
+        csrf={csrf}
+        onImported={() => {
+          setNotice(null);
+          lister.current?.refresh();
+        }}
+        orgId={orgId}
+        signal={signal}
+        timeZone={timeZone}
+        unit={draft.unit}
+      />
+
+      <TcxImportPanel
         csrf={csrf}
         onImported={() => {
           setNotice(null);

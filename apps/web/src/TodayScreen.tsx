@@ -1,4 +1,4 @@
-import { DAILY_METRICS_LOCAL_DATE_MIN, isEmptyDailyOverview, type DailyOverview } from '@running-tracker/contracts';
+import { DAILY_METRICS_LOCAL_DATE_MIN, isEmptyDailyOverview, type ActivityHistorySource, type DailyOverview } from '@running-tracker/contracts';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { checkInDateProblem, formatCheckInDate, localDateIn } from './daily-checkin.js';
@@ -10,6 +10,8 @@ import {
   gpsRunsSummary,
   importedActivitiesSummary,
   importedActivityRows,
+  tcxImportedActivitiesSummary,
+  tcxImportedActivityRows,
   isNoteOnlyCheckIn,
   manualActivityRows,
   manualActivitiesSummary,
@@ -53,7 +55,7 @@ function HistoryButton({
   day: DailyOverview['day'];
   label: string;
   onAction: (action: TodayAction) => void;
-  source: 'gpx' | 'manual' | 'recorded_run';
+  source: ActivityHistorySource;
 }) {
   return (
     <button
@@ -68,7 +70,7 @@ function HistoryButton({
 
 /** A loaded overview: the four sources, each in its own section, with its action. */
 export function OverviewContent({ onAction, overview }: { onAction: (action: TodayAction) => void; overview: DailyOverview }) {
-  const { checkIn, day, gpsRuns, importedActivities, manualActivities, meals, movement } = overview;
+  const { checkIn, day, gpsRuns, importedActivities, manualActivities, meals, movement, tcxImportedActivities } = overview;
   const mealRows = mealTotalRows(meals);
   const dateLabel = formatCheckInDate(day.localDate);
   const lengthNote = dayLengthNote(day);
@@ -165,6 +167,22 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
         </section>
       )}
 
+      {tcxImportedActivities.count > 0 && (
+        <section aria-labelledby="today-tcx-title" className="today-card">
+          <h2 id="today-tcx-title">Imported from TCX</h2>
+          <p>{tcxImportedActivitiesSummary(overview)}</p>
+          <Rows label="TCX imports by type" rows={tcxImportedActivityRows(overview)} />
+          <p className="today-note">
+            Reported duration is what each file&apos;s laps report as their total time; it is neither elapsed time nor moving
+            time. TCX imports are not added to manual activities, GPX imports or GPS runs, and are not checked against them.
+          </p>
+          <div className="run-card__actions">
+            <HistoryButton day={day} label="TCX imports" onAction={onAction} source="tcx" />
+            <button onClick={() => onAction({ kind: 'activities' })} type="button">Open Activities</button>
+          </div>
+        </section>
+      )}
+
       <section aria-labelledby="today-gps-title" className="today-card">
         <h2 id="today-gps-title">GPS runs</h2>
         <p className={gpsRuns.count === 0 ? 'today-missing' : undefined}>{gpsRunsSummary(gpsRuns)}</p>
@@ -175,6 +193,9 @@ export function OverviewContent({ onAction, overview }: { onAction: (action: Tod
         )}
         {importedActivities.count > 0 && gpsRuns.count > 0 && (
           <p className="today-note">A GPX import and a GPS run may describe the same outing; both are shown, never added together.</p>
+        )}
+        {tcxImportedActivities.count > 0 && gpsRuns.count > 0 && (
+          <p className="today-note">A TCX import and a GPS run may describe the same outing; both are shown, never added together.</p>
         )}
         <div className="run-card__actions">
           {gpsRuns.count > 0 && <HistoryButton day={day} label="GPS runs" onAction={onAction} source="recorded_run" />}

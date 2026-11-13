@@ -23,6 +23,7 @@ export const historySourceLabels: Record<ActivityHistorySource, string> = {
   gpx: 'GPX import',
   manual: 'Entered manually',
   recorded_run: 'Recorded run',
+  tcx: 'TCX import',
 };
 
 const gpsQualityLabels: Record<GpsQuality, string> = {
@@ -122,6 +123,14 @@ function details(item: ActivityHistoryItem, unit: DistanceUnit): ReactNode {
           <div><dt>Source</dt><dd>{historySourceLabels.gpx}</dd></div>
         </dl>
       );
+    case 'tcx':
+      return (
+        <dl>
+          <div><dt>Reported duration</dt><dd>{formatDuration(item.reportedDurationS)}</dd></div>
+          <div><dt>Distance</dt><dd>{distance(item.distanceM)}</dd></div>
+          <div><dt>Source</dt><dd>{historySourceLabels.tcx}</dd></div>
+        </dl>
+      );
     case 'recorded_run':
       return (
         <>
@@ -184,11 +193,12 @@ export function ActivityHistoryList({
         </div>
       )}
       <p className="search-results__note">
-        Manual entries, GPX imports and the runs you recorded here, newest first. Times are shown in {timeZone}. Distances
-        in {unit === 'km' ? 'kilometres' : 'miles'}. Each source keeps its own measure: a manual entry shows the duration you
-        entered; a GPX import shows its elapsed time, pauses included, not moving time; a recorded run shows the observed
-        duration of its accepted GPS measurements once its summary is ready. Sources are listed side by side and never added
-        together, so the same outing entered, imported and recorded appears more than once. Only you can see this history.
+        Manual entries, GPX and TCX imports and the runs you recorded here, newest first. Times are shown in {timeZone}.
+        Distances in {unit === 'km' ? 'kilometres' : 'miles'}. Each source keeps its own measure: a manual entry shows the
+        duration you entered; a GPX import shows its elapsed time, pauses included, not moving time; a TCX import shows the
+        duration its laps report, neither elapsed nor moving time; a recorded run shows the observed duration of its accepted
+        GPS measurements once its summary is ready. Sources are listed side by side and never added together, so the same
+        outing entered, imported and recorded appears more than once. Only you can see this history.
       </p>
       <form aria-label="History filters" className="search-filters" onSubmit={(event) => event.preventDefault()}>
         <label>
@@ -200,6 +210,7 @@ export function ActivityHistoryList({
             <option value="">All sources</option>
             <option value="manual">{historySourceLabels.manual}</option>
             <option value="gpx">{historySourceLabels.gpx}</option>
+            <option value="tcx">{historySourceLabels.tcx}</option>
             <option value="recorded_run">{historySourceLabels.recorded_run}</option>
           </select>
         </label>

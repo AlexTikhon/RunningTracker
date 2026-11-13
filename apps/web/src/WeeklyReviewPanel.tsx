@@ -3,6 +3,7 @@ import type {
   WeeklyReviewCoverage,
   WeeklyReviewImportedActivities,
   WeeklyReviewMovement,
+  WeeklyReviewTcxImportedActivities,
 } from '@running-tracker/contracts';
 import { useEffect, useRef, useState } from 'react';
 
@@ -55,12 +56,13 @@ function zoneLine(review: WeeklyReview): string {
     : `Days are read in ${week.timeZone}, the time zone of this device (no check-in this week has one).`;
 }
 
-/** Nothing of any source in the week. A movement day counts, also one with only recorded zeros; so does a GPX import. */
+/** Nothing of any source in the week. A movement day counts, also one with only recorded zeros; so does a GPX or TCX import. */
 export const isEmptyWeek = (review: WeeklyReview) =>
   review.coverage.daysWithCheckInRecord === 0 &&
   review.coverage.manualActivities.count === 0 &&
   review.coverage.gpsRuns.count === 0 &&
   review.importedActivities.count === 0 &&
+  review.tcxImportedActivities.count === 0 &&
   review.movement.daysWithRecord === 0;
 
 /** GPX imports of the week (ADR-0086): their own part, never added to manual activities or GPS runs. */
@@ -85,6 +87,38 @@ export function ReviewImports({ imported }: { imported: WeeklyReviewImportedActi
             <dl>
               <div><dt>Imports</dt><dd>{entry.count}</dd></div>
               <div><dt>Elapsed time</dt><dd>{formatDuration(entry.elapsedDurationS)}</dd></div>
+              <div><dt>Distance</dt><dd>{formatDistance(entry.distanceM, 'km')}</dd></div>
+            </dl>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** TCX imports of the week (ADR-0091): their own part with the reported duration, never added to any other source. */
+export function ReviewTcxImports({ imported }: { imported: WeeklyReviewTcxImportedActivities }) {
+  if (imported.count === 0) return null;
+  return (
+    <section aria-labelledby="review-tcx-imports-title" className="review-movement">
+      <h3 id="review-tcx-imports-title">Imported from TCX</h3>
+      <p className="review-movement__source">
+        <span className="review-badge">TCX import</span> Reported duration is what each file&apos;s laps report as their total
+        time; it is neither elapsed time nor moving time. Not added to manual activities, GPX imports or GPS runs, and not
+        checked against them.
+      </p>
+      <dl className="review-movement__totals">
+        <div><dt>Imports</dt><dd>{imported.count}</dd></div>
+        <div><dt>Reported duration</dt><dd>{formatDuration(imported.reportedDurationS)}</dd></div>
+        <div><dt>Distance</dt><dd>{formatDistance(imported.distanceM, 'km')}</dd></div>
+      </dl>
+      <ul aria-label="TCX imports by type" className="review-movement__days">
+        {imported.byType.map((entry) => (
+          <li className="review-movement__day" key={entry.type}>
+            <strong>{activityTypeLabels[entry.type]}</strong>
+            <dl>
+              <div><dt>Imports</dt><dd>{entry.count}</dd></div>
+              <div><dt>Reported duration</dt><dd>{formatDuration(entry.reportedDurationS)}</dd></div>
               <div><dt>Distance</dt><dd>{formatDistance(entry.distanceM, 'km')}</dd></div>
             </dl>
           </li>
@@ -175,6 +209,7 @@ export function ReviewContent({ review }: { review: WeeklyReview }) {
         </dl>
       </section>
       <ReviewImports imported={review.importedActivities} />
+      <ReviewTcxImports imported={review.tcxImportedActivities} />
       <ReviewMovement movement={review.movement} weekTimeZone={review.week.timeZone} />
       {review.facts.length > 0 && (
         <section aria-label="Numbers" className="review-numbers">

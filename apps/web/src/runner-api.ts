@@ -15,6 +15,8 @@ import {
   dailyTrendsSchema,
   GPX_IMPORT_CONTENT_TYPE,
   gpxImportPreviewSchema,
+  TCX_IMPORT_CONTENT_TYPE,
+  tcxImportPreviewSchema,
   ingestPointsResponseSchema,
   mealListResponseSchema,
   mealViewSchema,
@@ -38,6 +40,7 @@ import {
   type ActivityType,
   type ActivityView,
   type GpxImportPreview,
+  type TcxImportPreview,
   type ArchiveMetadataResponse,
   type CreateActivityRequest,
   type DailyMetricsListResponse,
@@ -456,6 +459,52 @@ export async function confirmGpxImport(
   const activity = activityViewSchema.parse(requireSuccess(response));
   const created = response.response.status === 201;
   if (activity.source !== 'gpx') throw new Error('The server returned an activity that was not imported from GPX');
+  if (created && activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
+  return { activity, created };
+}
+
+function tcxUploadHeaders(csrf: CsrfCredentials): HeadersInit {
+  return { 'content-type': TCX_IMPORT_CONTENT_TYPE, [csrf.headerName]: csrf.token };
+}
+
+// TCX import (ADR-0091), the GPX flow with its own routes and media type. The body is the file exactly as selected; the
+// server parses it and computes every number on preview and again on confirmation.
+export async function previewTcxImport(
+  input: { orgId: string },
+  file: Blob,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<TcxImportPreview> {
+  const response = await requestJson(`${activityPath(input.orgId)}/tcx-preview`, {
+    body: file,
+    cache: 'no-store',
+    credentials: 'same-origin',
+    headers: tcxUploadHeaders(csrf),
+    method: 'POST',
+    signal,
+  });
+  return tcxImportPreviewSchema.parse(requireSuccess(response));
+}
+
+// Idempotent like the GPX confirmation; 409 TCX_ALREADY_IMPORTED names an existing TCX import with the same laps.
+export async function confirmTcxImport(
+  target: ActivityTarget,
+  choice: { idempotencyKey: string; type: ActivityType },
+  file: Blob,
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<{ activity: ActivityView; created: boolean }> {
+  const query = new URLSearchParams({ idempotencyKey: choice.idempotencyKey, type: choice.type });
+  const response = await requestJson(`${activityPath(target.orgId, target.activityId)}/tcx-import?${query.toString()}`, {
+    body: file,
+    credentials: 'same-origin',
+    headers: tcxUploadHeaders(csrf),
+    method: 'PUT',
+    signal,
+  });
+  const activity = activityViewSchema.parse(requireSuccess(response));
+  const created = response.response.status === 201;
+  if (activity.source !== 'tcx') throw new Error('The server returned an activity that was not imported from TCX');
   if (created && activity.activityId !== target.activityId) throw new Error('The server returned a different activity');
   return { activity, created };
 }

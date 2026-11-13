@@ -46,7 +46,7 @@ export interface KeptActivitySelection {
 export interface HistoryIntent {
   localDate: string;
   scope: string;
-  source: 'gpx' | 'manual' | 'recorded_run';
+  source: ActivityHistorySource;
   timeZone: string;
 }
 

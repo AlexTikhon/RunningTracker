@@ -372,6 +372,8 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .activity-saved__details { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.5rem; margin: 0; }
 .activity-saved__details dt { color: #7f8a82; font-size: 0.7rem; }
 .activity-saved__details dd { margin: 0.1rem 0 0; font-weight: 800; overflow-wrap: anywhere; }
+/* An exact lap sum (ADR-0091) can be a long unbroken number; it wraps instead of widening a narrow screen. */
+.activity-import__note { overflow-wrap: anywhere; }
 .checkin-form__sleep { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .checkin-form__state, .checkin-form__zone { grid-column: 1 / -1; margin: 0; color: #b8c2bb; font-size: 0.84rem; line-height: 1.45; }
 .checkin-form__delete { grid-column: 1 / -1; justify-self: start; }
