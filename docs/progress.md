@@ -4437,3 +4437,137 @@ v1, FIT, multisport and multi-activity files, courses and workouts are refused o
 with GPX imports, manual entries and recorded runs does not exist. 10 MiB holds roughly 8–10 hours of a 1 Hz recording
 with extensions; longer files are refused. Parsing runs on the request thread. The stored start is an instant (the file's
 offset is not kept). The full browser suite was not rerun.
+
+## Draft a meal from text with a local model (ADR-0092) (2026-11-14)
+
+**What exists.** An optional **Draft from text** panel in the Meal log, off by default (`MEAL_DRAFTS_PROVIDER=off`), and
+`POST /api/orgs/{orgId}/meals/draft-proposals` (`meal-draft-1`). The person types one meal description; the server sends
+only that text and fixed instructions to a local Ollama model (the weekly insight's `OllamaProvider`, unchanged, with this
+feature's own model, local-address rule and limits), validates the answer against a per-outcome wire schema, and then
+**grounds** it deterministically: a title only if it is an excerpt of the text without a nutrition statement (otherwise
+`502 ungrounded_output`), a meal type only from its word in the text, and each nutrition value only if the model's excerpt
+is in the text and the server's own tokenizer finds the claimed number in it, followed by the field's unit, with a
+macronutrient's name attached (a food weight is never a nutrient), in a clause with no per-portion, multiplication,
+approximation, range or negation marker, with no other value for that nutrient in the text, and accepted by the meal
+contract (one decimal, bounds; never rounded). Each field is `proposed` with its excerpt, `not_stated` or `withheld` with
+a reason; two meal types named make it `clarify multiple_meals`. The date and zone are the form's: the meal log's date
+rules apply before any model call and both are echoed, never sent to the model. No migration; nothing from the text, the
+answer, the prompt or the proposal is stored or logged (bounded outcome codes and four integer field counts only).
+
+Admission and lifetimes are ADR-0057's (`InterpretationAdmission` unchanged): one process-wide place by default, one in
+flight and 5 per minute per person, a 200-call daily allowance, a 45 s deadline (at most 55 s; the browser waits 60 s for
+this request only, via a new optional `timeoutMs` of `requestJson`), and places released only when the provider's promise
+settles. Membership is checked before the call; session and membership again before the answer; no connection is held
+during the call. Web: `MealDraftController` (generation counter plus a text-and-date scope, session-bound), the panel
+(disclosure, Propose/Cancel, the proposal with an excerpt per value and a reason per field not filled in, Apply/Discard,
+an explicit Replace/Keep choice when the form holds unsaved details), and the form's note that applied details are not
+saved. Apply only fills the form; saving is the existing Add entry with the unchanged form-session key, so the saved entry
+is `source: manual` ("entered or confirmed by the person"). `hasControlCharacter` moved to the contracts' primitives.
+ADR-0092, runbook `meal-drafts.md`, evaluation report, OpenAPI, reference, product direction, README, `.env.example`, and
+an "amended by" note in ADR-0083.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| Test database identity | before the integration run: `current_database()`/`current_user` = `running_tracker_test` with `running_tracker_runtime`, `running_tracker_owner` and `running_tracker_maintenance` for the three configured connections (`loadIntegrationTestConfiguration` also refuses mismatched roles or databases) |
+| New unit tests | API: `meal-draft-grounding.spec.ts` 38 (the brief's two examples; zero vs null; one-decimal acceptance and two-decimal refusal; food quantities in EN/RU; per 100 g, per serving, each, по, `2 x`, `/100 g`; a total next to a per-100 g statement; about/range/up to/примерно/`1,200`/`1 200`/question; conflicts; negation; kJ, %, mg and missing units; unit word before the number; evidence not in the text, a different number, half claims; case-only differences; prompt injection; titles; meal types; the multiple-meals override), `meal-draft-service.spec.ts` 9 (exact model input, invalid and ungrounded answers, failure mapping, the place kept after a timeout and after a client abort until the provider settles, a late answer dropped unread, rate limit with Retry-After, access lost after grounding, no text in logs), `meal-draft-wire.spec.ts` 15 (sent JSON Schema and zod agree on 10 answers, prompt examples are grounded answers, fake provider control words and cancellation), `environment-meal-drafts.spec.ts` 5, `meal-draft-evaluation.spec.ts` 5 (frozen digests, scoring categories, call cap and failure streak, fake harness runs on both sets with 0 incorrect acceptances); web: `meal-draft-controller.spec.ts` 6 and `MealDraftPanel.spec.tsx` 8 |
+| `npm run verify` | exit 0 in 186 s: lint, typecheck, build; scripts 115, API 1,966, web 1,325, contracts 304, fixtures 14, simulator 3 |
+| `meal-drafts-http.integration.test.ts` | 13 passed (runtime role): off by default → `503 MEAL_DRAFT_DISABLED` after session/CSRF; a grounded draft with the echoed date and canonical zone, the model input holding only the text (no date, zone, organization or person), no statement touching `meals`, nothing stored, no text in logs; three kinds of non-member refused before any model call; date rules (after today, the Kiritimati UTC+14 edge, before 2000) and malformed bodies refused before the call; session and CSRF required; a one-connection pool stays usable during a call; membership revoked or session signed out during the call → `403`/`401` and no proposal; ungrounded → `502`, fabricated value → `withheld unverified`; a confirmed draft saved only by `POST /meals` as `source: manual`; after a `504` the place is held (`MEAL_DRAFT_BUSY` for another person, `MEAL_DRAFT_IN_PROGRESS` for the same) until the call settles |
+| Relevant integration files | `meal-drafts-http`, `meals-http`, `meals-access`, `run-search-interpretation` (shared contract helper), `daily-overview-http`, `observability`, `http-session-tenant`: 7 files, 135 passed, sequential on the validated test database |
+| `npx playwright test --project=chromium meal-draft.spec.ts` | 4 passed (fake provider): proposal with evidence, double click → one proposal request, nothing stored before saving, Apply fills title/type/values only, edit, double-click Add → one create, stored as `manual`; per-serving energy withheld, a written 0 kept, unsaved details not replaced without Replace/Keep, no horizontal scroll at 375 px, a held proposal dropped when the date changes and only the new answer shown; a proposal pending at sign-out never reaches the next session; the review API with drafts off shows the notice and the manual form saves |
+| Affected browser specs | `meal-draft`, `meal-log`, `run-search-interpretation`, `weekly-review`, `today`: 18/18 in the first run; in the final run 17/18, the failure being `today.spec.ts:175` with a blank page whose trace shows `net::ERR_ADDRESS_IN_USE` loading a Vite dependency (a local socket error, before any app code ran); `today.spec.ts` rerun alone: 3/3 |
+| Real-model evaluation | **run**: `qwen3:8b` (Q4_K_M, CPU only, Ollama 0.40.16, already installed; nothing pulled), prompt and rules frozen before the first call, 40 of the allowed 40 calls, no retries, 55 s deadline. Development 20: outcome 18/20, values 15/16, **0 incorrectly accepted**, 1 `ungrounded_output`, latency p50 15.4 s / p95 26.8 s / max 48.7 s (cold). Held-out 20: outcome 17/20, values 14/15, **0 incorrectly accepted**, 3 wrong model claims withheld by grounding (an injected value, a per-piece value not in its excerpt, a two-decimal value), 1 `ungrounded_output`, p50 14.7 s / p95 24.7 s / max 26.4 s. Details: `docs/reports/meal-draft-model-evaluation-2026-11-14.md` |
+| Fake-provider harness verification | both sets end to end, 0 incorrectly accepted, 6 wrong claims stopped by grounding in each; labelled as harness verification, not model evidence |
+
+**Not established.** The evaluation is 40 synthetic cases by the author of the rules, one model and one CPU; no real user
+text, and no quality target was set in advance, so the feature stays off by default. The grounding vocabulary is English
+and Russian; its rules are conservative heuristics that withhold some correct values. Chromium only; no Safari or iPhone
+run; Ollama over a container network was not tried. The full browser suite and the full integration suite (with the
+restore drill) were not rerun; no migration or erasure path changed. Provenance does not record that a model suggested
+the values (ADR-0092, Decision 5).
+
+## Draft from text: grounding corrections (ADR-0092 amendment) (2026-11-14)
+
+**What changed.** Three confirmed defects of the first grounding, each letting a schema-valid model claim become a
+proposed whole-entry value, are fixed in `meal-draft-grounding.ts`; nothing else in the feature changed (endpoint,
+response shape, apply/save, idempotency, access checks, cancellation, admission, privacy, off by default).
+
+- **Per-portion scope.** Qualifiers were looked for only in the value's comma-bounded clause, so "Nutrition per 100 g,
+  60 kcal, protein 4 g" proposed 60 and 4. Now a per-portion qualifier or nutrition-label heading anywhere in the text
+  (EN/RU; before or after a list, in a heading, across line breaks or sentences) requires the value to be stated as a total
+  ("in total", "итого"…, not label "Total fat") in a sentence without a qualifier, with no value-less qualifier sentence in
+  the text; conflict detection uses the same scope; hedges are read across the whole text. `по` counts only before a
+  number and a slash only after a letter.
+- **Signs.** Only the character directly before the digits was checked, so "Soup, - 500 kcal" proposed 500. The sign is
+  now read in the original text across any whitespace for ASCII, Unicode, hyphen-variant and fullwidth minus signs:
+  adjacent is negative, spaced is ambiguous, between numbers is a range; the en dash is a sign only when adjacent.
+- **Exact decimals.** Token and claim were converted with `Number` before comparison and before the precision check, so
+  "12.5000000000000001" (claimed as itself or as "12.5") became 12.5. Comparison is now on normalised decimal text, and
+  precision and bounds are checked in integer tenths (`BigInt`) before the public number is formed.
+
+ADR-0092 (rules 2 and 5–8 rewritten, a dated "Amendment" section, historical note on the evaluation, limitations), the
+reference, the runbook and a historical banner on the evaluation report were updated. The frozen datasets and the
+evaluation artifacts were not modified; the 40-call real-model evaluation remains historical and does not validate these
+corrections. One Chromium scenario's text changed ("…300 kcal per serving; fat 0 g in total"), because its zero shared a
+sentence with a per-serving qualifier.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| `meal-draft-grounding-regressions.spec.ts` (new, 35) against the unchanged code | 27 failed, 8 passed (the reproductions and their variants failed, as intended; two expected reasons had been corrected before this first run) |
+| Draft specs after the correction (`src/meals/drafts`) | 97 passed: grounding 38 (one case changed on purpose: a total in the same sentence as a qualifier is now withheld; the total in its own sentence is still proposed), regressions 35, service 9, wire 15 |
+| Fake harness on the frozen sets (no output files written) | unchanged: development 0 incorrect, 15/16; held-out 0 incorrect, 15/15 |
+| Test database identity | before the database runs, for each connection: client `127.0.0.1:5433`, server `172.18.0.2:5432`, `current_database()` = `running_tracker_test`, `current_user` = `running_tracker_runtime`, `running_tracker_owner`, `running_tracker_maintenance` as expected; a mismatch would have stopped the run |
+| `meal-drafts-http.integration.test.ts` | 16 passed, including 3 new cases where the injected provider returns schema-valid unsafe claims (per-100 g values in another clause, spaced and Unicode minus, rounded and over-precise claims) that the public answer withholds, next to legitimate totals, a zero and a decimal-comma value that pass the response contract |
+| `npm run verify` | exit 0 in 164 s: lint, typecheck, build; scripts 115, API 2,001, web 1,325, contracts 304, fixtures 14, simulator 3 |
+| Database suites, sequential | `meal-drafts-http`, `meals-http`, `meals-access`, `run-search-interpretation`, `daily-overview-http`: 5 files, 133 passed |
+| `npx playwright test --project=chromium meal-draft.spec.ts` | 4 passed at the first run (fake provider) |
+
+No real-model call was made for this change.
+
+**Not established.** The corrected rules have not been measured with a real model. They withhold more in the safe
+direction (a total in the same sentence as a qualifier, "1 serving of soup, 250 kcal", any hedge, a spaced ASCII hyphen
+before a number, including list bullets). Negation is still clause-local by design. The prompt's first example now
+contains values the server withholds; the prompt was not changed (a change needs a new version and evaluation).
+
+## Draft from text: second grounding correction (ADR-0092 "Amendment 2") (2026-11-14)
+
+**What changed.** Two more confirmed defects, each letting a schema-valid model claim become a proposed value, are fixed
+in `meal-draft-grounding.ts`. The endpoint, response shape, apply/save, idempotency, access checks, cancellation,
+admission lifetimes, privacy, off-by-default configuration, prompt, frozen datasets and evaluation artifacts are unchanged.
+
+- **A label's "total".** "Yogurt. Nutrition facts per 100 g: 60 kcal. Total protein 4 g." (also "Fat 4 g total.",
+  "Total: fat 4 g.") proposed 4: the whole-entry marker accepted a bare "total" and excluded only "Total
+  fat/carbohydrate/sugars". Now, when a label or per-portion qualifier is anywhere in the text, only the person's own
+  summing phrase ("in total", "altogether", "итого", "в сумме", "суммарно", "в общей сложности") in a qualifier-free
+  sentence that states no food amount resolves it; "total", "overall", "всего" and "целиком" never do, for any nutrient
+  or word order.
+- **Ranges split by a line break.** "Soup, 500 -\n600 kcal" and "Soup, 500 to\n600 kcal" proposed 600: the range check
+  read only the value's clause, which ends at the line break. Ranges are now read in the original text around the number,
+  in both directions, across whitespace and line breaks, for every dash, "to", "or", "до", "или", for energy and
+  macronutrients; punctuation between the numbers, a different kind of unit or a different nutrient keeps them separate.
+
+One expectation changed on purpose: "Soup. Per 100 g: 50 kcal. Total 300 kcal." (and its two-total conflict variant) is
+now `per_portion`; the conflict case is kept with "In total"/"Итого". ADR-0092 (rules 5 and 6, "Amendment 2",
+limitations), the reference and the runbook were updated; the historical evaluation report was not modified.
+
+**Executed checks.**
+
+| Command | Result |
+|---|---|
+| `meal-draft-grounding-scope-and-range.spec.ts` (new, 46) against the unchanged code | 39 failed, 7 passed (positive controls and two label lines the old exclusion covered) |
+| Draft and evaluation specs after the correction | first attempt with `npx vitest` from a lower-case `c:` working directory: every file failed to load (`Cannot read properties of undefined (reading 'config')`, two vitest instances); rerun through `npm run test --workspace=@running-tracker/api`: 6 files, 148 passed (one regression case changed on purpose, see above) |
+| Fake harness on the frozen sets (no output files) | unchanged: development 0 incorrect, 15/16; held-out 0 incorrect, 15/15 |
+| Test database identity | each connection: client `127.0.0.1:5433`, server `172.18.0.2:5432`, `running_tracker_test`, `current_user` and `session_user` = `running_tracker_runtime` / `running_tracker_owner` / `running_tracker_maintenance` as expected |
+| Database suites, sequential | `meal-drafts-http` (18, 2 new), `meals-http`, `meals-access`, `observability`, `tenant-isolation`: 5 files, 115 passed at the first run |
+| `npm run verify` | exit 0 in 177 s at the first run: scripts 115, API 2,047, web 1,325, contracts 304, fixtures 14, simulator 3 |
+| `npx playwright test --project=chromium meal-draft.spec.ts` | 4 passed at the first run (fake provider), no scenario changed |
+
+No real-model call was made for this change.
+
+**Not established.** The corrected rules are not measured with a real model. Found and not fixed (outside this bounded
+correction): a bound or negation separated from its number by a line break ("up to\n600 kcal", "not\n400 kcal",
+"более\n600 ккал"), a Russian "до" alone ("до 600 ккал"), and range wording outside the supported vocabulary ("between
+500 and 600 kcal", "от 500 и до 600 ккал") are still proposed. The summing-phrase rule is wording, not understanding.

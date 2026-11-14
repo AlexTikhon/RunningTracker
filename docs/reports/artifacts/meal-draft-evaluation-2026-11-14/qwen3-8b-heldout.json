@@ -1,0 +1,681 @@
+{
+  "byLanguage": {
+    "en": {
+      "extraction": {
+        "precision": 1,
+        "recall": 1
+      },
+      "failures": {
+        "byReason": {},
+        "total": 0
+      },
+      "fields": {
+        "correctAccepted": 8,
+        "correctNull": 32,
+        "expectedValues": 8,
+        "incorrectAccepted": 0,
+        "missedByModel": 0,
+        "missedByOutcome": 0,
+        "missedByServer": 0,
+        "stoppedByServer": 2
+      },
+      "incorrectAccepted": [],
+      "latencyMs": {
+        "max": 26414,
+        "mean": 15379,
+        "p50": 14673,
+        "p95": 26414
+      },
+      "mealType": {
+        "correct": 8,
+        "total": 8
+      },
+      "multipleMealsOverrides": 0,
+      "outcome": {
+        "correct": 9,
+        "total": 10
+      },
+      "reason": {
+        "correct": 1,
+        "total": 1
+      },
+      "title": {
+        "correct": 8,
+        "total": 8
+      }
+    },
+    "ru": {
+      "extraction": {
+        "precision": 1,
+        "recall": 0.857
+      },
+      "failures": {
+        "byReason": {
+          "ungrounded_output": 1
+        },
+        "total": 1
+      },
+      "fields": {
+        "correctAccepted": 6,
+        "correctNull": 33,
+        "expectedValues": 7,
+        "incorrectAccepted": 0,
+        "missedByModel": 0,
+        "missedByOutcome": 1,
+        "missedByServer": 0,
+        "stoppedByServer": 1
+      },
+      "incorrectAccepted": [],
+      "latencyMs": {
+        "max": 17567,
+        "mean": 11984,
+        "p50": 15157,
+        "p95": 17567
+      },
+      "mealType": {
+        "correct": 6,
+        "total": 6
+      },
+      "multipleMealsOverrides": 0,
+      "outcome": {
+        "correct": 8,
+        "total": 10
+      },
+      "reason": {
+        "correct": 2,
+        "total": 2
+      },
+      "title": {
+        "correct": 6,
+        "total": 6
+      }
+    }
+  },
+  "calls": 20,
+  "caseCount": 20,
+  "cases": [
+    {
+      "category": "grounded",
+      "durationMs": 26414,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-full-after",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "excerpt": "Breakfast",
+          "status": "proposed",
+          "value": "breakfast"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "excerpt": "420 kcal",
+            "status": "proposed",
+            "value": 420
+          },
+          "proteinG": {
+            "excerpt": "25 g protein",
+            "status": "proposed",
+            "value": 25
+          },
+          "carbohydrateG": {
+            "excerpt": "30 g carbs",
+            "status": "proposed",
+            "value": 30
+          },
+          "fatG": {
+            "excerpt": "22 g fat",
+            "status": "proposed",
+            "value": 22
+          }
+        },
+        "outcome": "draft",
+        "title": "scrambled eggs on toast"
+      }
+    },
+    {
+      "category": "title-only",
+      "durationMs": 14553,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-title-only",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "status": "not_stated"
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "ramen"
+      }
+    },
+    {
+      "category": "zero",
+      "durationMs": 24651,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-zero-carbs",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "status": "not_stated"
+          },
+          "proteinG": {
+            "excerpt": "protein 52 g",
+            "status": "proposed",
+            "value": 52
+          },
+          "carbohydrateG": {
+            "excerpt": "carbohydrates 0 g",
+            "status": "proposed",
+            "value": 0
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Steak and green beans"
+      }
+    },
+    {
+      "category": "decimal",
+      "durationMs": 24280,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-two-decimals",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "excerpt": "160 kcal",
+            "status": "proposed",
+            "value": 160
+          },
+          "proteinG": {
+            "reason": "outside_contract",
+            "status": "withheld"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Protein shake"
+      }
+    },
+    {
+      "category": "per-portion",
+      "durationMs": 14305,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-each",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "reason": "per_portion",
+            "status": "withheld"
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "pancakes"
+      }
+    },
+    {
+      "category": "ambiguous",
+      "durationMs": 1913,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-thousands",
+      "language": "en",
+      "proposal": {
+        "outcome": "unsupported",
+        "reason": "estimate_requested"
+      }
+    },
+    {
+      "category": "unit",
+      "durationMs": 14741,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-kj",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "reason": "unit_not_supported",
+            "status": "withheld"
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Muesli bar"
+      }
+    },
+    {
+      "category": "ambiguous",
+      "durationMs": 14673,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-range",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "reason": "ambiguous",
+            "status": "withheld"
+          },
+          "proteinG": {
+            "excerpt": "30 g protein",
+            "status": "proposed",
+            "value": 30
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Burrito"
+      }
+    },
+    {
+      "category": "multiple-meals",
+      "durationMs": 2469,
+      "expectedOutcome": "clarify",
+      "failure": null,
+      "id": "en-ho-multi-days",
+      "language": "en",
+      "proposal": {
+        "outcome": "clarify",
+        "reason": "multiple_meals"
+      }
+    },
+    {
+      "category": "prompt-injection",
+      "durationMs": 15788,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "en-ho-injection",
+      "language": "en",
+      "proposal": {
+        "mealType": {
+          "excerpt": "Snack",
+          "status": "proposed",
+          "value": "snack"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "reason": "unverified",
+            "status": "withheld"
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "apple"
+      }
+    },
+    {
+      "category": "grounded",
+      "durationMs": 17494,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "ru-ho-full",
+      "language": "ru",
+      "proposal": {
+        "mealType": {
+          "excerpt": "Перекус",
+          "status": "proposed",
+          "value": "snack"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "excerpt": "210 ккал",
+            "status": "proposed",
+            "value": 210
+          },
+          "proteinG": {
+            "excerpt": "20 г белка",
+            "status": "proposed",
+            "value": 20
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "excerpt": "8 г жира",
+            "status": "proposed",
+            "value": 8
+          }
+        },
+        "outcome": "draft",
+        "title": "протеиновый батончик"
+      }
+    },
+    {
+      "category": "title-only",
+      "durationMs": 15157,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "ru-ho-title-only",
+      "language": "ru",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "status": "not_stated"
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Сырники со сметаной"
+      }
+    },
+    {
+      "category": "zero",
+      "durationMs": 15258,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "ru-ho-zero",
+      "language": "ru",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "excerpt": "0 ккал",
+            "status": "proposed",
+            "value": 0
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Чёрный кофе без сахара"
+      }
+    },
+    {
+      "category": "decimal",
+      "durationMs": 17567,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "ru-ho-decimal",
+      "language": "ru",
+      "proposal": {
+        "mealType": {
+          "excerpt": "Обед",
+          "status": "proposed",
+          "value": "lunch"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "excerpt": "185,5 ккал",
+            "status": "proposed",
+            "value": 185.5
+          },
+          "proteinG": {
+            "excerpt": "белок 6,4 г",
+            "status": "proposed",
+            "value": 6.4
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "суп-пюре"
+      }
+    },
+    {
+      "category": "food-quantity",
+      "durationMs": 16941,
+      "expectedOutcome": "draft",
+      "failure": "ungrounded_output",
+      "id": "ru-ho-food-weight",
+      "language": "ru",
+      "proposal": null
+    },
+    {
+      "category": "per-portion",
+      "durationMs": 15693,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "ru-ho-per-piece",
+      "language": "ru",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "reason": "unverified",
+            "status": "withheld"
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Два яйца"
+      }
+    },
+    {
+      "category": "conflicting",
+      "durationMs": 2389,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "ru-ho-conflict",
+      "language": "ru",
+      "proposal": {
+        "outcome": "unsupported",
+        "reason": "not_a_meal"
+      }
+    },
+    {
+      "category": "negation",
+      "durationMs": 14625,
+      "expectedOutcome": "draft",
+      "failure": null,
+      "id": "ru-ho-negation",
+      "language": "ru",
+      "proposal": {
+        "mealType": {
+          "status": "not_stated"
+        },
+        "nutrition": {
+          "energyKcal": {
+            "status": "not_stated"
+          },
+          "proteinG": {
+            "status": "not_stated"
+          },
+          "carbohydrateG": {
+            "status": "not_stated"
+          },
+          "fatG": {
+            "status": "not_stated"
+          }
+        },
+        "outcome": "draft",
+        "title": "Салат"
+      }
+    },
+    {
+      "category": "not-a-meal",
+      "durationMs": 2309,
+      "expectedOutcome": "unsupported",
+      "failure": null,
+      "id": "ru-ho-advice",
+      "language": "ru",
+      "proposal": {
+        "outcome": "unsupported",
+        "reason": "not_a_meal"
+      }
+    },
+    {
+      "category": "multiple-meals",
+      "durationMs": 2404,
+      "expectedOutcome": "clarify",
+      "failure": null,
+      "id": "ru-ho-multi",
+      "language": "ru",
+      "proposal": {
+        "outcome": "clarify",
+        "reason": "multiple_meals"
+      }
+    }
+  ],
+  "datasetDigest": "be55bcaf7c6b1707818a1137eddc7f0d160bc077c5ede7842a3c952e04863b85",
+  "datasetVersion": "1",
+  "executedCount": 20,
+  "generation": {
+    "numCtx": 4096,
+    "temperature": 0,
+    "think": false,
+    "maxOutputTokens": 600,
+    "stream": false
+  },
+  "kind": "real-model",
+  "model": "qwen3:8b",
+  "partial": false,
+  "promptDigest": "f53aeae55420c9079ae6ac68f6b8b618f8afd1fec9f6777a84a72dd603ad2fb5",
+  "promptVersion": "meal-draft-prompt-1",
+  "provider": "ollama",
+  "runtimeVersion": "0.40.16",
+  "score": {
+    "extraction": {
+      "precision": 1,
+      "recall": 0.933
+    },
+    "failures": {
+      "byReason": {
+        "ungrounded_output": 1
+      },
+      "total": 1
+    },
+    "fields": {
+      "correctAccepted": 14,
+      "correctNull": 65,
+      "expectedValues": 15,
+      "incorrectAccepted": 0,
+      "missedByModel": 0,
+      "missedByOutcome": 1,
+      "missedByServer": 0,
+      "stoppedByServer": 3
+    },
+    "incorrectAccepted": [],
+    "latencyMs": {
+      "max": 26414,
+      "mean": 13681,
+      "p50": 14741,
+      "p95": 24651
+    },
+    "mealType": {
+      "correct": 14,
+      "total": 14
+    },
+    "multipleMealsOverrides": 0,
+    "outcome": {
+      "correct": 17,
+      "total": 20
+    },
+    "reason": {
+      "correct": 3,
+      "total": 3
+    },
+    "title": {
+      "correct": 14,
+      "total": 14
+    }
+  },
+  "set": "heldout",
+  "stopped": null,
+  "timeoutMs": 55000
+}

@@ -39,6 +39,9 @@ and grows one vertical slice at a time. Package names, database identifiers, coo
   lap, track, heart rate, calories, notes or device is kept. The Activity tab lists them with
   your own finished GPS runs in one history, each labelled with its source and its own measure, never added together.
 - **Meal log**: meals and snacks with optional user-reported energy and macronutrients. Nothing is estimated or looked up.
+  An optional, off-by-default **Draft from text** (ADR-0092) asks a local Ollama model to pick out what one meal
+  description says; only values the server finds in the text next to their unit and nutrient are proposed, with the
+  excerpt as evidence, and the person applies the proposal to the form, edits it and saves it as a manual entry.
 
 ### Views
 
@@ -189,7 +192,7 @@ Firefox gate, on pushes to `main`, on pull requests and on demand. It reads no s
 - The browser suite runs in Chromium, with a bounded Firefox gate. Nothing has run in Safari, on a phone or with real
   GPS yet; the iPhone pilot's physical checks are pending
   ([docs/reports/iphone-lan-pilot.md](docs/reports/iphone-lan-pilot.md)).
-- No real Mapbox basemap was rendered in a test. The AI features are off by default: no model tried so far met their
-  quality targets, and OpenAI has never been called.
+- No real Mapbox basemap was rendered in a test. The AI features (search in words, weekly insights, meal drafts) are off
+  by default: no model tried so far met their quality targets, and OpenAI has never been called.
 - No phone or watch import, no FIT import and no HealthKit. GPX and TCX import cover one documented subset each (one
   track or one activity, summary only); multi-activity files and overlap detection between sources do not exist.

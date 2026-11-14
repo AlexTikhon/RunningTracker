@@ -4,6 +4,9 @@
   a current-schema meal restore, Chromium end-to-end including a 375 px viewport). Hosted CI: see the final report of the
   change.
 - Date: 2026-11-09
+- Amended by: [ADR-0092](0092-meal-draft-from-text.md) (an optional, off-by-default "Draft from text" that proposes
+  values into this form from one meal description; a confirmed draft is saved by the same create route with `source:
+  manual`, read as "entered or confirmed by the person". Table, contract, idempotency and erasure unchanged.)
 - Relates to: ADR-0072/0073 (owner-only activities, erasure ledger, idempotent creation per form session), ADR-0074 (a
   day is a local calendar date with the zone of its first write; "today" by the server clock in the client's zone),
   ADR-0078/0079 (server-owned provenance; unconstrained numeric with precision CHECKs; replay outside AI insights),

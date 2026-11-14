@@ -31,7 +31,8 @@ commitment to dates or to every item below.
    ([ADR-0090](adr/0090-activity-trends-previous-period-comparison.md)), per metric and only where it is defined.
 3. **AI layer.**
    - An asynchronous weekly review written from a facts bundle that SQL produced.
-   - Food text parsing against a JSON schema, which the person confirms before anything is stored.
+   - Food text parsing against a JSON schema, which the person confirms before anything is stored: a first form is
+     "Draft from text" in the Meal log ([ADR-0092](adr/0092-meal-draft-from-text.md)), off by default.
    - A chat coach with read-only tools.
 4. **Optional:** retrieval over a small, curated knowledge base.
 
@@ -96,7 +97,7 @@ creation per form session (a retry is compared with the original request), edits
 erasures in the ledger (proven through a real backup and restore at the current schema). It is not an AI insight source.
 Today (`daily-overview-2`) shows the number of entries and each recorded total with its own coverage, computed exactly in
 the same snapshot; food energy is never combined with active energy, and there are no targets, balances or advice. Food
-text parsing (AI layer) would propose entries into this table for the person to confirm; it is not built.
+text parsing (AI layer) proposes entries into this table for the person to confirm since ADR-0092 (below).
 
 **Trends** is [ADR-0084](adr/0084-daily-trends.md): a read-only view of the 28 calendar dates ending on a chosen date,
 with four daily series (recorded weight, sleep duration, manually entered steps, food energy recorded), computed on every
@@ -163,6 +164,16 @@ source, so a TCX import is never deduplicated against a GPX import, a manual ent
 the weekly review and activity trends (with the comparison) show TCX as its own source with its own duration name; it is
 not AI input. No file, lap, trackpoint, heart rate, calories, notes or device identity is stored. FIT, multi-activity files
 and overlap detection remain open.
+
+**Draft from text** is [ADR-0092](adr/0092-meal-draft-from-text.md): an optional panel in the Meal log, off by default
+(`MEAL_DRAFTS_PROVIDER=off`), that sends one meal description, and nothing else, to a local Ollama model. The model only
+claims evidence; deterministic code proposes a title only if it is an excerpt of the text and a nutrition value only if an
+excerpt holds exactly that number with its unit and nutrient, outside per-portion, approximate, negated or conflicting
+statements, and the meal contract accepts it. Nothing is estimated, multiplied, converted, derived or rounded; missing
+stays unknown and a written 0 stays 0. The proposal and its evidence are shown first, applying only fills the editable
+form, and the person saves through the ordinary create route, so the entry is `source: manual` ("entered or confirmed by
+the person"). The date and zone are the form's, never the model's. No migration; nothing from the text or the answer is
+stored or logged. Frozen English and Russian evaluation sets measure a local model; see the ADR for the result.
 
 **HealthKit remains deferred** until macOS/Xcode access exists: reading Apple Health needs a native app, which cannot be
 built or signed from Windows. Nothing in the web pilot depends on it, and phone or watch imports stay a later item of the
