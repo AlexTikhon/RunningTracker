@@ -12,6 +12,7 @@ const shortCodePattern = /^[A-Za-z0-9_.:-]{1,32}$/u;
  * than filtered by pattern, so a new sensitive field is safe by default.
  */
 const allowedFields = new Set([
+  'abstainedFields',
   'attempts',
   'count',
   'durationMs',
@@ -20,10 +21,13 @@ const allowedFields = new Set([
   'inputTokens',
   'method',
   'model',
+  'multipleMealsOverride',
+  'notStatedFields',
   'orgId',
   'outcome',
   'outputTokens',
   'port',
+  'proposedFields',
   'reason',
   'requestId',
   'retryDelayMs',
@@ -33,6 +37,7 @@ const allowedFields = new Set([
   'status',
   'task',
   'timeoutMs',
+  'withheldFields',
 ]);
 
 export type LogFields = Readonly<Record<string, unknown>>;

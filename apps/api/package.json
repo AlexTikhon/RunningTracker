@@ -7,6 +7,7 @@
     "prebuild": "npm run build --workspace=@running-tracker/contracts",
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --watch --import tsx src/entrypoint.ts",
+    "eval:meal-drafts": "node --import tsx src/evaluation/meal-draft-evaluation-main.ts",
     "eval:run-search": "node --import tsx src/evaluation/run-search-evaluation-main.ts",
     "eval:weekly-insights": "node --import tsx src/evaluation/weekly-insight-evaluation-main.ts",
     "gps:analyze": "node --import tsx src/gps-traces/analyze-main.ts",

@@ -1,5 +1,9 @@
 import {
   createMealRequestSchema,
+  MEAL_DRAFT_CONTRACT_VERSION,
+  MEAL_DRAFT_ERROR_CODES,
+  mealDraftProposalRequestSchema,
+  mealDraftProposalResponseSchema,
   mealListQuerySchema,
   mealPathSchema,
   organizationPathSchema,
@@ -16,15 +20,21 @@ import {
   getAuthenticatedSession,
 } from '../auth/session-http.js';
 import type { SessionManager } from '../auth/session-manager.js';
+import { SessionStoreUnavailableError } from '../auth/session-store.js';
 import type { Clock } from '../clock.js';
 import type { Environment } from '../config/environment.js';
+import { assertNotAfterToday, canonicalTimeZone } from '../daily-metrics/daily-metrics-service.js';
 import { withAuthenticatedTenantTransaction } from '../database/authenticated-tenant-transaction.js';
-import { ApiError } from '../http/errors.js';
+import { ApiError, sessionStoreUnavailable } from '../http/errors.js';
+import { getRequestId } from '../http/request-id.js';
+import type { MealDraftService } from './drafts/meal-draft-service.js';
 import { createMeal, deleteMeal, listMeals, readMeal, updateMeal } from './meal-service.js';
 
 interface MealRouterDependencies {
   clock: Clock;
   config: Environment;
+  /** "Draft from text" (ADR-0092); undefined when MEAL_DRAFTS_PROVIDER=off. */
+  mealDrafts?: MealDraftService;
   pool: Pick<Pool, 'connect'>;
   sessionManager: SessionManager;
 }
@@ -72,7 +82,7 @@ function entryOf(request: Request): { mealId: string; orgId: string } {
  * organization is the path's, the identity is the database's and the provenance is always manual entry: none of them is
  * read from a request body or query.
  */
-export function createMealRouter({ clock, config, pool, sessionManager }: MealRouterDependencies): Router {
+export function createMealRouter({ clock, config, mealDrafts, pool, sessionManager }: MealRouterDependencies): Router {
   const router = createRouter({ mergeParams: true });
   const authenticate = createSessionAuthentication(sessionManager);
   const mutationProtection = createAuthenticatedMutationProtection(config, sessionManager);
@@ -102,6 +112,61 @@ export function createMealRouter({ clock, config, pool, sessionManager }: MealRo
       );
       response.status(result.created ? 201 : 200).json(result.view);
     } catch (error) {
+      next(error);
+    }
+  });
+
+  // Text describing one meal in, an editable draft proposal out (ADR-0092). Nothing is read from or written to `meals`:
+  // the only database question is "is this person an active member", asked before the model is called and again (with
+  // the session) before the answer leaves, each in its own short transaction, so no connection is held while the model
+  // works. The date and the zone are the form's; the meal log's date rules apply to them before any model call, and they
+  // are echoed, never the model's. Registered before '/:mealId'.
+  router.post('/draft-proposals', ...mutationProtection, requireJson, async (request, response, next) => {
+    try {
+      const orgId = organizationOf(request);
+      parseContract(noQuerySchema, request.query, 'meal draft query');
+      const body = parseContract(mealDraftProposalRequestSchema, request.body, 'meal draft request');
+      const session = getAuthenticatedSession(request);
+      if (mealDrafts === undefined) {
+        throw new ApiError(503, MEAL_DRAFT_ERROR_CODES.disabled, 'Drafting a meal from text is not enabled on this server');
+      }
+      const timeZone = canonicalTimeZone(body.timeZone);
+      assertNotAfterToday(body.localDate, timeZone, clock);
+
+      const verifyAccess = async (): Promise<void> => {
+        await withAuthenticatedTenantTransaction(pool, session, orgId, () => Promise.resolve());
+      };
+      await verifyAccess();
+
+      // A client that goes away ends the request; the model call is asked to stop, and keeps its place until it settles.
+      const clientGone = new AbortController();
+      response.once('close', () => {
+        if (!response.writableFinished) clientGone.abort();
+      });
+
+      const proposal = await mealDrafts.propose({
+        requestId: getRequestId(request),
+        // Asked again before the answer leaves (ADR-0080: the session may have been revoked on another instance).
+        revalidate: async () => {
+          let active: boolean;
+          try {
+            active = (await sessionManager.isActive(session)) === true;
+          } catch (error) {
+            throw error instanceof SessionStoreUnavailableError ? sessionStoreUnavailable() : error;
+          }
+          if (!active) throw new ApiError(401, 'AUTH_REQUIRED', 'A valid session is required');
+          await verifyAccess();
+        },
+        signal: clientGone.signal,
+        text: body.text,
+        userId: session.userId,
+      });
+      response
+        .status(200)
+        .json(mealDraftProposalResponseSchema.parse({ ...proposal, localDate: body.localDate, timeZone, version: MEAL_DRAFT_CONTRACT_VERSION }));
+    } catch (error) {
+      const retryAfter = (error as ApiError | undefined)?.details?.retryAfterSeconds;
+      if (typeof retryAfter === 'number') response.setHeader('Retry-After', String(retryAfter));
       next(error);
     }
   });

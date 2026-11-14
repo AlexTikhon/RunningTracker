@@ -19,6 +19,12 @@ import {
 } from './run-search-ai-config.js';
 import { resolveSecretFiles } from './secret-files.js';
 import {
+  buildMealDraftsConfig,
+  checkMealDraftsEnvironment,
+  mealDraftsEnvironmentFields,
+  withoutMealDraftsFields,
+} from './meal-drafts-config.js';
+import {
   buildWeeklyInsightsConfig,
   checkWeeklyInsightsEnvironment,
   weeklyInsightsEnvironmentFields,
@@ -280,6 +286,7 @@ const environmentSchema = z
     ...oidcEnvironmentFields,
     ...runSearchAiEnvironmentFields,
     ...weeklyInsightsEnvironmentFields,
+    ...mealDraftsEnvironmentFields,
   })
   .superRefine((environment, context) => {
     let runtime: ParsedDatabaseConnection | undefined;
@@ -408,19 +415,22 @@ const environmentSchema = z
     checkOidcEnvironment(environment, environment, context);
     checkRunSearchAiEnvironment(environment, environment, context);
     checkWeeklyInsightsEnvironment(environment, environment, context);
+    checkMealDraftsEnvironment(environment, environment, context);
   })
-  // The raw OIDC_*, RUN_SEARCH_AI_* and WEEKLY_INSIGHTS_* variables (including the secrets) are replaced by one
+  // The raw OIDC_*, RUN_SEARCH_AI_*, WEEKLY_INSIGHTS_* and MEAL_DRAFTS_* variables (including the secrets) are replaced by one
   // structured value each.
   .transform((environment) => {
-    const application = withoutWeeklyInsightsFields(withoutRunSearchAiFields(withoutOidcFields(environment)));
+    const application = withoutMealDraftsFields(withoutWeeklyInsightsFields(withoutRunSearchAiFields(withoutOidcFields(environment))));
     const oidc = buildOidcConfig(environment);
     const runSearchAi = buildRunSearchAiConfig(environment);
     const weeklyInsights = buildWeeklyInsightsConfig(environment);
+    const mealDrafts = buildMealDraftsConfig(environment);
     return {
       ...application,
       ...(oidc ? { OIDC: oidc } : {}),
       ...(runSearchAi ? { RUN_SEARCH_AI: runSearchAi } : {}),
       ...(weeklyInsights ? { WEEKLY_INSIGHTS: weeklyInsights } : {}),
+      ...(mealDrafts ? { MEAL_DRAFTS: mealDrafts } : {}),
     };
   });
 

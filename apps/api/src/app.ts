@@ -12,6 +12,7 @@ import { DailyOverviewService, type DailyOverviewTestHooks } from './daily-overv
 import { createDailyOverviewRouter, dailyOverviewNoStore } from './daily-overview/daily-overview.routes.js';
 import { DailyTrendsService, type DailyTrendsTestHooks } from './daily-trends/daily-trends-service.js';
 import { createDailyTrendsRouter, dailyTrendsNoStore } from './daily-trends/daily-trends.routes.js';
+import { createMealDraftService } from './meals/drafts/meal-draft-factory.js';
 import { createMealRouter, mealsNoStore } from './meals/meal.routes.js';
 import { createArchiveRouter } from './archive/archive.routes.js';
 import {
@@ -82,6 +83,8 @@ export interface AppDependencies {
   testOnlyDailyOverviewHooks?: DailyOverviewTestHooks;
   testOnlyDailyTrendsHooks?: DailyTrendsTestHooks;
   testOnlyFaultInjector?: TestOnlyFaultInjector;
+  /** Replaces the configured meal draft model in tests, so that no test can reach Ollama. */
+  testOnlyMealDraftProvider?: LlmProvider;
   /** Replaces the configured interpreter in tests, so that no test can reach a provider. */
   testOnlyRunSearchInterpreter?: RunSearchInterpreter;
   /** Replaces the configured weekly insight model in tests, so that no test can reach Ollama. */
@@ -110,6 +113,7 @@ export function createApp({
   testOnlyDailyOverviewHooks,
   testOnlyDailyTrendsHooks,
   testOnlyFaultInjector,
+  testOnlyMealDraftProvider,
   testOnlyRunSearchInterpreter,
   testOnlyWeeklyInsightProvider,
   testOnlyWeeklyReviewHooks,
@@ -122,6 +126,7 @@ export function createApp({
       testOnlyDailyOverviewHooks ||
       testOnlyDailyTrendsHooks ||
       testOnlyFaultInjector ||
+      testOnlyMealDraftProvider ||
       testOnlyRouter ||
       testOnlyRunSearchInterpreter ||
       testOnlyWeeklyInsightProvider ||
@@ -154,6 +159,14 @@ export function createApp({
     ...(testOnlyRunSearchInterpreter ? { interpreter: testOnlyRunSearchInterpreter } : {}),
     logger,
     metrics: metrics.interpretation,
+  });
+  // Undefined unless MEAL_DRAFTS_PROVIDER is ollama or fake: then no provider object exists and the route answers 503.
+  const mealDrafts = createMealDraftService({
+    clock,
+    config,
+    logger,
+    metrics: metrics.mealDrafts,
+    ...(testOnlyMealDraftProvider ? { provider: testOnlyMealDraftProvider } : {}),
   });
   const insights =
     weeklyInsights ??
@@ -276,12 +289,14 @@ export function createApp({
       sessionManager: sessions,
     })),
   );
-  // The manual meal log (ADR-0083): owner-only, not an insight or weekly review source.
+  // The manual meal log (ADR-0083): owner-only, not an insight or weekly review source. Its optional "Draft from text"
+  // proposals (ADR-0092) store nothing; a confirmed draft is saved through the same create route as a manual entry.
   app.use(
     '/api/orgs/:orgId/meals',
     routePrefix('/api/orgs/:orgId/meals', createMealRouter({
       clock,
       config,
+      ...(mealDrafts ? { mealDrafts } : {}),
       pool: pool as Pick<Pool, 'connect'>,
       sessionManager: sessions,
     })),

@@ -5,6 +5,9 @@ export const LATENCY_BUCKETS_SECONDS = [
   0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30,
 ] as const;
 
+/** Seconds; a local model on a CPU answers in seconds to tens of seconds, bounded by a 55 s deadline (ADR-0092). */
+export const MEAL_DRAFT_BUCKETS_SECONDS = [0.1, 0.5, 1, 2, 5, 10, 15, 20, 30, 45, 60] as const;
+
 /** Uncompressed tile bytes up to the 1 MiB hard limit. */
 export const TILE_BYTES_BUCKETS = [
   1_024, 4_096, 16_384, 65_536, 131_072, 262_144, 524_288, 1_048_576,
@@ -102,6 +105,27 @@ export function createApiMetrics(registry: MetricsRegistry = new MetricsRegistry
         labelNames: ['direction'],
         maxSeries: 4,
         name: 'run_search_interpretation_tokens_total',
+      }),
+    },
+    mealDrafts: {
+      durationSeconds: registry.histogram({
+        buckets: MEAL_DRAFT_BUCKETS_SECONDS,
+        help: 'Time from admission to answer of a meal draft proposal, by bounded outcome.',
+        labelNames: ['outcome'],
+        maxSeries: 32,
+        name: 'meal_draft_proposal_seconds',
+      }),
+      fields: registry.counter({
+        help: 'Nutrition fields of grounded meal draft answers, by what happened to them (proposed, not stated, withheld).',
+        labelNames: ['disposition'],
+        maxSeries: 8,
+        name: 'meal_draft_fields_total',
+      }),
+      requests: registry.counter({
+        help: 'Meal draft proposal requests by bounded outcome (answers, provider failures, admission refusals).',
+        labelNames: ['outcome'],
+        maxSeries: 32,
+        name: 'meal_draft_proposal_requests_total',
       }),
     },
     live: {
