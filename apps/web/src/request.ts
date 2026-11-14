@@ -9,17 +9,19 @@ export function onAuthenticationRequired(listener: () => void): () => void {
 // The deadline covers both headers and body consumption. Racing the entire
 // operation also settles callers whose transport does not honour AbortSignal.
 // A caller that orders its own answers (the session check) turns the 401 announcement off and acts on the answer it
-// is handed instead, so that a late 401 from an older request cannot end a newer session.
+// is handed instead, so that a late 401 from an older request cannot end a newer session. A caller whose server has a
+// longer, bounded deadline of its own (a meal draft from a local model, ADR-0092) gives a longer `timeoutMs`, so the
+// server's timeout answer arrives before the browser gives up.
 export async function requestJson(
   url: string,
   options: RequestInit = {},
-  { announceUnauthorized = true }: { announceUnauthorized?: boolean } = {},
+  { announceUnauthorized = true, timeoutMs = REQUEST_TIMEOUT_MS }: { announceUnauthorized?: boolean; timeoutMs?: number } = {},
 ): Promise<{ response: Response; payload: unknown }> {
   const controller = new AbortController();
   const abort = () => controller.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', abort, { once: true });
   if (options.signal?.aborted) abort();
-  const timer = setTimeout(() => controller.abort(new DOMException('Request deadline exceeded', 'TimeoutError')), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(new DOMException('Request deadline exceeded', 'TimeoutError')), timeoutMs);
   let rejectAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
     rejectAbort = () => reject(controller.signal.reason instanceof Error ? controller.signal.reason : new DOMException('Request cancelled', 'AbortError'));

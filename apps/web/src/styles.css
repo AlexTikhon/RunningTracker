@@ -475,6 +475,24 @@ h1 { max-width: 11ch; margin: 0; font-size: clamp(3.1rem, 7.2vw, 6.2rem); line-h
 .meal-card__source { margin: 0; color: #a9b5ad; font-size: 0.86rem; }
 .meal-log .run-card h3 { overflow-wrap: anywhere; }
 .meal-log__back { justify-self: start; margin-top: 0.4rem; }
+/* Draft from text (ADR-0092): the same look as the run-search interpreter; evidence is quoted text of the person's own. */
+.meal-draft { display: grid; gap: 0.7rem; min-width: 0; }
+.meal-draft h2 { margin: 0; font-size: 1.15rem; }
+.meal-draft form { display: grid; gap: 0.6rem; min-width: 0; }
+.meal-draft label { display: grid; gap: 0.4rem; color: #dfe6e0; font-size: 0.76rem; font-weight: 800; }
+.meal-draft textarea { min-width: 0; resize: vertical; border: 1px solid #465149; border-radius: 0.7rem; padding: 0.72rem 0.85rem; color: #f4f7f3; color-scheme: dark; background: #0e1410; font: inherit; font-weight: 500; }
+.meal-draft__disclosure, .meal-draft__hint, .meal-draft__disabled { margin: 0; color: #9ba59d; font-size: 0.8rem; line-height: 1.45; }
+.meal-draft__outcome > p { margin: 0; padding: 0.7rem 0.9rem; border: 1px solid #3d493f; border-radius: 0.8rem; color: #dfe6e0; font-size: 0.84rem; line-height: 1.45; }
+.meal-draft__outcome > p[role='alert'] { border-color: #75433e; color: #ffaca4; }
+.meal-draft__proposal { display: grid; gap: 0.6rem; min-width: 0; padding: 0.9rem; border: 1px solid #3d493f; border-radius: 0.9rem; background: rgb(17 23 19 / 65%); }
+.meal-draft__proposal h3 { margin: 0; font-size: 1rem; }
+.meal-draft__fields { display: grid; gap: 0.45rem; margin: 0; }
+.meal-draft__fields > div { display: grid; grid-template-columns: minmax(7rem, 11rem) minmax(0, 1fr); gap: 0.6rem; }
+.meal-draft__fields dt { color: #a9b5ad; font-size: 0.82rem; }
+.meal-draft__fields dd { display: grid; gap: 0.15rem; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.meal-draft__evidence { color: #9ba59d; font-size: 0.8rem; line-height: 1.4; }
+.meal-draft__applied { grid-column: 1 / -1; margin: 0; padding: 0.6rem 0.8rem; border: 1px solid #3f5a46; border-radius: 0.7rem; color: #cfe3d4; font-size: 0.84rem; line-height: 1.45; }
+@media (max-width: 480px) { .meal-draft__fields > div { grid-template-columns: minmax(0, 1fr); gap: 0.15rem; } }
 .today-meal-totals { display: grid; gap: 0.5rem; width: 100%; margin: 0; }
 .today-meal-totals div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.15rem 0.75rem; min-width: 0; }
 .today-meal-totals dt { color: #a9b5ad; font-size: 0.86rem; }

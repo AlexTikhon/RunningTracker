@@ -163,7 +163,7 @@ describe('Meal log view (ADR-0083)', () => {
 describe('Meal log screen', () => {
   it('opens on the date Today asked for, or on today when none is given or it is in the future', () => {
     const signal = new AbortController().signal;
-    const api = { create: vi.fn(), list: vi.fn(), remove: vi.fn(), update: vi.fn() };
+    const api = { create: vi.fn(), list: vi.fn(), propose: vi.fn(), remove: vi.fn(), update: vi.fn() };
     const nowMs = Date.parse('2026-11-08T10:00:00Z');
     const csrf = { headerName: 'x-csrf-token' as const, token: 't' };
     const screen = (initialDate: string | null) =>
@@ -175,5 +175,6 @@ describe('Meal log screen', () => {
     // Server rendering runs no effect: nothing is read or written before the screen mounts.
     expect(api.list).not.toHaveBeenCalled();
     expect(api.create).not.toHaveBeenCalled();
+    expect(api.propose).not.toHaveBeenCalled();
   });
 });

@@ -2,6 +2,9 @@ import { MEAL_LOCAL_DATE_MIN, MEAL_NUTRITION_FIELDS, MEAL_TITLE_MAX_LENGTH, type
 import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react';
 
 import { checkInDateProblem, formatCheckInDate, localDateIn } from './daily-checkin.js';
+import { applyProposalToDraft, hasUnsavedDetails } from './meal-draft.js';
+import { idleMealDraft, MealDraftController, type MealDraftScope, type MealDraftSnapshot } from './meal-draft-controller.js';
+import { MealDraftPanel, type MealDraftPanelProps } from './MealDraftPanel.js';
 import {
   confirmingMealDeletion,
   idleMealSave,
@@ -30,7 +33,7 @@ import {
   type MealDraft,
 } from './meal-log.js';
 import { defaultTimeZone } from './run-search.js';
-import { createMeal, deleteMeal, listMeals, updateMeal, type CsrfCredentials } from './runner-api.js';
+import { createMeal, deleteMeal, listMeals, proposeMealDraft, updateMeal, type CsrfCredentials } from './runner-api.js';
 
 // The Meal log (ADR-0083): log what you ate by hand, for a selected local date. Nutrition values are optional totals for
 // the whole entry; nothing is estimated, looked up or judged. Only the person who logged an entry can see it.
@@ -58,6 +61,10 @@ export interface MealLogViewProps {
   dateInput: string;
   deletion: { mealId: string; snapshot: MealDeletionSnapshot } | null;
   draft: MealDraft;
+  // The form's details came from an applied text draft (ADR-0092) and have not been saved yet.
+  draftApplied?: boolean;
+  // "Draft from text" (ADR-0092); omitted, the screen is the manual form only.
+  draftPanel?: MealDraftPanelProps;
   // The entry being edited, or null for a new entry.
   editing: MealView | null;
   // Validation problems to show (after a save was attempted), or null.
@@ -134,7 +141,7 @@ function EntryCard({
 
 /** Everything the screen shows, from its state. Pure, so every state is testable without a DOM. */
 export function MealLogView(props: MealLogViewProps) {
-  const { busy, dateInput, deletion, draft, editing, errors, handlers, list, notice, repeatsUncertain, save, timeZone, today } = props;
+  const { busy, dateInput, deletion, draft, draftApplied = false, draftPanel, editing, errors, handlers, list, notice, repeatsUncertain, save, timeZone, today } = props;
   const dateProblem = checkInDateProblem(dateInput, today);
   const dateLabel = formatCheckInDate(list.localDate);
   const pending = save.phase === 'pending';
@@ -164,6 +171,8 @@ export function MealLogView(props: MealLogViewProps) {
       <p className="today-day">
         Showing <strong>{dateLabel}</strong>{list.localDate === today ? ' (today)' : ''}. New entries are saved in the time zone {timeZone}.
       </p>
+
+      {draftPanel !== undefined && <MealDraftPanel {...draftPanel} />}
 
       <form aria-labelledby="meal-form-title" className="search-filters activity-form meal-form" noValidate onSubmit={handlers.submit}>
         <h2 id="meal-form-title" ref={props.formHeading} tabIndex={-1}>
@@ -197,6 +206,12 @@ export function MealLogView(props: MealLogViewProps) {
         <p className="meal-card__source">
           Source: <span className="review-badge">{mealSourceLabel('manual')}</span>
         </p>
+        {draftApplied && editing === null && (
+          <p className="meal-draft__applied" role="status">
+            Filled in from your text and not saved yet. Check every value and change anything that is wrong. When you save,
+            the entry is stored as manually entered, because you confirm each value yourself.
+          </p>
+        )}
         {errors !== null && errors.length > 0 && (
           <ul aria-label="Problems with the entry" className="search-filters__errors">
             {errors.map((error) => <li key={error}>{error}</li>)}
@@ -266,11 +281,12 @@ export function MealLogView(props: MealLogViewProps) {
 export interface MealLogApi {
   create: MealCreator;
   list: MealLoader;
+  propose: typeof proposeMealDraft;
   remove: MealRemover;
   update: MealUpdater;
 }
 
-const defaultApi: MealLogApi = { create: createMeal, list: listMeals, remove: deleteMeal, update: updateMeal };
+const defaultApi: MealLogApi = { create: createMeal, list: listMeals, propose: proposeMealDraft, remove: deleteMeal, update: updateMeal };
 
 export interface MealLogScreenProps {
   csrf: CsrfCredentials;
@@ -316,6 +332,12 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
   const [deletion, setDeletion] = useState<DeletionSelection | null>(null);
   const [deletionState, setDeletionState] = useState<{ id: number; snapshot: MealDeletionSnapshot } | null>(null);
   const nextDeletionId = useRef(1);
+  // "Draft from text" (ADR-0092).
+  const [draftText, setDraftText] = useState('');
+  const [draftSnapshot, setDraftSnapshot] = useState<MealDraftSnapshot>(idleMealDraft);
+  const [confirmingReplace, setConfirmingReplace] = useState(false);
+  const [draftApplied, setDraftApplied] = useState(false);
+  const drafter = useRef<MealDraftController | null>(null);
 
   const lister = useRef<MealListController | null>(null);
   const creator = useRef<MealCreateController | null>(null);
@@ -329,6 +351,7 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
   afterCreated.current = () => {
     lister.current?.refresh();
     setShowErrors(false);
+    setDraftApplied(false);
     setDraft((current) => ({ ...emptyMealDraft, mealType: current.mealType }));
   };
   const afterAlreadySaved = useRef<() => void>(() => undefined);
@@ -337,6 +360,7 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
   const afterDeleted = useRef<(mealId: string) => void>(() => undefined);
   afterDeleted.current = (mealId) => {
     if (editing?.mealId === mealId) {
+      setDraftApplied(false);
       setEditing(null);
       setEditSave(idleMealSave);
       setShowErrors(false);
@@ -357,6 +381,24 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
       if (lister.current === next) lister.current = null;
     };
   }, [orgId, signal]);
+
+  // One draft controller per organization, session and zone. Ending the session disposes it, so a late proposal can never
+  // reach another person's or another session's form.
+  useEffect(() => {
+    const next = new MealDraftController({
+      load: (input, requestSignal) => apiRef.current.propose(input, csrfRef.current, requestSignal),
+      onChange: setDraftSnapshot,
+      orgId,
+      signal,
+      timeZone,
+    });
+    drafter.current = next;
+    setDraftSnapshot(next.snapshot);
+    return () => {
+      next.dispose();
+      if (drafter.current === next) drafter.current = null;
+    };
+  }, [orgId, signal, timeZone]);
 
   useEffect(() => {
     const next = new MealCreateController({
@@ -437,8 +479,15 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
   const busy = createSave.phase === 'pending' || editSave.phase === 'pending' || (deletion !== null && deletionSnapshot.phase === 'pending');
   const repeatsUncertain = editing === null && validation.ok && creator.current?.wouldReuse(list.localDate, validation.details) === true;
 
+  // Whatever proposal is pending or shown stops applying: the text, the date or the edit target changed.
+  const dropDraft = () => {
+    drafter.current?.invalidate();
+    setConfirmingReplace(false);
+  };
+
   const leaveEdit = () => {
     if (busy) return;
+    setDraftApplied(false);
     setEditing(null);
     setEditSave(idleMealSave);
     setShowErrors(false);
@@ -451,6 +500,8 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
     if (checkInDateProblem(value, today) !== null) return;
     setNotice(null);
     setDeletion(null);
+    // A proposal was asked for the date shown; it is never applied to another one.
+    dropDraft();
     // An entry belongs to its date: editing it ends when another date is shown.
     if (editing !== null) leaveEdit();
     if (createSave.phase === 'saved') creator.current?.acknowledge();
@@ -474,6 +525,9 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
     },
     edit: (view) => {
       if (busy || creator.current?.pending === true) return;
+      // A draft only ever fills a new entry, never the entry being edited.
+      dropDraft();
+      setDraftApplied(false);
       setNotice(null);
       setShowErrors(false);
       setEditSave(idleMealSave);
@@ -486,6 +540,7 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
     retryList: () => lister.current?.retry(),
     startNew: () => {
       creator.current?.startNew();
+      setDraftApplied(false);
       setShowErrors(false);
       setDraft((current) => ({ ...emptyMealDraft, mealType: current.mealType }));
     },
@@ -503,12 +558,67 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
     },
   };
 
+  const alreadySaved = createSave.phase === 'already-saved';
+  const editMessage = 'Finish or cancel the edit first: a draft only fills a new entry.';
+  const applyBlocked =
+    editing !== null
+      ? editMessage
+      : busy
+        ? 'Wait until the current save or deletion has finished.'
+        : alreadySaved
+          ? 'Your earlier save went through. Press "Start a new entry" in the form first.'
+          : null;
+  // The proposal on screen, only while it still belongs to this exact text and the date the form saves to.
+  const currentProposal =
+    draftSnapshot.status === 'proposal' && sameScope(draftSnapshot.scope, { localDate: list.localDate, text: draftText }) ? draftSnapshot.proposal : null;
+  const applyNow = () => {
+    if (currentProposal === null || applyBlocked !== null) return;
+    setDraft((current) => applyProposalToDraft(currentProposal, current));
+    setShowErrors(false);
+    setNotice(null);
+    creator.current?.acknowledge();
+    drafter.current?.invalidate();
+    setConfirmingReplace(false);
+    setDraftApplied(true);
+    formHeading.current?.focus();
+  };
+  const draftPanel: MealDraftPanelProps = {
+    applyBlocked,
+    confirmingReplace,
+    handlers: {
+      apply: () => {
+        if (currentProposal === null || applyBlocked !== null) return;
+        // Never replace details the person has not saved without asking.
+        if (hasUnsavedDetails(draft)) setConfirmingReplace(true);
+        else applyNow();
+      },
+      cancel: dropDraft,
+      confirmReplace: applyNow,
+      discard: dropDraft,
+      keepForm: () => setConfirmingReplace(false),
+      propose: () => {
+        if (editing !== null) return;
+        setConfirmingReplace(false);
+        drafter.current?.submit(draftText, list.localDate);
+      },
+      textChange: (text) => {
+        setDraftText(text);
+        dropDraft();
+      },
+    },
+    proposeBlocked: editing !== null ? editMessage : null,
+    snapshot: draftSnapshot.status === 'proposal' && currentProposal === null ? idleMealDraft : draftSnapshot,
+    text: draftText,
+  };
+
   return (
     <MealLogView
       busy={busy}
       dateInput={dateInput}
       deletion={deletion === null ? null : { mealId: deletion.mealId, snapshot: deletionSnapshot }}
       draft={draft}
+      draftApplied={draftApplied}
+      draftPanel={draftPanel}
       editing={editing}
       errors={showErrors && !validation.ok ? validation.errors : null}
       formHeading={formHeading}
@@ -522,4 +632,8 @@ export function MealLogScreen({ api = defaultApi, csrf, initialDate, newKey, now
       today={today}
     />
   );
+}
+
+function sameScope(left: MealDraftScope, right: MealDraftScope): boolean {
+  return left.localDate === right.localDate && left.text === right.text;
 }

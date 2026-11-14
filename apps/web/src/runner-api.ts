@@ -20,6 +20,10 @@ import {
   ingestPointsResponseSchema,
   mealListResponseSchema,
   mealViewSchema,
+  MEAL_DRAFT_CLIENT_WAIT_MS,
+  MEAL_DRAFT_CONTRACT_VERSION,
+  mealDraftProposalResponseSchema,
+  type MealDraftProposalResponse,
   liveTrackResponseSchema,
   organizationCoachListResponseSchema,
   organizationListResponseSchema,
@@ -762,6 +766,33 @@ export async function listMeals(
   const page = mealListResponseSchema.parse(requireSuccess(response));
   if (page.items.some((item) => item.localDate !== input.localDate)) throw new Error('The server returned entries of a different date');
   return page;
+}
+
+// "Draft from text" (ADR-0092): sends the text and the form's date and zone; the answer is a proposal for the form and
+// nothing is stored. A local model may take tens of seconds, so this one request waits longer than the usual 15 s (the
+// server's own deadline is shorter, so its 504 arrives first). Never retried here: each call is one model run. An answer
+// for another date or zone than the one asked about is refused, never applied.
+export async function proposeMealDraft(
+  input: { localDate: string; orgId: string; text: string; timeZone: string },
+  csrf: CsrfCredentials,
+  signal: AbortSignal,
+): Promise<MealDraftProposalResponse> {
+  const response = await requestJson(
+    `${mealPath(input.orgId)}/draft-proposals`,
+    {
+      body: JSON.stringify({ localDate: input.localDate, text: input.text, timeZone: input.timeZone, version: MEAL_DRAFT_CONTRACT_VERSION }),
+      credentials: 'same-origin',
+      headers: mutationHeaders(csrf),
+      method: 'POST',
+      signal,
+    },
+    { timeoutMs: MEAL_DRAFT_CLIENT_WAIT_MS },
+  );
+  const proposal = mealDraftProposalResponseSchema.parse(requireSuccess(response));
+  if (proposal.localDate !== input.localDate || !sameTimeZone(proposal.timeZone, input.timeZone)) {
+    throw new Error('The server returned a draft for a different date or time zone');
+  }
+  return proposal;
 }
 
 // 204 in every case, including an entry that is already gone, so a retry is always safe.
