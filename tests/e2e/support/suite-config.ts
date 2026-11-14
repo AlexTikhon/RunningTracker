@@ -56,6 +56,9 @@ export function localSessionApi(
     readonly runSearchAi: Readonly<Record<string, string>>;
     // Default 'fake'. 'off' is stated explicitly rather than left to a developer's .env.
     readonly weeklyInsights?: 'fake' | 'off';
+    // "Draft from text" in the Meal log (ADR-0092). Default 'fake' (the deterministic in-process stand-in; no model is
+    // ever configured in the suite); 'off' is the product default.
+    readonly mealDrafts?: 'fake' | 'off';
   },
 ): WebServerConfig {
   const apiOrigin = options.apiOrigin ?? environment.apiOrigin;
@@ -85,6 +88,9 @@ export function localSessionApi(
       // on every API, and the global teardown empties the table. The product default is unchanged.
       SESSION_STORE_MAX_ENTRIES: '1000',
       ...(options.weeklyInsights === 'off' ? { WEEKLY_INSIGHTS_PROVIDER: 'off' } : fakeWeeklyInsights()),
+      ...(options.mealDrafts === 'off'
+        ? { MEAL_DRAFTS_PROVIDER: 'off' }
+        : { MEAL_DRAFTS_MAX_CONCURRENT: '4', MEAL_DRAFTS_PROVIDER: 'fake', MEAL_DRAFTS_TIMEOUT_MS: '10000', MEAL_DRAFTS_USER_RATE_PER_MINUTE: '60' }),
     },
     reuseExistingServer: false,
     stderr: 'pipe',

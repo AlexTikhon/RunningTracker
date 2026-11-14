@@ -515,6 +515,22 @@ export async function countActivityRows(
 // moved 25 hours ahead, so every run still recording or paused becomes finished the way it does in production:
 // status and data revision change, control revision does not. The function is global by design; this runs only
 // against the disposable _test database, which the live connection confirms before anything is called.
+// The organization's meal entries as stored (ADR-0083/0092): what a draft-from-text scenario may and may not have saved.
+export async function readMeals(
+  environment: E2eEnvironment,
+  orgId: string,
+): Promise<Array<{ energy_kcal: string | null; fat_g: string | null; meal_type: string; protein_g: string | null; source: string; title: string }>> {
+  return withOwnerClient(environment, async (client) =>
+    (
+      await client.query<{ energy_kcal: string | null; fat_g: string | null; meal_type: string; protein_g: string | null; source: string; title: string }>(
+        `SELECT title, meal_type, source, energy_kcal::text AS energy_kcal, protein_g::text AS protein_g, fat_g::text AS fat_g
+           FROM meals WHERE org_id = $1 ORDER BY created_at, id`,
+        [orgId],
+      )
+    ).rows,
+  );
+}
+
 export async function autoFinishRuns(environment: E2eEnvironment): Promise<number> {
   const client = new pg.Client({
     application_name: 'running-tracker-e2e-auto-finish',
