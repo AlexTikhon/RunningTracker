@@ -8,6 +8,7 @@ export * from './daily-movement.js';
 export * from './daily-overview.js';
 export * from './daily-trends.js';
 export * from './http.js';
+export * from './meal-draft.js';
 export * from './meals.js';
 export * from './models.js';
 export * from './openapi.js';

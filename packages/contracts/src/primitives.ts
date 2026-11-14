@@ -43,6 +43,22 @@ export const coordinatesSchema = z.tuple([longitudeSchema, latitudeSchema]);
 export const canonicalFiniteNumber = (value: number): number =>
   Object.is(value, -0) ? 0 : value;
 
+/**
+ * Everything below the space that is not a line break, a carriage return or a tab, plus DEL and the C1 range. Free text
+ * that becomes model input accepts none of them: no character that could be read as part of a terminal or protocol
+ * sequence.
+ */
+export function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const allowedWhitespace = code === 0x09 || code === 0x0a || code === 0x0d;
+    if ((code < 0x20 && !allowedWhitespace) || (code >= 0x7f && code <= 0x9f)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // A calendar date without a time or an offset, as a person reads it on a wall calendar. It is meaningful only
 // together with a time zone. The range keeps `Date.UTC` arithmetic and PostgreSQL timestamps far from their limits.
 export const LOCAL_DATE_MIN_YEAR = 1970;

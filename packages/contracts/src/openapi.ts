@@ -23,6 +23,7 @@ import {
 import { dailyOverviewSchema } from './daily-overview.js';
 import { ACTIVITY_TRENDS_COMPARISON_MODES, ACTIVITY_TRENDS_COMPARISON_REASONS, activityTrendsSchema } from './activity-trends.js';
 import { dailyTrendsSchema } from './daily-trends.js';
+import { mealDraftProposalRequestSchema, mealDraftProposalResponseSchema } from './meal-draft.js';
 import {
   createMealRequestSchema,
   mealListResponseSchema,
@@ -534,6 +535,20 @@ export const openApiDocument = {
         responses: {
           '200': jsonResponse('The entry this form session already created, for an equal retry.', 'MealView'),
           '201': jsonResponse('The entry was created.', 'MealView'),
+          ...defaultErrors,
+        },
+      },
+    },
+    '/api/orgs/{orgId}/meals/draft-proposals': {
+      post: {
+        tags: ['Meals'],
+        summary: 'Propose an editable meal draft from text describing one meal (local model, optional, off by default)',
+        description:
+          "Optional and off by default (MEAL_DRAFTS_PROVIDER=off: 503 MEAL_DRAFT_DISABLED). Sends the text, and nothing else (no record, history, identity, date or zone), once to a local Ollama model, and answers with a PROPOSAL for the meal form; nothing is stored, and the person saves through POST /api/orgs/{orgId}/meals, whose source stays `manual` (ADR-0092). `localDate` and `timeZone` are the form's: the meal log's date rules apply (400 INVALID_REQUEST before any model call) and both are echoed, canonical, never chosen by the model. The model only extracts evidence: the server accepts a title only if it is an exact excerpt of the text, a meal type only if the text names it, and a nutrition value only if an excerpt of the text holds exactly that number, its unit and its nutrient, outside any per-portion, approximate, negated or conflicting statement, and the value passes the meal contract (at most one decimal, within bounds; never rounded, multiplied, converted, looked up or derived). Each field is `proposed` with its excerpt, `not_stated`, or `withheld` with a reason; missing is never zero and a written 0 stays 0. Two meal types named in one text are `clarify` `multiple_meals`. Failures: 429 MEAL_DRAFT_RATE_LIMITED or MEAL_DRAFT_IN_PROGRESS (Retry-After where known), 503 MEAL_DRAFT_BUSY or MEAL_DRAFT_BUDGET_EXHAUSTED, 504 MEAL_DRAFT_TIMEOUT, 502 MEAL_DRAFT_FAILED with `details.reason` (an unreachable model, an incomplete, invalid or ungrounded answer). The membership is checked before the model is called and again, with the session, before the answer is returned; no database connection is held while the model runs. Clients must not retry automatically. Answers `Cache-Control: no-store`, errors included.",
+        parameters: [parameterRef('OrgId'), ...csrfParameters],
+        requestBody: requestBody('MealDraftProposalRequest'),
+        responses: {
+          '200': jsonResponse('A draft with per-field evidence, a clarification or an unsupported reason.', 'MealDraftProposalResponse'),
           ...defaultErrors,
         },
       },
@@ -1122,6 +1137,8 @@ export const openApiDocument = {
       UpdateMealRequest: jsonSchema(updateMealRequestSchema),
       MealView: jsonSchema(mealViewSchema),
       MealListResponse: jsonSchema(mealListResponseSchema),
+      MealDraftProposalRequest: jsonSchema(mealDraftProposalRequestSchema),
+      MealDraftProposalResponse: jsonSchema(mealDraftProposalResponseSchema),
       CreateWeeklyInsightRequest: jsonSchema(createWeeklyInsightRequestSchema),
       WeeklyInsightAccepted: jsonSchema(weeklyInsightAcceptedSchema),
       WeeklyInsightOutput: jsonSchema(weeklyInsightOutputSchema),

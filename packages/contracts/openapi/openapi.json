@@ -1357,6 +1357,51 @@
         }
       }
     },
+    "/api/orgs/{orgId}/meals/draft-proposals": {
+      "post": {
+        "tags": [
+          "Meals"
+        ],
+        "summary": "Propose an editable meal draft from text describing one meal (local model, optional, off by default)",
+        "description": "Optional and off by default (MEAL_DRAFTS_PROVIDER=off: 503 MEAL_DRAFT_DISABLED). Sends the text, and nothing else (no record, history, identity, date or zone), once to a local Ollama model, and answers with a PROPOSAL for the meal form; nothing is stored, and the person saves through POST /api/orgs/{orgId}/meals, whose source stays `manual` (ADR-0092). `localDate` and `timeZone` are the form's: the meal log's date rules apply (400 INVALID_REQUEST before any model call) and both are echoed, canonical, never chosen by the model. The model only extracts evidence: the server accepts a title only if it is an exact excerpt of the text, a meal type only if the text names it, and a nutrition value only if an excerpt of the text holds exactly that number, its unit and its nutrient, outside any per-portion, approximate, negated or conflicting statement, and the value passes the meal contract (at most one decimal, within bounds; never rounded, multiplied, converted, looked up or derived). Each field is `proposed` with its excerpt, `not_stated`, or `withheld` with a reason; missing is never zero and a written 0 stays 0. Two meal types named in one text are `clarify` `multiple_meals`. Failures: 429 MEAL_DRAFT_RATE_LIMITED or MEAL_DRAFT_IN_PROGRESS (Retry-After where known), 503 MEAL_DRAFT_BUSY or MEAL_DRAFT_BUDGET_EXHAUSTED, 504 MEAL_DRAFT_TIMEOUT, 502 MEAL_DRAFT_FAILED with `details.reason` (an unreachable model, an incomplete, invalid or ungrounded answer). The membership is checked before the model is called and again, with the session, before the answer is returned; no database connection is held while the model runs. Clients must not retry automatically. Answers `Cache-Control: no-store`, errors included.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrgId"
+          },
+          {
+            "$ref": "#/components/parameters/Origin"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MealDraftProposalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MealDraftProposalResponse"
+                }
+              }
+            },
+            "description": "A draft with per-field evidence, a clarification or an unsupported reason."
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/api/orgs/{orgId}/meals/{mealId}": {
       "get": {
         "tags": [
@@ -5849,6 +5894,474 @@
           "nextCursor"
         ],
         "additionalProperties": false
+      },
+      "MealDraftProposalRequest": {
+        "type": "object",
+        "properties": {
+          "localDate": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "timeZone": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string",
+            "const": "meal-draft-1"
+          }
+        },
+        "required": [
+          "localDate",
+          "text",
+          "timeZone",
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "MealDraftProposalResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "localDate": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "version": {
+                "type": "string",
+                "const": "meal-draft-1"
+              },
+              "mealType": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "excerpt": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 160
+                      },
+                      "status": {
+                        "type": "string",
+                        "const": "proposed"
+                      },
+                      "value": {
+                        "type": "string",
+                        "enum": [
+                          "breakfast",
+                          "lunch",
+                          "dinner",
+                          "snack",
+                          "other"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "excerpt",
+                      "status",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "not_stated"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "nutrition": {
+                "type": "object",
+                "properties": {
+                  "carbohydrateG": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "excerpt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 160
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "proposed"
+                          },
+                          "value": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 2000
+                          }
+                        },
+                        "required": [
+                          "excerpt",
+                          "status",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "not_stated"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "reason": {
+                            "type": "string",
+                            "enum": [
+                              "per_portion",
+                              "conflicting",
+                              "negated",
+                              "ambiguous",
+                              "unit_not_supported",
+                              "outside_contract",
+                              "unverified"
+                            ]
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "withheld"
+                          }
+                        },
+                        "required": [
+                          "reason",
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "energyKcal": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "excerpt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 160
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "proposed"
+                          },
+                          "value": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 20000
+                          }
+                        },
+                        "required": [
+                          "excerpt",
+                          "status",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "not_stated"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "reason": {
+                            "type": "string",
+                            "enum": [
+                              "per_portion",
+                              "conflicting",
+                              "negated",
+                              "ambiguous",
+                              "unit_not_supported",
+                              "outside_contract",
+                              "unverified"
+                            ]
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "withheld"
+                          }
+                        },
+                        "required": [
+                          "reason",
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fatG": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "excerpt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 160
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "proposed"
+                          },
+                          "value": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 2000
+                          }
+                        },
+                        "required": [
+                          "excerpt",
+                          "status",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "not_stated"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "reason": {
+                            "type": "string",
+                            "enum": [
+                              "per_portion",
+                              "conflicting",
+                              "negated",
+                              "ambiguous",
+                              "unit_not_supported",
+                              "outside_contract",
+                              "unverified"
+                            ]
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "withheld"
+                          }
+                        },
+                        "required": [
+                          "reason",
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "proteinG": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "excerpt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 160
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "proposed"
+                          },
+                          "value": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 2000
+                          }
+                        },
+                        "required": [
+                          "excerpt",
+                          "status",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "not_stated"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "reason": {
+                            "type": "string",
+                            "enum": [
+                              "per_portion",
+                              "conflicting",
+                              "negated",
+                              "ambiguous",
+                              "unit_not_supported",
+                              "outside_contract",
+                              "unverified"
+                            ]
+                          },
+                          "status": {
+                            "type": "string",
+                            "const": "withheld"
+                          }
+                        },
+                        "required": [
+                          "reason",
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "carbohydrateG",
+                  "energyKcal",
+                  "fatG",
+                  "proteinG"
+                ],
+                "additionalProperties": false
+              },
+              "outcome": {
+                "type": "string",
+                "const": "draft"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "localDate",
+              "timeZone",
+              "version",
+              "mealType",
+              "nutrition",
+              "outcome",
+              "title"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "localDate": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "version": {
+                "type": "string",
+                "const": "meal-draft-1"
+              },
+              "outcome": {
+                "type": "string",
+                "const": "clarify"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "multiple_meals",
+                  "no_food_named"
+                ]
+              }
+            },
+            "required": [
+              "localDate",
+              "timeZone",
+              "version",
+              "outcome",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "localDate": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "version": {
+                "type": "string",
+                "const": "meal-draft-1"
+              },
+              "outcome": {
+                "type": "string",
+                "const": "unsupported"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "estimate_requested",
+                  "not_a_meal"
+                ]
+              }
+            },
+            "required": [
+              "localDate",
+              "timeZone",
+              "version",
+              "outcome",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        ]
       },
       "CreateWeeklyInsightRequest": {
         "type": "object",

@@ -7,25 +7,12 @@ import {
   runSearchSortSchema,
   validateInclusiveDateRange,
 } from './http.js';
-import { ianaTimeZoneSchema, localDateSchema } from './primitives.js';
+import { hasControlCharacter, ianaTimeZoneSchema, localDateSchema } from './primitives.js';
 
 // Natural language in, the same filters the "My runs" form already has out (ADR-0057). The server never searches
 // on the strength of this answer: the person reviews the proposal and applies it through the existing search.
 
 export const RUN_SEARCH_INTERPRETATION_TEXT_MAX = 500;
-
-// Everything below the space that is not a line break, a carriage return or a tab, plus DEL and the C1 range. Text
-// is data for a model, so no character that could be read as part of a terminal or protocol sequence is accepted.
-function hasControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    const allowedWhitespace = code === 0x09 || code === 0x0a || code === 0x0d;
-    if ((code < 0x20 && !allowedWhitespace) || (code >= 0x7f && code <= 0x9f)) {
-      return true;
-    }
-  }
-  return false;
-}
 
 const interpretationTextSchema = z
   .string()
